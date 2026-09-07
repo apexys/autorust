@@ -13,6 +13,8 @@
 use crate::codegen::postrange::{apply_opts, Renderer};
 use crate::codegen::simplify::{pm_flatten_range, pm_reduce_unparented};
 use crate::uop::sym::{pm_clean_up_group_sink, pm_mop_cleanup, symbolic, symbolic_simple, sget};
+use crate::dtype;
+use crate::uop::range::AxisType;
 use crate::uop::sym::r;
 use crate::uop::upat::{graph_rewrite, CtxVal, PatternMatcher, RuleFn, UPat};
 use crate::uop::ctx::UOpCtx;
@@ -60,7 +62,88 @@ fn post_stages() -> Vec<Stage> {
         Stage { name: "*** expand broadcast / add loads", pm: symbolic_simple().add(&pm_expand_broadcast()).add(&pm_add_loads()), bottom_up: false },
         Stage { name: "devectorize2", pm: devectorizer2(), bottom_up: false },
         Stage { name: "early symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()).add(&pm_clean_up_group_sink()), bottom_up: false },
+        Stage { name: "add images", pm: PatternMatcher::new(vec![]), bottom_up: true },
+        Stage { name: "extra symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
+        Stage { name: "lower all index dtypes", pm: crate::uop::weak::pm_lower_index_dtype(), bottom_up: false },
+        Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
+        Stage { name: "cast float alu operands", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "early decompositions", pm: PatternMatcher::new(vec![]).add(&symbolic_simple()), bottom_up: false },
+        Stage { name: "decomp dtypes", pm: PatternMatcher::new(vec![]).add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
+        Stage { name: "late decompositions", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "move gates from index", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()), bottom_up: false },
+        Stage { name: "casted consts", pm: pm_casted_consts(), bottom_up: false,  },
+        Stage { name: "add implicit barriers", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "add control flow", pm: PatternMatcher::new(vec![]), bottom_up: true },
+        Stage { name: "number params with -1", pm: PatternMatcher::new(vec![]), bottom_up: false },
     ]
+}
+
+/// `do_split_ends`/`pm_split_ends` (late/linearizer.py:87) — re-nest END
+/// srcs: one nested END per range (sorted by arg desc), backedges last.
+fn pm_split_ends() -> PatternMatcher {
+    PatternMatcher::new(vec![(
+        UPat::ops1(crate::uop::Ops::End).allow_all_srcs().named("e"),
+        r(|ctx, st, _| {
+            let e = sget(st, "e");
+            let srcs = ctx.srcs(e).to_vec();
+            let ret0 = srcs[0];
+            let mut backedge = Vec::new();
+            let mut rest = Vec::new();
+            for &x in &srcs[1..] {
+                let d = ctx.dt_of(x);
+                if d == crate::dtype::VOID || d == crate::dtype::BOOL {
+                    backedge.push(x);
+                } else {
+                    rest.push(x);
+                }
+            }
+            let sink = crate::tensor::sink(ctx, rest.clone());
+            let mut rngs = ctx.ranges(sink).to_vec();
+            rngs.sort_by_key(|&x| std::cmp::Reverse(AxisType::range_axis_id(ctx, x)));
+            let mut ret = ret0;
+            for r in rngs {
+                ret = ctx.end(ret, vec![r]);
+            }
+            if !backedge.is_empty() {
+                ret = ctx.end(ret, backedge);
+            }
+            if ret == e {
+                None
+            } else {
+                Some(ret)
+            }
+        }),
+    )])
+}
+
+/// `pm_casted_consts` (codegen/__init__.py:280) — spell literals as
+/// `cconst(val, dtype)` = CAST(CONST(val at from_py default), dtype).
+fn pm_casted_consts() -> PatternMatcher {
+    PatternMatcher::new(vec![(
+        UPat::ops1(crate::uop::Ops::Const).allow_all_srcs().named("c"),
+        r(|ctx, st, _| {
+            let c = sget(st, "c");
+            let v = ctx.val(c);
+            let d = ctx.dt_of(c);
+            if d == crate::dtype::VOID {
+                return None;
+            }
+            // UOp.const(b) — the from_py default dtype (weakint/weakfloat/bool)
+            let inner = ctx.const_py(v, None);
+            Some(ctx.cast(inner, d))
+        }),
+    )])
+}
+
+/// `memory_coalescing` + `ew_devectorizer` for the "add images" stage.
+fn add_images(ctx: &mut Ctx2, sink: UopId) -> UopId {
+    let coalesced = crate::codegen::coalesce::memory_coalescing(ctx, sink);
+    // ew_devectorizer: unpack remaining vectorized elementwise (corpus: no-op
+    // after coalescing) — bottom-up rewrite with symbolic_simple
+    let pm = PatternMatcher::new(vec![]).add(&symbolic_simple());
+    graph_rewrite(ctx, coalesced, &pm, true, None, false, false, CtxVal::None)
+        .unwrap_or_else(|e| panic!("TGERR: add images: {e}"))
 }
 
 /// `do_devectorize` (codegen/__init__.py:107).
@@ -399,6 +482,8 @@ pub fn full_rewrite_to_sink(ctx: &mut UOpCtx, ast: UopId) -> UopId {
             let (pm, _rm) = expander_pm_with(ctx, cur);
             graph_rewrite(ctx, cur, &pm, st.bottom_up, None, false, false, CtxVal::None)
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
+        } else if st.name == "add images" {
+            add_images(ctx, cur)
         } else {
             graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, CtxVal::None)
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))

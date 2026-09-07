@@ -379,22 +379,23 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
   the middle stages are no-ops on the current corpus).
 - Oracle: `TG_M5_CODEGEN=1` runs callify+schedule, picks the first compute kernel body
   (SINK containing ADD/MUL), lowers it through the pipeline, emits the flat graph.
-- **Ported so far** (all key-exact vs python through "early symbolic" for the ew and
-  mulc corpus kernels): `apply_opts` (Scheduler, convert_loop_to_global, the heuristic
+- **Ported so far** (the ENTIRE full_rewrite_to_sink pipeline key-exact vs python
+  through "number params with -1" for the ew and mulc corpus kernels — 28/13-node
+  final SINKs match; postrange, expander, devectorize, coalescing, weak lowering,
+  split_ends, casted consts): `apply_opts` (Scheduler, convert_loop_to_global, the heuristic
   subset — GROUPTOP/unroll/easy-upcast/local-groups, get_optimized_ast with ANSI-colored
   KernelInfo names), `expander` (UPCAST/UNROLL range → STACK of consts),
   expand broadcast + add loads, `devectorizer2` (incl. EXPAND-scalar→STACK),
   `pm_clean_up_group_sink`, `add gpudims` (get_grouped_dims, SPECIAL gidx/lidx globals).
   Renderer facts in `codegen::postrange::Renderer` (CPU-interp defaults).
-- **Next stages to port** (python name → content):
-  1. `add images` — `memory_coalescing` (late/coalesce.py) + `ew_devectorizer`.
-  2. `lower all index dtypes` — `pm_lower_index_dtype`/`pm_commit_weak`/`pm_cast_weak`
-     (uop/weak.py, 82 LOC).
-  3. decomps (`codegen/decomp/{dtype,op}.py` — TRANSCENDENTAL=0 first), `move gates`,
-     `final rewrite`+`pm_remove_invalid`, `casted consts`, `implicit barriers`.
-  4. `add control flow` (`late/linearizer.py` CFGContext + pm_split_ends), `number params`.
-  5. `do_linearize` (pm_linearize_cleanups gated-store IF/ENDIF), cstyle render
-     (byte-equality subset gate), interpreter (ops_python.py model — no WMMA).
+- **Next steps**:
+  1. `linearize` (late/linearizer.py priority-toposort) + `pm_linearize_cleanups`
+     (gated-store IF/ENDIF — no-ops on the corpus) → PROGRAM(SINK, LINEAR).
+  2. The interpreter (`exec/interp.rs`) over the linearized lines — ops_python.py
+     model: global/local loops from SPECIALs, values dict, exec masks, per-thread
+     REGs, LOAD/STORE through INDEX/SHRINK, exec_alu — no WMMA. Numeric gate:
+     allclose vs tinygrad CPU for the corpus.
+  3. cstyle renderer (byte-equality subset gate); `ops_rust.py` DEV=RUST driver.
   Deferred: `load collapse`/`split ranges`/`simplify ranges` are no-ops on the current
   corpus (key-equal with empty PMs; port with the sum/reduce kernel work).
 

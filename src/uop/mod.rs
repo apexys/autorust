@@ -15,3 +15,4 @@ pub use arg::*;
 pub use flat::*;
 pub use graph::*;
 pub use ops::*;
+pub mod weak;

@@ -26,7 +26,7 @@ def rs_codegen(prog):
     return json_to_uop(json.dumps(json.loads(p.stdout)["graph"]))[0]
 
 
-def py_stage_keys(prog, stage="early symbolic"):
+def py_stage_keys(prog, stage="number params with -1"):
     """python's per-stage toposort key multiset for the first compute kernel AST
     (subprocess-isolated: python's structural UOp cache leaks state across programs)."""
     import os, subprocess
