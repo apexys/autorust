@@ -388,14 +388,31 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
   expand broadcast + add loads, `devectorizer2` (incl. EXPAND-scalar→STACK),
   `pm_clean_up_group_sink`, `add gpudims` (get_grouped_dims, SPECIAL gidx/lidx globals).
   Renderer facts in `codegen::postrange::Renderer` (CPU-interp defaults).
+- `codegen/linearize.rs`: `linearize` (priority-toposort: run_count×priority×extra
+  nkey, heap-driven) + `pm_linearize_cleanups` (no-ops on the corpus).
 - **Next steps**:
-  1. `linearize` (late/linearizer.py priority-toposort) + `pm_linearize_cleanups`
-     (gated-store IF/ENDIF — no-ops on the corpus) → PROGRAM(SINK, LINEAR).
-  2. The interpreter (`exec/interp.rs`) over the linearized lines — ops_python.py
-     model: global/local loops from SPECIALs, values dict, exec masks, per-thread
-     REGs, LOAD/STORE through INDEX/SHRINK, exec_alu — no WMMA. Numeric gate:
-     allclose vs tinygrad CPU for the corpus.
-  3. cstyle renderer (byte-equality subset gate); `ops_rust.py` DEV=RUST driver.
+  1. The interpreter (`codegen/interp.rs`) over the linearized lines — ops_python.py
+     model. Semantic notes from the python source (runtime/ops_python.py:38-160):
+     - launch loops: `for idxs in product(range(global_size[::-1]))`; warp =
+       `product(range(local_size[::-1]))` (last local dim varies fastest); thread t's
+       local dim d id = warp[t][2-d]; SPECIAL 'g' → same id for all threads,
+       'l' → per-thread.
+     - values are PER-THREAD lists; vector loads add a lane dimension OUTSIDE:
+       `values[vec_load] = [load(inp, j) for j in range(load_sz)]` (lane-major,
+       thread-minor).
+     - memory flows as (mem, offset) PAIRS: INDEX/SHRINK build pairs `(m, o*scale)`;
+       a scalar's pair can carry a re-indexable list as "mem" (INDEX over a plain
+       LOAD: mem = the loaded per-thread list, offset 0 → m[0] recovers the value).
+     - LOAD: `_load(m, i)` raises on out-of-bounds unless gated; vector loads zip
+       (mem,offset) pairs with the gate list; STORE fans `src_values[1]` (a STACK)
+       over lanes when `u.max_numel() > 1`, gated by exec_masks.
+     - global_size/local_size derive from the SPECIAL extents (gidx*→global,
+       lidx*→local; missing → 1).
+     - ALU: `exec_alu(op, dtype, per-thread tuple)`; CAST truncates via
+       `truncate[u.dtype](dtype.const(x))`; END jumps via loop_ends; IF/ENDIF push/
+       pop exec masks; no WMMA.
+     Numeric gate: allclose vs tinygrad CPU for the corpus (addc, mulc, sum).
+  2. cstyle renderer (byte-equality subset gate); `ops_rust.py` DEV=RUST driver.
   Deferred: `load collapse`/`split ranges`/`simplify ranges` are no-ops on the current
   corpus (key-equal with empty PMs; port with the sum/reduce kernel work).
 
