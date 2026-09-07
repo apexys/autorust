@@ -1,0 +1,13 @@
+[package]
+name = "autorust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+nanoserde = "0.2.1"
+
+[profile.dev]
+opt-level = 1
