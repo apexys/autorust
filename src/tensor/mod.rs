@@ -2,7 +2,8 @@
 //! (tensor.py:274); all sugar (movement/elementwise/reduce/creation) is UOp-level
 //! via the mixin chain and returns UOps. Submodules mirror the mixin files.
 
-mod callify;
+
+pub mod callify;
 pub mod ix;
 pub use ix::Ix;
 mod shape;
@@ -10,13 +11,34 @@ mod shapearg;
 
 pub use shape::Shape;
 pub use shapearg::ShapeArg;
-mod creation;
+pub mod creation;
 mod dtype;
-mod elementwise;
+pub mod elementwise;
 pub mod movement;
-mod reduce;
+pub mod reduce;
 
 use crate::dtype::{AddrSpace, ConstVal};
+
+/// arg for Tensor.add/mul: another Tensor or a python scalar.
+pub enum TensorAddArg {
+    T(Tensor),
+    C(ConstVal),
+}
+impl From<Tensor> for TensorAddArg {
+    fn from(t: Tensor) -> Self {
+        TensorAddArg::T(t)
+    }
+}
+impl From<f64> for TensorAddArg {
+    fn from(v: f64) -> Self {
+        TensorAddArg::C(ConstVal::Float(v))
+    }
+}
+impl From<i64> for TensorAddArg {
+    fn from(v: i64) -> Self {
+        TensorAddArg::C(ConstVal::Int(v as i128))
+    }
+}
 use crate::uop::arg::{Arg, EnumClass, EnumVal};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
@@ -266,6 +288,31 @@ impl Tensor {
 
     pub fn cumsum(self, ctx: &mut UOpCtx, axis: i64) -> Tensor {
         Tensor::from_uop(reduce::cumsum(ctx, self.uop, axis))
+    }
+
+    /// Tensor-level elementwise sugar for the oracle/schedule corpus.
+    pub fn add(self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        match other.into() {
+            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Add, self.uop, o.uop)),
+            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Add, self.uop, c)),
+        }
+    }
+
+    pub fn mul(self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        match other.into() {
+            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Mul, self.uop, o.uop)),
+            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Mul, self.uop, c)),
+        }
+    }
+
+    pub fn neg(self, ctx: &mut UOpCtx) -> Tensor {
+        Tensor::from_uop(elementwise::neg(ctx, self.uop))
+    }
+
+    /// `Tensor.contiguous()` — CONTIGUOUS node when not virtual.
+    pub fn contiguous(self, ctx: &mut UOpCtx) -> Tensor {
+        let dt = self.dtype(ctx);
+        Tensor::from_uop(ctx.uop(Ops::Contiguous, Some(dt), vec![self.uop], Arg::None))
     }
 
     /// `Tensor.alu`: `u[0].alu(op, u[1:])` — a bare op ctor; promotion/broadcast happen

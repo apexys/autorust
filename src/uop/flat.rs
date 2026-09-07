@@ -11,7 +11,7 @@
 
 use nanoserde::{DeJson, SerJson};
 
-use super::arg::{Arg, DeviceSpec, EnumVal, NonFinite, ParamArg};
+use super::arg::{DataArg, Arg, DeviceSpec, EnumVal, NonFinite, ParamArg};
 use super::graph::{Graph, UopId};
 use crate::dtype::{self, AddrSpace, ConstVal, DTypeId};
 use crate::helpers::bigint::BigInt;
@@ -72,6 +72,8 @@ pub enum FlatArg {
     /// The `Invalid` const sentinel.
     ConstInvalid,
     Pickle(Vec<u8>),
+    /// Named python dataclass (KernelInfo/CallInfo/BufferizeOpts/...).
+    Data { tag: String, fields: Vec<(String, FlatArg)> },
 }
 
 
@@ -151,6 +153,13 @@ pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, St
             })
         }
         FlatArg::Pickle(p) => Arg::Pickle(p.clone()),
+        FlatArg::Data { tag, fields } => {
+            let mut fs = Vec::with_capacity(fields.len());
+            for (n, f) in fields {
+                fs.push((n.clone(), arg_from_flat_with(&f, dtmap)?));
+            }
+            Arg::Data(DataArg { tag: tag.clone(), fields: fs })
+        }
     })
 }
 
@@ -266,6 +275,14 @@ pub fn arg_to_flat_with(a: &Arg, dtidx: Option<&[u16]>) -> FlatArg {
         },
         Arg::Const(c) => constval_to_flat(c),
         Arg::Pickle(p) => FlatArg::Pickle(p.clone()),
+        Arg::Data(d) => FlatArg::Data {
+            tag: d.tag.clone(),
+            fields: d
+                .fields
+                .iter()
+                .map(|(n, a)| (n.clone(), arg_to_flat_with(a, dtidx)))
+                .collect(),
+        },
     }
 }
 

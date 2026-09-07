@@ -13,7 +13,7 @@
 //! graph as errored (Python raises → rewrite aborts → differential skips it).
 
 use std::collections::HashSet;
-use super::arg::{Arg, ParamArg};
+use super::arg::{Arg, DeviceSpec, ParamArg};
 use super::graph::{Graph, UopId};
 use super::ops::{group, Ops};
 use super::alu::{cdiv, floordiv, py_mod};
@@ -36,13 +36,17 @@ pub struct UOpCtx {
     shape_c: Vec<Option<Option<Rc<Shape>>>>,
     /// `_min_max` cache
     mm_c: Vec<Option<Option<(SVal, SVal)>>>,
+    /// `_ranges` cache (insertion-ordered, python dict semantics)
+    pub range_c: Vec<Option<Option<Rc<Vec<UopId>>>>>,
+    /// IndexingContext-style range counter (used by new_range)
+    pub range_idx: i64,
 }
 
 use std::rc::Rc;
 
 impl UOpCtx {
     pub fn new() -> Self {
-        UOpCtx { g: Graph::new(), shape_c: Vec::new(), mm_c: Vec::new() }
+        UOpCtx { g: Graph::new(), shape_c: Vec::new(), mm_c: Vec::new(), range_c: Vec::new(), range_idx: 0 }
     }
 
     /// Grow the property caches to cover externally-loaded graphs (oracle use).
@@ -53,6 +57,12 @@ impl UOpCtx {
     fn grow(&mut self) {
         self.shape_c.push(None);
         self.mm_c.push(None);
+        self.range_c.push(None);
+    }
+
+    /// `UOp.const(bool)` in python's bool dtype.
+    pub fn const_bool(&mut self, b: bool) -> UopId {
+        self.const_py(crate::dtype::ConstVal::Bool(b), Some(crate::dtype::BOOL))
     }
 
     // ---------- construction ----------
@@ -992,9 +1002,16 @@ impl UOpCtx {
             }
         }
         if (op == Range || op == Special) && dt != dtype::VOID && !srcs.is_empty() {
-            // (self.src[0]-1).vmax — SUB with const 1: vmax = src0.vmax - 1
-            let hi = self.vmax(srcs[0])?.as_i64_or_panic() - 1;
-            return Ok((SVal::I(0), SVal::I(hi as i128)));
+            // (self.src[0]-1).vmax — SUB with const 1; an unbounded src0 falls
+            // back to dtype bounds like python's _min_max (never panics)
+            let hi = match self.vmax(srcs[0])? {
+                SVal::I(v) => SVal::I(v - 1),
+                SVal::U(_) => match self.dtype_bounds(dt)?.1 {
+                    SVal::I(v) => SVal::I(v - 1),
+                    other => other,
+                },
+            };
+            return Ok((SVal::I(0), hi));
         }
         if op == After {
             return self.min_max(srcs[0]);
@@ -1939,6 +1956,7 @@ pub enum ArgKey {
     Seq { tuple: bool, items: Vec<ArgKey> },
     Param(ParamKey),
     Pickle(Vec<u8>),
+    Data(String, Vec<(String, ArgKey)>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2012,6 +2030,9 @@ fn arg_key(a: &Arg) -> ArgKey {
             volatile: p.volatile,
         }),
         Arg::Pickle(b) => ArgKey::Pickle(b.clone()),
+        Arg::Data(d) => {
+            ArgKey::Data(d.tag.clone(), d.fields.iter().map(|(n, a)| (n.clone(), arg_key(a))).collect())
+        }
         Arg::Const(c) => match c {
             ConstVal::Bool(b) => ArgKey::Bool(*b),
             ConstVal::Int(i) => ArgKey::Int(*i),
@@ -2072,5 +2093,250 @@ pub fn arg_from_i128(v: i128) -> Arg {
         Arg::Int(v as i64)
     } else {
         Arg::Const(ConstVal::Int(v))
+    }
+}
+
+// ---------- M4 scheduler graph utilities (uop/ops.py) ----------
+
+impl UOpCtx {
+    /// `u.toposort(gate=, enter_calls=)` (ops.py:294) — insertion-ordered list
+    /// (python dict semantics), gate returning false prunes the subtree.
+    pub fn toposort_gated(&self, root: UopId, gate: Option<&dyn Fn(UopId) -> bool>, enter_calls: bool) -> Vec<UopId> {
+        enum Step {
+            Enter(UopId),
+            Emit(UopId),
+        }
+        let mut out: Vec<UopId> = vec![];
+        let mut seen: Vec<bool> = vec![false; self.g.nodes.len()];
+        let mut stack = vec![Step::Enter(root)];
+        while let Some(s) = stack.pop() {
+            match s {
+                Step::Enter(id) => {
+                    if seen[id.0 as usize] {
+                        continue;
+                    }
+                    let go = match gate {
+                        None => true,
+                        Some(g) => g(id),
+                    };
+                    if go {
+                        stack.push(Step::Emit(id));
+                        let op = self.op_of(id);
+                        let skip_body = !enter_calls && matches!(op, Ops::Call | Ops::Function);
+                        let srcs = self.g.get(id).srcs.clone();
+                        for (i, &src) in srcs.iter().enumerate().rev() {
+                            if skip_body && i == 0 {
+                                continue;
+                            }
+                            stack.push(Step::Enter(src));
+                        }
+                    }
+                }
+                Step::Emit(id) => {
+                    if !seen[id.0 as usize] {
+                        seen[id.0 as usize] = true;
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `u.topovisit(visitor, cache)` — the shared-cache variant used by limit_bufs.
+    pub fn topovisit<T: Clone>(&self, root: UopId, visitor: &mut dyn FnMut(UopId) -> T, cache: &mut Vec<Option<T>>) -> T {
+        enum Step {
+            Enter(UopId),
+            Emit(UopId),
+        }
+        let mut stack = vec![Step::Enter(root)];
+        while let Some(s) = stack.pop() {
+            match s {
+                Step::Enter(id) => {
+                    if cache[id.0 as usize].is_some() {
+                        continue;
+                    }
+                    stack.push(Step::Emit(id));
+                    for &src in self.g.get(id).srcs.iter().rev() {
+                        stack.push(Step::Enter(src));
+                    }
+                }
+                Step::Emit(id) => {
+                    if cache[id.0 as usize].is_none() {
+                        cache[id.0 as usize] = Some(visitor(id));
+                    }
+                }
+            }
+        }
+        cache[root.0 as usize].clone().expect("topovisit: root not visited")
+    }
+
+    /// ParamArg of a BUFFER/PARAM node, if any.
+    pub fn param_arg(&self, id: UopId) -> Option<&ParamArg> {
+        match self.arg_of(id) {
+            Arg::Param(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// `u.device` — ParamArg.device of a BUFFER/PARAM (None otherwise).
+    pub fn device_of(&self, id: UopId) -> Option<&DeviceSpec> {
+        self.param_arg(id).and_then(|p| p.device.as_ref())
+    }
+
+    /// `u.addrspace` — ParamArg.addrspace (None when absent).
+    pub fn addrspace_of(&self, id: UopId) -> Option<AddrSpace> {
+        self.param_arg(id).and_then(|p| p.addrspace)
+    }
+
+    /// `u.is_variable` — 0-d ALU BUFFER with a value range (shape arg is the
+    /// empty shape, checked structurally without the shape cache).
+    pub fn is_variable(&self, id: UopId) -> bool {
+        if self.op_of(id) != Ops::Buffer {
+            return false;
+        }
+        match self.param_arg(id) {
+            Some(p) => p.vmin_vmax.is_some() && p.addrspace == Some(AddrSpace::Alu),
+            None => false,
+        }
+    }
+
+    /// `u.is_bound_var` — AFTER wrapping a bound variable store.
+    pub fn is_bound_var(&self, id: UopId) -> bool {
+        if self.op_of(id) != Ops::After {
+            return false;
+        }
+        // AFTER(var_buffer.store(value)): src[0].src[0] is the variable
+        let srcs = self.srcs(id);
+        if srcs.is_empty() || self.op_of(srcs[0]) != Ops::Store {
+            return false;
+        }
+        let st = self.srcs(srcs[0]);
+        !st.is_empty() && self.is_variable(st[0])
+    }
+
+    /// `u.buf_uop` (ops.py:881).
+    pub fn buf_uop(&mut self, id: UopId) -> UopId {
+        let op = self.op_of(id);
+        if op == Ops::Buffer || op == Ops::Param {
+            return id;
+        }
+        if op == Ops::Mselect {
+            return id; // per-device selection stays (corpus is single-device)
+        }
+        if op == Ops::Mstack {
+            let srcs = self.srcs(id).to_vec();
+            let bufs: Vec<UopId> = srcs.iter().map(|&s| self.buf_uop(s)).collect();
+            return self.uop(Ops::Mstack, None, bufs, Arg::None);
+        }
+        if self.op_of(self.base(id)) == Ops::After {
+            let b = self.base(id);
+            let bsrc = self.srcs(b)[0];
+            let bu = self.buf_uop(bsrc);
+            return self.base(bu);
+        }
+        let mut s = id;
+        loop {
+            let srcs = self.srcs(s);
+            let op = self.op_of(s);
+            if srcs.is_empty() || matches!(op, Ops::Buffer | Ops::Param | Ops::Stage | Ops::Mstack) {
+                return s;
+            }
+            s = srcs[0];
+        }
+    }
+
+    /// `u.unsharded_base` (ops.py:765) — movement/base chain to the storage base.
+    pub fn unsharded_base(&mut self, id: UopId) -> UopId {
+        let op = self.op_of(id);
+        if group::in_(group::MOVEMENT, op) || op == Ops::Detach || op == Ops::Unshard {
+            let s0 = self.srcs(id)[0];
+            return self.base(s0);
+        }
+        id
+    }
+
+    /// `u.has_buffer_identity(after_ok)` (ops.py:908).
+    pub fn has_buffer_identity(&mut self, id: UopId, after_ok: bool) -> bool {
+        let op = self.op_of(id);
+        if matches!(op, Ops::Reshape | Ops::Unshard | Ops::Mselect) {
+            let s0 = self.srcs(id)[0];
+            return self.has_buffer_identity(s0, after_ok);
+        }
+        if after_ok && op == Ops::After {
+            let s0 = self.srcs(id)[0];
+            return self.has_buffer_identity(s0, after_ok);
+        }
+        matches!(op, Ops::Buffer | Ops::Param)
+    }
+
+    /// `u.max_numel()` — int max of shape product.
+    pub fn max_numel(&mut self, id: UopId) -> i64 {
+        let shp = self.max_shape(id);
+        shp.iter().product::<i64>()
+    }
+
+    /// `u.max_shape` — per-axis vmax (concrete ints in the corpus).
+    pub fn max_shape(&mut self, id: UopId) -> Vec<i64> {
+        let shp = self.shape_of(id).expect("TGERR: max_shape on shapeless node");
+        shp.iter()
+            .map(|s| match s {
+                SVal::I(i) => *i as i64,
+                SVal::U(u) => {
+                    let (_, vmax) = self.min_max(*u).expect("TGERR: unbounded symbolic shape");
+                    vmax.as_i64_or_panic()
+                }
+            })
+            .collect()
+    }
+
+    /// `contiguous_view_offset` (ops.py:890-906) — flat offset when the
+    /// movement chain is contiguous, None otherwise.
+    pub fn contiguous_view_offset(&mut self, x: UopId) -> Option<i64> {
+        self.contiguous_view(x).map(|(_, off)| off)
+    }
+
+    /// `contiguous_view` (ops.py:890) — (tagged base buffer, offset).
+    pub fn contiguous_view(&mut self, x: UopId) -> Option<(UopId, i64)> {
+        let numel = self.max_numel(x);
+        let flat = crate::tensor::movement::flatten(self, x, -1, -1);
+        let r = self.range(SVal::I(numel as i128), 0, crate::uop::range::AxisType::Weak);
+        let idx = self.index(flat, vec![r]);
+        let pm = crate::uop::sym::pm_mop_cleanup();
+        let cvo = crate::uop::ops::pm_contiguous_view_offset();
+        let full = pm.add(&crate::uop::sym::symbolic()).add(&cvo);
+        let out = crate::uop::upat::graph_rewrite(self, idx, &full, false, None, false, false, super::upat::CtxVal::None).ok()?;
+        if self.op_of(out) != Ops::Index {
+            return None;
+        }
+        let osrcs = self.srcs(out).to_vec();
+        if osrcs.len() != 2 {
+            return None;
+        }
+        // (b:=out.src[0]).tag must be truthy
+        let tagged = !matches!(self.tag_of(osrcs[0]), Arg::None);
+        if !tagged {
+            return None;
+        }
+        if self.op_of(osrcs[1]) != Ops::Const {
+            return None;
+        }
+        match self.val(osrcs[1]) {
+            ConstVal::Int(i) if i >= i64::MIN as i128 && i <= i64::MAX as i128 => Some((osrcs[0], i as i64)),
+            _ => None,
+        }
+    }
+
+    /// `ret.sink(arg=...)` — SINK node with an arg.
+    pub fn sink_arg(&mut self, srcs: Vec<UopId>, arg: Arg) -> UopId {
+        self.uop(Ops::Sink, None, srcs, arg)
+    }
+
+    /// `body.call(*srcs)` for OPAQUE bodies (SINK kernel) — `Ops.CALL` with CallInfo.
+    pub fn call(&mut self, body: UopId, srcs: Vec<UopId>, name: Option<&str>) -> UopId {
+        let arg = Arg::Data(super::arg::call_info(name));
+        let mut all = vec![body];
+        all.extend(srcs);
+        self.uop(Ops::Call, None, all, arg)
     }
 }

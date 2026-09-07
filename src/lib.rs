@@ -1,5 +1,8 @@
+pub mod codegen;
 pub mod dtype;
 pub mod helpers;
+
+pub mod schedule;
 pub mod tensor;
 pub mod uop;
 

@@ -54,11 +54,17 @@ fn main() {
         m: Option<i64>,
         shape: Option<Vec<i64>>,
         x: Option<usize>,
+        y: Option<usize>,
+        val: Option<f64>,
+        axis: Option<Vec<i64>>,
+        keepdim: Option<bool>,
         ixs: Option<Vec<IxSpec>>,
     }
     #[derive(nanoserde::DeJson)]
     struct Program {
         prog: Vec<Step>,
+        #[nserde(default)]
+        mode: Option<String>,
     }
 
     let prog: Program = nanoserde::DeJson::deserialize_json(&input).unwrap_or_else(|e| {
@@ -119,9 +125,38 @@ fn main() {
                     .collect();
                 tensors[st.x.unwrap_or(0)].clone().getitem(&mut ctx, &parsed)
             }
+            "add" => tensors[st.x.unwrap_or(0)].clone().add(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
+            "mul" => tensors[st.x.unwrap_or(0)].clone().mul(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
+            "addc" => tensors[st.x.unwrap_or(0)].clone().add(&mut ctx, st.val.unwrap_or(0.0)),
+            "mulc" => tensors[st.x.unwrap_or(0)].clone().mul(&mut ctx, st.val.unwrap_or(1.0)),
+            "neg" => tensors[st.x.unwrap_or(0)].clone().neg(&mut ctx),
+            "sum" => tensors[st.x.unwrap_or(0)].clone().sum(
+                &mut ctx,
+                st.axis.clone().map(|a| a.iter().map(|&v| v as usize).collect::<Vec<_>>()).as_deref(),
+                st.keepdim.unwrap_or(false),
+                None,
+            ),
+            "max" => tensors[st.x.unwrap_or(0)].clone().max(
+                &mut ctx,
+                st.axis.clone().map(|a| a.iter().map(|&v| v as usize).collect::<Vec<_>>()).as_deref(),
+                st.keepdim.unwrap_or(false),
+            ),
+            "contiguous" => tensors[st.x.unwrap_or(0)].clone().contiguous(&mut ctx),
             other => panic!("TGERR: oracle_tensor: unknown op {other} (step {i})"),
         };
         tensors.push(t);
+    }
+    if prog.mode.as_deref() == Some("schedule") {
+        // full scheduler pipeline: sink all tensors, callify, schedule, resolve
+        let sink_srcs: Vec<autorust::uop::UopId> = tensors.iter().map(|t| t.uop).collect();
+        let big_sink = autorust::tensor::sink(&mut ctx, sink_srcs);
+        let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
+        let (linear, planned) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
+        let root = if std::env::var("TG_SCHED_PLANNED").is_ok() { planned } else { linear };
+        ctx.g.roots = vec![root];
+        let flat = ctx.g.to_flat();
+        println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
+        return;
     }
     let root = tensors.last().map(|t| t.uop).unwrap_or_else(|| panic!("TGERR: empty program"));
     ctx.g.roots = vec![root];

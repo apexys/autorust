@@ -5,11 +5,14 @@ use std::sync::{Arc, OnceLock};
 use super::alu::exec_alu;
 use super::arg::Arg;
 use super::ctx::UOpCtx;
+use std::collections::HashMap;
+
 use super::graph::UopId;
 use super::ops::{group, Ops};
 pub use super::upat::sget;
-use super::upat::{
-    const_arg, opset_diff, opset_union, permutations, ConstArgVal, CtxVal, PatternMatcher, RuleFn, Store, UPat, UPatOrConst,
+pub use super::upat::{
+    sget_opt, const_arg, opset_diff, opset_union, permutations, ConstArgVal, CtxVal, PatternMatcher, RuleFn, Store, UPat,
+    UPatOrConst,
 };
 use super::ctx::sval_cmp;
 use super::sint::SVal;
@@ -209,7 +212,7 @@ fn invalid_pat() -> UPat {
     UPat::cvar(Some("i"), None, Some(Arg::Const(CV::Invalid)))
 }
 
-fn invalid_gate() -> UPat {
+pub fn invalid_gate() -> UPat {
     var("cond").where_(UPatOrConst::Pat(var("x")), UPatOrConst::Pat(invalid_pat()))
 }
 
@@ -360,7 +363,7 @@ where
 }
 
 impl UPat {
-    fn with_src_any(self, alts: Vec<UPat>) -> UPat {
+    pub fn with_src_any(self, alts: Vec<UPat>) -> UPat {
         let mut p = self.clone();
         p.src = super::upat::SrcPat::Any(alts);
         p.strict_length = false;
@@ -369,7 +372,7 @@ impl UPat {
         p
     }
 
-    fn with_src_list(self, srcs: Vec<UPat>) -> UPat {
+    pub fn with_src_list(self, srcs: Vec<UPat>) -> UPat {
         let n = srcs.len();
         let first = srcs.clone();
         let mut p = self.clone();
@@ -546,7 +549,7 @@ impl UPat {
         q
     }
 
-    fn with_src_any_len(self, any: bool) -> UPat {
+    pub fn with_src_any_len(self, any: bool) -> UPat {
         let mut q = self;
         if any {
             q.strict_length = false;
@@ -1636,4 +1639,291 @@ pub fn pm_commutative() -> &'static PatternMatcher {
 static MOP_CLEANUP_PM: OnceLock<PatternMatcher> = OnceLock::new();
 pub fn pm_mop_cleanup() -> &'static PatternMatcher {
     MOP_CLEANUP_PM.get_or_init(pm_mop_cleanup_inner)
+}
+
+// ---------- pm_simplify_valid / pm_drop_and_clauses (symbolic.py:316-429) ----------
+
+/// `parse_valid` (symbolic.py:316) — (expr, is_upper, c).
+fn parse_valid(ctx: &mut UOpCtx, v: UopId) -> Option<(UopId, bool, i64)> {
+    let op = ctx.op_of(v);
+    let srcs = ctx.srcs(v).to_vec();
+    if op == Ops::Cmpne && srcs.len() == 2 {
+        // (X < c).ne(True) -> X >= c
+        let s1 = srcs[1];
+        let s0 = srcs[0];
+        if ctx.op_of(s1) == Ops::Const
+            && ctx.val(s1) == ConstVal::Int(1)
+            && ctx.op_of(s0) == Ops::Cmplt
+            && crate::dtype::is_int(ctx.dt_of(ctx.srcs(s0)[0]))
+        {
+            let s0s = ctx.srcs(s0).to_vec();
+            let vmin = ctx.min_max(s0s[1]).ok()?.0;
+            return Some((s0s[0], false, vmin.as_i64_or_panic()));
+        }
+    }
+    if op == Ops::Cmplt && srcs.len() == 2 && crate::dtype::is_int(ctx.dt_of(srcs[0])) {
+        // c < X -> X >= c+1
+        if ctx.op_of(srcs[0]) == Ops::Const {
+            let c = match ctx.val(srcs[0]) {
+                ConstVal::Int(i) => i as i64,
+                _ => return None,
+            };
+            return Some((srcs[1], false, c + 1));
+        }
+        // X < c -> X <= c-1
+        let vmax = ctx.min_max(srcs[1]).ok()?.1;
+        return Some((srcs[0], true, vmax.as_i64_or_panic() - 1));
+    }
+    None
+}
+
+fn substitute_and_simplify(ctx: &mut UOpCtx, uop: UopId, dict: &HashMap<UopId, UopId>) -> UopId {
+    let s = crate::uop::upat::substitute(ctx, uop, dict.clone(), true, true);
+    crate::uop::upat::simplify(ctx, s)
+}
+
+/// `uop_given_valid` (symbolic.py:335), including the python loop-variable
+/// leak (`expr`/`v0` from the last bounds iteration feeding try_simplex).
+pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simplex: bool) -> UopId {
+    // bounds: expr -> [lower, upper]
+    let mut bound_exprs: Vec<UopId> = Vec::new();
+    let mut bounds: Vec<(UopId, [Option<ConstVal>; 2])> = Vec::new();
+    let mut stmts: Vec<UopId> = Vec::new();
+    ctx.split_uop(valid, Ops::And, &mut stmts);
+    for stmt in stmts {
+        if let Some((expr, is_upper, c)) = parse_valid(ctx, stmt) {
+            match bounds.iter_mut().find(|(e, _)| *e == expr) {
+                Some((_, slot)) => slot[is_upper as usize] = Some(ConstVal::Int(c as i128)),
+                None => {
+                    bound_exprs.push(expr);
+                    bounds.push((expr, {
+                        let mut s: [Option<ConstVal>; 2] = [None, None];
+                        s[is_upper as usize] = Some(ConstVal::Int(c as i128));
+                        s
+                    }));
+                }
+            }
+        }
+    }
+
+    // all_candidates
+    let mut all_candidates: Vec<(UopId, UopId)> = Vec::new();
+    let mut last_expr: Option<UopId> = None;
+    let mut last_v0: Option<SVal> = None;
+    for (i, (expr, v)) in bounds.iter().enumerate() {
+        let (vmn, vmx) = ctx.min_max(*expr).unwrap_or_else(|e| panic!("TGERR: bounds vmin/vmax: {e}"));
+        let v0 = match &v[0] {
+            Some(c) => match *c {
+                ConstVal::Int(i) => SVal::I(i),
+                ConstVal::Float(f) => SVal::I(f as i128),
+                _ => panic!("TGERR: bad lower bound const"),
+            },
+            None => vmn,
+        };
+        let v1 = match &v[1] {
+            Some(c) => match *c {
+                ConstVal::Int(i) => SVal::I(i),
+                ConstVal::Float(f) => SVal::I(f as i128),
+                _ => panic!("TGERR: bad upper bound const"),
+            },
+            None => vmx,
+        };
+        let fake = ctx.variable(&format!("fake{i}"), sval_cv(v0), sval_cv(v1), ctx.dt_of(*expr), true);
+        all_candidates.push((*expr, fake));
+        last_expr = Some(*expr);
+        last_v0 = Some(v0);
+    }
+
+    if try_simplex {
+        let mut candidates: Vec<Vec<(UopId, UopId)>> = vec![vec![*all_candidates.last().expect("TGERR: no bounds")]];
+        // python quirk: `expr` and `v0` leak from the last loop iteration
+        let (le_expr, le_v0) = (last_expr.expect("TGERR: no bounds"), last_v0.expect("TGERR: no bounds"));
+        let is_add_simplex = ctx.op_of(le_expr) == Ops::Add && le_v0 == SVal::I(1);
+        let irreducible = |x: UopId| group::in_(group::IRREDUCIBLE, ctx.op_of(x));
+        if is_add_simplex {
+            let mut parts: Vec<UopId> = Vec::new();
+            ctx.split_uop(le_expr, Ops::Add, &mut parts);
+            if parts.iter().all(|&u| irreducible(u)) {
+                let cand: Vec<(UopId, UopId)> = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &Xi)| {
+                        let (_, vmx) = ctx.min_max(Xi).unwrap_or((SVal::I(0), SVal::I(0)));
+                        (Xi, ctx.variable(&format!("fake{i}"), ConstVal::Int(1), sval_cv(vmx), ctx.dt_of(Xi), true))
+                    })
+                    .collect();
+                candidates.push(cand);
+            }
+        }
+        for candidate in candidates {
+            let back = ctx.backward_slice_with_self(uop);
+            if candidate.iter().any(|(x, _)| !back.contains(x)) {
+                continue;
+            }
+            let mut newuops: Vec<UopId> = Vec::new();
+            for (x, newx) in &candidate {
+                let mut d = HashMap::new();
+                d.insert(*x, *newx);
+                let sub = crate::uop::upat::substitute(ctx, uop, d.clone(), true, true);
+                let simp = crate::uop::upat::simplify(ctx, sub);
+                let mut back2 = HashMap::new();
+                back2.insert(*newx, *x);
+                let res = crate::uop::upat::substitute(ctx, simp, back2, true, true);
+                newuops.push(crate::uop::upat::simplify(ctx, res));
+            }
+            let all_same = newuops.iter().all(|&n| n == newuops[0]);
+            if all_same {
+                uop = newuops[0];
+            } else if ctx.op_of(uop) == Ops::Stack && ctx.srcs(uop).len() == 2 {
+                let s0s: Vec<UopId> = newuops.iter().map(|&n| ctx.srcs(n)[0]).collect();
+                let s1s: Vec<UopId> = newuops.iter().map(|&n| ctx.srcs(n)[1]).collect();
+                if s0s.iter().all(|&n| n == s0s[0]) {
+                    let srcs = ctx.srcs(uop).to_vec();
+                    uop = ctx.uop(Ops::Stack, None, vec![s0s[0], srcs[1]], Arg::None);
+                }
+                if s1s.iter().all(|&n| n == s1s[0]) {
+                    let srcs = ctx.srcs(uop).to_vec();
+                    uop = ctx.uop(Ops::Stack, None, vec![srcs[0], s1s[0]], Arg::None);
+                }
+            }
+        }
+    }
+
+    // try all the valids together
+    let mut sub_dict: HashMap<UopId, UopId> = HashMap::new();
+    for (x, newx) in &all_candidates {
+        sub_dict.insert(*x, *newx);
+    }
+    let s_uop = crate::uop::upat::substitute(ctx, uop, sub_dict.clone(), true, true);
+    if s_uop != uop {
+        let simp = crate::uop::upat::simplify(ctx, s_uop);
+        let mut back: HashMap<UopId, UopId> = HashMap::new();
+        for (x, newx) in &sub_dict {
+            back.insert(*newx, *x);
+        }
+        let res = crate::uop::upat::substitute(ctx, simp, back, true, true);
+        uop = crate::uop::upat::simplify(ctx, res);
+    }
+    uop
+}
+
+fn sval_cv(s: SVal) -> ConstVal {
+    match s {
+        SVal::I(i) => ConstVal::Int(i),
+        _ => panic!("TGERR: symbolic bound in variable"),
+    }
+}
+
+fn valid_priority(ctx: &mut UOpCtx, v: UopId, valids: &[UopId]) -> i64 {
+    match parse_valid(ctx, v) {
+        None => 0,
+        Some((expr, _, _)) => {
+            let mut n = 0i64;
+            for &other in valids {
+                if ctx.op_in_backward_slice_with_self(other, &[Ops::Range]) {
+                    let _ = other;
+                }
+                // python: sum(-1 for other in valids if res[0] in other.backward_slice_with_self)
+                if ctx.backward_slice_with_self(other).contains(&expr) {
+                    n -= 1;
+                }
+            }
+            n
+        }
+    }
+}
+
+/// `simplify_valid` (symbolic.py:369).
+pub fn simplify_valid(ctx: &mut UOpCtx, valid: UopId) -> Option<UopId> {
+    if ctx.op_in_backward_slice_with_self(valid, &[Ops::Index]) {
+        return None;
+    }
+    let mut valids: Vec<UopId> = Vec::new();
+    ctx.split_uop(valid, Ops::And, &mut valids);
+    // sort by priority (stable, like python's sorted)
+    let mut prios: Vec<(i64, usize)> = valids.iter().enumerate().map(|(i, &v)| (valid_priority(ctx, v, &valids), i)).collect();
+    prios.sort_by_key(|&(p, _)| p);
+    let sorted: Vec<UopId> = prios.into_iter().map(|(_, i)| valids[i]).collect();
+    let mut valids = sorted;
+    let mut deduped: Vec<UopId> = Vec::new();
+    for &v in &valids {
+        if !deduped.contains(&v) {
+            deduped.push(v);
+        }
+    }
+    let mut ret: Vec<UopId> = Vec::new();
+    for stmt in deduped {
+        if !ret.is_empty() {
+            let acc = if ret.len() == 1 { ret[0] } else { ctx.uprod(ret[0], &ret[1..]) };
+            let s = uop_given_valid(ctx, acc, stmt, true);
+            ret.push(s);
+        } else {
+            ret.push(stmt);
+        }
+    }
+    if ret != valids {
+        Some(if ret.len() == 1 { ret[0] } else { ctx.uprod(ret[0], &ret[1..]) })
+    } else {
+        None
+    }
+}
+
+/// `gated_given_valid` (symbolic.py:418).
+fn gated_given_valid(ctx: &mut UOpCtx, cond: UopId, x: UopId, i: UopId) -> Option<UopId> {
+    if ctx.dt_of(x) != crate::dtype::WEAKINT || ctx.op_in_backward_slice_with_self(x, &[Ops::Index]) {
+        return None;
+    }
+    let gx = uop_given_valid(ctx, cond, x, false);
+    Some(ctx.where_(cond, gx, i))
+}
+
+/// `drop_and_clauses` (symbolic.py:389).
+fn drop_and_clauses(ctx: &mut UOpCtx, cond: UopId, x: UopId, i: UopId) -> Option<UopId> {
+    let mut parts: Vec<UopId> = Vec::new();
+    ctx.split_uop(cond, Ops::And, &mut parts);
+    let xr = ctx.ranges(x).to_vec();
+    let mut keep = Vec::new();
+    let mut drop = false;
+    for c in parts {
+        let has = ctx.ranges(c).iter().any(|r| xr.contains(r));
+        if has {
+            keep.push(c);
+        } else {
+            drop = true;
+        }
+    }
+    if !drop {
+        return None;
+    }
+    let t = ctx.const_py(ConstVal::Bool(true), Some(crate::dtype::BOOL));
+    let kept = if keep.is_empty() { t } else if keep.len() == 1 { keep[0] } else { ctx.uprod(keep[0], &keep[1..]) };
+    Some(ctx.where_(kept, x, i))
+}
+
+/// `pm_drop_and_clauses` (symbolic.py:395).
+pub fn pm_drop_and_clauses() -> PatternMatcher {
+    PatternMatcher::new(vec![(
+        invalid_gate(),
+        r(|ctx, st, _| {
+            let (cond, x, i) = (sget(st, "cond"), sget(st, "x"), sget(st, "i"));
+            drop_and_clauses(ctx, cond, x, i)
+        }),
+    )])
+}
+
+/// `pm_simplify_valid` (symbolic.py:425).
+pub fn pm_simplify_valid() -> PatternMatcher {
+    PatternMatcher::new(vec![
+        (
+            UPat::op_var(vec![Ops::And]).named("valid"),
+            r(|ctx, st, _| simplify_valid(ctx, sget(st, "valid"))),
+        ),
+        (
+            invalid_gate(),
+            r(|ctx, st, _| {
+                let (cond, x, i) = (sget(st, "cond"), sget(st, "x"), sget(st, "i"));
+                gated_given_valid(ctx, cond, x, i).or_else(|| drop_and_clauses(ctx, cond, x, i))
+            }),
+        ),
+    ])
 }

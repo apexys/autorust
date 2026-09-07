@@ -53,6 +53,79 @@ pub enum Arg {
     Const(ConstVal),
     /// Escape hatch: pickle bytes, opaque to Rust until we model this arg.
     Pickle(Vec<u8>),
+    /// A named python dataclass arg (KernelInfo, CallInfo, BufferizeOpts, Opt):
+    /// tag + named fields, rebuilt to the real dataclass on the bridge.
+    Data(DataArg),
+}
+
+/// Generic dataclass-shaped arg: every field is an Arg (None/Bool/Int/Str/Enum/
+/// Seq/Data). Equality is structural, matching python dataclass __eq__ for the
+/// fields we carry.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DataArg {
+    pub tag: String,
+    pub fields: Vec<(String, Arg)>,
+}
+
+impl DataArg {
+    pub fn get(&self, name: &str) -> &Arg {
+        &self.fields.iter().find(|(n, _)| n == name).expect("TGERR: missing dataclass field").1
+    }
+    pub fn as_bool(&self, name: &str) -> bool {
+        match self.get(name) {
+            Arg::Bool(b) => *b,
+            other => panic!("TGERR: field {name} not bool: {other:?}"),
+        }
+    }
+    pub fn as_str(&self, name: &str) -> &str {
+        match self.get(name) {
+            Arg::Str(s) => s,
+            other => panic!("TGERR: field {name} not str: {other:?}"),
+        }
+    }
+    pub fn is_none(&self, name: &str) -> bool {
+        matches!(self.get(name), Arg::None)
+    }
+}
+
+/// `KernelInfo(name="test", axis_types=(), dont_use_locals=False, applied_opts=(), opts_to_apply=None, estimates=None, beam=0)`
+pub fn kernel_info(name: &str, opts_to_apply: Option<Vec<Arg>>) -> DataArg {
+    DataArg {
+        tag: "KernelInfo".into(),
+        fields: vec![
+            ("name".into(), Arg::Str(name.into())),
+            ("axis_types".into(), Arg::Seq { tuple: true, items: vec![] }),
+            ("dont_use_locals".into(), Arg::Bool(false)),
+            ("applied_opts".into(), Arg::Seq { tuple: true, items: vec![] }),
+            ("opts_to_apply".into(), opts_to_apply.map(|o| Arg::Seq { tuple: true, items: o }).unwrap_or(Arg::None)),
+            ("beam".into(), Arg::Int(0)),
+        ],
+    }
+}
+
+/// `CallInfo(grad_fxn=None, name=None, precompile=False, precompile_backward=False, aux=None)`
+pub fn call_info(name: Option<&str>) -> DataArg {
+    DataArg {
+        tag: "CallInfo".into(),
+        fields: vec![
+            ("name".into(), name.map(|n| Arg::Str(n.into())).unwrap_or(Arg::None)),
+            ("precompile".into(), Arg::Bool(false)),
+            ("precompile_backward".into(), Arg::Bool(false)),
+        ],
+    }
+}
+
+/// `BufferizeOpts(device, addrspace=GLOBAL, removable=True)`; device is
+/// str|tuple|None (LOCAL ids appear as Int once assigned).
+pub fn bufferize_opts(device: Arg, addrspace: Option<AddrSpace>, removable: bool) -> DataArg {
+    DataArg {
+        tag: "BufferizeOpts".into(),
+        fields: vec![
+            ("device".into(), device),
+            ("addrspace".into(), addrspace.map(|a| Arg::Enum(EnumVal { class: EnumClass::AddrSpace, value: a as u16 })).unwrap_or(Arg::None)),
+            ("removable".into(), Arg::Bool(removable)),
+        ],
+    }
 }
 
 /// Device field of ParamArg: `str | tuple[str, ...] | None`.
@@ -222,6 +295,7 @@ impl std::hash::Hash for Arg {
                 tuple.hash(state);
                 items.hash(state);
             }
+            Data(d) => d.hash(state),
             None => {}
         }
     }

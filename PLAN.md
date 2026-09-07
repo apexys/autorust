@@ -354,8 +354,13 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
       differentially exact vs Python: 13k random graphs per PM, ~0.08% residual = documented
       NaN-const-through-minmax class; Rust unit tests port the engine-semantics cores of
       test_uop_graph/test_pattern_matcher)
-- [ ] M3 Tensor front-end
-- [ ] M4 scheduler
+- [x] M3 part 1 Tensor front-end (Tensor core, movement/getitem, creation, elementwise,
+      reduce, indexing DSL + `test_tensor_diff.py` key-equality differential)
+- [x] M4 scheduler (`run_rangeify`/`IndexingContext`, `get_kernel_graph` incl. `pm_mops`/
+      earliest rewrites/copy-to-store/add-buffers/split-kernels, `create_schedule`,
+      `resolve_linear_call`, `pm_copy_from_store`, `transform_to_call` callify,
+      TLSF memory planner; gate: `test_schedule_diff.py` 6/6 programs — LINEAR kernel
+      bodies key-equal vs Python incl. planned mode)
 - [ ] M5 codegen + cstyle + interpreter + `ops_rust.py`
 - [ ] M6 native realize + device traits
 - [ ] M7 user kernels (`@function`/custom_kernel + flash attention), TinyJit, autograd, BEAM/TC activation

@@ -18,7 +18,8 @@ import pickle
 import pathlib
 
 from tinygrad.dtype import DType, AddrSpace, ConstFloat, INVERSE_DTYPES_DICT, dtypes, Invalid
-from tinygrad.uop.ops import UOp, Ops, AxisType, ParamArg
+from tinygrad.uop.ops import UOp, Ops, AxisType, ParamArg, KernelInfo, CallInfo
+from tinygrad.schedule.indexing import BufferizeOpts
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _LIB = ctypes.CDLL(str(_ROOT / "target" / "debug" / "libautorust.so"))
@@ -194,6 +195,17 @@ def _arg_py(j, dts):
         return tuple(items) if v["tuple"] else items
     if kind == "Pickle":
         return pickle.loads(bytes(v[0]))
+    if kind == "Data":
+        fs = {k: _arg_py(f, dts) for k, f in v["fields"]}
+        if v["tag"] == "KernelInfo":
+            return KernelInfo(name=fs["name"], axis_types=tuple(fs["axis_types"]),
+                              dont_use_locals=fs["dont_use_locals"], applied_opts=tuple(fs["applied_opts"]),
+                              opts_to_apply=fs["opts_to_apply"], beam=fs["beam"])
+        if v["tag"] == "CallInfo":
+            return CallInfo(None, fs["name"], fs["precompile"], fs["precompile_backward"])
+        if v["tag"] == "BufferizeOpts":
+            return BufferizeOpts(fs["device"], fs["addrspace"], fs["removable"])
+        raise ValueError(f"unknown dataclass {v['tag']}")
     raise ValueError(f"unknown arg kind {kind}")
 
 

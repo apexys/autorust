@@ -240,3 +240,92 @@ pub mod group {
     }
 
 }
+
+
+
+
+// ---------- pm_contiguous_view_offset (ops.py:1772) ----------
+
+use crate::uop::ctx::UOpCtx;
+use crate::uop::graph::UopId;
+use crate::uop::arg::Arg;
+use crate::uop::sym::{cvar, r, sget};
+use crate::uop::upat::{PatternMatcher, RuleFn, UPat, UPatOrConst};
+
+/// python `rtag()` — set tag to True (replace is a no-op when already set).
+fn rtag(ctx: &mut UOpCtx, b: UopId) -> UopId {
+    let (op, dt, srcs, arg, tag) = ctx.snapshot(b);
+    if matches!(tag, Arg::Bool(true)) {
+        return b;
+    }
+    ctx.uop_tag(op, Some(dt), srcs, arg, Arg::Bool(true))
+}
+
+/// `pm_contiguous_view_offset`.
+pub fn pm_contiguous_view_offset() -> PatternMatcher {
+    let rules: Vec<(UPat, RuleFn)> = vec![
+        // normalize to 1d bitcasts
+        (
+            UPat::ops1(Ops::Bitcast).named("b"),
+            r(|ctx, st, _| {
+                let b = sget(st, "b");
+                let shape = ctx.shape(b).ok().flatten()?;
+                if shape.len() != 1 {
+                    let flat = crate::tensor::movement::flatten(ctx, ctx.srcs(b)[0], -1, -1);
+                    let bc = ctx.bitcast(flat, ctx.dt_of(b));
+                    Some(crate::tensor::movement::reshape(ctx, bc, &shape))
+                } else {
+                    None
+                }
+            }),
+        ),
+        // INDEX(b, RANGE) -> INDEX(rtag(b), 0)
+        (
+            UPat::ops1(Ops::Index)
+                .with_src_tup(vec![UPat::var(Some("b"), None), UPat::ops1(Ops::Range)])
+                .allow_all_srcs(),
+            r(|ctx, st, _| {
+                let b = sget(st, "b");
+                let zero = ctx.const_py(crate::dtype::ConstVal::Int(0), Some(crate::dtype::default_int()));
+                let rb = rtag(ctx, b);
+                Some(ctx.index(rb, vec![zero]))
+            }),
+        ),
+        // INDEX(b) with a single src -> INDEX(rtag(b), 0)
+        (
+            UPat::ops1(Ops::Index).with_src_tup(vec![UPat::var(Some("b"), None)]),
+            r(|ctx, st, _| {
+                let b = sget(st, "b");
+                let zero = ctx.const_py(crate::dtype::ConstVal::Int(0), Some(crate::dtype::default_int()));
+                let rb = rtag(ctx, b);
+                Some(ctx.index(rb, vec![zero]))
+            }),
+        ),
+        // INDEX(b, RANGE + c) -> INDEX(rtag(b), c)
+        (
+            UPat::ops1(Ops::Index)
+                .with_src_tup(vec![
+                    UPat::var(Some("b"), None),
+                    UPat::ops1(Ops::Range).add(UPatOrConst::Pat(cvar("c"))),
+                ])
+                .allow_all_srcs(),
+            r(|ctx, st, _| {
+                let (b, c) = (sget(st, "b"), sget(st, "c"));
+                let rb = rtag(ctx, b);
+                Some(ctx.index(rb, vec![c]))
+            }),
+        ),
+        // INDEX(b, CONST c) -> INDEX(rtag(b), c) when numel == 1
+        (
+            UPat::ops1(Ops::Index)
+                .with_src_tup(vec![UPat::var(Some("b"), None), cvar("c")])
+                .allow_all_srcs(),
+            r(|ctx, st, _| {
+                let (b, c) = (sget(st, "b"), sget(st, "c"));
+                let rb = rtag(ctx, b);
+                Some(ctx.index(rb, vec![c]))
+            }),
+        ),
+    ];
+    PatternMatcher::new(rules)
+}

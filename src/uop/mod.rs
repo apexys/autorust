@@ -7,6 +7,7 @@ pub mod flat;
 pub mod graph;
 pub mod ops;
 pub mod sint;
+pub mod range;
 pub mod sym;
 pub mod upat;
 

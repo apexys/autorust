@@ -144,6 +144,40 @@ impl UPat {
         UPat::ops1(op).with_src_tup(vec![self.clone()])
     }
 
+    /// match any number of srcs (sets required_len to the fixed prefix only)
+    pub fn allow_all_srcs(&self) -> UPat {
+        let mut p = self.clone();
+        p.strict_length = false;
+        p.required_len = match &p.src {
+            SrcPat::Tup(v) => v.len(),
+            SrcPat::List(_) => 1,
+            _ => 0,
+        };
+        p.recompute_early_reject();
+        p
+    }
+
+    /// all srcs are RESHAPE(var) patterns (for MSELECT/MSTACK reshape hoisting)
+    pub fn with_src_all_reshape(&self) -> UPat {
+        let srcs = self.srcs_clone();
+        let new_srcs: Vec<UPat> = srcs
+            .into_iter()
+            .map(|s| UPat::ops1(Ops::Reshape).with_src_tup(vec![s]).allow_all_srcs())
+            .collect();
+        let mut p = self.clone();
+        p.src = SrcPat::Tup(new_srcs);
+        p.strict_length = false;
+        p.recompute_early_reject();
+        p
+    }
+
+    fn srcs_clone(&self) -> Vec<UPat> {
+        match &self.src {
+            SrcPat::Tup(v) => v.clone(),
+            _ => vec![],
+        }
+    }
+
     pub fn with_src_tup(&self, srcs: Vec<UPat>) -> UPat {
         let mut p = self.clone();
         p.src = SrcPat::Tup(srcs);
@@ -166,7 +200,7 @@ impl UPat {
         self.early_reject = er;
     }
 
-    fn recompute_early_reject(&mut self) {
+    pub fn recompute_early_reject(&mut self) {
         let mut er = Vec::new();
         if let SrcPat::Tup(v) = &self.src {
             for p in v {
@@ -627,6 +661,41 @@ pub enum CtxVal {
     #[default]
     None,
     Subst(HashMap<UopId, UopId>),
+    /// Scheduler IndexingContext (run_rangeify rules).
+    Idx(std::rc::Rc<std::cell::RefCell<crate::schedule::indexing::IndexingContext>>),
+    /// Device string for pm_fix_deviceless.
+    Dev(Option<crate::uop::arg::DeviceSpec>),
+    /// Shared counter (itertools.count contexts).
+    Cnt(std::rc::Rc<std::cell::Cell<i64>>),
+    /// LocalAddBufferContext for kernel splitting.
+    La(std::rc::Rc<std::cell::RefCell<LocalAddBufferContext>>),
+    /// AllocCtx for callify.
+    Al(std::rc::Rc<std::cell::RefCell<crate::tensor::callify::AllocCtx>>),
+    /// (cache, args) for pm_post_sched_cache.
+    Ca(std::rc::Rc<std::cell::RefCell<crate::schedule::sched::CallCtx>>),
+}
+
+/// `LocalAddBufferContext` (rangeify.py:469).
+#[derive(Default)]
+pub struct LocalAddBufferContext {
+    pub dg: i64,
+    /// insertion-ordered buf -> replacement map
+    pub map_keys: Vec<UopId>,
+    pub map_vals: Vec<UopId>,
+    pub range: i64,
+    pub opts: Option<Vec<Arg>>,
+}
+
+impl LocalAddBufferContext {
+    pub fn map_get(&self, k: UopId) -> Option<UopId> {
+        self.map_keys.iter().position(|&x| x == k).map(|i| self.map_vals[i])
+    }
+    pub fn map_insert(&mut self, k: UopId, v: UopId) {
+        if self.map_get(k).is_none() {
+            self.map_keys.push(k);
+            self.map_vals.push(v);
+        }
+    }
 }
 
 impl CtxVal {
@@ -636,6 +705,69 @@ impl CtxVal {
             _ => None,
         }
     }
+}
+
+/// rule helper: closure over (IndexingContext, UOpCtx, store)
+pub fn r_idx<F>(f: F) -> RuleFn
+where
+    F: Fn(&mut crate::schedule::indexing::IndexingContext, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::Idx(ictx) => f(&mut ictx.borrow_mut(), ctx, st),
+        _ => panic!("TGERR: rule requires IndexingContext"),
+    })
+}
+
+/// rule helper: closure over (UOpCtx, store) with no special ctx
+pub fn r_ctx<F>(f: F) -> RuleFn
+where
+    F: Fn(&mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, _ctxv| f(ctx, st))
+}
+
+/// rule helper: closure over (AllocCtx, UOpCtx, store)
+pub fn r_al<F>(f: F) -> RuleFn
+where
+    F: Fn(&mut crate::tensor::callify::AllocCtx, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::Al(a) => f(&mut a.borrow_mut(), ctx, st),
+        _ => panic!("TGERR: rule requires AllocCtx"),
+    })
+}
+
+/// rule helper: closure over (LocalAddBufferContext, UOpCtx, store)
+pub fn r_la<F>(f: F) -> RuleFn
+where
+    F: Fn(&mut LocalAddBufferContext, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::La(l) => f(&mut l.borrow_mut(), ctx, st),
+        _ => panic!("TGERR: rule requires LocalAddBufferContext"),
+    })
+}
+
+/// rule helper: closure over (counter, UOpCtx, store)
+pub fn r_cnt<F>(f: F) -> RuleFn
+where
+    F: Fn(&std::cell::Cell<i64>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::Cnt(c) => f(c, ctx, st),
+        _ => panic!("TGERR: rule requires counter ctx"),
+    })
+}
+
+/// rule helper: closure over (device ctx, UOpCtx, store)
+pub fn r_dev<F>(f: F) -> RuleFn
+where
+    F: Fn(&Option<crate::uop::arg::DeviceSpec>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::Dev(d) => f(d, ctx, st),
+        _ => panic!("TGERR: rule requires device ctx"),
+    })
 }
 
 #[derive(Default)]
@@ -679,12 +811,11 @@ impl PatternMatcher {
                 if std::env::var("TG_TRACE").is_ok() {
                     eprintln!("RULE[{}] fire on op {:?}", i, ctx.op_of(uop));
                 }
-                let _ = &rule;
                 if let Some(ret) = (rule.f)(ctx, store, ctxval) {
                     if ret != uop {
                         return Some(ret);
                     }
-                    break; // first non-None result wins, even if it is the node itself
+                    // python: rules returning self are skipped, try the next rule
                 }
             }
         }
@@ -873,7 +1004,7 @@ impl<'a> RewriteCtxt<'a> {
 
     /// the main driver (ops.py:1675-1741).
     fn unified_rewrite(&mut self, ctx: &mut UOpCtx, root: UopId) -> Result<UopId, String> {
-        #[derive(Clone, Copy, PartialEq)]
+        #[derive(Clone, Copy, PartialEq, Debug)]
         enum Stage {
             S0,
             S1,
@@ -887,6 +1018,11 @@ impl<'a> RewriteCtxt<'a> {
                 return Err("infinite loop in graph_rewrite (stack too big)".into());
             }
             if self.replace.contains_key(&n) {
+                // NOTE: python can't hit this for freshly rebuilt nodes (identity
+                // objects); structural interning can, so fire the waiters.
+                if let Some(w) = waitlist.remove(&n) {
+                    stack.extend(w);
+                }
                 continue;
             }
             match stage {
@@ -991,7 +1127,10 @@ impl<'a> RewriteCtxt<'a> {
                 }
             }
         }
-        Ok(self.replace[&root])
+        match self.replace.get(&root) {
+            Some(&r) => Ok(r),
+            None => Err(format!("rewrite did not complete root {:?}", root.0)),
+        }
     }
 }
 
@@ -1014,14 +1153,32 @@ pub fn graph_rewrite(
         replace: HashMap::new(),
         enter_calls,
     };
-    if walk {
-        rc.walk_rewrite(ctx, sink)
-    } else {
-        rc.unified_rewrite(ctx, sink)
-    }
+    let _ = &mut rc;
+    if walk { rc.walk_rewrite(ctx, sink) } else { rc.unified_rewrite(ctx, sink) }
 }
 
 /// `UOp.substitute` (ops.py:529-534) — bottom-up rewrite with `_substitute`.
+/// `substitute` with an extra PM composed before `_substitute`
+/// (python `substitute(..., extra_pm=...)`).
+pub fn substitute_extra(
+    ctx: &mut UOpCtx,
+    root: UopId,
+    dvars: HashMap<UopId, UopId>,
+    extra: Option<&PatternMatcher>,
+    walk: bool,
+    enter_calls: bool,
+) -> UopId {
+    if dvars.is_empty() {
+        return root;
+    }
+    let extra = extra.expect("TGERR: substitute_extra requires extra pm");
+    let mut patterns: Vec<(UPat, RuleFn)> = extra.rules.iter().map(|r| (r.pat.clone(), r.f.clone())).collect();
+    patterns.extend(substitute_pm().rules.iter().map(|r| (r.pat.clone(), r.f.clone())));
+    let pm = PatternMatcher::new(patterns);
+    graph_rewrite(ctx, root, &pm, true, None, walk, enter_calls, CtxVal::Subst(dvars))
+        .unwrap_or_else(|e| panic!("TGERR: substitute_extra failed: {e}"))
+}
+
 pub fn substitute(ctx: &mut UOpCtx, root: UopId, dvars: HashMap<UopId, UopId>, walk: bool, enter_calls: bool) -> UopId {
     let dvars: HashMap<UopId, UopId> = dvars.into_iter().filter(|(k, v)| k != v).collect();
     if dvars.is_empty() {
