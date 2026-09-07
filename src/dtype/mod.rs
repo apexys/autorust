@@ -146,7 +146,21 @@ pub fn by_attr(attr: &str) -> Option<DTypeId> {
 
 /// `to_dtype(DTypeLike)` for the str case.
 pub fn to_dtype(attr: &str) -> Option<DTypeId> {
-    by_attr(attr)
+    // accept both the python attr ("uchar") and the friendly alias ("uint8")
+    by_attr(attr).or_else(|| match attr {
+        "uint8" => by_attr("uchar"),
+        "uint16" => by_attr("ushort"),
+        "uint32" => by_attr("uint"),
+        "uint64" => by_attr("ulong"),
+        "int8" => by_attr("char"),
+        "int16" => by_attr("short"),
+        "int32" => by_attr("int"),
+        "int64" => by_attr("long"),
+        "float32" => by_attr("float"),
+        "float64" => by_attr("double"),
+        "float16" => by_attr("half"),
+        _ => None,
+    })
 }
 
 // ---- sets (port of DTypes class-level tuples) ----

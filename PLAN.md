@@ -155,6 +155,27 @@ tests in `autorust/src`.
 - `Tensor` = `uop: UOpId` wrapper (+`grad`, `is_param`); port
   `mixin/{creation,dtype,elementwise,movement,reduce}` and the op-dispatch core of
   `mixin/op.py`; `tensor.py` minus precompile/numpy-data internals.
+- **v0.14 layout note (surveyed M3 start)**: the mixin chain
+  `RandMixin ← OpMixin ← ElementwiseMixin ← CreationMixin ← (DTypeMixin, MovementMixin)`
+  subclasses **UOp itself** — all sugar is UOp-level and returns UOps; `Tensor`
+  (tensor.py, 775 lines) only wraps `uop: UOpId` (+`grad`, `is_param`) with
+  `_apply_uop`/`alu`/`_uop`/`_wrap_uop` delegation. Port order mirrors the chain:
+  1. `tensor/core.rs` — Tensor struct, const factory, accessors, `_apply_uop`
+  2. `tensor/movement.rs` — `_mop` (v0.14 emits shape-args as SRC consts, not args:
+     RESHAPE/EXPAND = 1 shape src, PAD/SHRINK = lo/end list srcs, PERMUTE/FLIP = arg
+     tuple, STACK promotes srcs), reshape/expand/pad/shrink/permute/flip/squeeze/
+     unsqueeze/T/transpose/flatten/stack/cat/pad_to, `_parse_view_index`/`_apply_view_ops`
+     (basic getitem: int/None/slice/ellipsis)
+  3. `tensor/creation.rs` — full/ones/zeros/eye/arange/linspace/_tri/triu/tril
+     (+`UOp.new_buffer`/`empty` with the global slot counter)
+  4. `tensor/elementwise.rs` — `ufix`/Tensor-`_broadcasted` (keeps weak CONSTs weak via
+     const_like(weak_dtype(least_upper))) /`_binop` = ctor broadcast (dtype_from_uop
+     expands), named binops/unops, div/mod/fmod int-vs-float arms, pow/exp2/log2 family
+  5. `tensor/reduce.rs` — `_rop` = `REDUCE(permute(reduce_axis+kept), arg=(op, n))`,
+     `_reduce`/sum/prod/max/any/all/mean/var/std/logsumexp/softmax/cumsum/argmax/argmin
+  6. `tensor/dtype.rs` — cast/bitcast/float/shrink_to_ndim
+  7. `tensor/callify.rs` — AllocCtx/tags/`transform_to_call` (FUNCTION-free subset) +
+     `callify`/`call`
 - **Callify is part of M3, not deferrable**: v0.14's `realize`/`linear_with_vars` route
   every graph through `transform_to_call` (tensor.py:224) → `CALL(FUNCTION(body), params)`
   → the scheduler unwraps it. Port the FUNCTION-free subset now (AllocCtx, tags/`rtag`,

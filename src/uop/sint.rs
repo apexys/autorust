@@ -44,17 +44,27 @@ impl SInt {
 
 pub use SInt as SVal;
 
-impl From<i64> for SInt {
-    fn from(v: i64) -> Self {
-        SInt::I(v as i128)
-    }
+/// `sint`-like scalar: any Rust integer literal converts to `SVal::I`.
+/// (SVal::U is symbolic — only built from UOps, never from literals.)
+pub trait SvalLike {
+    fn into_sval(self) -> SVal;
 }
 
-impl From<usize> for SInt {
-    fn from(v: usize) -> Self {
-        SInt::I(v as i128)
-    }
+macro_rules! impl_sval_like {
+    ($($t:ty),*) => {$(
+        impl SvalLike for $t {
+            fn into_sval(self) -> SVal {
+                SVal::I(self as i128)
+            }
+        }
+        impl From<$t> for SInt {
+            fn from(v: $t) -> Self {
+                SInt::I(v as i128)
+            }
+        }
+    )*};
 }
+impl_sval_like!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, usize);
 
 impl PartialOrd for SInt {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {

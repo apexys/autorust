@@ -10,6 +10,36 @@ use crate::dtype::{ConstVal, DTypeId};
 use super::ops::Ops;
 
 /// Helpers from `tinygrad/helpers.py` (int semantics; Python floor division).
+/// Python `+` on ConstVals (int+int -> Int/Big, float wins, bool coerces).
+pub fn py_add_const(x: &crate::dtype::ConstVal, y: &crate::dtype::ConstVal) -> crate::dtype::ConstVal {
+    use crate::dtype::ConstVal::*;
+    match (x, y) {
+        (Float(a), b) | (b, Float(a)) => Float(a + b.as_f64()),
+        (Int(a), Int(b)) => Int(a.wrapping_add(*b)),
+        (Big(a), Big(b)) => Big(a.add(b)),
+        (Big(a), Int(b)) | (Int(b), Big(a)) => {
+            let other = crate::helpers::bigint::BigInt::from_i128(*b);
+            Big(a.add(&other))
+        }
+        (Bool(a), other) | (other, Bool(a)) => {
+            let av = if *a { 1i128 } else { 0 };
+            let bv = match other {
+                Bool(v) => {
+                    if *v {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                Int(v) => *v,
+                _ => panic!("TGERR: py_add_const unsupported bool mix"),
+            };
+            Int(av.wrapping_add(bv))
+        }
+        _ => panic!("TGERR: py_add_const unsupported"),
+    }
+}
+
 pub fn cdiv(x: i128, y: i128) -> i128 {
     if y == 0 {
         return 0;

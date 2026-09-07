@@ -596,19 +596,18 @@ impl UOpCtx {
                 }
                 let mut out = Vec::with_capacity(ps.len());
                 for (i, &(o, sz)) in marg.iter().enumerate() {
-                    let ok = match op {
-                        Pad => {
-                            self.resolve_cmp(SVal::I(sz as i128), std::cmp::Ordering::Greater, SVal::I(0))?
-                                && self.resolve_cmp(SVal::I(0), std::cmp::Ordering::Less, SVal::I(o as i128))?
-                                && self.resolve_cmp(SVal::I((o + sz) as i128), std::cmp::Ordering::Less, ps[i])?
-                        }
-                        Shrink => {
-                            self.resolve_cmp(SVal::I(0), std::cmp::Ordering::Less, SVal::I(o as i128))?
-                                && self.resolve_cmp(SVal::I(sz as i128), std::cmp::Ordering::Greater, SVal::I(0))?
-                                && self.resolve_cmp(SVal::I((o + sz) as i128), std::cmp::Ordering::Less, ps[i])?
-                        }
-                        _ => unreachable!(),
-                    };
+                    // Python: resolve(sz>=0) and resolve(0<=o) and
+                    //   PAD:    resolve(o+s<=sz)  (start + dim <= stop)
+                    //   SHRINK: resolve(o+sz<=s)  (start + size <= dim)
+                    let ok = self.resolve_ord(SVal::I(sz as i128), CmpOrd::Ge, SVal::I(0), true)
+                        && self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(o as i128), true)
+                        && match op {
+                            Pad => {
+                                let start_dim = self.sval_add(SVal::I(o as i128), ps[i]);
+                                self.resolve_ord(start_dim, CmpOrd::Le, SVal::I(sz as i128), true)
+                            }
+                            _ => self.resolve_ord(SVal::I((o + sz) as i128), CmpOrd::Le, ps[i], true),
+                        };
                     if !ok {
                         return Err(format!("invalid pad/shrink for {ps:?}"));
                     }
@@ -663,6 +662,9 @@ impl UOpCtx {
     /// marg for RESHAPE/EXPAND: the new shape (may be symbolic).
     pub fn marg_shape(&mut self, id: UopId) -> Result<Shape, String> {
         let srcs = self.srcs(id).to_vec();
+        if srcs.len() < 2 {
+            panic!("TGERR: marg_shape on {} with {} srcs", DebugOp(self.op_of(id)), srcs.len());
+        }
         self.as_shape(srcs[1])
     }
 
@@ -743,7 +745,8 @@ impl UOpCtx {
                     }
                     src.push(u);
                 }
-                SVal::I(v) => src.push(self.cint_dt(v as i64, crate::dtype::default_int())),
+                // Python: UOp.const(x) -> from_py(int) -> weakint
+            SVal::I(v) => src.push(self.const_py(crate::dtype::ConstVal::Int(v as i128), None)),
             }
         }
         if src.len() == 1 {
@@ -1112,6 +1115,51 @@ impl UOpCtx {
     /// `resolve`-style comparison: True iff the relation certainly holds.
     /// Placeholder: concrete ints only; symbolic → lenient true (completed in
     /// the rewrite-engine step).
+    /// `resolve(x, default)` (ops.py:54) for a comparison `a ORD b`: fold it to a
+    /// bool via the same UOps Python builds (`ge` = NOT(lt)); `default` only when
+    /// the folded result is not provably constant (vmin != vmax).
+    pub fn resolve_ord(&mut self, a: SVal, ord: CmpOrd, b: SVal, default: bool) -> bool {
+        match (a, b) {
+            (SVal::I(x), SVal::I(y)) => match ord {
+                CmpOrd::Lt => x < y,
+                CmpOrd::Le => x <= y,
+                CmpOrd::Eq => x == y,
+                CmpOrd::Ne => x != y,
+                CmpOrd::Ge => x >= y,
+                CmpOrd::Gt => x > y,
+            },
+            _ => {
+                let (ua, ub) = (self.sval_to_uop(a), self.sval_to_uop(b));
+                match ord {
+                    CmpOrd::Lt => {
+                        let u = self.alu2(Ops::Cmplt, ua, ub);
+                        resolve_uop_bool(self, u, default)
+                    }
+                    CmpOrd::Gt => {
+                        let u = self.alu2(Ops::Cmplt, ub, ua);
+                        resolve_uop_bool(self, u, default)
+                    }
+                    CmpOrd::Eq => {
+                        let u = self.alu2(Ops::Cmpeq, ua, ub);
+                        resolve_uop_bool(self, u, default)
+                    }
+                    CmpOrd::Ne => {
+                        let u = self.alu2(Ops::Cmpeq, ua, ub);
+                        !resolve_uop_bool(self, u, !default)
+                    }
+                    CmpOrd::Le => {
+                        let u = self.alu2(Ops::Cmplt, ub, ua);
+                        !resolve_uop_bool(self, u, !default)
+                    }
+                    CmpOrd::Ge => {
+                        let u = self.alu2(Ops::Cmplt, ua, ub);
+                        !resolve_uop_bool(self, u, !default)
+                    }
+                }
+            }
+        }
+    }
+
     pub fn resolve_cmp(&mut self, a: SVal, ord: std::cmp::Ordering, b: SVal) -> Result<bool, String> {
         match (a, b) {
             (SVal::I(x), SVal::I(y)) => Ok(x.cmp(&y) == ord),
@@ -1184,6 +1232,13 @@ fn dtype_const_canon(d: DTypeId, v: ConstVal) -> ConstVal {
     dtype::dtype_const(d, v)
 }
 
+struct DebugOp(Ops);
+impl std::fmt::Display for DebugOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
 pub fn arg_as_int(a: &Arg) -> Option<i64> {
     match a {
         Arg::Int(i) => Some(*i),
@@ -1193,6 +1248,14 @@ pub fn arg_as_int(a: &Arg) -> Option<i64> {
 }
 
 // ---- free helpers ----
+
+fn resolve_uop_bool(ctx: &mut UOpCtx, u: UopId, default: bool) -> bool {
+    let s = crate::uop::upat::simplify(ctx, u);
+    match ctx.min_max(s) {
+        Ok((vmin, vmax)) if vmin == vmax => vmin != SVal::I(0),
+        _ => default,
+    }
+}
 
 pub fn sval_min(a: SVal, b: SVal) -> SVal {
     if sval_cmp(a, b) == std::cmp::Ordering::Less {
@@ -1229,6 +1292,17 @@ impl SVal {
 
 // ---------- Step 4: algebraic sugar (elementwise mixin, UOp level) ----------
 
+/// Comparison operator set (Python `<= < == != >= >`); std `Ordering` has only
+/// 3 variants and extra match arms would silently bind as variables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmpOrd {
+    Lt,
+    Le,
+    Eq,
+    Ne,
+    Ge,
+    Gt,
+}
 impl UOpCtx {
     /// `x.alu(op, *src)` — raw construction, dtype derived.
     pub fn alu(&mut self, op: Ops, srcs: Vec<UopId>) -> UopId {
@@ -1482,10 +1556,72 @@ impl UOpCtx {
         };
         match (xshape, rshape) {
             (Some(xs), Some(rs)) if !xs.is_empty() && xs != rs => {
-                let arg = Arg::Seq { tuple: true, items: xs.iter().map(|s| self.sval_to_arg(s)).collect() };
-                self.uop(Ops::Expand, None, vec![ret], arg)
+                // python const_like: ret._mop(EXPAND, arg=self._shape) — shape as src
+                let shape_src = self.shape_arg(&xs);
+                let s0 = crate::tensor::sink(self, vec![shape_src]);
+                let sid = crate::uop::upat::simplify(self, s0);
+                let mut srcs = vec![ret];
+                srcs.extend(self.srcs(sid).to_vec());
+                self.uop(Ops::Expand, None, srcs, Arg::None)
             }
             _ => ret,
+        }
+    }
+
+    /// SVal -> UopId (const wrap for ints), the `ufix` of shape math.
+    pub fn sval_to_uop(&mut self, s: SVal) -> UopId {
+        match s {
+            SVal::I(v) => self.cint_dt(v as i64, crate::dtype::default_int()),
+            SVal::U(u) => u,
+        }
+    }
+
+    /// Python sint binop: int-int folds, UOp sides keep receiver order with the
+    /// int side wrapped as a CONST in place (`3 + u` -> ADD(CONST(3), u)).
+    pub fn sval_binop(&mut self, op: Ops, a: SVal, b: SVal) -> SVal {
+        if let (SVal::I(x), SVal::I(y)) = (a, b) {
+            return match op {
+                Ops::Add => SVal::I(x.wrapping_add(y)),
+                Ops::Sub => SVal::I(x.wrapping_sub(y)),
+                Ops::Mul => SVal::I(x.wrapping_mul(y)),
+                Ops::Floordiv => SVal::I(crate::uop::alu::floordiv(x, y)),
+                Ops::Cdiv => SVal::I(crate::uop::alu::cdiv(x, y)),
+                Ops::Cmod => SVal::I(crate::uop::alu::cmod(x, y)),
+                Ops::Floormod => SVal::I(crate::uop::alu::floormod(x, y)),
+                _ => panic!("TGERR: sval_binop unsupported op {op:?}"),
+            };
+        }
+        let (ua, ub) = (self.sval_to_uop(a), self.sval_to_uop(b));
+        SVal::U(self.alu2(op, ua, ub))
+    }
+
+    pub fn sval_add(&mut self, a: SVal, b: SVal) -> SVal {
+        self.sval_binop(Ops::Add, a, b)
+    }
+
+    pub fn sval_sub(&mut self, a: SVal, b: SVal) -> SVal {
+        self.sval_binop(Ops::Sub, a, b)
+    }
+
+    pub fn sval_mul(&mut self, a: SVal, b: SVal) -> SVal {
+        self.sval_binop(Ops::Mul, a, b)
+    }
+
+    pub fn sval_div_floor(&mut self, a: SVal, b: SVal) -> SVal {
+        self.sval_binop(Ops::Floordiv, a, b)
+    }
+
+    pub fn sval_neg(&mut self, a: SVal) -> SVal {
+        match a {
+            SVal::I(v) => SVal::I(-v),
+            SVal::U(u) => SVal::U(self.alu1(Ops::Neg, u)),
+        }
+    }
+
+    pub fn sval_is_one(&mut self, s: &SVal) -> Option<bool> {
+        match s {
+            SVal::I(v) => Some(*v == 1),
+            SVal::U(_) => None,
         }
     }
 

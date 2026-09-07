@@ -1,5 +1,6 @@
 pub mod dtype;
 pub mod helpers;
+pub mod tensor;
 pub mod uop;
 
 // ---- cdylib C ABI (loaded via ctypes; caller frees with autorust_free) ----
