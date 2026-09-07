@@ -241,22 +241,33 @@ tests in `autorust/src`.
   - numeric differential: same inputs → `allclose` outputs, Rust interp vs tinygrad CPU;
   - `DEV=RUST` passes `test_tiny.py` cases (const, plus, elu, cat, sum, eye, gemm).
 
-### M6 — native realize + device traits
-- Port `engine/realize.py` subset (`compile_linear`, `run_linear`, `exec_kernel`,
-  `exec_copy`), and `device.py` as backend traits in Rust mirroring tinygrad's seams:
-  `Allocator` (`_alloc/_copyin/_copyout/_as_buffer`) with **`LRUAllocator` as a default
-  trait impl** — the (size, options)-keyed free-list cache with OOM-triggered
-  `free_cache()` retry (device.py:250-270). This is the runtime-level buffer cache and is
-  performance-critical for OpenCL (every uncached alloc is a `clCreateBuffer`; the
-  graph-level planner deliberately skips CL). Also `Compiler` (`compile(src)->bytes`, with
-  `compile_cached` semantics), `Program` (`__call__(bufs, global_size, local_size, vals,
-  wait)`), `Compiled` (renderer+allocator+runtime, `synchronize()`), `Buffer` (device,
-  size, dtype, ensure_allocated, copy paths). `Tensor.realize` stops touching Python;
-  `tolist()/numpy()` read backend memory through a uniform interface.
-- The CPU interpreter registers as the first `Backend` impl; nothing in schedule/codegen/
-  engine may assume CPU.
-- **Gate**: end-to-end corpus runs with Python fully out of the loop; numerics match
-  tinygrad CPU; `schedule_cache`-style behavior sane (no O(n) recompiles).
+### M6 — native realize + device traits — COMPLETE
+- `src/engine/buffer.rs`: `Buffer` (base + byte-offset views, `get_buf` windows,
+  opaque-ctor path), `BufTable` = the engine `buffers` dict; `UOpCtx.initial_data`
+  carries `Tensor(data)`'s fake-realize bytes (`_frompy` → `buffer.allocate(mv)`).
+- `src/engine/device.rs`: `BackendAllocator` (`_alloc/_copyin/_copyout/_offset`) +
+  `LruAllocator` default impl (free-list cache keyed (size, spec), `free_cache`),
+  empty `Compiler`, `TinyElf` (lib/name/signature), `Prog` trait (`__call__`),
+  `InterpProgram` (flat-decodes the linear from the elf lib — the pickle seam),
+  `Compiled` (allocator+renderer+runtime cache), thread-local `Device` registry
+  ("CPU"/"PYTHON"/default "NV" all interp-backed for M6; M8 adds CL additively).
+- `src/engine/realize.rs`: `ProgramInfo` (DataArg-encoded PROGRAM arg) +
+  `from_sink` (ALU vars / globals / ins/outs / SPECIAL launch dims), `to_program`
+  (full_rewrite_to_sink → linearize → SOURCE(flat linear) → BINARY(empty compiler),
+  cached per AST), `compile_linear` (PROGRAMs swapped into CALLs), `run_linear`
+  (`exec_copy` memcpy windows / `exec_kernel` device launch), `Tensor` realize +
+  flat readback through python's `_apply_map_to_tensors` semantics (the callify
+  `buffer_map` gives each tensor its final storage).
+- KEY CONVENTION: python's `PythonProgram` iterates `global_size[::-1]` /
+  `local_size[::-1]`; `InterpProgram` reverses `launch_dims` output to match the
+  M5 interpreter's little-endian dim convention (caught by the mulc gate: lanes
+  all read idx 0 without the reversal).
+- `create_linear_with_vars` now returns held_bufs (schedule/__init__.py:208: the
+  top CALL's direct BUFFER args) and passes them to the memory planner — the M5
+  oracle had planned tensor-facing buffers into arenas (numerics unaffected).
+- **Gate** `py/tests/test_native_exec.py`: end-to-end corpus (ew / mul / neg /
+  two-kernel chain) runs with Python fully out of the loop; numerics match
+  tinygrad; double-realize compiles exactly once (to_program + runtime caches).
 
 ### M7 — user kernels + the rest of the Tensor (stretch, still before/alongside M8)
 - **`@function` / `Tensor.custom_kernel`** (function.py, 105 LOC + `precompile` +
@@ -363,7 +374,7 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
       bodies key-equal vs Python incl. planned mode)
 - [x] M5 codegen + cstyle + interpreter (`ops_rust.py` descoped) — COMPLETE (opening block
       key-exact, see below)
-- [ ] M6 native realize + device traits
+- [x] M6 native realize + device traits
 - [ ] M7 user kernels (`@function`/custom_kernel + flash attention), TinyJit, autograd, BEAM/TC activation
 - [ ] M8 OpenCL backend
 

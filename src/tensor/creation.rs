@@ -14,6 +14,16 @@ use crate::uop::sint::SVal;
 use super::movement;
 use super::Tensor;
 
+/// Register the initial host bytes for a buffer-backed tensor (python
+/// `Buffer(opaque=memoryview(bytearray(initial_value)))` at Tensor(data) time):
+/// walk to the base BUFFER uop and record the bytes for the engine.
+fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
+    while ctx.op_of(u) != Ops::Buffer {
+        u = ctx.srcs(u)[0];
+    }
+    ctx.initial_data.insert(u.0, std::rc::Rc::new(std::cell::RefCell::new(bytes)));
+}
+
 /// `UOp.unique_num` — the global BUFFER slot counter (ops.py:814).
 pub static UNIQUE_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
@@ -237,6 +247,7 @@ pub fn canonicalize_device(device: Option<&str>) -> String {
 /// control — the values then pack at that width on the Python side.
 pub trait SliceElem: Sized {
     fn default_dtype() -> DTypeId;
+    fn to_f64(&self) -> f64;
 }
 
 macro_rules! impl_slice_elem {
@@ -245,11 +256,21 @@ macro_rules! impl_slice_elem {
             fn default_dtype() -> DTypeId {
                 $dt
             }
+            fn to_f64(&self) -> f64 {
+                *self as f64
+            }
         }
     )*};
 }
+impl SliceElem for bool {
+    fn default_dtype() -> DTypeId {
+        dtype::BOOL
+    }
+    fn to_f64(&self) -> f64 {
+        if *self { 1.0 } else { 0.0 }
+    }
+}
 impl_slice_elem!(
-    bool => dtype::BOOL;
     i8 => dtype::default_int(); i16 => dtype::default_int(); i32 => dtype::default_int(); i64 => dtype::default_int(); isize => dtype::default_int();
     u8 => dtype::default_int(); u16 => dtype::default_int(); u32 => dtype::default_int(); u64 => dtype::default_int(); usize => dtype::default_int();
     f32 => dtype::default_float(); f64 => dtype::default_float()
@@ -282,6 +303,17 @@ pub fn from_slice<T: SliceElem>(ctx: &mut UOpCtx, data: &[T], dtype: Option<DTyp
             target
         };
     let ret = empty(ctx, &shape, bdtype, "PYTHON");
+    // pack the host data into the PYTHON base storage (Buffer(opaque=...))
+    let packed: Vec<u8> = match bdtype {
+        d if d == dtype::FLOAT32 => data.iter().flat_map(|v| (v.to_f64() as f32).to_le_bytes()).collect(),
+        d if d == dtype::FLOAT64 => data.iter().flat_map(|v| v.to_f64().to_le_bytes()).collect(),
+        d if d == dtype::INT32 => data.iter().flat_map(|v| (v.to_f64() as i32).to_le_bytes()).collect(),
+        d if d == dtype::INT64 => data.iter().flat_map(|v| (v.to_f64() as i64).to_le_bytes()).collect(),
+        d if d == dtype::UINT8 => data.iter().map(|v| v.to_f64() as u8).collect(),
+        d if d == dtype::BOOL => data.iter().map(|v| (v.to_f64() != 0.0) as u8).collect(),
+        other => panic!("TGERR: from_slice pack dtype {other:?}"),
+    };
+    register_initial(ctx, ret, packed);
     let ret = if bdtype != target { ctx.cast(ret, target) } else { ret };
     let dev = canonicalize_device(device);
     let ret = if dev == "PYTHON" { ret } else { copy_to_device(ctx, ret, &dev) };
@@ -296,6 +328,7 @@ pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<
     let size = SVal::I((data.len() / dtype.itemsize()) as i128);
     let _ = &size;
     let ret = new_buffer(ctx, "PYTHON", size, dtype, None);
+    register_initial(ctx, ret, data.to_vec());
     let dev = canonicalize_device(device);
     let ret = if dev == "PYTHON" { ret } else { copy_to_device(ctx, ret, &dev) };
     Tensor::from_uop(ret)

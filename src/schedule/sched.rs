@@ -265,13 +265,20 @@ pub fn pm_resolve_linear_call() -> PatternMatcher {
 
 /// `create_linear_with_vars` (schedule/__init__.py:181) — returns the resolved
 /// LINEAR (pre-memory-plan) plus the final memory-planned LINEAR.
-pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, UopId) {
+pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, UopId, Vec<UopId>) {
     // schedule to linear: pm_schedule lowers the top SINK
     let linear_call = {
         let pm_sched = pm_schedule();
         graph_rewrite(ctx, big_sink, &pm_sched, false, None, false, true, CtxVal::None)
             .unwrap_or_else(|e| panic!("TGERR: schedule to linear: {e}"))
     };
+
+    // held bufs (schedule/__init__.py:208): the top CALL's direct BUFFER args
+    let held_bufs: Vec<UopId> = ctx.srcs(linear_call)[1..]
+        .iter()
+        .copied()
+        .filter(|&a| ctx.op_of(a) == Ops::Buffer)
+        .collect();
 
     // resolve the linear_call (allocates buffers)
     let linear = resolve_linear_call(ctx, linear_call);
@@ -281,8 +288,8 @@ pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Uop
         .unwrap_or_else(|e| panic!("TGERR: create copies: {e}"));
 
     // vars: corpus is concrete — no var_vals
-    let planned = crate::schedule::memory::memory_plan_rewrite(ctx, linear, &[]);
-    (linear, planned)
+    let planned = crate::schedule::memory::memory_plan_rewrite(ctx, linear, &held_bufs);
+    (linear, planned, held_bufs)
 }
 
 /// `pm_schedule` / `lower_sink_to_linear` — lower the (callified) tensor SINK.

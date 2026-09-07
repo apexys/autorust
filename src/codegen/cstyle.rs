@@ -103,6 +103,11 @@ fn strip_parens(s: &str) -> &str {
 }
 
 /// `to_function_name` (helpers.py:154) — ansistrip then keep ident chars.
+pub fn to_function_name_pub(s: &str) -> String {
+    to_function_name(s)
+}
+
+/// `to_function_name` (helpers.py:154) — ansistrip then keep ident chars.
 fn to_function_name(s: &str) -> String {
     let mut clean = String::new();
     let mut chars = s.chars().peekable();

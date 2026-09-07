@@ -147,12 +147,32 @@ fn main() {
         };
         tensors.push(t);
     }
+            if prog.mode.as_deref() == Some("native") {
+            // M6 native gate: python fully out of the loop. Realize the final
+            // tensor twice (tolist semantics); caches must prevent recompiles.
+            let mut bufs = autorust::engine::buffer::BufTable::default();
+            let mut cache = autorust::engine::realize::ProgCache::default();
+            let last = tensors.last().expect("TGERR: empty program").uop;
+            let vals1 = autorust::engine::realize::tensor_values(&mut ctx, last, &mut bufs, &mut cache);
+            let vals2 = autorust::engine::realize::tensor_values(&mut ctx, last, &mut bufs, &mut cache);
+            let outs_json: Vec<String> = [&vals1, &vals2]
+                .iter()
+                .map(|vals| format!("[{}]", vals.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join(", ")))
+                .collect();
+            println!(
+                "{{\"ok\": true, \"outs\": [{}], \"compiles\": {}, \"stable\": {}}}",
+                outs_json.join(", "),
+                autorust::engine::device::total_compiles(),
+                vals1 == vals2
+            );
+            return;
+        }
     if prog.mode.as_deref() == Some("schedule") {
         // full scheduler pipeline: sink all tensors, callify, schedule, resolve
         let sink_srcs: Vec<autorust::uop::UopId> = tensors.iter().map(|t| t.uop).collect();
         let big_sink = autorust::tensor::sink(&mut ctx, sink_srcs);
         let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
-        let (linear, planned) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
+        let (linear, planned, _held) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
         let root = linear;
         if std::env::var("TG_M5_RENDER").is_ok() {
             render_calls(&mut ctx, planned);
@@ -248,7 +268,7 @@ struct ExecStep {
 }
 
 fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
-    use autorust::codegen::interp::{exec_kernel, from_storage_scalar, to_storage_scalar, Buf, MemView};
+    use autorust::codegen::interp::{exec_kernel, from_storage_scalar, to_storage_scalar, MemView};
     use autorust::uop::arg::Arg;
     use autorust::uop::Ops;
 
@@ -262,7 +282,7 @@ fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
 
     // resolve each call's args to (buffer uop, byte offset, view dtype, view numel)
     struct ArgView {
-        mem: std::rc::Rc<std::cell::RefCell<Buf>>,
+        mem: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
         byte_off: usize,
         itemsize: usize,
         numel: usize,
@@ -272,7 +292,7 @@ fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
         fn memview(&self) -> MemView { MemView(self.mem.clone(), self.byte_off, self.itemsize, self.numel) }
     }
 
-    let mut allocs: std::collections::HashMap<u32, std::rc::Rc<std::cell::RefCell<Buf>>> = std::collections::HashMap::new();
+    let mut allocs: std::collections::HashMap<u32, std::rc::Rc<std::cell::RefCell<Vec<u8>>>> = std::collections::HashMap::new();
     let mut outs_json: Vec<String> = Vec::new();
     let calls: Vec<UopId> = ctx.srcs(linear).to_vec();
     for &call in calls.iter() {
@@ -309,7 +329,7 @@ fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
             let buf = allocs.entry(cur.0).or_insert_with(|| {
                 let nel = ctx.max_numel(cur) as usize;
                 let isz = ctx.dt_of(cur).itemsize();
-                std::rc::Rc::new(std::cell::RefCell::new(Buf { bytes: vec![0u8; nel * isz] }))
+                std::rc::Rc::new(std::cell::RefCell::new(vec![0u8; nel * isz]))
             }).clone();
             let isz = view_dt.itemsize();
             arg_views.push(ArgView { mem: buf, byte_off, itemsize: isz, numel: view_nbytes / isz, dt: view_dt });
@@ -335,18 +355,18 @@ fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
             for (j, &v) in data.iter().enumerate() {
                 let sv = to_storage_scalar(v, src.dt);
                 let mut b = src.mem.borrow_mut();
-                for (k, x) in sv.iter().enumerate() { b.bytes[src.byte_off + j * src.itemsize + k] = *x; }
+                for (k, x) in sv.iter().enumerate() { b[src.byte_off + j * src.itemsize + k] = *x; }
             }
             let n = dst.numel * dst.itemsize;
             let dstb = dst.mem.clone();
             let srcb = src.mem.clone();
             let dst_bytes: Vec<u8> = {
                 let s = srcb.borrow();
-                (0..n).map(|k| s.bytes[src.byte_off + k]).collect()
+                (0..n).map(|k| s[src.byte_off + k]).collect()
             };
             {
                 let mut d = dstb.borrow_mut();
-                for (k, x) in dst_bytes.into_iter().enumerate() { d.bytes[dst.byte_off + k] = x; }
+                for (k, x) in dst_bytes.into_iter().enumerate() { d[dst.byte_off + k] = x; }
             }
             continue;
         }
@@ -378,7 +398,7 @@ fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
             let av = &arg_views[slots.iter().position(|&s| s == slot).unwrap_or_else(|| panic!("TGERR: slot {slot}"))];
             let vals: Vec<String> = (0..av.numel).map(|j| {
                 let boff = av.byte_off + j * av.itemsize;
-                let bytes: Vec<u8> = (0..av.itemsize).map(|k| av.mem.borrow().bytes[boff + k]).collect();
+                let bytes: Vec<u8> = (0..av.itemsize).map(|k| av.mem.borrow()[boff + k]).collect();
                 format!("{:?}", from_storage_scalar(&bytes, av.dt))
             }).collect();
             outs_json.push(format!("[{}]", vals.join(", ")));

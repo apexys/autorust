@@ -12,11 +12,10 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 /// A byte-backed allocation (one per BUFFER uop).
-pub struct Buf { pub bytes: Vec<u8> }
 
 /// A memoryview: (buffer, byte offset, element size in bytes, element count).
-#[derive(Clone)]
-pub struct MemView(pub Rc<RefCell<Buf>>, pub usize, pub usize, pub usize);
+#[derive(Clone, Debug)]
+pub struct MemView(pub Rc<RefCell<Vec<u8>>>, pub usize, pub usize, pub usize);
 
 pub fn from_storage_scalar(bytes: &[u8], dt: DTypeId) -> f64 {
     let b = |i: usize| *bytes.get(i).unwrap_or(&0);
@@ -105,7 +104,7 @@ fn truncate(v: f64, dt: DTypeId) -> f64 {
 fn _load(m: &MemView, i: usize, dt: DTypeId) -> f64 {
     if i >= m.3 { panic!("TGERR: load out of bounds, size is {} and access is {i}", m.3); }
     let boff = m.1 + i * m.2;
-    let bytes: Vec<u8> = (0..m.2).map(|k| m.0.borrow().bytes[boff + k]).collect();
+    let bytes: Vec<u8> = (0..m.2).map(|k| m.0.borrow()[boff + k]).collect();
     from_storage_scalar(&bytes, dt)
 }
 
@@ -116,7 +115,7 @@ fn _store(m: &MemView, i: usize, v: f64, dt: DTypeId) {
     let boff = m.1 + i * m.2;
     let sval = to_storage_scalar(v, dt);
     let mut b = m.0.borrow_mut();
-    for (k, x) in sval.iter().enumerate() { b.bytes[boff + k] = *x; }
+    for (k, x) in sval.iter().enumerate() { b[boff + k] = *x; }
 }
 
 /// one (global_idx, local_size) launch invocation.
@@ -230,11 +229,11 @@ fn exec_launch(
                     // REGs are per thread
                     let nel = numels.get(&u).copied().unwrap_or(1);
                     let isz = ctx.dt_of(u).itemsize();
-                    values.insert(u, Val::M((0..wsize).map(|_| MemView(Rc::new(RefCell::new(Buf { bytes: vec![0u8; nel * isz] })), 0, isz, nel)).collect()));
+                    values.insert(u, Val::M((0..wsize).map(|_| MemView(Rc::new(RefCell::new(vec![0u8; nel * isz])), 0, isz, nel)).collect()));
                 } else {
                     let nel = numels.get(&u).copied().unwrap_or(1);
                     let isz = ctx.dt_of(u).itemsize();
-                    let mv = MemView(Rc::new(RefCell::new(Buf { bytes: vec![0u8; nel * isz] })), 0, isz, nel);
+                    let mv = MemView(Rc::new(RefCell::new(vec![0u8; nel * isz])), 0, isz, nel);
                     values.insert(u, Val::M(vec![mv; wsize]));
                 }
             }
@@ -373,13 +372,8 @@ fn loop_start_index(uops: &[UopId], range: &UopId) -> usize {
     uops.iter().position(|u| u == range).unwrap_or_else(|| panic!("TGERR: interp missing RANGE start"))
 }
 
-/// `PythonProgram.__call__` — derive launch dims from the SPECIAL extents.
-pub fn exec_kernel(
-    ctx: &mut UOpCtx,
-    uops: &[UopId],
-    views: &std::collections::HashMap<i64, MemView>,
-    vals: &[f64],
-) {
+/// `ProgramInfo.from_sink` SPECIAL scan: derive (global, local) extents.
+pub fn derive_dims(ctx: &mut UOpCtx, uops: &[UopId]) -> ([usize; 3], [usize; 3]) {
     let mut global = [1usize; 3];
     let mut local = [1usize; 3];
     for &u in uops {
@@ -400,6 +394,30 @@ pub fn exec_kernel(
             }
         }
     }
+    (global, local)
+}
+
+/// `PythonProgram.__call__` — derive launch dims from the SPECIAL extents.
+pub fn exec_kernel(
+    ctx: &mut UOpCtx,
+    uops: &[UopId],
+    views: &std::collections::HashMap<i64, MemView>,
+    vals: &[f64],
+) {
+    let (global, local) = derive_dims(ctx, uops);
+    exec_kernel_with_dims(ctx, uops, views, vals, global, Some(local));
+}
+
+/// `PythonProgram.__call__` with explicit launch dims (the Program seam).
+pub fn exec_kernel_with_dims(
+    ctx: &mut UOpCtx,
+    uops: &[UopId],
+    views: &std::collections::HashMap<i64, MemView>,
+    vals: &[f64],
+    global: [usize; 3],
+    local: Option<[usize; 3]>,
+) {
+    let local = local.unwrap_or([1usize; 3]);
     let mut numels: std::collections::HashMap<UopId, usize> = std::collections::HashMap::new();
     for &u in uops {
         match ctx.op_of(u) {

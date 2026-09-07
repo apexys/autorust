@@ -40,18 +40,29 @@ pub struct UOpCtx {
     pub range_c: Vec<Option<Option<Rc<Vec<UopId>>>>>,
     /// IndexingContext-style range counter (used by new_range)
     pub range_idx: i64,
+    /// python `buffers` side table (the opaque-constructed slice): BUFFER uop
+    /// id -> initial bytes. Engine `buffer_of` consumes this at first access
+    /// (Tensor(data) -> Buffer(opaque=...)).
+    pub initial_data: std::collections::HashMap<u32, std::rc::Rc<std::cell::RefCell<Vec<u8>>>>,
 }
 
 use std::rc::Rc;
 
 impl UOpCtx {
     pub fn new() -> Self {
-        UOpCtx { g: Graph::new(), shape_c: Vec::new(), mm_c: Vec::new(), range_c: Vec::new(), range_idx: 0 }
+        UOpCtx { g: Graph::new(), shape_c: Vec::new(), mm_c: Vec::new(), range_c: Vec::new(), range_idx: 0, initial_data: std::collections::HashMap::new() }
     }
 
     /// Grow the property caches to cover externally-loaded graphs (oracle use).
     pub fn add_cache_slots(&mut self) {
         self.grow();
+    }
+
+    /// Grow the property caches to cover a whole externally-loaded graph.
+    pub fn grow_to(&mut self, n: usize) {
+        while self.shape_c.len() < n {
+            self.grow();
+        }
     }
 
     fn grow(&mut self) {

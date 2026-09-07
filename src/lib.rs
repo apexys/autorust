@@ -1,4 +1,5 @@
 pub mod codegen;
+pub mod engine;
 pub mod dtype;
 pub mod helpers;
 
