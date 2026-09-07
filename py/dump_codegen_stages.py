@@ -44,7 +44,7 @@ def gw2(sink, pm, ctx=None, bottom_up=False, name=None, bpm=None, walk=False, en
 CI.graph_rewrite = gw2
 
 UOp.unique_num = itertools.count(0)
-prog = [
+prog = json.loads(sys.argv[1]) if len(sys.argv) > 1 else [
     {"op": "from_slice", "data": [1.0, 2.0, 3.0, 4.0], "kind": "f32", "dtype": None},
     {"op": "addc", "x": 0, "val": 1.0},
 ]

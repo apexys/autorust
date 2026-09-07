@@ -2189,6 +2189,39 @@ impl UOpCtx {
         self.param_arg(id).and_then(|p| p.addrspace)
     }
 
+    /// `u.addrspace` derived property (ops.py:867) — python's full logic.
+    pub fn addrspace_derived(&self, id: UopId) -> Option<AddrSpace> {
+        let op = self.op_of(id);
+        if op == Ops::Param || op == Ops::Buffer {
+            return self.addrspace_of(id);
+        }
+        if op == Ops::Special || op == Ops::Range || op == Ops::Load {
+            return Some(AddrSpace::Alu);
+        }
+        if matches!(op, Ops::Index | Ops::Cast | Ops::After | Ops::Reduce | Ops::Store | Ops::Mstack | Ops::Mselect | Ops::End | Ops::Unshard)
+            || group::in_(group::MOVEMENT, op)
+        {
+            let srcs = self.srcs(id);
+            if srcs.is_empty() {
+                return None;
+            }
+            return self.addrspace_derived(srcs[0]);
+        }
+        if op == Ops::Stack || op == Ops::Wmma || op == Ops::Group || group::in_(group::ELEMENTWISE, op) {
+            let mut ad: Vec<AddrSpace> = Vec::new();
+            for &s in self.srcs(id) {
+                if let Some(a) = self.addrspace_derived(s) {
+                    ad.push(a);
+                }
+            }
+            if ad.is_empty() || !ad.iter().all(|&a| a == ad[0]) {
+                return None;
+            }
+            return Some(ad[0]);
+        }
+        None
+    }
+
     /// `u.is_variable` — 0-d ALU BUFFER with a value range (shape arg is the
     /// empty shape, checked structurally without the shape cache).
     pub fn is_variable(&self, id: UopId) -> bool {

@@ -2,7 +2,8 @@
 pipeline vs python's full_rewrite_to_sink.
 
 Compares the Rust pipeline output (via the bridge) against python's
-"early movement ops" stage keys for corpus kernel ASTs. Later python stages
+"postopt symbolic" stage keys for corpus kernel ASTs (the pipeline covers
+early movement ops .. apply_opts .. postopt symbolic). Later python stages
 append as the Rust pipeline grows (see PLAN.md §M5).
 """
 import sys, json, itertools, subprocess, unittest
@@ -25,39 +26,19 @@ def rs_codegen(prog):
     return json_to_uop(json.dumps(json.loads(p.stdout)["graph"]))[0]
 
 
-def py_stage_keys(prog, stage="early movement ops"):
-    """python's per-stage toposort key multiset for the first compute kernel AST."""
-    import tinygrad.codegen.__init__ as CI
-    orig = CI.graph_rewrite
-    out = {}
-    def gw2(sink, pm, ctx=None, bottom_up=False, name=None, bpm=None, walk=False, enter_calls=False):
-        ret = orig(sink, pm, ctx=ctx, bottom_up=bottom_up, name=name, bpm=bpm, walk=walk, enter_calls=enter_calls)
-        if name is not None and name not in out:
-            out[name] = sorted(u.key for u in ret.toposort())
-        return ret
-    CI.graph_rewrite = gw2
-    try:
-        ts = py_build(prog)
-        call, _ = transform_to_call(UOp.sink(*[t.uop for t in ts]))
-        linear_call = orig(call, pm_schedule, enter_calls=True, name="schedule to linear")
-        lin = orig(linear_call, pm_resolve_linear_call, name="resolve linear call")
-        lin = orig(lin, pm_copy_from_store, name="create COPY kernels for SDMA")
-        ast = None
-        for c in lin.src:
-            body = c.src[0]
-            if body.op is Ops.SINK and any(x.op in (Ops.ADD, Ops.MUL) for x in body.toposort(gate=lambda u: u.op is not Ops.CALL)):
-                ast = body
-                break
-        assert ast is not None
-        from tinygrad.runtime.ops_python import PythonRenderer
-        ren = PythonRenderer.__new__(PythonRenderer)
-        from tinygrad.helpers import Target
-        PythonRenderer.__init__(ren, Target.parse("cpu"))
-        stages = []
-        CI.full_rewrite_to_sink(ast, ren)
-        return out.get(stage)
-    finally:
-        CI.graph_rewrite = orig
+def py_stage_keys(prog, stage="early symbolic"):
+    """python's per-stage toposort key multiset for the first compute kernel AST
+    (subprocess-isolated: python's structural UOp cache leaks state across programs)."""
+    import os, subprocess
+    env = dict(os.environ)
+    p = subprocess.run([sys.executable, "py/dump_codegen_stages.py", json.dumps(prog)],
+                       capture_output=True, text=True, env=env)
+    assert p.returncode == 0, p.stderr[-400:]
+    d = json.loads(p.stdout)
+    for st in d["stages"]:
+        if st["name"] == stage:
+            return [bytes.fromhex(k) for k in st["keys"]]
+    raise AssertionError(f"stage {stage} not found")
 
 
 class TestCodegenDiff(unittest.TestCase):

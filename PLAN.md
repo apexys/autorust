@@ -379,29 +379,24 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
   the middle stages are no-ops on the current corpus).
 - Oracle: `TG_M5_CODEGEN=1` runs callify+schedule, picks the first compute kernel body
   (SINK containing ADD/MUL), lowers it through the pipeline, emits the flat graph.
+- **Ported so far** (all key-exact vs python through "early symbolic" for the ew and
+  mulc corpus kernels): `apply_opts` (Scheduler, convert_loop_to_global, the heuristic
+  subset — GROUPTOP/unroll/easy-upcast/local-groups, get_optimized_ast with ANSI-colored
+  KernelInfo names), `expander` (UPCAST/UNROLL range → STACK of consts),
+  expand broadcast + add loads, `devectorizer2` (incl. EXPAND-scalar→STACK),
+  `pm_clean_up_group_sink`, `add gpudims` (get_grouped_dims, SPECIAL gidx/lidx globals).
+  Renderer facts in `codegen::postrange::Renderer` (CPU-interp defaults).
 - **Next stages to port** (python name → content):
-  1. `load collapse` — `pm_load_collapse` (simplify.py:137-159; `reduce_collapse` exists
-     as `pm_reduce_collapse` in codegen/simplify.rs — needs the `no_load` variant PM +
-     the `x<c-y` undo rule).
-  2. `split ranges` — `pm_split_ranges` (simplify.py:60-76; `mark_range_mod`+`do_substitute`
-     over a `dict[UOp, UOp|None]` ctx — the substitute-ctx machinery exists in upat.rs
-     `substitute_extra`).
-  3. `simplify ranges` — port `simplify_merge_adjacent` + `mark_gated` (M4 note) into
-     `pm_simplify_ranges` (codegen/simplify.rs currently lacks it).
-  4. `postrange` opts — `apply_opts` with NOOPT-equivalent empty opts for the MVP corpus
-     (heuristic.py port afterwards).
-  5. `expander` (`expander2`+`build_range_map`), `remove reduces`
-     (`reduce_ranges_to_acc`/PLACEHOLDER acc machinery + `merge_reduce_ends`),
-     `add local buffers`, `add gpudims` (`get_grouped_dims` — keep grid machinery).
-  6. `expand broadcast/add loads`, `devectorize2`, `memory coalescing`, `ew devectorizer`,
-     `lower index dtypes` (needs `pm_lower_index_dtype`/`pm_commit_weak`/`pm_cast_weak`
-     from uop/weak.py), decomps (dtype/op/transcendental — TRANSCENDENTAL=0 first),
-     `move gates from index`, `final rewrite`+`pm_remove_invalid`, `casted consts`,
-     `implicit barriers`, `add control flow` (`linearize`/CFGContext/`pm_split_ends`),
-     `number params`.
-  7. Then `do_linearize` (`pm_linearize_cleanups`, gated-store IF/ENDIF), cstyle render
-     (byte-equality subset gate), and the interpreter (runtime/ops_python.py model:
-     global/local loops, exec masks, per-thread REGs — no WMMA).
+  1. `add images` — `memory_coalescing` (late/coalesce.py) + `ew_devectorizer`.
+  2. `lower all index dtypes` — `pm_lower_index_dtype`/`pm_commit_weak`/`pm_cast_weak`
+     (uop/weak.py, 82 LOC).
+  3. decomps (`codegen/decomp/{dtype,op}.py` — TRANSCENDENTAL=0 first), `move gates`,
+     `final rewrite`+`pm_remove_invalid`, `casted consts`, `implicit barriers`.
+  4. `add control flow` (`late/linearizer.py` CFGContext + pm_split_ends), `number params`.
+  5. `do_linearize` (pm_linearize_cleanups gated-store IF/ENDIF), cstyle render
+     (byte-equality subset gate), interpreter (ops_python.py model — no WMMA).
+  Deferred: `load collapse`/`split ranges`/`simplify ranges` are no-ops on the current
+  corpus (key-equal with empty PMs; port with the sum/reduce kernel work).
 
 ### M2 deferred (finish alongside M5/M6 consumers)
 - `pm_simplify_valid` / `uop_given_valid` / `simplify_valid` (symbolic.py:313-429) — needed by

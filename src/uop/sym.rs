@@ -1641,6 +1641,45 @@ pub fn pm_mop_cleanup() -> &'static PatternMatcher {
     MOP_CLEANUP_PM.get_or_init(pm_mop_cleanup_inner)
 }
 
+// ---------- pm_clean_up_group_sink (symbolic.py:432-438) ----------
+static CLEAN_UP_GROUP_SINK: OnceLock<PatternMatcher> = OnceLock::new();
+
+/// `pm_clean_up_group_sink` — inline GROUP/NOOP/STACK/SINK children into sink-like roots.
+pub fn pm_clean_up_group_sink() -> &'static PatternMatcher {
+    CLEAN_UP_GROUP_SINK.get_or_init(|| {
+        let sink_like = [Ops::Noop, Ops::Stack, Ops::Sink, Ops::Group];
+        let rules: Vec<(UPat, RuleFn)> = vec![
+            // GROUP with a single src is that src
+            (
+                UPat::ops1(Ops::Group).with_src_tup(vec![var("x")]),
+                r(|ctx, st, _| Some(sget(st, "x"))),
+            ),
+            // SINK/GROUP roots: inline sink-like children
+            (
+                UPat::op_var(vec![Ops::Sink, Ops::Group]).allow_all_srcs().named("root"),
+                r(move |ctx, st, _| {
+                    let root = sget(st, "root");
+                    let srcs = ctx.srcs(root).to_vec();
+                    if !srcs.iter().any(|&s| sink_like.contains(&ctx.op_of(s))) {
+                        return None;
+                    }
+                    let mut new_srcs: Vec<UopId> = Vec::new();
+                    for &x in &srcs {
+                        if sink_like.contains(&ctx.op_of(x)) {
+                            new_srcs.extend(ctx.srcs(x).iter().copied());
+                        } else {
+                            new_srcs.push(x);
+                        }
+                    }
+                    let (_, d, _, arg, tag) = ctx.snapshot(root);
+                    Some(ctx.replace(root, ctx.op_of(root), d, new_srcs, arg, tag))
+                }),
+            ),
+        ];
+        PatternMatcher::new(rules)
+    })
+}
+
 // ---------- pm_simplify_valid / pm_drop_and_clauses (symbolic.py:316-429) ----------
 
 /// `parse_valid` (symbolic.py:316) — (expr, is_upper, c).

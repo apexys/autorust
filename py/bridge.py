@@ -19,6 +19,7 @@ import pathlib
 
 from tinygrad.dtype import DType, AddrSpace, ConstFloat, INVERSE_DTYPES_DICT, dtypes, Invalid
 from tinygrad.uop.ops import UOp, Ops, AxisType, ParamArg, KernelInfo, CallInfo
+from tinygrad.codegen.opt import Opt, OptOps
 from tinygrad.schedule.indexing import BufferizeOpts
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -205,6 +206,9 @@ def _arg_py(j, dts):
             return CallInfo(None, fs["name"], fs["precompile"], fs["precompile_backward"])
         if v["tag"] == "BufferizeOpts":
             return BufferizeOpts(fs["device"], fs["addrspace"], fs["removable"])
+        if v["tag"] == "Opt":
+            op = OptOps[fs["op"]] if isinstance(fs["op"], str) else fs["op"]
+            return Opt(op=op, axis=fs["axis"], arg=fs["arg"])
         raise ValueError(f"unknown dataclass {v['tag']}")
     raise ValueError(f"unknown arg kind {kind}")
 
