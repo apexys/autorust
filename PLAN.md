@@ -412,15 +412,17 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
        `truncate[u.dtype](dtype.const(x))`; END jumps via loop_ends; IF/ENDIF push/
        pop exec masks; no WMMA.
      Numeric gate: allclose vs tinygrad CPU for the corpus (addc, mulc, sum).
-  2. `codegen/interp.rs` is written (compiles, untested): exec_kernel derives
-     launch dims from SPECIAL extents, then exec_launch per python's dispatch.
-     Remaining wiring for the numeric gate: oracle `TG_M5_EXEC` mode that runs
-     callify→schedule→pipeline→linearize per LINEAR kernel call, allocates one
-     Mem per distinct buffer uop (keyed by uop id, sized max_numel*itemsize),
-     fills the copy kernel's PYTHON-addrspace source buffer with the from_slice
-     data before execution, runs kernels in LINEAR order, and emits the output
-     buffer contents as JSON; pytest compares allclose vs tinygrad CPU.
-  3. cstyle renderer (byte-equality subset gate); `ops_rust.py` DEV=RUST driver.
+  2. DONE — `codegen/interp.rs` + oracle `TG_M5_EXEC` mode: byte-backed Buf
+     per BUFFER uop, call args resolved through BITCAST/SHRINK chains to
+     (arena, byte offset, view dtype); SDMA COPY calls fill the PYTHON src
+     (copyin) then memcpy dst<-src; compute calls run the linearized uops
+     (launch dims from SPECIAL extents, ALU-side INDEX lane pick, vector
+     STORE lane fan-out with o+j). Numeric gate `py/tests/test_exec_diff.py`
+     compares vs tinygrad tolist — corpus green.
+  3. cstyle renderer (byte-equality subset gate). `ops_rust.py` DESCOPED:
+     the Rust port has its own full tensor→schedule→codegen stack, so a
+     DEV=RUST python driver would only test throwaway marshaling glue; M6's
+     end-to-end native realize covers the same exec_kernel path in pure Rust.
   Deferred: `load collapse`/`split ranges`/`simplify ranges` are no-ops on the current
   corpus (key-equal with empty PMs; port with the sum/reduce kernel work).
 

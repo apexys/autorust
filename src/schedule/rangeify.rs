@@ -1117,6 +1117,12 @@ fn debuf(lctx: &mut crate::uop::upat::LocalAddBufferContext, ctx: &mut UOpCtx, b
     let max_shape = ctx.max_shape(buf);
     let size: i64 = max_shape.iter().product();
     let slot = lctx.dg;
+    // python: if buf not in ctx.map: ctx.map[buf] = buf — every touched buffer
+    // becomes a call arg (first-touch order); slots are per-encounter
+    if !lctx.map_keys.contains(&buf) {
+        lctx.map_keys.push(buf);
+        lctx.map_vals.push(buf);
+    }
     let pa = ParamArg {
         slot,
         dtype: buf_dt,

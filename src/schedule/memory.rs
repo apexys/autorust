@@ -107,7 +107,8 @@ impl TlsfAllocator {
         assert!(is_free, "TGERR: block must be free");
         while let Some(n) = nxt {
             let Some(&(bsize, bnext, _, bfree)) = self.blocks.get(&n).copied().as_ref() else { break };
-            if !is_free {
+            // python: if the NEIGHBOR is not free, stop merging
+            if !bfree {
                 break;
             }
             self.remove_block(start, size, None);
@@ -305,10 +306,11 @@ pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId])
         });
         let off = offsets[&b];
         let nbytes_b = ctx.max_numel(b) as i64 * ctx.dt_of(b).itemsize() as i64;
+        // python: arena[offset:offset+nbytes] — movement::shrink takes (start, stop)
         let view = crate::tensor::movement::shrink(
             ctx,
             arena,
-            &[(SVal::I(off as i128), SVal::I(nbytes_b as i128))],
+            &[(SVal::I(off as i128), SVal::I((off + nbytes_b) as i128))],
         );
         let bc = ctx.bitcast(view, ctx.dt_of(b));
         replace_map.insert(b, bc);

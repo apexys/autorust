@@ -19,6 +19,7 @@ use autorust::tensor::{ShapeArg, Tensor};
 use autorust::uop::ctx::UOpCtx;
 use autorust::uop::flat::{to_string_flat, parse_flat};
 use autorust::uop::sint::SVal;
+use autorust::uop::UopId;
 
 fn dtype_from_name(name: Option<String>) -> Option<DTypeId> {
     name.as_ref().and_then(|n| dtype::to_dtype(n))
@@ -151,8 +152,15 @@ fn main() {
         let sink_srcs: Vec<autorust::uop::UopId> = tensors.iter().map(|t| t.uop).collect();
         let big_sink = autorust::tensor::sink(&mut ctx, sink_srcs);
         let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
-        let (linear, _planned) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
+        let (linear, planned) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
         let root = linear;
+        if std::env::var("TG_M5_EXEC").is_ok() {
+            let steps: Vec<ExecStep> = prog.prog.iter().map(|st| ExecStep {
+                op: st.op.clone(), data: st.data.clone(), dtype: st.dtype.clone(),
+            }).collect();
+            exec_linear(&mut ctx, planned, &steps);
+            return;
+        }
         if std::env::var("TG_M5_CODEGEN").is_ok() {
             // lower the first compute kernel body through the M5 pipeline
             let mut ast = None;
@@ -190,4 +198,153 @@ fn main() {
     let flat = ctx.g.to_flat();
     println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
     let _ = none_str;
+}
+
+/// M5 numeric gate: execute every kernel call through the uops interpreter
+/// (`PythonProgram.__call__` model) and emit the output buffer values.
+#[derive(nanoserde::DeJson, Default, Clone)]
+struct ExecStep {
+    op: String,
+    data: Option<Vec<f64>>,
+    dtype: Option<String>,
+}
+
+fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
+    use autorust::codegen::interp::{exec_kernel, from_storage_scalar, to_storage_scalar, Buf, MemView};
+    use autorust::uop::arg::Arg;
+    use autorust::uop::Ops;
+
+    // from_slice data (in program order) fills the input views
+    let input_data: Vec<Vec<f64>> = prog
+        .iter()
+        .filter(|st| st.op == "from_slice")
+        .map(|st| st.data.clone().unwrap_or_default())
+        .collect();
+    let mut input_iter = input_data.iter();
+
+    // resolve each call's args to (buffer uop, byte offset, view dtype, view numel)
+    struct ArgView {
+        mem: std::rc::Rc<std::cell::RefCell<Buf>>,
+        byte_off: usize,
+        itemsize: usize,
+        numel: usize,
+        dt: autorust::dtype::DTypeId,
+    }
+    impl ArgView {
+        fn memview(&self) -> MemView { MemView(self.mem.clone(), self.byte_off, self.itemsize, self.numel) }
+    }
+
+    let mut allocs: std::collections::HashMap<u32, std::rc::Rc<std::cell::RefCell<Buf>>> = std::collections::HashMap::new();
+    let mut outs_json: Vec<String> = Vec::new();
+    let calls: Vec<UopId> = ctx.srcs(linear).to_vec();
+    for &call in calls.iter() {
+        let body = ctx.srcs(call)[0];
+        // resolve arg views (walk BITCAST/SHRINK chains down to the BUFFER)
+        let mut arg_views: Vec<ArgView> = Vec::new();
+        let call_args: Vec<UopId> = ctx.srcs(call)[1..].to_vec();
+        for arg in call_args.iter() {
+            let mut cur = *arg;
+            let mut byte_off = 0usize;
+            let mut view_dt = ctx.dt_of(*arg);
+            let mut view_nbytes = ctx.max_numel(*arg) as usize * view_dt.itemsize();
+            while ctx.op_of(cur) != Ops::Buffer {
+                match ctx.op_of(cur) {
+                    Ops::Bitcast => { view_dt = ctx.dt_of(cur); }
+                    Ops::Shrink => {
+                        let base_dt = ctx.dt_of(ctx.srcs(cur)[0]);
+                        let off = match ctx.val(ctx.srcs(cur)[1]) {
+                            autorust::dtype::ConstVal::Int(v) => v as usize,
+                            other => panic!("TGERR: exec SHRINK offset {other:?}"),
+                        };
+                        let sz = match ctx.val(ctx.srcs(cur)[2]) {
+                            autorust::dtype::ConstVal::Int(v) => v as usize,
+                            other => panic!("TGERR: exec SHRINK size {other:?}"),
+                        };
+                        byte_off += off * base_dt.itemsize();
+                        view_nbytes = sz * base_dt.itemsize();
+                    }
+                    Ops::Cast | Ops::Index => {}
+                    other => panic!("TGERR: exec arg walk op {other:?}"),
+                }
+                cur = ctx.srcs(cur)[0];
+            }
+            let buf = allocs.entry(cur.0).or_insert_with(|| {
+                let nel = ctx.max_numel(cur) as usize;
+                let isz = ctx.dt_of(cur).itemsize();
+                std::rc::Rc::new(std::cell::RefCell::new(Buf { bytes: vec![0u8; nel * isz] }))
+            }).clone();
+            let isz = view_dt.itemsize();
+            arg_views.push(ArgView { mem: buf, byte_off, itemsize: isz, numel: view_nbytes / isz, dt: view_dt });
+        }
+        // bind PARAM slots (call args are in sorted-slot order)
+        let mut slots: Vec<i64> = ctx.toposort(body).iter().filter_map(|&pu| {
+            if ctx.op_of(pu) == Ops::Param {
+                if let Arg::Param(p) = ctx.arg_of(pu) { return Some(p.slot); }
+            }
+            None
+        }).collect();
+        slots.sort();
+        slots.dedup();
+        let mut views: std::collections::HashMap<i64, MemView> = std::collections::HashMap::new();
+        for (i, &s) in slots.iter().enumerate() {
+            views.insert(s, arg_views.get(i).unwrap_or_else(|| panic!("TGERR: exec missing arg for slot {s}")).memview());
+        }
+        // SDMA copy call: fill the src view (arg 1, the PYTHON const buffer) with
+        // the from_slice data (python copyin), then memcpy dst <- src
+        if ctx.op_of(body) == Ops::Copy {
+            let (dst, src) = (&arg_views[0], &arg_views[1]);
+            let data = input_iter.next().unwrap_or_else(|| panic!("TGERR: exec no input data for copy"));
+            for (j, &v) in data.iter().enumerate() {
+                let sv = to_storage_scalar(v, src.dt);
+                let mut b = src.mem.borrow_mut();
+                for (k, x) in sv.iter().enumerate() { b.bytes[src.byte_off + j * src.itemsize + k] = *x; }
+            }
+            let n = dst.numel * dst.itemsize;
+            let dstb = dst.mem.clone();
+            let srcb = src.mem.clone();
+            let dst_bytes: Vec<u8> = {
+                let s = srcb.borrow();
+                (0..n).map(|k| s.bytes[src.byte_off + k]).collect()
+            };
+            {
+                let mut d = dstb.borrow_mut();
+                for (k, x) in dst_bytes.into_iter().enumerate() { d.bytes[dst.byte_off + k] = x; }
+            }
+            continue;
+        }
+        // ins/outs analysis (ProgramInfo.from_sink): LOAD/STORE src[0] chain to PARAM
+        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink(ctx, body);
+        let lst = autorust::codegen::linearize::linearize(ctx, sunk);
+        let mut ins: Vec<i64> = Vec::new();
+        let mut outs: Vec<i64> = Vec::new();
+        for &u in &lst {
+            if matches!(ctx.op_of(u), Ops::Load | Ops::Store) {
+                let mut idx = ctx.srcs(u)[0];
+                while matches!(ctx.op_of(idx), Ops::Index | Ops::Shrink | Ops::Cast | Ops::Bitcast) {
+                    idx = ctx.srcs(idx)[0];
+                }
+                if ctx.op_of(idx) == Ops::Param {
+                    if let Arg::Param(p) = ctx.arg_of(idx) {
+                        let list = if ctx.op_of(u) == Ops::Store { &mut outs } else { &mut ins };
+                        if !list.contains(&p.slot) { list.push(p.slot); }
+                    }
+                }
+            }
+        }
+        // fill inputs: from_slice data enters via the SDMA copy's src only
+        // (compute-call inputs are intermediates written by prior kernels)
+        // run
+        exec_kernel(ctx, &lst, &views, &[]);
+        // collect outs
+        for &slot in &outs {
+            let av = &arg_views[slots.iter().position(|&s| s == slot).unwrap_or_else(|| panic!("TGERR: slot {slot}"))];
+            let vals: Vec<String> = (0..av.numel).map(|j| {
+                let boff = av.byte_off + j * av.itemsize;
+                let bytes: Vec<u8> = (0..av.itemsize).map(|k| av.mem.borrow().bytes[boff + k]).collect();
+                format!("{:?}", from_storage_scalar(&bytes, av.dt))
+            }).collect();
+            outs_json.push(format!("[{}]", vals.join(", ")));
+        }
+    }
+    println!("{{\"ok\": true, \"outs\": [{}]}}", outs_json.join(", "));
 }
