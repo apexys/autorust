@@ -151,8 +151,35 @@ fn main() {
         let sink_srcs: Vec<autorust::uop::UopId> = tensors.iter().map(|t| t.uop).collect();
         let big_sink = autorust::tensor::sink(&mut ctx, sink_srcs);
         let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
-        let (linear, planned) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
-        let root = if std::env::var("TG_SCHED_PLANNED").is_ok() { planned } else { linear };
+        let (linear, _planned) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
+        let root = linear;
+        if std::env::var("TG_M5_CODEGEN").is_ok() {
+            // lower the first compute kernel body through the M5 pipeline
+            let mut ast = None;
+            for &c in ctx.srcs(root).iter() {
+                let body = ctx.srcs(c)[0];
+                if ctx.op_of(body) == autorust::uop::Ops::Sink {
+                    let mut stack = vec![body];
+                    let mut seen = std::collections::HashSet::new();
+                    let mut has_alu = false;
+                    while let Some(n) = stack.pop() {
+                        if !seen.insert(n.0) { continue; }
+                        if matches!(ctx.op_of(n), autorust::uop::Ops::Add | autorust::uop::Ops::Mul) { has_alu = true; }
+                        stack.extend(ctx.srcs(n));
+                    }
+                    if has_alu {
+                        ast = Some(body);
+                        break;
+                    }
+                }
+            }
+            let ast = ast.expect("TGERR: no compute kernel body");
+            let lowered = autorust::codegen::pipeline::full_rewrite_to_sink(&mut ctx, ast);
+            ctx.g.roots = vec![lowered];
+            let flat = ctx.g.to_flat();
+            println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
+            return;
+        }
         ctx.g.roots = vec![root];
         let flat = ctx.g.to_flat();
         println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));

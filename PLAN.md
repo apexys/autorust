@@ -361,10 +361,47 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
       `resolve_linear_call`, `pm_copy_from_store`, `transform_to_call` callify,
       TLSF memory planner; gate: `test_schedule_diff.py` 6/6 programs — LINEAR kernel
       bodies key-equal vs Python incl. planned mode)
-- [ ] M5 codegen + cstyle + interpreter + `ops_rust.py`
+- [~] M5 codegen + cstyle + interpreter + `ops_rust.py` — IN PROGRESS (opening block
+      key-exact, see below)
 - [ ] M6 native realize + device traits
 - [ ] M7 user kernels (`@function`/custom_kernel + flash attention), TinyJit, autograd, BEAM/TC activation
 - [ ] M8 OpenCL backend
+
+### M5 in-progress state (committed)
+- `src/codegen/pipeline.rs`: `full_rewrite_to_sink` opening block ("early movement ops"
+  = `pm_mops`+`mop_cleanup` bottom-up, "initial symbolic" = sym+pm_flatten_range,
+  "postopt symbolic" = sym+pm_flatten_range+pm_reduce_unparented).
+- `py/dump_codegen_stages.py`: python per-stage key-multiset dumper for
+  `full_rewrite_to_sink` (PYTHON renderer, Target.parse("cpu")); stage order verified.
+- `py/tests/test_codegen_diff.py`: differential gate — for corpus kernel ASTs, the Rust
+  pipeline output bridged back to python is KEY-EQUAL to python's "early movement ops"
+  stage (2 programs passing; identical node counts through "postopt symbolic" because
+  the middle stages are no-ops on the current corpus).
+- Oracle: `TG_M5_CODEGEN=1` runs callify+schedule, picks the first compute kernel body
+  (SINK containing ADD/MUL), lowers it through the pipeline, emits the flat graph.
+- **Next stages to port** (python name → content):
+  1. `load collapse` — `pm_load_collapse` (simplify.py:137-159; `reduce_collapse` exists
+     as `pm_reduce_collapse` in codegen/simplify.rs — needs the `no_load` variant PM +
+     the `x<c-y` undo rule).
+  2. `split ranges` — `pm_split_ranges` (simplify.py:60-76; `mark_range_mod`+`do_substitute`
+     over a `dict[UOp, UOp|None]` ctx — the substitute-ctx machinery exists in upat.rs
+     `substitute_extra`).
+  3. `simplify ranges` — port `simplify_merge_adjacent` + `mark_gated` (M4 note) into
+     `pm_simplify_ranges` (codegen/simplify.rs currently lacks it).
+  4. `postrange` opts — `apply_opts` with NOOPT-equivalent empty opts for the MVP corpus
+     (heuristic.py port afterwards).
+  5. `expander` (`expander2`+`build_range_map`), `remove reduces`
+     (`reduce_ranges_to_acc`/PLACEHOLDER acc machinery + `merge_reduce_ends`),
+     `add local buffers`, `add gpudims` (`get_grouped_dims` — keep grid machinery).
+  6. `expand broadcast/add loads`, `devectorize2`, `memory coalescing`, `ew devectorizer`,
+     `lower index dtypes` (needs `pm_lower_index_dtype`/`pm_commit_weak`/`pm_cast_weak`
+     from uop/weak.py), decomps (dtype/op/transcendental — TRANSCENDENTAL=0 first),
+     `move gates from index`, `final rewrite`+`pm_remove_invalid`, `casted consts`,
+     `implicit barriers`, `add control flow` (`linearize`/CFGContext/`pm_split_ends`),
+     `number params`.
+  7. Then `do_linearize` (`pm_linearize_cleanups`, gated-store IF/ENDIF), cstyle render
+     (byte-equality subset gate), and the interpreter (runtime/ops_python.py model:
+     global/local loops, exec masks, per-thread REGs — no WMMA).
 
 ### M2 deferred (finish alongside M5/M6 consumers)
 - `pm_simplify_valid` / `uop_given_valid` / `simplify_valid` (symbolic.py:313-429) — needed by
