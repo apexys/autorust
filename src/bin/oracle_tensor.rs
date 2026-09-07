@@ -154,6 +154,10 @@ fn main() {
         let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
         let (linear, planned) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
         let root = linear;
+        if std::env::var("TG_M5_RENDER").is_ok() {
+            render_calls(&mut ctx, planned);
+            return;
+        }
         if std::env::var("TG_M5_EXEC").is_ok() {
             let steps: Vec<ExecStep> = prog.prog.iter().map(|st| ExecStep {
                 op: st.op.clone(), data: st.data.clone(), dtype: st.dtype.clone(),
@@ -198,6 +202,40 @@ fn main() {
     let flat = ctx.g.to_flat();
     println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
     let _ = none_str;
+}
+
+/// M5 cstyle gate: render each compute kernel's linearized uops with the
+/// clang-flavored cstyle renderer and emit the text per call.
+fn render_calls(ctx: &mut UOpCtx, planned: UopId) {
+    use autorust::uop::Ops;
+    let ren = autorust::codegen::postrange::Renderer::clang();
+    let calls: Vec<UopId> = ctx.srcs(planned).to_vec();
+    let mut outs: Vec<String> = Vec::new();
+    for call in calls.iter() {
+        let body = ctx.srcs(*call)[0];
+        if ctx.op_of(body) == Ops::Copy {
+            outs.push("null".to_string());
+            continue;
+        }
+        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body, &ren);
+        let lst = autorust::codegen::linearize::linearize(ctx, sunk);
+        let text = autorust::codegen::cstyle::render_clang(ctx, &lst);
+        let mut j = String::from("\"");
+for ch in text.chars() {
+    match ch {
+        '"' => j.push_str("\\\""),
+        '\\' => j.push_str("\\\\"),
+        '\n' => j.push_str("\\n"),
+        '\t' => j.push_str("\\t"),
+        '\r' => j.push_str("\\r"),
+        c if (c as u32) < 0x20 => j.push_str(&format!("\\u{:04x}", c as u32)),
+        c => j.push(c),
+    }
+}
+j.push('"');
+outs.push(j);
+    }
+    println!("{{\"ok\": true, \"renders\": [{}]}}", outs.join(", "));
 }
 
 /// M5 numeric gate: execute every kernel call through the uops interpreter

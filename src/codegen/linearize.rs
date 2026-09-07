@@ -5,7 +5,6 @@ use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::range::AxisType;
 use crate::uop::UopId;
-use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 /// `linearize` (linearizer.py:9) — toposort with priorities (heap by nkey).
@@ -58,10 +57,10 @@ pub fn linearize(ctx: &mut UOpCtx, sink: UopId) -> Vec<UopId> {
     let nkey: std::collections::HashMap<UopId, usize> =
         sorted_lst.iter().enumerate().map(|(i, &u)| (u, i)).collect();
 
-    // heap-driven toposort from the sink, popping the smallest (-nkey) — python
-    // pushes (-nkey, u) and pops the smallest, i.e. LARGEST nkey first
-    let mut heap: BinaryHeap<(Reverse<usize>, u32)> = BinaryHeap::new();
-    heap.push((Reverse(nkey[&sink]), sink.0));
+    // heap-driven toposort from the sink — python pushes (-nkey, u) and pops the
+    // smallest, i.e. LARGEST nkey first
+    let mut heap: BinaryHeap<(usize, u32)> = BinaryHeap::new();
+    heap.push((nkey[&sink], sink.0));
     let mut newlst: Vec<UopId> = Vec::new();
     while let Some((_, id)) = heap.pop() {
         let u = UopId(id);
@@ -70,7 +69,7 @@ pub fn linearize(ctx: &mut UOpCtx, sink: UopId) -> Vec<UopId> {
             let e = out_degree.get_mut(&v).unwrap();
             *e -= 1;
             if *e == 0 {
-                heap.push((Reverse(nkey[&v]), v.0));
+                heap.push((nkey[&v], v.0));
             }
         }
     }

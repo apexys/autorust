@@ -456,6 +456,10 @@ fn pm_add_loads() -> PatternMatcher {
 /// `full_rewrite_to_sink` (codegen/__init__.py:288) — partial: the opening
 /// mops/symbolic block. Returns the rewritten SINK.
 pub fn full_rewrite_to_sink(ctx: &mut UOpCtx, ast: UopId) -> UopId {
+    full_rewrite_to_sink_with(ctx, ast, &Renderer::cpu_interp())
+}
+
+pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
     let limit = stage_limit();
     let mut i = 0usize;
     let mut cur = ast;
@@ -471,8 +475,7 @@ pub fn full_rewrite_to_sink(ctx: &mut UOpCtx, ast: UopId) -> UopId {
         return cur;
     }
     // do postrange optimization, BEAM or hand_coded_optimizations
-    let ren = Renderer::cpu_interp();
-    cur = apply_opts(ctx, cur, &ren);
+    cur = apply_opts(ctx, cur, ren);
     i += 1;
     for st in post_stages() {
         if i + 1 > limit {

@@ -95,6 +95,19 @@ impl Renderer {
             shared_max: 32768,
         }
     }
+
+    /// `ClangRenderer` — has_local=False, global_max=(NUM_CPU_THREADS, 0, 0).
+    pub fn clang() -> Renderer {
+        Renderer {
+            device: "CPU".to_string(),
+            has_local: false,
+            has_shared: true,
+            has_threads: false,
+            global_max: Some([1024, 0, 0]),
+            local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
+            shared_max: 32768,
+        }
+    }
 }
 
 /// `Scheduler` (postrange.py:26).

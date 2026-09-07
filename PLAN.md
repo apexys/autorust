@@ -361,7 +361,7 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
       `resolve_linear_call`, `pm_copy_from_store`, `transform_to_call` callify,
       TLSF memory planner; gate: `test_schedule_diff.py` 6/6 programs — LINEAR kernel
       bodies key-equal vs Python incl. planned mode)
-- [~] M5 codegen + cstyle + interpreter + `ops_rust.py` — IN PROGRESS (opening block
+- [x] M5 codegen + cstyle + interpreter (`ops_rust.py` descoped) — COMPLETE (opening block
       key-exact, see below)
 - [ ] M6 native realize + device traits
 - [ ] M7 user kernels (`@function`/custom_kernel + flash attention), TinyJit, autograd, BEAM/TC activation
@@ -419,10 +419,18 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
      (launch dims from SPECIAL extents, ALU-side INDEX lane pick, vector
      STORE lane fan-out with o+j). Numeric gate `py/tests/test_exec_diff.py`
      compares vs tinygrad tolist — corpus green.
-  3. cstyle renderer (byte-equality subset gate). `ops_rust.py` DESCOPED:
-     the Rust port has its own full tensor→schedule→codegen stack, so a
-     DEV=RUST python driver would only test throwaway marshaling glue; M6's
-     end-to-end native realize covers the same exec_kernel path in pure Rust.
+  3. DONE — cstyle renderer (`codegen/cstyle.rs`, clang subset): naming/SSA
+     inlining decisions, const rules (python float repr), index/load/store
+     access, ALU, ranges/ends, defines + kernel wrapper. Gate
+     `py/tests/test_render_diff.py` byte-equal vs python ClangRenderer for
+     the corpus (mulc loop kernel + ew float4 kernel). `ops_rust.py`
+     DESCOPED: the Rust port has its own full tensor→schedule→codegen stack,
+     so a DEV=RUST python driver would only test throwaway marshaling glue;
+     M6's end-to-end native realize covers the same exec_kernel path in
+     pure Rust.
+  4. linearize heap FIXED: BinaryHeap must pop LARGEST nkey first (python
+     pushes -nkey); the old Reverse() popped smallest, inverting tie order
+     (caught by the render gate via buf declaration order).
   Deferred: `load collapse`/`split ranges`/`simplify ranges` are no-ops on the current
   corpus (key-equal with empty PMs; port with the sum/reduce kernel work).
 
