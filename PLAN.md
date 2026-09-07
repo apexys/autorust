@@ -412,7 +412,15 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
        `truncate[u.dtype](dtype.const(x))`; END jumps via loop_ends; IF/ENDIF push/
        pop exec masks; no WMMA.
      Numeric gate: allclose vs tinygrad CPU for the corpus (addc, mulc, sum).
-  2. cstyle renderer (byte-equality subset gate); `ops_rust.py` DEV=RUST driver.
+  2. `codegen/interp.rs` is written (compiles, untested): exec_kernel derives
+     launch dims from SPECIAL extents, then exec_launch per python's dispatch.
+     Remaining wiring for the numeric gate: oracle `TG_M5_EXEC` mode that runs
+     callify→schedule→pipeline→linearize per LINEAR kernel call, allocates one
+     Mem per distinct buffer uop (keyed by uop id, sized max_numel*itemsize),
+     fills the copy kernel's PYTHON-addrspace source buffer with the from_slice
+     data before execution, runs kernels in LINEAR order, and emits the output
+     buffer contents as JSON; pytest compares allclose vs tinygrad CPU.
+  3. cstyle renderer (byte-equality subset gate); `ops_rust.py` DEV=RUST driver.
   Deferred: `load collapse`/`split ranges`/`simplify ranges` are no-ops on the current
   corpus (key-equal with empty PMs; port with the sum/reduce kernel work).
 
