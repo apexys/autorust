@@ -306,6 +306,8 @@ fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>,
                 let x = Tensor::from_slice(ctx, &[0.5f32, 1.5, -2.0], None, dev);
                 x.mul(ctx, 3.0)
             }
+            "arange4" => Tensor::arange(ctx, 0.0, Some(4.0), 1.0, None),
+            "arange_step" => Tensor::arange(ctx, 3.0, Some(7.0), 2.0, None),
             "red_sum_arange" => Tensor::arange(ctx, 0.0, Some(100.0), 1.0, None).sum(ctx, None, false, None),
             "red_mean_arange" => Tensor::arange(ctx, 0.0, Some(100.0), 1.0, None).mean(ctx, None, false),
             "red_max_arange" => Tensor::arange(ctx, 0.0, Some(100.0), 1.0, None).max(ctx, None, false),
@@ -414,7 +416,15 @@ fn alu_code_for_op_all_backends() {
 }
 
 #[test]
-#[ignore = "arange realize bug found by this harness: the cumsum-based arange's loop-carried accumulator collapses to its final value in the kernel graph (arange(4) -> [3,3,3,3], sum(arange(100)) -> 9900). Needs the reduce->range PHI/acc decomp fixed; un-ignore when green."]
+fn aranges_all_backends() {
+    let gm = goldens();
+    for b in backends() {
+        run_named(&b, &gm, &["arange4", "arange_step"]);
+    }
+}
+
+#[test]
+#[ignore = "reduce-over-arange still broken: the arange cumsum kernel graph is now correct (arange4/arange_step pass), but reducing over the cumsum output nests two REDUCEs in one kernel — the expander's range-map reshape and memory coalescing both panic (multiple stores). Needs the reduce-over-reduce staging decision (python stages the inner reduce); un-ignore when nested reduces stage correctly."]
 fn reductions_all_backends() {
     let gm = goldens();
     for b in backends() {

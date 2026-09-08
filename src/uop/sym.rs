@@ -666,12 +666,12 @@ fn build_symbolic_simple() -> PatternMatcher {
     ));
     rules.push((
         var_dt("x", vec![crate::dtype::BOOL])
-            .where_(UPatOrConst::Val(CV::Bool(true)), UPatOrConst::Val(CV::Bool(false))),
+            .where_(UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(true))))), UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(false)))))),
         r(|_, st, _| Some(sget(st, "x"))),
     ));
     rules.push((
         var_dt("x", vec![crate::dtype::BOOL])
-            .where_(UPatOrConst::Val(CV::Bool(false)), UPatOrConst::Val(CV::Bool(true))),
+            .where_(UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(false))))), UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(true)))))),
         r(|ctx, st, _| Some(ctx.logical_not(sget(st, "x")))),
     ));
     // CAST(bool -> int) != const

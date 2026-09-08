@@ -432,11 +432,31 @@ interp stubs (M6 semantics).
   test): (a) weak-const commit passes — tinygrad `uop/weak.py`
   (commit_weak_srcs on Broadcastable, the STORE commit at dest dtype,
   pm_lower_weak); (b) non-native-float decomp — create_non_native_float_pats +
-  pm_manual_bf16_cast (M8.5 extra_matcher); (c) arange realize: the
-  cumsum-based arange's loop-carried accumulator collapses to its final value
-  (arange(4) -> [3,3,3,3]) — reduce->range PHI handling; (d) sub-dword
+  pm_manual_bf16_cast (M8.5 extra_matcher); (c) ~~arange realize~~ FIXED (see
+  M8.2a below); (c') reduce-over-reduce staging: reducing over an arange (two
+  nested REDUCEs in one graph) panics in the expander's range-map reshape and
+  in memory coalescing ("multiple stores") — python stages the inner reduce
+  (realize_map decision); un-ignores `reductions_all_backends`; (d) sub-dword
   vectorized memory coalescing bitcasts (bool4/fp8 vector stores unrenderable);
   (e) XOR training gate slots in as M7 acceptance (#[ignore] placeholder).
+
+### M8.2a done (arange realize fix)
+- Root causes (two, independent):
+  1. `indexing.rs finish_node`: PAD/SHRINK pairs live in shape-srcs (our M2
+     convention, python's `marg` reads src[1]/src[2]) but the movement arm
+     extracted args only for RESHAPE/EXPAND — the pad/shrink arms zipped over
+     an empty arg list and returned EMPTY ranges, killing the range flow at
+     the first tensor-level shrink/pad and leaving the arange pad mask as
+     `Where(true, 1, 0)` (the cumsum collapsed to its total). Fixed by
+     extracting pairs via `marg_pairs` for Pad|Shrink (arg-carried fallback
+     for symbolic kernel-LOCAL pairs).
+  2. `sym.rs` bool-WHERE rules: python's `x.where(True, False) -> x` uses
+     `UPat.const(True, dtypes.bool)` — the branch consts carry a BOOL dtype
+     constraint; our port dropped it and `py_const_eq`'s python numeric
+     equality (True == 1) matched `Where(bool, Int(1), Int(0))`, folding int
+     mask sums into bool OR chains (wrong for sums of overlapping masks).
+     Fixed by constraining the branch consts to BOOL.
+- `aranges_all_backends` harness test + `arange4`/`arange_step` goldens added.
 
 ### M5 in-progress state (committed)
 - `src/codegen/pipeline.rs`: `full_rewrite_to_sink` opening block ("early movement ops"

@@ -39,6 +39,8 @@ pub static GOLDEN: &[Golden] = &[
     Golden { name: "op_floordiv", shape: &[8], vals: &[1.0, -7.0, 0.0, 4.0, 5.0, -1.0, 1.0, 1.0], rtol: 0.0 },
     Golden { name: "op_floormod", shape: &[8], vals: &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0], rtol: 0.0 },
     Golden { name: "op_mulacc", shape: &[], vals: &[32.0], rtol: 0.0 },
+    Golden { name: "arange4", shape: &[4], vals: &[0.0, 1.0, 2.0, 3.0], rtol: 0.0 },
+    Golden { name: "arange_step", shape: &[2], vals: &[3.0, 5.0], rtol: 0.0 },
     Golden { name: "red_sum_arange", shape: &[], vals: &[4950.0], rtol: 0.0 },
     Golden { name: "red_mean_arange", shape: &[], vals: &[49.5], rtol: 0.0 },
     Golden { name: "red_max_arange", shape: &[], vals: &[99.0], rtol: 0.0 },

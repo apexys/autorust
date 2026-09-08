@@ -95,6 +95,8 @@ def make_programs():
     # CDIV/CMOD are reached inside floordiv/floormod decomp (no tensor sugar).
 
     # -- reductions over aranges (exact integer-valued f32) --
+    add("arange4", lambda: Tensor.arange(4))
+    add("arange_step", lambda: Tensor.arange(3, 7, 2))
     add("red_sum_arange", lambda: Tensor.arange(100).sum())
     add("red_mean_arange", lambda: Tensor.arange(100).mean())
     add("red_max_arange", lambda: Tensor.arange(100).max())

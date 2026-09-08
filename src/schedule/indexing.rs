@@ -711,7 +711,11 @@ fn finish_node(
         let (op, _dt, srcs, arg, _tag) = ctx.snapshot(x);
         let in_shape = ctx.shape(srcs[0]).expect("TGERR: movement src shape").unwrap_or_default();
         // RESHAPE/EXPAND store their shape in shape-srcs (our M2 convention),
-        // python carries it in the movement arg — normalize here.
+        // python carries it in the movement arg — normalize here. PAD/SHRINK
+        // pairs likewise live in shape-srcs ((start, stop) lists), python's
+        // marg (ops.py:779) reads them from src[1]/src[2] — without this the
+        // pad/shrink arms zip over nothing and the ranges pass through
+        // unwrapped (the arange cumsum mask bug).
         let arg_refs: Vec<Arg> = if matches!(op, Ops::Reshape | Ops::Expand) {
             match ctx.marg_shape(x) {
                 Ok(shape) => shape.iter().map(|s| match s {
@@ -719,6 +723,19 @@ fn finish_node(
                     SVal::U(_) => panic!("TGERR: symbolic reshape dim unsupported in rangeify"),
                 }).collect(),
                 Err(_) => vec![],
+            }
+        } else if matches!(op, Ops::Pad | Ops::Shrink) {
+            match ctx.marg_pairs(x) {
+                Ok(pairs) => pairs
+                    .iter()
+                    .map(|(a, b)| Arg::Seq { tuple: true, items: vec![Arg::Int(*a), Arg::Int(*b)] })
+                    .collect(),
+                // symbolic pairs (kernel-LOCAL views): fall back to the
+                // arg-carried path — python handles sint symbolically here.
+                Err(_) => match &arg {
+                    Arg::Seq { tuple: true, items } => items.clone(),
+                    _ => vec![],
+                },
             }
         } else {
             match &arg {
