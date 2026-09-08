@@ -150,7 +150,7 @@ fn main() {
             if prog.mode.as_deref() == Some("native") {
             // M6 native gate: python fully out of the loop. Realize the final
             // tensor twice (tolist semantics); caches must prevent recompiles.
-            let mut bufs = autorust::engine::buffer::BufTable::default();
+            let mut bufs = autorust::runtime::buffer::BufTable::default();
             let mut cache = autorust::engine::realize::ProgCache::default();
             let last = tensors.last().expect("TGERR: empty program").uop;
             let vals1 = autorust::engine::realize::tensor_values(&mut ctx, last, &mut bufs, &mut cache);
@@ -162,7 +162,7 @@ fn main() {
             println!(
                 "{{\"ok\": true, \"outs\": [{}], \"compiles\": {}, \"stable\": {}}}",
                 outs_json.join(", "),
-                autorust::engine::device::total_compiles(),
+                autorust::runtime::device::total_compiles(),
                 vals1 == vals2
             );
             return;
@@ -228,7 +228,7 @@ fn main() {
 /// clang-flavored cstyle renderer and emit the text per call.
 fn render_calls(ctx: &mut UOpCtx, planned: UopId) {
     use autorust::uop::Ops;
-    let ren = autorust::codegen::postrange::Renderer::clang();
+    let ren = autorust::renderer::Renderer::clang();
     let calls: Vec<UopId> = ctx.srcs(planned).to_vec();
     let mut outs: Vec<String> = Vec::new();
     for call in calls.iter() {
@@ -239,7 +239,7 @@ fn render_calls(ctx: &mut UOpCtx, planned: UopId) {
         }
         let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body, &ren);
         let lst = autorust::codegen::linearize::linearize(ctx, sunk);
-        let text = autorust::codegen::cstyle::render_clang(ctx, &lst);
+        let text = autorust::renderer::cstyle::render_clang(ctx, &lst);
         let mut j = String::from("\"");
 for ch in text.chars() {
     match ch {
@@ -268,7 +268,7 @@ struct ExecStep {
 }
 
 fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {
-    use autorust::codegen::interp::{exec_kernel, from_storage_scalar, to_storage_scalar, MemView};
+    use autorust::runtime::interp::{exec_kernel, from_storage_scalar, to_storage_scalar, MemView};
     use autorust::uop::arg::Arg;
     use autorust::uop::Ops;
 

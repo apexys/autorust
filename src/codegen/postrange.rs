@@ -70,45 +70,8 @@ pub fn colored(st: &str, color: &str) -> String {
     format!("\u{1b}[{}m{}\u{1b}[0m", code, st)
 }
 
-/// The renderer facts the pipeline needs (`renderer/__init__.py` defaults).
-#[derive(Clone)]
-pub struct Renderer {
-    pub device: String,
-    pub has_local: bool,
-    pub has_shared: bool,
-    pub has_threads: bool,
-    pub global_max: Option<[i64; 3]>,
-    pub local_max: Option<[i64; 3]>,
-    pub shared_max: i64,
-}
+use crate::renderer::Renderer;
 
-impl Renderer {
-    /// `PythonRenderer` for `Target.parse("cpu")` — base Renderer defaults.
-    pub fn cpu_interp() -> Renderer {
-        Renderer {
-            device: "PYTHON".to_string(),
-            has_local: true,
-            has_shared: true,
-            has_threads: false,
-            global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
-            local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
-            shared_max: 32768,
-        }
-    }
-
-    /// `ClangRenderer` — has_local=False, global_max=(NUM_CPU_THREADS, 0, 0).
-    pub fn clang() -> Renderer {
-        Renderer {
-            device: "CPU".to_string(),
-            has_local: false,
-            has_shared: true,
-            has_threads: false,
-            global_max: Some([1024, 0, 0]),
-            local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
-            shared_max: 32768,
-        }
-    }
-}
 
 /// `Scheduler` (postrange.py:26).
 pub struct Scheduler<'a> {

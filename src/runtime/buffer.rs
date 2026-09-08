@@ -1,10 +1,14 @@
-//! `device.py` Buffer + allocator seams (M6).
+//! `device.py` Buffer + allocator seams (M6, backend-trait split M8).
 //!
 //! `Buffer` mirrors python device.py:102 — a base allocation plus views
-//! sharing it with a byte offset. `Opaque` is the device-side handle (a byte
-//! storage window); M8 adds the OpenCL variant. The `initial_data` side table
-//! on UOpCtx plays the role of python's `buffers` WeakKeyDictionary for
-//! opaquely-constructed buffers (Tensor(data) → `Buffer(opaque=...)`).
+//! sharing it with a byte offset. `OpaqueT` is the backend-owned opaque
+//! handle (python's untyped `Any`): each backend defines its own concrete
+//! type and the core only sees `Rc<dyn OpaqueT>`. `HostOpaque` is the
+//! built-in byte storage. The `initial_data` side table on UOpCtx plays the
+//! role of python's `buffers` WeakKeyDictionary for opaquely-constructed
+//! buffers (Tensor(data) → `Buffer(opaque=...)`); initial bytes are staged
+//! in the base and copied in through the backend allocator on allocation,
+//! so Tensor(data) works on any device.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -23,16 +27,30 @@ use super::device::Compiled;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct BufferSpec {}
 
-/// Opaque device handle: a shared byte storage plus a (offset, size) window —
-/// python's memoryview slicing model (`_offset` returns a narrower window).
+/// The backend-owned opaque handle (python `Allocator._alloc` return type —
+/// an untyped `Any` passed from the allocator to `Program.__call__`).
+pub trait OpaqueT: 'static {
+    /// Window size in bytes.
+    fn size(&self) -> usize;
+    /// Identity of the underlying storage (same allocation => same id).
+    fn storage_id(&self) -> usize;
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// The built-in host byte storage plus a (offset, size) window — python's
+/// memoryview slicing model (`_offset` returns a narrower window).
 #[derive(Clone)]
-pub struct Opaque {
+pub struct HostOpaque {
     pub mem: Rc<RefCell<Vec<u8>>>,
     pub offset: usize,
     pub size: usize,
 }
 
-impl Opaque {
+impl HostOpaque {
+    pub fn new(mem: Vec<u8>) -> HostOpaque {
+        let size = mem.len();
+        HostOpaque { mem: Rc::new(RefCell::new(mem)), offset: 0, size }
+    }
     pub fn read(&self) -> Vec<u8> {
         self.mem.borrow()[self.offset..self.offset + self.size].to_vec()
     }
@@ -42,12 +60,35 @@ impl Opaque {
     }
 }
 
+impl OpaqueT for HostOpaque {
+    fn size(&self) -> usize {
+        self.size
+    }
+    fn storage_id(&self) -> usize {
+        Rc::as_ptr(&self.mem) as *const u8 as usize
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Downcast to the host storage (the interp backend only runs on host bytes).
+pub fn host_of(o: &dyn OpaqueT) -> &HostOpaque {
+    o.as_any().downcast_ref::<HostOpaque>().expect("TGERR: expected host opaque")
+}
+
+/// An owned opaque view (`Rc<dyn OpaqueT>`) — `Buffer._buf`.
+pub type OpaqueView = Rc<dyn OpaqueT>;
+
 /// The base `Buffer` (python device.py:102): one allocation per base.
 pub struct BufferBase {
     pub device: String,
     pub size: usize,
     pub dtype: DTypeId,
-    pub buf: RefCell<Option<Opaque>>,
+    pub buf: RefCell<Option<OpaqueView>>,
+    /// Tensor(data) staged bytes, copied in through the backend allocator on
+    /// first allocation (python: opaque= host path generalized to devices).
+    pub pending_copyin: RefCell<Option<Vec<u8>>>,
     pub uop_refcount: Cell<i64>,
 }
 
@@ -58,8 +99,21 @@ impl BufferBase {
     pub fn is_allocated(&self) -> bool {
         self.buf.borrow().is_some()
     }
-    pub fn allocate_with(&self, o: Opaque) {
+    pub fn allocate_with(&self, o: OpaqueView) {
         assert!(!self.is_allocated(), "TGERR: can't allocate already allocated buffer");
+        if let Some(bytes) = self.pending_copyin.borrow_mut().take() {
+            assert_eq!(bytes.len(), o.size(), "TGERR: initial data size mismatch");
+            // host fast path keeps byte storage shared with ctx.initial_data
+            if let Some(h) = o.as_any().downcast_ref::<HostOpaque>() {
+                if h.offset == 0 && h.size == bytes.len() {
+                    *h.mem.borrow_mut() = bytes;
+                } else {
+                    h.write(&bytes);
+                }
+            } else {
+                panic!("TGERR: pending copyin requires a device — allocate through ensure_allocated");
+            }
+        }
         *self.buf.borrow_mut() = Some(o);
     }
     pub fn deallocate(&self) {
@@ -80,7 +134,14 @@ pub struct Buffer {
 impl Buffer {
     /// `Buffer(device, size, dtype)` — a fresh base.
     pub fn new_base(device: &str, size: usize, dtype: DTypeId) -> Buffer {
-        let base = Rc::new(BufferBase { device: device.to_string(), size, dtype, buf: RefCell::new(None), uop_refcount: Cell::new(0) });
+        let base = Rc::new(BufferBase {
+            device: device.to_string(),
+            size,
+            dtype,
+            buf: RefCell::new(None),
+            pending_copyin: RefCell::new(None),
+            uop_refcount: Cell::new(0),
+        });
         Buffer { base, size, dtype, offset: 0 }
     }
 
@@ -102,31 +163,43 @@ impl Buffer {
 
     /// `Buffer.ensure_allocated` — allocate on the device if needed.
     pub fn ensure_allocated(&self, dev: &Compiled) {
-        if !self.is_allocated() {
-            self.allocate(dev, None);
+        if self.is_allocated() {
+            return;
         }
+        let o = dev.allocator.alloc(self.base.nbytes());
+        if let Some(bytes) = self.base.pending_copyin.borrow_mut().take() {
+            assert_eq!(bytes.len(), o.size(), "TGERR: initial data size mismatch");
+            dev.allocator._copyin(&*o, &bytes);
+        }
+        *self.base.buf.borrow_mut() = Some(o);
     }
 
     /// `Buffer.allocate` — through the device LRU allocator (or an explicit
-    /// opaque, the `opaque=` ctor path used by Tensor(data)).
-    pub fn allocate(&self, dev: &Compiled, opaque: Option<Opaque>) {
+    /// opaque, the `opaque=` ctor path).
+    pub fn allocate(&self, dev: &Compiled, opaque: Option<OpaqueView>) {
         assert!(!self.is_allocated(), "TGERR: can't allocate already allocated buffer");
         match opaque {
             Some(o) => self.base.allocate_with(o),
-            None => self.base.allocate_with(dev.allocator.alloc(self.base.nbytes())),
+            None => {
+                let o = dev.allocator.alloc(self.base.nbytes());
+                if let Some(bytes) = self.base.pending_copyin.borrow_mut().take() {
+                    dev.allocator._copyin(&*o, &bytes);
+                }
+                *self.base.buf.borrow_mut() = Some(o);
+            }
         }
     }
 
     /// `Buffer.get_buf(device)` — the opaque window for kernel args.
     /// Single-device corpus: device == self.device; views go through `_offset`.
-    pub fn get_buf(&self, dev: &Compiled) -> Opaque {
+    pub fn get_buf(&self, dev: &Compiled) -> OpaqueView {
         self.ensure_allocated(dev);
         let b = self.base.buf.borrow().as_ref().unwrap().clone();
         let nb = self.nbytes();
-        if self.offset == 0 && nb == b.size {
+        if b.size() == nb && self.offset == 0 {
             b
         } else {
-            dev.allocator.offset(&b, nb, self.offset)
+            dev.buf_view(&*b, nb, self.offset)
         }
     }
 }
@@ -168,13 +241,15 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
                 size,
                 dtype: dt,
                 buf: RefCell::new(None),
+                pending_copyin: RefCell::new(None),
                 uop_refcount: Cell::new(1),
             });
-            // Tensor(data) opaque path: initial bytes come with the buffer.
+            // Tensor(data) path: initial bytes staged, copied in on allocation
+            // (through the backend allocator, so any device works).
             if let Some(bytes) = ctx.initial_data.get(&u.0) {
                 let nb = size * dt.itemsize();
                 assert!(bytes.borrow().len() == nb, "TGERR: initial data size mismatch");
-                base.allocate_with(Opaque { mem: bytes.clone(), offset: 0, size: nb });
+                *base.pending_copyin.borrow_mut() = Some(bytes.borrow().clone());
             }
             let b = Buffer { base: base.clone(), size, dtype: dt, offset: 0 };
             t.bases.insert(u.0, base);

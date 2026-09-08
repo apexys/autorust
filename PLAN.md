@@ -57,7 +57,9 @@ Sizes are LOC of the v0.14.0 tree. Decision key: **PORT** (must exist in Rust),
 | devices/runtime | `device.py`, `runtime/ops_{cuda,amd,cl,nv,hip,...}.py`, `runtime/support/{hcq,hcq2,...}` | ~10k+ | PORT abstraction only (P6) | `Buffer`/`Allocator`/`Compiler`/`Program`/`Compiled` become Rust **traits** shaped exactly like tinygrad's, so backends (CPU interp now, OpenCL next) are additive impls. SKIP concrete GPU devices + HCQ/HCQ2 + graph capture |
 | engine | `engine/{realize,jit}.py`, `engine/worker.py` | 677 | PORT subset (P6) | `run_linear`/`compile_linear`/`exec_*` (P6), `TinyJit` stretch goal, SKIP worker pool |
 | rng / autograd | `mixin/rand.py`, `mixin/gradient.py` | 462 | PORT (P6, stretch) | after native execution works |
-| nn / llm / viz / extras | `nn/`, `llm/`, `viz/`, `function.py`, disk cache, process replay | huge | SKIP | maybe a `nn`-shaped test module later for e2e (MNIST) |
+| nn core | `nn/__init__.py` (420), `nn/state.py` (352), `nn/optim.py` (179) | ~950 | **PORT (M7e)** | the M7 integrator: exercises custom_kernel (Embedding), rand, gradient, conv ops together |
+| llm / viz / nn extras | `llm/`, `viz/`, `nn/onnx.py`, `nn/torch.py`, disk cache, process replay | huge | SKIP | ONNX import stays out |
+| `fetch` / `Tensor.from_url` | thin std-only shim: `TcpStream` HTTP/1.1 GET (Content-Length + chunked, <=3 redirects, tinygrad cache layout) + minimal DEFLATE inflate (~200 LOC) | ~350 | **PORT (M7e)** | plain HTTP only (GCS/fashion-MNIST verified reachable over http); no TLS, no ranges |
 
 MVP port budget ≈ **10–11k lines of Python** (of ~19k core), plus tests.
 
@@ -295,7 +297,17 @@ tests in `autorust/src`.
   fresh buffers); symbolic shape baking comes with it (M2 core already supports `sint`).
 - autograd (`mixin/gradient.py`), `rand` (`mixin/rand.py`), half/bf16 emulation,
   WMMA arm in the interpreter + first tensor-core layouts (`opt/tc.py`), BEAM search
-  driver (`opt/search.py` + `time_call`), `nn`-subset + MNIST e2e, DISK device.
+  driver (`opt/search.py` + `time_call`), DISK device.
+- **nn core** (`nn/__init__.py` 420 + `nn/state.py` 352 + `nn/optim.py` 179): BatchNorm,
+  Conv1d/2d, ConvTranspose1d/2d, Linear, GroupNorm, InstanceNorm, LayerNorm(+2d),
+  RMSNorm, Embedding (custom fwd/bwd kernels -> rides M7a), LSTMCell; `State`
+  (get_parameters, load_state_dict, safe_save); Optimizer + SGD/Adam(+W)/LARS/LAMB.
+  Needs: `Tensor.rand`/kaiming (M7c), `gradient` (M7c), `custom_kernel` (M7a),
+  `conv2d`/`pad` tensor ops (corpus). **Proof: MNIST e2e** — MLP train step +
+  Conv inference, weights via `State`, loaded from local idx files, optimizer
+  step numerics diffed against tinygrad. `nn/onnx.py` stays out. Dataset path uses
+  the std-only `fetch`/`from_url` shim (plain HTTP + inflate) so the MNIST gate
+  self-downloads; https-only sources remain user-supplied.
 
 ### M8 — first additional backend: OpenCL (next session, the reason for M5/M6 shape)
 Everything M5/M6 set up is consumed here; no engine changes expected.
@@ -323,7 +335,7 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
 | BEAM driver / tensor-core layouts | not walled: `expand_wmma` + opts parameterization are ported in M5 (empty TC lists), `time_call` semantics in M6; `opt/search.py` + `tc.py` activate in M7 |
 | CPU x86 ISA JIT | perf hit; interpreter is our execution engine (could render C + cc later as cheap upgrade) |
 | precompiled-CALL fast path, `@function`/`custom_kernel` UX | CALL/FUNCTION/PARAM spine is native from M3; the user-facing decorator + `transform_precompiled_call` activate in M7 (flash attention as proof) |
-| DISK/TINYFS/NPY/PYTHON devices, `fetch` | constructor rejects Path; `from_url` unimplemented |
+| TINYFS/NPY/PYTHON devices, TLS | constructor rejects Path; no TLS anywhere — https-only sources stay user-supplied files |
 | symbolic-heavy coverage | `sint`/`Variable`/vmin-vmax are core since M2 and the scheduler is `sint`-typed throughout; corpus is concrete-first with symbolic smoke tests in M3/M4 — full coverage arrives with TinyJit (M7) |
 | viz, process replay, disk cache, worker pool | no profiling hooks; `Context` env vars still ported for behavior toggles |
 

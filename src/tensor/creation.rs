@@ -28,7 +28,7 @@ fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
 pub static UNIQUE_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// `UOp.new_buffer(device, size, dtype, num=None)` (ops.py:815-820).
-/// `device` here is the Python-side canonical string (e.g. "PYTHON", "NV").
+/// `device` here is the Python-side canonical string (e.g. "PYTHON" — tinygrad's DEFAULT staging name —, "NV").
 pub fn new_buffer(ctx: &mut UOpCtx, device: &str, size: SVal, dt: DTypeId, num: Option<i64>) -> UopId {
     assert!(!dtype::is_weak(dt), "TGERR: cannot create storage for weak dtype {dt:?}");
     let slot = num.unwrap_or_else(|| UNIQUE_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
@@ -287,7 +287,7 @@ pub fn copy_to_device(ctx: &mut UOpCtx, x: UopId, device: &str) -> UopId {
 }
 
 /// `Tensor(data=list, dtype=?, device=?)` -> `UOp._frompy` (ops.py:829-842):
-/// `UOp.empty(shape, bdtype, "PYTHON")` (float32 storage for bf16/fp8 targets,
+/// `UOp.empty(shape, bdtype, "INTERP")` (float32 storage for bf16/fp8 targets,
 /// then a cast), then `COPY` to the canonical device when it is not "PYTHON".
 /// The byte packing itself is a Python-side buffer effect and does not appear
 /// in the graph.

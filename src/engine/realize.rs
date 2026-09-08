@@ -11,9 +11,9 @@ use std::rc::Rc;
 
 use crate::codegen::linearize::{linearize, pm_linearize_cleanups};
 use crate::codegen::pipeline::full_rewrite_to_sink_with;
-use crate::codegen::postrange::Renderer;
-use crate::engine::buffer::{buffer_of, BufTable, Opaque};
-use crate::engine::device::{device, Prog, TinyElf};
+use crate::renderer::cstyle::to_function_name_pub;
+use crate::runtime::buffer::{buffer_of, BufTable, OpaqueView};
+use crate::runtime::device::{device, TinyElf};
 use crate::uop::arg::{Arg, DataArg};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
@@ -206,26 +206,24 @@ pub struct ProgCache {
     map: HashMap<u32, Rc<CompiledProg>>,
 }
 
-/// `to_program` (codegen/__init__.py:500) — cached do_to_program.
-pub fn to_program(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, cache: &mut ProgCache) -> Rc<CompiledProg> {
+/// `to_program` (codegen/__init__.py:500) — cached do_to_program. The device
+/// supplies its renderer (facts + render) and compiler through the public
+/// backend seams.
+pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device::Compiled>, cache: &mut ProgCache) -> Rc<CompiledProg> {
     if let Some(p) = cache.map.get(&ast.0) {
         return p.clone();
     }
     // 1. full_rewrite_to_sink
-    let sunk = full_rewrite_to_sink_with(ctx, ast, ren);
+    let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts());
     // 2. ProgramInfo.from_sink
     let pi = program_info_from_sink(ctx, sunk);
     // 3. do_linearize: linearize + pm_linearize_cleanups
     let lst = linearize(ctx, sunk);
     let lst = pm_linearize_cleanups(ctx, lst);
-    // 4. do_render: SOURCE = the flat-serialized linear (interp renderer)
-    let saved_roots = ctx.g.roots.clone();
-    ctx.g.roots = lst.clone();
-    let flat = ctx.g.to_flat();
-    ctx.g.roots = saved_roots;
-    let src_text = crate::uop::flat::to_string_flat(&flat);
-    // 5. do_compile: empty compiler -> the source bytes
-    let lib = crate::engine::device::Compiler.compile_cached(&src_text);
+    // 4. do_render: SOURCE through the device's renderer seam
+    let src_text = dev.renderer.render(ctx, &lst);
+    // 5. do_compile: through the device's compiler seam
+    let lib = dev.compiler.compile_cached(&src_text);
     let linear_uop = ctx.uop(Ops::Linear, Some(crate::dtype::VOID), lst.clone(), Arg::None);
     let source_uop = ctx.uop(Ops::Source, Some(crate::dtype::VOID), vec![], Arg::Str(src_text));
     let binary_uop = ctx.uop(Ops::Binary, Some(crate::dtype::VOID), vec![source_uop], Arg::Bytes(lib.clone()));
@@ -241,7 +239,7 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, cache: &mut Prog
             }
         }
     }
-    let elf = Rc::new(TinyElf { lib, name: crate::codegen::cstyle::to_function_name_pub(&pi.name), signature });
+    let elf = Rc::new(TinyElf { lib, name: to_function_name_pub(&pi.name), signature });
     let cp = Rc::new(CompiledProg { uop: prg, pi, elf });
     cache.map.insert(ast.0, cp.clone());
     cp
@@ -264,7 +262,7 @@ pub fn compile_linear(ctx: &mut UOpCtx, linear: UopId, cache: &mut ProgCache) ->
             let first_arg = ctx.srcs(c)[1];
             let dev_name = buffer_of(ctx, &mut BufTable::default(), first_arg).device().to_string();
             let dev = device(&dev_name);
-            let cp = to_program(ctx, ast, &dev.renderer, cache);
+            let cp = to_program(ctx, ast, &dev, cache);
             let mut new_srcs = vec![cp.uop];
             new_srcs.extend(ctx.srcs(c)[1..].iter().copied());
             let new_call = ctx.uop(Ops::Call, Some(ctx.dt_of(c)), new_srcs, ctx.arg_of(c).clone());
@@ -289,8 +287,9 @@ fn resolve_params(ctx: &UOpCtx, call: UopId) -> Vec<UopId> {
     ctx.srcs(call)[1..].to_vec()
 }
 
-/// `exec_copy` (realize.py:168) — dest/src engine buffers; interpreter
-/// devices memcpy through the windows (python `_copyout` path).
+/// `exec_copy` (realize.py:168) — dest/src engine buffers; copies through
+/// the backend allocators (host bounce for cross-device/CL, shared host
+/// windows memcpy directly).
 fn exec_copy(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId) {
     let resolved = resolve_params(ctx, call);
     assert!(resolved.len() >= 2, "TGERR: copy call args");
@@ -302,10 +301,9 @@ fn exec_copy(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId) {
     src.ensure_allocated(&src_dev);
     let d = dest.get_buf(&dest_dev);
     let s = src.get_buf(&src_dev);
-    // dest.allocator._copyout(dest.as_memoryview(force_zero_copy=True), src._buf)
-    if !Rc::ptr_eq(&d.mem, &s.mem) || d.offset != s.offset {
-        d.write(&s.read());
-    }
+    let mut tmp = vec![0u8; s.size()];
+    src_dev.allocator._copyout(&mut tmp, &*s);
+    dest_dev.allocator._copyin(&*d, &tmp);
 }
 
 /// `exec_kernel` (realize.py:180) — launch the PROGRAM through the device.
@@ -315,7 +313,7 @@ fn exec_kernel(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId, cp: &Rc<Compiled
     let g0 = *cp.pi.globals.first().unwrap_or(&0) as usize;
     let dev_name = buffer_of(ctx, t, resolved[g0]).device().to_string();
     let dev = device(&dev_name);
-    let mut bufs: Vec<Opaque> = Vec::new();
+    let mut bufs: Vec<OpaqueView> = Vec::new();
     for &g in &cp.pi.globals {
         let b = buffer_of(ctx, t, resolved[g as usize]);
         b.ensure_allocated(&dev);
@@ -351,7 +349,7 @@ pub fn run_linear(ctx: &mut UOpCtx, linear: UopId, t: &mut BufTable, var_vals: &
 
 /// Schedule + run one tensor (python `Tensor.realize` path). Returns the
 /// tensor's realized base buffer (the held buffer the kernel wrote).
-pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> crate::engine::buffer::Buffer {
+pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> crate::runtime::buffer::Buffer {
     let sink = crate::tensor::sink(ctx, vec![tensor_uop]);
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
@@ -373,9 +371,9 @@ pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cach
     let dev = device(b.device());
     b.ensure_allocated(&dev);
     let o = b.get_buf(&dev);
-    let bytes = dev.copyout(&o);
+    let bytes = dev.copyout(&*o);
     let isz = b.dtype.itemsize();
     (0..b.size)
-        .map(|i| crate::codegen::interp::from_storage_scalar(&bytes[i * isz..(i + 1) * isz], b.dtype))
+        .map(|i| crate::runtime::interp::from_storage_scalar(&bytes[i * isz..(i + 1) * isz], b.dtype))
         .collect()
 }

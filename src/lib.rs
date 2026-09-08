@@ -1,8 +1,10 @@
 pub mod codegen;
 pub mod engine;
+pub mod renderer;
 pub mod dtype;
 pub mod helpers;
 
+pub mod runtime;
 pub mod schedule;
 pub mod tensor;
 pub mod uop;

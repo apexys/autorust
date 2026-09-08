@@ -1,4 +1,2 @@
-//! `engine/` — M6: native realize + device traits.
-pub mod buffer;
-pub mod device;
+//! `engine/` — M6/M8: native realize (schedule → kernels → launches).
 pub mod realize;

@@ -1,0 +1,11 @@
+//! `runtime/` — the device-facing half of the crate (`tinygrad/runtime/` +
+//! `device.py`): buffer/opaque seams, the `Compiled` device composed from
+//! public backend traits, and the built-in backends. A user backend is added
+//! by implementing `OpaqueT`, `BackendAllocator`, `Comp`, `Prog` and
+//! `UopRenderer` and calling `register_device` — nothing else.
+pub mod buffer;
+pub mod device;
+pub mod interp;
+pub mod ops_interp;
+#[cfg(feature = "backend_cl")]
+pub mod ops_cl;

@@ -10,7 +10,8 @@
 //! multisets from python; `TG_M5_STAGES` truncates this pipeline so the test
 //! compares stage-for-stage.
 
-use crate::codegen::postrange::{apply_opts, Renderer};
+use crate::codegen::postrange::apply_opts;
+use crate::renderer::Renderer;
 use crate::codegen::simplify::{pm_flatten_range, pm_reduce_unparented};
 use crate::uop::sym::{pm_clean_up_group_sink, pm_mop_cleanup, symbolic, symbolic_simple, sget};
 use crate::schedule::rangeify::pm_mops;
