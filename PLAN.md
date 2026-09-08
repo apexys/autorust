@@ -265,9 +265,23 @@ tests in `autorust/src`.
 - `create_linear_with_vars` now returns held_bufs (schedule/__init__.py:208: the
   top CALL's direct BUFFER args) and passes them to the memory planner — the M5
   oracle had planned tensor-facing buffers into arenas (numerics unaffected).
+- Reductions (M6 hardening): ported `expand_reduce` (the expander folds
+  UNROLL/UPCAST const-list axes into the reduce, bumping `arg[1]`),
+  `pm_reduce_local` (`fix_group_for_reduce` early-return, `reduce_ranges_to_acc`
+  REG-acc pattern, `expand_horizontal_reduce`, `merge_reduce_ends`), and the
+  two missing `apply_opt` semantics: `opt.arg == 0` means "full extent"
+  (`rng.vmax+1`), and shift_to's KernelOptError is caught (not fatal) in the
+  heuristic.
+- KEY FIX: `pm_mops`'s movement-on-INDEX pattern was inverted — python matches
+  `INDEX(MOVEMENT(...), idxs...)` (index-into-movement, `_mop_index`), not
+  `MOVEMENT(INDEX(...))`. Also `INDEX(src=(x,)) -> x` (single-src INDEX
+  identity) was a no-op in our devectorizer2. Both caught by the sum gate
+  (a (1,)-wrap RESHAPE survived into the linear and the interp crashed).
+- devectorize2 now = `mop_cleanup + pm_mops + devectorizer2` (python composite).
 - **Gate** `py/tests/test_native_exec.py`: end-to-end corpus (ew / mul / neg /
-  two-kernel chain) runs with Python fully out of the loop; numerics match
-  tinygrad; double-realize compiles exactly once (to_program + runtime caches).
+  sum / two-kernel chain / sum chain) runs with Python fully out of the loop;
+  numerics match tinygrad; double-realize compiles exactly once (to_program +
+  runtime caches).
 
 ### M7 — user kernels + the rest of the Tensor (stretch, still before/alongside M8)
 - **`@function` / `Tensor.custom_kernel`** (function.py, 105 LOC + `precompile` +
@@ -374,7 +388,7 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
       bodies key-equal vs Python incl. planned mode)
 - [x] M5 codegen + cstyle + interpreter (`ops_rust.py` descoped) — COMPLETE (opening block
       key-exact, see below)
-- [x] M6 native realize + device traits
+- [x] M6 native realize + device traits (incl. reductions)
 - [ ] M7 user kernels (`@function`/custom_kernel + flash attention), TinyJit, autograd, BEAM/TC activation
 - [ ] M8 OpenCL backend
 

@@ -10,7 +10,7 @@ use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::{group, Ops};
 use crate::uop::range::AxisType;
 use crate::uop::sint::SVal;
-use crate::uop::sym::{self, pm_mop_cleanup, symbolic, CtxVal};
+use crate::uop::sym::{self, pm_mop_cleanup, symbolic, r, sget, CtxVal};
 use crate::uop::upat::{graph_rewrite, r_cnt, r_ctx, r_la, substitute_extra, PatternMatcher, RuleFn, SrcPat, UPat};
 use crate::uop::UopId;
 
@@ -96,15 +96,16 @@ pub fn svals_to_args(sv: &[SVal]) -> Vec<Arg> {
 /// `pm_mops` (rangeify.py:50).
 pub fn pm_mops() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
-        // handle movement ops on INDEX
+        // handle movement ops on INDEX: INDEX(MOVEMENT(v, marg), idxs...)
+        // (python: `UPat(GroupOp.Movement, name="r").f(Ops.INDEX, allow_any_len=True, name="idx")`)
         (
-            UPat::op_var(group::MOVEMENT.to_vec())
-                .with_src_tup(vec![UPat::ops1(Ops::Index)])
-                .named("r")
-                .with_src_any_len(true),
-            r_ctx(|ctx, st| {
+            UPat::ops1(Ops::Index)
+                .with_src_tup(vec![UPat::op_var(group::MOVEMENT.to_vec()).named("r")])
+                .allow_all_srcs()
+                .named("idx"),
+            r(|ctx, st, _| {
+                let idx = sym::sget(st, "idx");
                 let r = sym::sget(st, "r");
-                let idx = ctx.srcs(r)[0];
                 mop_index(ctx, r, idx)
             }),
         ),

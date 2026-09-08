@@ -5,6 +5,7 @@ use crate::dtype::{self, ConstVal};
 use crate::uop::ops::{group, Ops};
 use crate::uop::sym::{r, sget, sget_opt, var, CtxVal};
 use crate::uop::sint::SVal;
+use crate::uop::range::AxisType;
 use crate::uop::upat::{PatternMatcher, RuleFn, Store, UPat, UPatOrConst};
 use crate::uop::{arg::Arg, ctx::UOpCtx, UopId};
 use std::collections::HashMap;
@@ -348,4 +349,284 @@ fn sval_to_constval(s: &SVal) -> ConstVal {
         SVal::I(i) => ConstVal::Int(*i),
         _ => panic!("TGERR: symbolic bound on substitute variable"),
     }
+}
+
+// **** pm_reduce_local (codegen/__init__.py:227-234, run in "remove reduces") ****
+
+/// `ReduceContext` — the acc placeholder slot counter (codegen/__init__.py:209).
+pub type ReduceCtx = std::rc::Rc<std::cell::Cell<i64>>;
+
+/// `UOp.placeholder(ProdArg, slot, AddrSpace.REG)` (ops.py:1138-1150): LOCAL/REG
+/// placeholders are Ops.BUFFER with a REG-addrspace ParamArg and no device.
+fn placeholder_reg(ctx: &mut UOpCtx, like: UopId, slot: i64) -> UopId {
+    let dt = ctx.dt_of(like);
+    let shape = ctx.shape(like).unwrap().unwrap_or_default();
+    let numel = crate::tensor::movement::prod_sval(ctx, &shape);
+    let arg = crate::uop::arg::ParamArg {
+        slot,
+        dtype: dt,
+        vmin_vmax: None,
+        multiple_of: None,
+        name: None,
+        addrspace: Some(dtype::AddrSpace::Reg),
+        axis: None,
+        device: None,
+        volatile: false,
+    };
+    let src = ctx.shape_arg(&[numel]);
+    ctx.uop(Ops::Buffer, None, vec![src], Arg::Param(arg))
+}
+
+/// `x.ended_ranges` (ops.py:481-488).
+fn ended_ranges_of(ctx: &UOpCtx, u: UopId, out: &mut Vec<UopId>) {
+    let op = ctx.op_of(u);
+    if op == Ops::End || op == Ops::Reduce || op == Ops::Stage {
+        out.extend(ctx.srcs(u)[1..].iter().copied());
+    } else if op == Ops::After {
+        for &s in &ctx.srcs(u)[1..] {
+            ended_ranges_of(ctx, s, out);
+        }
+    }
+}
+
+fn reduce_op_and_axes(ctx: &UOpCtx, r: UopId) -> (Ops, i64) {
+    match ctx.arg_of(r) {
+        Arg::Seq { tuple: true, items } => {
+            let op = match &items[0] {
+                Arg::Enum(e) => Ops::from_u16(e.value).unwrap_or_else(|| panic!("TGERR: bad reduce op")),
+                _ => panic!("TGERR: bad reduce arg"),
+            };
+            let n = match &items[1] {
+                Arg::Int(i) => *i,
+                _ => panic!("TGERR: bad reduce arg"),
+            };
+            (op, n)
+        }
+        _ => panic!("TGERR: bad reduce arg"),
+    }
+}
+
+/// `fix_group_for_reduce` (codegen/__init__.py:170-184) — corpus subset: GROUP
+/// (LOCAL shared-memory) reduces are not exercised; only the early-return path.
+pub fn fix_group_for_reduce(ctx: &UOpCtx, x: UopId) -> Option<UopId> {
+    let has_gfr = ctx.srcs(x)[1..].iter().any(|&u| ctx.op_of(u) == Ops::Range && AxisType::range_axis_type(ctx, u) == AxisType::GroupReduce);
+    if has_gfr {
+        panic!("TGERR: GROUP_REDUCE reduces are not supported in the M6 corpus");
+    }
+    None
+}
+
+/// `reduce_ranges_to_acc` (codegen/__init__.py:210-222).
+pub fn reduce_ranges_to_acc(ctx: &mut UOpCtx, r: UopId, acc_num: &std::cell::Cell<i64>) -> Option<UopId> {
+    let (_op, _dt, srcs, arg, _tag) = ctx.snapshot(r);
+    if srcs.len() < 2 {
+        return None; // pattern requires input + at least one range
+    }
+    let (rop, _nax) = reduce_op_and_axes(ctx, r);
+    let acc = placeholder_reg(ctx, r, acc_num.get());
+    acc_num.set(acc_num.get() + 1);
+    let topo = ctx.toposort(srcs[0]).to_vec();
+    let mut ended: Vec<UopId> = Vec::new();
+    for &x in &topo {
+        ended_ranges_of(ctx, x, &mut ended);
+    }
+    let input_ranges: Vec<UopId> = topo
+        .iter()
+        .copied()
+        .filter(|&x| ctx.op_of(x) == Ops::Range && !srcs[1..].contains(&x) && !ended.contains(&x))
+        .collect();
+    // acc_init = acc.after(*input_ranges).store(identity_element(r.arg[0], r.dtype))
+    let ident = ctx.identity_element(rop, ctx.dt_of(r));
+    let acc_in = crate::tensor::after(ctx, acc, input_ranges.clone());
+    let init_store = crate::tensor::store(ctx, acc_in, ident, None);
+    // acc_initted = acc.after(acc_init, *r.src[1:])
+    let acc_initted = crate::tensor::after(ctx, acc, [vec![init_store], srcs[1..].to_vec()].concat());
+    // inp = r.src[0].reduce(arg=r.arg) if r.arg[1] else r.src[0]
+    let nax = match &arg {
+        Arg::Seq { tuple: true, items } => match &items[1] {
+            Arg::Int(i) => *i,
+            _ => 0,
+        },
+        _ => 0,
+    };
+    let inp = if nax > 0 {
+        ctx.uop(Ops::Reduce, Some(ctx.dt_of(srcs[0])), vec![srcs[0]], arg.clone())
+    } else {
+        srcs[0]
+    };
+    // acc_out = acc_initted.store(acc_initted.alu(r.arg[0], inp)).end(*r.src[1:]).rtag("mergeable")
+    let acc_val = ctx.uop(rop, Some(ctx.dt_of(acc_initted)), vec![acc_initted, inp], Arg::None);
+    let store_out = crate::tensor::store(ctx, acc_initted, acc_val, None);
+    let acc_out = ctx.uop_tag(Ops::End, None, [vec![store_out], srcs[1..].to_vec()].concat(), Arg::None, Arg::Str("mergeable".into()));
+    // return acc.after(acc_out)
+    Some(crate::tensor::after(ctx, acc, vec![acc_out]))
+}
+
+/// `expand_horizontal_reduce` (codegen/__init__.py:216-221) — REDUCE with a
+/// single src: index over the leading arg[1] axes and chain the alu.
+pub fn expand_horizontal_reduce(ctx: &mut UOpCtx, r: UopId) -> Option<UopId> {
+    let (_op, _dt, srcs, arg, _tag) = ctx.snapshot(r);
+    if srcs.len() != 1 {
+        return None;
+    }
+    let inp = srcs[0];
+    let (rop, nax) = reduce_op_and_axes(ctx, r);
+    let shape = ctx.shape(inp).unwrap_or_else(|_| panic!("TGERR: no shape on horizontal reduce input"));
+    let shape: &Vec<SVal> = &shape.clone().unwrap_or_default();
+    let dims: Vec<i64> = (0..nax as usize)
+        .map(|a| match shape.get(a) {
+            Some(SVal::I(n)) => *n as i64,
+            _ => panic!("TGERR: horizontal reduce on symbolic axis"),
+        })
+        .collect();
+    let dt = ctx.dt_of(r);
+    let mut vals: Vec<UopId> = Vec::new();
+    let mut ctr = vec![0i64; dims.len()];
+    loop {
+        let idxs: Vec<UopId> = ctr
+            .iter()
+            .map(|&i| ctx.const_py(ConstVal::Int(i as i128), Some(dtype::WEAKINT)))
+            .collect();
+        let mut srcs2 = vec![inp];
+        srcs2.extend(idxs);
+        vals.push(ctx.uop(Ops::Index, Some(dt), srcs2, Arg::None));
+        // next product element (row-major)
+        let mut i = dims.len();
+        loop {
+            if i == 0 {
+                i = usize::MAX;
+                break;
+            }
+            i -= 1;
+            ctr[i] += 1;
+            if ctr[i] < dims[i] {
+                break;
+            }
+            ctr[i] = 0;
+        }
+        if i == usize::MAX {
+            break;
+        }
+    }
+    let mut ret = vals[0];
+    for &v in &vals[1..] {
+        ret = ctx.uop(rop, Some(dt), vec![ret, v], Arg::None);
+    }
+    Some(ret)
+}
+
+/// `merge_reduce_ends` (codegen/__init__.py:190-208) — merge ENDs that share
+/// the same range list and were tagged "mergeable".
+pub fn merge_reduce_ends(ctx: &mut UOpCtx, sink: UopId) -> Option<UopId> {
+    // range_to_ends: key = the END's range srcs (srcs[1..]), value = ends
+    let mut range_to_ends: HashMap<Vec<UopId>, Vec<UopId>> = HashMap::new();
+    for &u in ctx.toposort(sink).iter() {
+        if ctx.op_of(u) == Ops::End && matches!(ctx.tag_of(u), Arg::Str(s) if s == "mergeable") {
+            range_to_ends.entry(ctx.srcs(u)[1..].to_vec()).or_default().push(u);
+        }
+    }
+    let next_axis_start = ctx
+        .toposort(sink)
+        .iter()
+        .filter(|&&u| ctx.op_of(u) == Ops::Range)
+        .filter_map(|&u| match ctx.arg_of(u) {
+            Arg::Seq { tuple: true, items } => match &items[0] {
+                Arg::Int(i) => Some(*i),
+                _ => None,
+            },
+            _ => None,
+        })
+        .max()
+        .unwrap_or(-1)
+        + 1;
+    let mut subs: Vec<(UopId, UopId)> = Vec::new();
+    let mut next_axis = next_axis_start;
+    for (r, ends) in range_to_ends.iter() {
+        if ends.len() <= 1 {
+            continue;
+        }
+        // group by the END's e.ranges (the ranges of e.src[0])
+        let mut by_ctx: Vec<(Vec<UopId>, Vec<UopId>)> = Vec::new(); // (sorted ranges, ends)
+        for &e in ends {
+            let mut rs: Vec<UopId> = ctx.ranges(ctx.srcs(e)[0]).to_vec();
+            rs.sort_unstable();
+            match by_ctx.iter_mut().find(|(k, _)| *k == rs) {
+                Some((_, v)) => v.push(e),
+                None => by_ctx.push((rs, vec![e])),
+            }
+        }
+        for (i, (_, group)) in by_ctx.into_iter().enumerate() {
+            let tr: Vec<UopId> = if i == 0 {
+                r.clone()
+            } else {
+                let renamed: Vec<UopId> = r
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &rr)| {
+                        let (_op, dt, srcs, arg, _tag) = ctx.snapshot(rr);
+                        let Arg::Seq { tuple: true, items } = &arg else { panic!("TGERR: bad range") };
+                        let items2 = vec![Arg::Int(next_axis + j as i64), items[1].clone()];
+                        ctx.uop(Ops::Range, Some(dt), srcs.to_vec(), Arg::Seq { tuple: true, items: items2 })
+                    })
+                    .collect();
+                next_axis += r.len() as i64;
+                renamed
+            };
+            // mapped = e.substitute(dict(zip(r, tr))) when i > 0
+            let mapped: Vec<UopId> = group
+                .iter()
+                .map(|&e| {
+                    if i > 0 {
+                        let m: HashMap<UopId, UopId> = r.iter().copied().zip(tr.iter().copied()).collect();
+                        crate::uop::upat::substitute(ctx, e, m, false, false)
+                    } else {
+                        e
+                    }
+                })
+                .collect();
+            let merged = if mapped.len() == 1 {
+                mapped[0]
+            } else {
+                let g = ctx.uop(Ops::Group, None, mapped, Arg::None);
+                ctx.uop_tag(Ops::End, None, [vec![g], tr.clone()].concat(), Arg::None, Arg::Str("mergeable".into()))
+            };
+            for &e in &group {
+                subs.push((e, merged));
+            }
+        }
+    }
+    if subs.is_empty() {
+        return None;
+    }
+    let m: HashMap<UopId, UopId> = subs.into_iter().collect();
+    Some(crate::uop::upat::substitute(ctx, sink, m, false, false))
+}
+
+/// `pm_reduce_local` (codegen/__init__.py:227-234): fix groups, build acc
+/// patterns for parented reduces, expand horizontal reduces, merge ENDs.
+pub fn pm_reduce_local() -> PatternMatcher {
+    PatternMatcher::new(vec![
+        (
+            UPat::ops1(Ops::Reduce).named("x"),
+            Arc::new(move |ctx: &mut UOpCtx, st: &Store, _: &CtxVal| fix_group_for_reduce(ctx, sget(st, "x"))),
+        ),
+        (
+            UPat::ops1(Ops::Reduce)
+                .with_src_tup(vec![UPat::any(vec![]), UPat::any(vec![])])
+                .allow_all_srcs()
+                .named("r"),
+            crate::uop::upat::r_cnt(|c: &std::cell::Cell<i64>, ctx: &mut UOpCtx, st: &Store| {
+                reduce_ranges_to_acc(ctx, sget(st, "r"), c)
+            }),
+        ),
+        (
+            UPat::ops1(Ops::Reduce).named("r"),
+            Arc::new(move |ctx: &mut UOpCtx, st: &Store, _: &CtxVal| expand_horizontal_reduce(ctx, sget(st, "r"))),
+        ),
+        (
+            UPat::ops1(Ops::Sink).named("sink"),
+            Arc::new(move |ctx: &mut UOpCtx, st: &Store, _: &CtxVal| merge_reduce_ends(ctx, sget(st, "sink"))),
+        ),
+    ])
+    .add(crate::uop::sym::pm_clean_up_group_sink())
 }

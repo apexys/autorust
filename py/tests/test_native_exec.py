@@ -37,6 +37,8 @@ def py_exec(prog):
             tensors.append(tensors[st["x"]] * st["val"])
         elif op == "neg":
             tensors.append(-tensors[st["x"]])
+        elif op == "sum":
+            tensors.append(tensors[st["x"]].sum(axis=tuple(st["axis"]) if st.get("axis") else None))
         else:
             raise AssertionError(f"unknown op {op}")
     return tensors[-1].tolist()
@@ -50,9 +52,12 @@ class TestNativeExec(unittest.TestCase):
             self.assertEqual(rs["compiles"], 1, "double realize recompiled")
             py = py_exec(prog)
             r = rs["outs"][-1]
-            self.assertEqual(len(r), len(py), "output sizes differ")
-            for a, b in zip(r, py):
-                self.assertAlmostEqual(a, b, places=5, msg=f"{name}: {r} vs {py}")
+            if isinstance(py, list):
+                self.assertEqual(len(r), len(py), "output sizes differ")
+                for a, b in zip(r, py):
+                    self.assertAlmostEqual(a, b, places=5, msg=f"{name}: {r} vs {py}")
+            else:
+                self.assertAlmostEqual(r[0], py, places=5, msg=f"{name}: {r} vs {py}")
 
     def test_ew_kernel(self):
         self.native_equality("ew kernel", [
@@ -70,6 +75,20 @@ class TestNativeExec(unittest.TestCase):
         self.native_equality("neg kernel", [
             {"op": "from_slice", "data": [-1.0, -2.5, 3.0], "kind": "f32", "dtype": None},
             {"op": "neg", "x": 0},
+        ])
+
+    def test_sum_kernel(self):
+        self.native_equality("sum kernel", [
+            {"op": "from_slice", "data": [1.0, 2.0, 3.0, 4.0], "kind": "f32", "dtype": None},
+            {"op": "sum", "x": 0, "axis": [0]},
+        ])
+
+    def test_sum_chain(self):
+        self.native_equality("sum chain", [
+            {"op": "from_slice", "data": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "kind": "f32", "dtype": None},
+            {"op": "mulc", "x": 0, "val": 2.0},
+            {"op": "sum", "x": 1, "axis": [0]},
+            {"op": "addc", "x": 2, "val": 1.0},
         ])
 
     def test_two_kernel_chain(self):

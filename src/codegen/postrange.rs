@@ -353,9 +353,11 @@ impl<'a> Scheduler<'a> {
             }
         };
         let rng = self.rngs(ctx)[real_axis];
+        // python: `amt = int(rng.vmax+1) if opt.arg == 0 else opt.arg` — a
+        // literal 0 arg means "the full extent", never an actual zero divisor.
         let amt = match arg {
+            Some(0) | None => self.rng_vmax(ctx, rng) + 1,
             Some(a) => a,
-            None => self.rng_vmax(ctx, rng) + 1, // arg == 0
         };
         match op {
             OptOp::Unroll => {

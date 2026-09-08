@@ -13,6 +13,7 @@
 use crate::codegen::postrange::{apply_opts, Renderer};
 use crate::codegen::simplify::{pm_flatten_range, pm_reduce_unparented};
 use crate::uop::sym::{pm_clean_up_group_sink, pm_mop_cleanup, symbolic, symbolic_simple, sget};
+use crate::schedule::rangeify::pm_mops;
 use crate::dtype;
 use crate::uop::range::AxisType;
 use crate::uop::sym::r;
@@ -56,11 +57,11 @@ fn post_stages() -> Vec<Stage> {
     vec![
         Stage { name: "postopt symbolic", pm: symbolic().add(&pm_flatten_range()).add(&pm_reduce_unparented()), bottom_up: false },
         Stage { name: "expander", pm: expander_pm(), bottom_up: false },
-        Stage { name: "remove reduces", pm: PatternMatcher::new(vec![]).add(&pm_mop_cleanup()), bottom_up: false },
+        Stage { name: "remove reduces", pm: PatternMatcher::new(vec![]).add(&pm_mop_cleanup()).add(&crate::codegen::simplify::pm_reduce_local()), bottom_up: false },
         Stage { name: "add local buffers", pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()), bottom_up: true },
         Stage { name: "add gpudims", pm: crate::codegen::gpudims::pm_add_gpudims(), bottom_up: false },
         Stage { name: "*** expand broadcast / add loads", pm: symbolic_simple().add(&pm_expand_broadcast()).add(&pm_add_loads()), bottom_up: false },
-        Stage { name: "devectorize2", pm: devectorizer2(), bottom_up: false },
+        Stage { name: "devectorize2", pm: devectorizer2().add(&pm_mop_cleanup()).add(&pm_mops()), bottom_up: false },
         Stage { name: "early symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()).add(&pm_clean_up_group_sink()), bottom_up: false },
         Stage { name: "add images", pm: PatternMatcher::new(vec![]), bottom_up: true },
         Stage { name: "extra symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
@@ -213,7 +214,8 @@ fn cartesian(lists: &[Vec<UopId>]) -> Vec<Vec<UopId>> {
     ret
 }
 
-/// `devectorizer2` (codegen/__init__.py:139) — corpus subset (no WMMA).
+/// `devectorizer2` (codegen/__init__.py:139) — mop_cleanup+pm_mops+rules
+/// (no WMMA in corpus).
 fn devectorizer2() -> PatternMatcher {
     let targets: Vec<crate::uop::Ops> = group::ELEMENTWISE
         .iter()
@@ -226,8 +228,13 @@ fn devectorizer2() -> PatternMatcher {
             UPat::op_var(targets).named("b"),
             r(|ctx, st, _| do_devectorize(ctx, sget(st, "b"))),
         ),
-        // INDEX without src is nothing
-        (UPat::ops1(crate::uop::Ops::Index).named("x"), r(|_ctx, _st, _| None)),
+        // INDEX with a single src is nothing (python: `INDEX(src=(x,)) -> x`)
+        (
+            UPat::ops1(crate::uop::Ops::Index)
+                .with_src_tup(vec![UPat::var(None, None)])
+                .named("x"),
+            r(|ctx, st, _| Some(ctx.srcs(sget(st, "x"))[0])),
+        ),
         // stacked INDEX is many INDEX
         (
             UPat::ops1(crate::uop::Ops::Index)
@@ -341,7 +348,14 @@ fn expander_pm() -> PatternMatcher {
 fn expander_pm_with(ctx: &mut Ctx2, sink: UopId) -> (PatternMatcher, HashMap<i64, usize>) {
     let range_map = build_range_map(ctx, sink);
     let rm = range_map.clone();
-    let pm = PatternMatcher::new(vec![(
+    let pm = PatternMatcher::new(vec![
+        (
+            // `expand_reduce` (codegen/__init__.py:49): fold non-range srcs'
+            // shape>1 axes into the reduce as leading axes.
+            UPat::ops1(crate::uop::Ops::Reduce).named("r"),
+            r(|ctx: &mut Ctx2, st, _| expand_reduce(ctx, sget(st, "r"))),
+        ),
+        (
         UPat::ops1(crate::uop::Ops::Range).named("r"),
         r(move |ctx: &mut Ctx2, st, _| {
             let r = sget(st, "r");
@@ -367,6 +381,57 @@ fn expander_pm_with(ctx: &mut Ctx2, sink: UopId) -> (PatternMatcher, HashMap<i64
     .add(&pm_flatten_range())
     .add(&pm_mop_cleanup());
     (pm, range_map)
+}
+
+/// `expand_reduce` (codegen/__init__.py:49-64).
+fn expand_reduce(ctx: &mut Ctx2, r: UopId) -> Option<UopId> {
+    let (_op, dt, srcs, arg, _tag) = ctx.snapshot(r);
+    let s0 = srcs[0];
+    let mut range_srcs: Vec<UopId> = Vec::new();
+    let mut new_axes: Vec<usize> = Vec::new();
+    for &u in &srcs[1..] {
+        if ctx.op_of(u) == crate::uop::Ops::Range {
+            range_srcs.push(u);
+        } else if let Ok(shape) = ctx.shape(u) {
+            for (i, s) in shape.unwrap_or_default().iter().enumerate() {
+                if !matches!(s, crate::uop::sint::SVal::I(1)) {
+                    new_axes.push(i);
+                }
+            }
+        }
+    }
+    if new_axes.is_empty() {
+        return None;
+    }
+    // assert r.arg[1] == 0 and keep items[0] (the reduce op)
+    let red_op: Arg = match &arg {
+        Arg::Seq { tuple: true, items } => {
+            match &items[1] {
+                Arg::Int(0) => {}
+                other => panic!("TGERR: expand_reduce expects arg[1] == 0, got {other:?}"),
+            }
+            items[0].clone()
+        }
+        other => panic!("TGERR: expand_reduce bad arg {other:?}"),
+    };
+    let s0_shape: Vec<crate::uop::sint::SVal> = ctx.shape(s0).unwrap().unwrap_or_default().as_ref().clone();
+    let perm: Vec<usize> = new_axes
+        .iter()
+        .copied()
+        .chain((0..s0_shape.len()).filter(|i| !new_axes.contains(i)))
+        .collect();
+    let permuted = crate::tensor::movement::permute_internal(ctx, s0, &perm);
+    let red_arg = Arg::Seq {
+        tuple: true,
+        items: vec![red_op, Arg::Int(new_axes.len() as i64)],
+    };
+    let red = ctx.uop(crate::uop::Ops::Reduce, Some(dt), [vec![permuted], range_srcs].concat(), red_arg);
+    let out_shape: Vec<crate::uop::sint::SVal> = s0_shape
+        .iter()
+        .enumerate()
+        .map(|(i, s)| if new_axes.contains(&i) { crate::uop::sint::SVal::I(1) } else { *s })
+        .collect();
+    Some(crate::tensor::movement::reshape_internal(ctx, red, &out_shape))
 }
 
 /// `expand_broadcast` (codegen/__init__.py:97).
@@ -484,6 +549,9 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         cur = if st.name == "expander" {
             let (pm, _rm) = expander_pm_with(ctx, cur);
             graph_rewrite(ctx, cur, &pm, st.bottom_up, None, false, false, CtxVal::None)
+                .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
+        } else if st.name == "remove reduces" {
+            graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, CtxVal::Cnt(std::rc::Rc::new(std::cell::Cell::new(0i64))))
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "add images" {
             add_images(ctx, cur)
