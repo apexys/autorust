@@ -309,20 +309,31 @@ tests in `autorust/src`.
   the std-only `fetch`/`from_url` shim (plain HTTP + inflate) so the MNIST gate
   self-downloads; https-only sources remain user-supplied.
 
-### M8 — first additional backend: OpenCL (next session, the reason for M5/M6 shape)
-Everything M5/M6 set up is consumed here; no engine changes expected.
-- `OclRenderer` = cstyle with OpenCL C flavor (compare against
-  `tinygrad/renderer/cstyle.py` OpenCL render of identical linearized uops — byte-diff
-  is the conformance test, exactly like the interpreter-vs-CPU differential).
-- `OclCompiler` via `cl-sys`/`opencl3` (clCreateBuffer, clBuildProgram, enqueueNDRange,
-  synchronize on event), `OclAllocator` + host copyin/copyout, `OclProgram` impl of the
-  `Program` trait, `synchronize()`.
-- `supported_dtypes` per device query (fp16 via `cl_khr_fp16` optional); corpus runs with
-  `DEV=OCL` vs `DEV=CPU` numerics (`allclose`) and kernel-count parity vs tinygrad's own
-  `DEV=OCL` on the same graphs.
-- Explicitly out of scope still: images, multi-device. (Tensor cores and BEAM activate in
-  M7 and are backend-independent; the OCL renderer just declares `tensor_cores` when its
-  device supports them.)
+### M8 — first additional backend: OpenCL — DONE (backend_cl feature, opencl3)
+The restructure (`runtime/` + `renderer/` with public backend seams) landed first:
+`OpaqueT`/`BackendAllocator`/`Comp`/`Prog`/`UopRenderer` traits + `register_device` —
+a user backend is built from those alone (the interp backend registers through the same
+path; "CL" likewise). Device alias INTERP ("CPU" kept); unknown names fall back to
+interp stubs (M6 semantics).
+- `renderer/cstyle.rs` parameterized: `CStyleLang` config struct (buffer/smem prefixes,
+  barrier, code_for_workitem, type_map, float4_style, infinity/nan, gep threshold,
+  vector_defines flag) — clang flavor byte-exact as before, opencl flavor added.
+  `render_access` uses the bidx's derived addrspace (python's `u.addrspace`); SPECIAL
+  renders `get_*_id(dim); /* expr */` via the `uop/render.py` expr port (`renderer/expr.rs`).
+- `runtime/ops_cl.rs`: CLDevice = CLCompiler (source→CL binary via clBuildProgram) +
+  CLAllocator (clCreateBuffer under the LRU; blocking copyin; `_offset` panics like
+  python's CL) + CLProgram (binary→clCreateKernel, local_size scales global_size,
+  event profiling on wait). Composition quirk mirrored from tinygrad: the device's
+  compiler seam is the EMPTY compiler (elf lib = rendered source; NVIDIA CL binaries
+  round-trip through the source text), and the real CL compile runs inside CLProgram.
+- Gates (test_ocl_diff.py, RTX 3060 / driver 580.173.02): OpenCL render byte-diff vs
+  tinygrad `OpenCLRenderer` (4/4 byte-exact incl. LOCAL/SPECIAL kernels), native CL
+  numerics vs tinygrad DEV=CL (4/4 allclose), kernel-count parity (4/4).
+- Not ported (future work): images, multi-device, extra_matcher (bf16/fp8 float-intermediate
+  patterns — corpus is fp32-only; code_for_op-driven decomp parameterization for
+  transcendental/fdiv parity across flavors), non-blocking copyin (python retains
+  pending_copyin; we block), REAL binaries on non-NVIDIA CL drivers (tinygrad shares the
+  source-text round-trip limitation).
 
 ## 4. What we deliberately leave out (and what breaks because of it)
 
@@ -402,7 +413,7 @@ Everything M5/M6 set up is consumed here; no engine changes expected.
       key-exact, see below)
 - [x] M6 native realize + device traits (incl. reductions)
 - [ ] M7 user kernels (`@function`/custom_kernel + flash attention), TinyJit, autograd, BEAM/TC activation
-- [ ] M8 OpenCL backend
+- [x] M8 OpenCL backend (render byte-diff + DEV=CL numerics + kernel-count parity on the RTX 3060)
 
 ### M5 in-progress state (committed)
 - `src/codegen/pipeline.rs`: `full_rewrite_to_sink` opening block ("early movement ops"

@@ -6,8 +6,16 @@ edition = "2024"
 [lib]
 crate-type = ["lib", "cdylib"]
 
+[[bin]]
+name = "ocl_smoke"
+required-features = ["backend_cl"]
+
+[features]
+backend_cl = ["dep:opencl3"]
+
 [dependencies]
 nanoserde = "0.2.1"
+opencl3 = { version = "0.9", optional = true }
 
 [profile.dev]
 opt-level = 1

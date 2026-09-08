@@ -21,34 +21,101 @@ struct Info {
     derived: Option<AddrSpace>,
     numel: i64,
     shape: Vec<i64>,
+    volatile: bool,
 }
 
-struct CStyleLang {
+/// `CStyleLanguage` (renderer/cstyle.py:117) — the language options a C-style
+/// backend tweaks. A new C-style backend is a `CStyleLang` literal + facts.
+pub struct CStyleLang {
+    buffer_prefix: &'static str,
     buffer_suffix: &'static str,
     var_prefix: &'static str,
     var_suffix: &'static str,
+    smem_align: &'static str,
+    smem_prefix: &'static str,
+    smem_prefix_for_cast: bool,
     kernel_typedef: &'static str,
     gep_arr_threshold: i64,
+    barrier: &'static str,
+    infinity: &'static str,
+    nan: &'static str,
+    /// `type_map` — dtype name overrides (OpenCL C names).
+    type_map: &'static [(DTypeId, &'static str)],
+    /// `code_for_workitem` — (kind, fn name) for SPECIAL g/l/i.
+    workitem: Option<(&'static str, &'static str, &'static str)>,
+    /// ClangRenderer-only vector typedef defines block.
+    vector_defines: bool,
+    /// `float4_style` — Stack literal delimiters.
+    float4_style: (&'static str, &'static str),
 }
 
 impl CStyleLang {
     /// `ClangRenderer` language options.
-    fn clang() -> CStyleLang {
+    pub fn clang() -> CStyleLang {
         CStyleLang {
+            buffer_prefix: "",
             buffer_suffix: " restrict",
             var_prefix: "const ",
             var_suffix: "",
-            kernel_typedef: "void",
+            smem_align: "",
+            smem_prefix: "",
+            smem_prefix_for_cast: true,
             gep_arr_threshold: 0,
+            barrier: "",
+            infinity: "__builtin_inff()",
+            nan: "__builtin_nanf(\"\")",
+            type_map: &[(dtype::BOOL, "_Bool"), (dtype::FLOAT16, "__fp16")],
+            workitem: None,
+            vector_defines: true,
+            kernel_typedef: "void",
+            float4_style: ("{", "}"),
         }
     }
 
-    /// `_render_dtype`.
+    /// `OpenCLRenderer` language options (cstyle.py:308).
+    pub fn opencl() -> CStyleLang {
+        CStyleLang {
+            buffer_prefix: "__global ",
+            buffer_suffix: "",
+            var_prefix: "const ",
+            var_suffix: "",
+            smem_align: "__attribute__ ((aligned (16))) ",
+            smem_prefix: "__local ",
+            smem_prefix_for_cast: true,
+            gep_arr_threshold: 4,
+            barrier: "barrier(CLK_LOCAL_MEM_FENCE);",
+            infinity: "INFINITY",
+            nan: "NAN",
+            type_map: &[
+                (dtype::INT8, "char"),
+                (dtype::UINT8, "uchar"),
+                (dtype::UINT32, "uint"),
+                (dtype::UINT16, "ushort"),
+                (dtype::UINT64, "ulong"),
+                (dtype::BFLOAT16, "ushort"),
+            ],
+            workitem: Some(("get_group_id", "get_local_id", "get_global_id")),
+            vector_defines: false,
+            kernel_typedef: "__kernel void",
+            float4_style: ("(", ")"),
+        }
+    }
+
+    /// `_render_dtype` — type_map lookup (space-normalized), prefix/suffix by
+    /// addrspace, vector size suffix.
     fn render_dtype(&self, dt: DTypeId, sz: i64, addrspace: Option<AddrSpace>, override_ptr: bool) -> String {
         let as_ = addrspace.unwrap_or(AddrSpace::Alu);
-        let prefix = String::new(); // buffer_prefix/smem_prefix: "" for clang corpus
+        let mut prefix = String::new();
+        if matches!(as_, AddrSpace::Local | AddrSpace::Global) {
+            if as_ == AddrSpace::Local && self.smem_prefix_for_cast {
+                prefix = self.smem_prefix.to_string();
+            }
+            if as_ == AddrSpace::Global {
+                prefix = self.buffer_prefix.to_string();
+            }
+        }
         let suffix = if matches!(as_, AddrSpace::Local | AddrSpace::Global) || override_ptr { "*" } else { "" };
-        let base = base_type_name(dt);
+        let base = self.type_name(dt);
         if sz > 1 {
             format!("{prefix}{base}{sz}{suffix}")
         } else {
@@ -56,16 +123,29 @@ impl CStyleLang {
         }
     }
 
+    /// `type_map.get(dtype, dtype.name).replace(" ", "_")`.
+    fn type_name(&self, dt: DTypeId) -> String {
+        for (d, name) in self.type_map {
+            if *d == dt {
+                return name.to_string();
+            }
+        }
+        dt.name().replace(' ', "_")
+    }
+
     fn render_type(&self, i: &Info) -> String {
         self.render_dtype(i.dt, i.numel, i.addrspace, false)
     }
 
     /// `render_access` — u = the INDEX/SHRINK bidx, src[0] = the buffer.
+    /// (python uses `u.addrspace` on the bidx — our pipeline carries that in
+    /// the derived addrspace, so fall through to it.)
     fn render_access(&self, info: &HashMap<UopId, Info>, id: UopId, bidx: &str) -> String {
         let i = &info[&id];
         let src_dt = info[&i.srcs[0]].dt;
+        let as_ = i.addrspace.or(i.derived);
         if i.numel > 1 || i.dt != src_dt {
-            format!("*(({})({}))", self.render_dtype(i.dt, i.numel, i.addrspace, true), bidx)
+            format!("*(({})({}))", self.render_dtype(i.dt, i.numel, as_, true), bidx)
         } else {
             format!("*{bidx}")
         }
@@ -161,7 +241,15 @@ fn range_str(arg: &Arg) -> String {
 
 /// `ClangRenderer.render(lst)`.
 pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
-    let lang = CStyleLang::clang();
+    render_cstyle(ctx, lst, &CStyleLang::clang())
+}
+
+/// `OpenCLRenderer.render(lst)`.
+pub fn render_opencl(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
+    render_cstyle(ctx, lst, &CStyleLang::opencl())
+}
+
+fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     // snapshot facts
     let mut info: HashMap<UopId, Info> = HashMap::new();
     for &u in lst {
@@ -176,7 +264,11 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
             }
             _ => (1, vec![]),
         };
-        info.insert(u, Info { op, dt: ctx.dt_of(u), srcs, addrspace, derived, numel, shape });
+        let volatile = match ctx.arg_of(u) {
+            Arg::Param(p) => p.volatile,
+            _ => false,
+        };
+        info.insert(u, Info { op, dt: ctx.dt_of(u), srcs, addrspace, derived, numel, shape, volatile });
     }
     let mut child_count: HashMap<UopId, usize> = HashMap::new();
     for &u in lst {
@@ -248,8 +340,12 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
         let prefix: Option<&'static str>;
         match i.op {
             Ops::Special => {
-                let arg = ctx.arg_of(u);
-                r.insert(u, format!("{arg:?}"));
+                // r[u] = u.arg (the plain string, e.g. "lidx0")
+                let nm = match ctx.arg_of(u) {
+                    Arg::Str(s) => s.clone(),
+                    other => panic!("TGERR: cstyle SPECIAL arg {other:?}"),
+                };
+                r.insert(u, nm);
                 prefix = None;
             }
             Ops::Range => {
@@ -305,13 +401,13 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
             }
             Ops::If => format!("if ({}) {{", g(&r, &i.srcs[0])),
             Ops::Endif => "}".to_string(),
-            Ops::Barrier => String::new(),
+            Ops::Barrier => lang.barrier.to_string(),
             Ops::Cast => {
                 let src0 = &info[&i.srcs[0]];
                 if i.numel > 1 && i.addrspace == Some(AddrSpace::Reg) {
                     format!("__builtin_convertvector({}, {})", g(&r, &i.srcs[0]), lang.render_type(&i))
                 } else if src0.op == Ops::Const {
-                    const_text(ctx, i.dt, i.srcs[0])
+                    const_text(ctx, i.dt, i.srcs[0], lang)
                 } else {
                     format!("({})({})", lang.render_type(&i), g(&r, &i.srcs[0]))
                 }
@@ -324,15 +420,21 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
                 }
             }
             Ops::Special => {
-                // code_for_workitem: corpus-absent (clang keeps ranges); approximate
-                let dim = match ctx.arg_of(u) {
-                    Arg::Seq { tuple: _, items } => match items.last() {
-                        Some(Arg::Const(ConstVal::Int(v))) => *v as usize,
-                        _ => 0,
-                    },
-                    _ => 0,
+                // code_for_workitem[arg[0]](arg[-1]) + "; /* {src[0].render()} */"
+                let (gfn, lfn, ifn) = lang.workitem.expect("TGERR: cstyle SPECIAL without code_for_workitem");
+                let arg = ctx.arg_of(u).clone();
+                let (kind, dim) = match &arg {
+                    Arg::Str(s) => (s.as_bytes()[0], s[s.len() - 1..].parse::<usize>().unwrap_or(0)),
+                    other => panic!("TGERR: cstyle SPECIAL arg {other:?}"),
                 };
-                format!("get_local_id({dim}); /* */")
+                let f = match kind {
+                    b'g' => gfn,
+                    b'l' => lfn,
+                    _ => ifn,
+                };
+                // the extent comment: src[0].render() (expr, simplified)
+                let ext = crate::renderer::expr::expr_render(ctx, i.srcs[0]);
+                format!("{f}({dim}); /* {ext} */")
             }
             Ops::Index | Ops::Shrink => {
                 let buf = &info[&i.srcs[0]];
@@ -363,7 +465,8 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
                 let sty = lang.render_type(&i);
                 let float4 = "(float4)".replace("float4", &sty);
                 let inner: Vec<String> = i.srcs.iter().map(|s| g(&r, s)).collect();
-                format!("{float4}{{{}}}", inner.join(","))
+                let (open, close) = lang.float4_style;
+                format!("{float4}{open}{}{close}", inner.join(","))
             }
             Ops::Load => {
                 if i.srcs.len() >= 3 {
@@ -384,6 +487,15 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
             Ops::Wmma => {
                 let nm = wmma_name(ctx, u);
                 format!("__{}({}, {}, {})", nm, g(&r, &i.srcs[0]), g(&r, &i.srcs[1]), g(&r, &i.srcs[2]))
+            }
+            Ops::Buffer => {
+                // render_buffer: the (local) storage declaration
+                let prefix = if i.addrspace == Some(AddrSpace::Local) {
+                    format!("{}{}", lang.smem_align, lang.smem_prefix)
+                } else {
+                    String::new()
+                };
+                format!("{prefix}{} {}[{}];", lang.render_dtype(i.dt, 1, i.addrspace, false), r[&u], i.numel)
             }
             _ if group::in_(group::ALU, i.op) => {
                 let args: Vec<String> = i
@@ -420,7 +532,8 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
             r.insert(u, l);
         } else {
             let full = if !matches!(i.op, Ops::Range | Ops::Store | Ops::Buffer) && i.dt != dtype::VOID {
-                format!("{} {} = {};", lang.render_type(&i), r[&u], l)
+                let semi = if i.op == Ops::Special { "" } else { ";" };
+                format!("{} {} = {}{semi}", lang.render_type(&i), r[&u], l)
             } else {
                 l
             };
@@ -437,23 +550,25 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
 
     // defines: vector typedefs for (dtype, numel>1) uops with raw addrspace ALU/None
     let mut seen_dts: Vec<(DTypeId, i64)> = Vec::new();
-    for &u in lst {
-        let i = &info[&u];
-        if matches!(i.addrspace, None | Some(AddrSpace::Alu)) && i.dt != dtype::VOID && !i.shape.is_empty() {
-            let key = (i.dt, i.numel);
-            if !seen_dts.contains(&key) {
-                seen_dts.push(key);
+    if lang.vector_defines {
+        for &u in lst {
+            let i = &info[&u];
+            if matches!(i.addrspace, None | Some(AddrSpace::Alu)) && i.dt != dtype::VOID && !i.shape.is_empty() {
+                let key = (i.dt, i.numel);
+                if !seen_dts.contains(&key) {
+                    seen_dts.push(key);
+                }
             }
         }
     }
     let mut define_lines: Vec<String> = Vec::new();
-    for (dt, count) in seen_dts {
-        if count > 1 {
-            let alignment = if dt == dtype::BOOL { 1 } else { 2u64.pow((dt.itemsize() as u32 * count as u32).ilog2()) };
-            let vec = format!("{}{}", base_type_name(dt), count);
+    for (dt, count) in &seen_dts {
+        if *count > 1 {
+            let alignment = if *dt == dtype::BOOL { 1 } else { 2u64.pow((dt.itemsize() as u32 * *count as u32).ilog2()) };
+            let vec = format!("{}{}", lang.type_name(*dt), count);
             define_lines.push(format!(
                 "typedef {} {} __attribute__((aligned({}),ext_vector_type({})));",
-                base_type_name(dt),
+                lang.type_name(*dt),
                 vec,
                 alignment,
                 count
@@ -465,7 +580,7 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
         .iter()
         .map(|(nm, i, _writable)| {
             let as_ = i.addrspace;
-            let vol = ""; // volatile: corpus-absent
+            let vol = if i.volatile { "volatile " } else { "" };
             let (pre, suf) = if as_ == Some(AddrSpace::Alu) {
                 (lang.var_prefix, lang.var_suffix)
             } else {
@@ -482,8 +597,19 @@ pub fn render_clang(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
         buftypes.join(", "),
         kernel.join("\n")
     );
-    let defines = define_lines.join("\n");
-    format!("{defines}\n{prg}\n")
+    if lang.vector_defines {
+        let defines = define_lines.join("\n");
+        format!("{defines}\n{prg}\n")
+    } else {
+        // OpenCLRenderer.render_kernel: optional fp16 pragma prefix, no defines,
+        // and no trailing newline (python joins prefix + prg)
+        let pragma = if lst.iter().any(|&u| info[&u].dt == dtype::FLOAT16) {
+            "#pragma OPENCL EXTENSION cl_khr_fp16 : enable\n"
+        } else {
+            ""
+        };
+        format!("{pragma}{prg}")
+    }
 }
 
 fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
@@ -494,7 +620,7 @@ fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
 }
 
 /// The base_rewrite const rules (in python match order) — cast dtype decides.
-fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId) -> String {
+fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId, lang: &CStyleLang) -> String {
     let val = ctx.val(c);
     let vint = match val {
         ConstVal::Int(v) => Some(v),
@@ -510,8 +636,8 @@ fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId) -> String {
     };
     if dtype::is_float(dt) {
         if !vfloat.is_finite() {
-            let inf = "__builtin_inff()";
-            let nan = "__builtin_nanf(\"\")";
+            let inf = lang.infinity;
+            let nan = lang.nan;
             return if vfloat.is_nan() {
                 format!("({nan})")
             } else if vfloat > 0.0 {
@@ -539,13 +665,13 @@ fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId) -> String {
         return if vint.unwrap_or(0) != 0 { "1".to_string() } else { "0".to_string() };
     }
     if dtype::in_set(&[dtype::BFLOAT16, dtype::FLOAT16], dt) {
-        return format!("(({})({}f))", base_type_name(dt), py_float(vfloat));
+        return format!("(({})({}f))", lang.type_name(dt), py_float(vfloat));
     }
     if dt == dtype::UINT8 || dt == dtype::UINT16 {
-        return format!("({}({}u))", base_type_name(dt), vint.unwrap_or(0));
+        return format!("({}({}u))", lang.type_name(dt), vint.unwrap_or(0));
     }
     if dt == dtype::INT8 || dt == dtype::INT16 {
-        return format!("({}({}))", base_type_name(dt), vint.unwrap_or(0));
+        return format!("({}({}))", lang.type_name(dt), vint.unwrap_or(0));
     }
     format!("{}", vint.unwrap_or(0))
 }

@@ -242,7 +242,7 @@ pub fn canonicalize_device_name(device: &str) -> String {
     }
 }
 
-type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
+pub type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
 
 thread_local! {
     static REGISTRY: RefCell<HashMap<String, (DeviceFactory, Option<Rc<Compiled>>)>> = RefCell::new(HashMap::new());

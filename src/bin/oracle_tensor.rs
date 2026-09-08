@@ -178,6 +178,10 @@ fn main() {
             render_calls(&mut ctx, planned);
             return;
         }
+        if std::env::var("TG_OCL_RENDER").is_ok() {
+            render_calls_opencl(&mut ctx, planned);
+            return;
+        }
         if std::env::var("TG_M5_EXEC").is_ok() {
             let steps: Vec<ExecStep> = prog.prog.iter().map(|st| ExecStep {
                 op: st.op.clone(), data: st.data.clone(), dtype: st.dtype.clone(),
@@ -222,6 +226,39 @@ fn main() {
     let flat = ctx.g.to_flat();
     println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
     let _ = none_str;
+}
+
+/// M8 OCL gate: render each compute kernel's linearized uops with the
+/// OpenCL-flavored cstyle renderer and emit the text per call.
+fn render_calls_opencl(ctx: &mut UOpCtx, planned: UopId) {
+    let ren = autorust::renderer::Renderer::opencl();
+    let calls: Vec<UopId> = ctx.srcs(planned).to_vec();
+    let mut outs: Vec<String> = Vec::new();
+    for call in calls.iter() {
+        let body = ctx.srcs(*call)[0];
+        if ctx.op_of(body) == autorust::uop::Ops::Copy {
+            outs.push("null".to_string());
+            continue;
+        }
+        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body, &ren);
+        let lst = autorust::codegen::linearize::linearize(ctx, sunk);
+        let text = autorust::renderer::cstyle::render_opencl(ctx, &lst);
+        let mut j = String::from("\"");
+for ch in text.chars() {
+    match ch {
+        '"' => j.push_str("\\\""),
+        '\\' => j.push_str("\\\\"),
+        '\n' => j.push_str("\\n"),
+        '\t' => j.push_str("\\t"),
+        '\r' => j.push_str("\\r"),
+        c if (c as u32) < 0x20 => j.push_str(&format!("\\u{:04x}", c as u32)),
+        c => j.push(c),
+    }
+}
+j.push('"');
+outs.push(j);
+    }
+    println!("{{\"ok\": true, \"renders\": [{}]}}", outs.join(", "));
 }
 
 /// M5 cstyle gate: render each compute kernel's linearized uops with the

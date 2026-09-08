@@ -3,6 +3,7 @@
 //! backend implements, and the C-style family.
 
 pub mod cstyle;
+pub mod expr;
 
 use crate::uop::Ops;
 
