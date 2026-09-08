@@ -566,7 +566,8 @@ pub fn apply_movement_op(ctx: &mut UOpCtx, op: Ops, in_shape: &[SVal], arg: &[Ar
                 })
                 .collect()
         }
-        Ops::Expand => rngs[arg.len()..].to_vec(),
+        // python slices clamp: expanding a 0-dim (scalar) yields no new ranges
+        Ops::Expand => rngs[arg.len().min(rngs.len())..].to_vec(),
         Ops::Pad => {
             let pairs: Vec<(i64, i64)> = arg
                 .iter()
@@ -743,7 +744,8 @@ fn finish_node(
                 },
             }
         };
-        let sink = crate::tensor::sink(ctx, out_rngs[..n].to_vec());
+        // python slice clamps: a scalar expand has no out ranges
+        let sink = crate::tensor::sink(ctx, out_rngs[..n.min(out_rngs.len())].to_vec());
         let rr = ctx.ranges(sink).to_vec();
         ending_ranges.entry(x).or_default().extend(rr);
     }

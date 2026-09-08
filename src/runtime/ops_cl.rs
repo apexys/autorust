@@ -143,7 +143,7 @@ impl Comp for ClCompiler {
         let devices = [self.inner.dev.id()];
         if let Err(e) = program.build(&devices, "") {
             let log = program.get_build_log(devices[0]).unwrap_or_default();
-            panic!("TGERR: OpenCL Compile Error\n\n{e}\n{log}");
+            panic!("TGERR: OpenCL Compile Error\n--- src ---\n{src}\n--- log ---\n{log}\n{e}");
         }
         check(program.get_binaries(), "CL_PROGRAM_BINARIES").into_iter().next().unwrap_or_default()
     }
@@ -269,7 +269,12 @@ impl UopRenderer for OclUopRenderer {
 pub fn register() {
     let factory: crate::runtime::device::DeviceFactory = Rc::new(|| {
         let inner = Rc::new(ClInner::open());
-        let renderer: Box<dyn UopRenderer> = Box::new(OclUopRenderer { facts: Renderer::opencl() });
+        let facts = {
+            // python: arch = ",".join(device_exts) — half/double gated on the
+            // real device's cl_khr_* extensions (cstyle.py:339).
+            Renderer::opencl_arch(&inner.exts)
+        };
+        let renderer: Box<dyn UopRenderer> = Box::new(OclUopRenderer { facts });
         // python: OpenCLRenderer.compiler is the base empty Compiler — the elf
         // lib is the rendered source; the real CL compile happens in CLProgram
         let compiler: Rc<dyn Comp> = Rc::new(crate::runtime::device::IdentityCompiler::default());

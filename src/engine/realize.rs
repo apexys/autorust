@@ -350,7 +350,14 @@ pub fn run_linear(ctx: &mut UOpCtx, linear: UopId, t: &mut BufTable, var_vals: &
 /// Schedule + run one tensor (python `Tensor.realize` path). Returns the
 /// tensor's realized base buffer (the held buffer the kernel wrote).
 pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> crate::runtime::buffer::Buffer {
-    let sink = crate::tensor::sink(ctx, vec![tensor_uop]);
+    // python `_buffer()`: a device-less (virtual) tensor is made real via
+    // contiguous + clone to the default device before realizing.
+    let mut target = tensor_uop;
+    if crate::schedule::indexing::device_of(ctx, target).is_none() || crate::dtype::is_weak(ctx.dt_of(target)) {
+        let cont = ctx.uop(Ops::Contiguous, Some(ctx.dt_of(target)), vec![target], Arg::None);
+        target = crate::tensor::creation::copy_to_device(ctx, cont, "PYTHON");
+    }
+    let sink = crate::tensor::sink(ctx, vec![target]);
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
     let _ = linear;
@@ -359,9 +366,9 @@ pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cac
     // storage form after the schedule — that is the buffer the kernel wrote.
     let final_uop = buffer_map
         .iter()
-        .find(|(a, _)| *a == tensor_uop)
+        .find(|(a, _)| *a == target)
         .map(|(_, v)| *v)
-        .unwrap_or(tensor_uop);
+        .unwrap_or(target);
     buffer_of(ctx, t, final_uop)
 }
 

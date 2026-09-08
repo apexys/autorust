@@ -174,6 +174,7 @@ pub const UINTS: &[DTypeId] = &[UINT8, UINT16, UINT32, UINT64];
 pub const SINTS: &[DTypeId] = &[INT8, INT16, INT32, INT64];
 pub const INTS: &[DTypeId] = &[UINT8, UINT16, UINT32, UINT64, INT8, INT16, INT32, INT64];
 pub const WEAKS: &[DTypeId] = &[WEAKINT, WEAKFLOAT];
+
 /// `dtypes.all` — floats + ints + bool (note: `_uint128`/`_uint256` are NOT in `all`).
 pub const ALL: &[DTypeId] = &[
     FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ, FLOAT16, BFLOAT16, FLOAT32, FLOAT64,
@@ -809,7 +810,7 @@ fn wrap_int(v: i128, d: DTypeId) -> i128 {
     }
 }
 
-fn trunc_float(d: DTypeId, x: f64) -> f64 {
+pub fn trunc_float(d: DTypeId, x: f64) -> f64 {
     if d == crate::dtype::WEAKFLOAT {
         return x;
     }

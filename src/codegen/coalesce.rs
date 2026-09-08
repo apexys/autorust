@@ -143,6 +143,7 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
                 // apply valid again after length determination (corpus: const-true valids only)
                 let base_node = if valid_is_true(ctx, *valid) { base_node } else { ctx.valid(base_node, *valid) };
                 let idx: UopId = if grp.len() > 1 {
+                    // SHRINK pairs are (start, size): the group is n elements at base.
                     let n = ctx.const_py(ConstVal::Int(grp.len() as i128), Some(crate::dtype::WEAKINT));
                     ctx.uop(Ops::Shrink, Some(ctx.dt_of(*buf)), vec![*buf, base_node, n], Arg::None)
                 } else {

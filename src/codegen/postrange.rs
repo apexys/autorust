@@ -523,6 +523,10 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
                     let not_in_any = {
                         let mut any_missing = false;
                         for &b in &bufs {
+                            // a 1-src INDEX is a degenerate pass-through: no idx
+                            if ctx.srcs(b).len() < 2 {
+                                continue;
+                            }
                             let idx = ctx.srcs(b)[1];
                             let bs = ctx.backward_slice_with_self(idx);
                             if !bs.contains(&rng) {

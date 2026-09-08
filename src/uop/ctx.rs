@@ -611,28 +611,45 @@ impl UOpCtx {
                 Ok(perm.iter().map(|&i| ps[i]).collect())
             }
             Pad | Shrink => {
-                let marg = self.marg_pairs(id)?;
+                let marg = self.marg_pairs_svals(id)?;
                 if marg.len() != ps.len() {
                     return Err(format!("invalid pad/shrink {marg:?} for {ps:?}"));
                 }
                 let mut out = Vec::with_capacity(ps.len());
                 for (i, &(o, sz)) in marg.iter().enumerate() {
-                    // Python: resolve(sz>=0) and resolve(0<=o) and
-                    //   PAD:    resolve(o+s<=sz)  (start + dim <= stop)
-                    //   SHRINK: resolve(o+sz<=s)  (start + size <= dim)
-                    let ok = self.resolve_ord(SVal::I(sz as i128), CmpOrd::Ge, SVal::I(0), true)
-                        && self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(o as i128), true)
-                        && match op {
-                            Pad => {
-                                let start_dim = self.sval_add(SVal::I(o as i128), ps[i]);
-                                self.resolve_ord(start_dim, CmpOrd::Le, SVal::I(sz as i128), true)
+                    match (o, sz) {
+                        (SVal::I(o), SVal::I(sz)) => {
+                            // python indexing.py conventions: PAD pairs are
+                            // (start, stop) — new dim = stop; SHRINK pairs are
+                            // (start, size) — new dim = size (mixin converts
+                            // the slice bounds to sizes).
+                            let ok = match op {
+                                Pad => {
+                                    let start_dim = self.sval_add(SVal::I(o), ps[i]);
+                                    self.resolve_ord(SVal::I(sz), CmpOrd::Ge, SVal::I(0), true)
+                                        && self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(o), true)
+                                        && self.resolve_ord(start_dim, CmpOrd::Le, SVal::I(sz), true)
+                                }
+                                _ => {
+                                    let start_dim = self.sval_add(SVal::I(o), SVal::I(sz));
+                                    self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(o), true)
+                                        && self.resolve_ord(start_dim, CmpOrd::Le, ps[i], true)
+                                }
+                            };
+                            if !ok {
+                                return Err(format!("invalid pad/shrink for {ps:?} pair=({o},{sz}) op={op:?}"));
                             }
-                            _ => self.resolve_ord(SVal::I((o + sz) as i128), CmpOrd::Le, ps[i], true),
-                        };
-                    if !ok {
-                        return Err(format!("invalid pad/shrink for {ps:?}"));
+                            out.push(SVal::I(sz));
+                        }
+                        _ => {
+                            // symbolic view (e.g. a gid-derived LOCAL window):
+                            // the new dim is the pair's size/stop half.
+                            match self.ssimplify_const_val(sz) {
+                                Some(v) => out.push(SVal::I(v)),
+                                None => out.push(sz),
+                            }
+                        }
                     }
-                    out.push(SVal::I(sz as i128));
                 }
                 Ok(out)
             }
@@ -691,10 +708,47 @@ impl UOpCtx {
 
     /// marg for PAD/SHRINK: (start, stop) pairs.
     pub fn marg_pairs(&mut self, id: UopId) -> Result<Vec<(i64, i64)>, String> {
+        Ok(self.marg_pairs_svals(id)?.iter().map(|(a, b)| (a.as_i64_or_panic(), b.as_i64_or_panic())).collect())
+    }
+
+    /// A symbolic SVal that simplifies to a concrete int (e.g. the size half
+    /// of a SHRINK pair is usually a const).
+    fn ssimplify_const_val(&mut self, v: SVal) -> Option<i128> {
+        match v {
+            SVal::I(i) => Some(i),
+            SVal::U(u) => self.ssimplify(u).ok().and_then(|s| match s {
+                SVal::I(i) => Some(i),
+                _ => None,
+            }),
+        }
+    }
+
+    /// Pad/Shrink pairs as raw SVals — symbolic starts/stops (e.g. a
+    /// gid-derived view inside a LOCAL kernel) stay symbolic here and are
+    /// resolved by ssimplify in the shape arm.
+    pub fn marg_pairs_svals(&mut self, id: UopId) -> Result<Vec<(SVal, SVal)>, String> {
         let srcs = self.srcs(id).to_vec();
-        let starts = self.as_shape(srcs[1])?;
-        let stops = self.as_shape(srcs[2])?;
-        Ok(starts.iter().zip(stops.iter()).map(|(a, b)| (a.as_i64_or_panic(), b.as_i64_or_panic())).collect())
+        if srcs.len() >= 3 {
+            let starts = self.as_shape(srcs[1])?;
+            let stops = self.as_shape(srcs[2])?;
+            return Ok(starts.iter().zip(stops.iter()).map(|(a, b)| (*a, *b)).collect());
+        }
+        // arg-carried pairs (schedule-created SHRINK/PAD: ((start, stop), ...));
+        // other movement ops (e.g. Expand) arrive via probing callers -> Err.
+        let pairs: Vec<(SVal, SVal)> = match self.arg_of(id) {
+            Arg::Seq { tuple: true, items } => items
+                .iter()
+                .map(|pair| match pair {
+                    Arg::Seq { tuple: true, items } if items.len() == 2 => match (&items[0], &items[1]) {
+                        (Arg::Int(a), Arg::Int(b)) => Ok((SVal::I(*a as i128), SVal::I(*b as i128))),
+                        _ => Err(format!("TGERR: bad pair arg {pair:?}")),
+                    },
+                    other => Err(format!("TGERR: bad pair arg {other:?}")),
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            _ => return Err(format!("TGERR: node {} ({:?}) has no pair arg", id.0, self.op_of(id))),
+        };
+        Ok(pairs)
     }
 
     /// marg for PERMUTE/FLIP: the int list arg.
@@ -721,7 +775,16 @@ impl UOpCtx {
             Pad | Shrink => {
                 let starts = self.as_shape(srcs[1])?;
                 let stops = self.as_shape(srcs[2])?;
-                Ok(starts.iter().zip(stops.iter()).map(|(a, b)| (a.as_i64_or_panic(), b.as_i64_or_panic())).collect())
+                match starts.iter().zip(stops.iter()).map(|(a, b)| a.as_i64().zip(b.as_i64())).collect::<Option<Vec<_>>>() {
+            Some(pairs) => Ok(pairs),
+            None => {
+                let dbg = |sv: &SVal| match sv {
+                    SVal::I(i) => format!("I({i})"),
+                    SVal::U(u) => format!("U({}: {:?} arg={:?} srcs={:?})", u.0, self.op_of(*u), self.arg_of(*u), self.srcs(*u).iter().map(|s| (s.0, self.op_of(*s))).collect::<Vec<_>>()),
+                };
+                panic!("TGERR: symbolic movement pair on node {} (op {:?}): starts=[{}] stops=[{}]", id.0, self.op_of(id), starts.iter().map(dbg).collect::<Vec<_>>().join(", "), stops.iter().map(dbg).collect::<Vec<_>>().join(", "))
+            }
+        }
             }
             Permute | Flip => match &arg {
                 Arg::Seq { tuple: true, items } => {

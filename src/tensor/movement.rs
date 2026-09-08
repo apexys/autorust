@@ -232,6 +232,8 @@ pub fn pad(ctx: &mut UOpCtx, x: UopId, arg: &[(SVal, SVal)]) -> UopId {
 pub fn shrink(ctx: &mut UOpCtx, x: UopId, arg: &[(SVal, SVal)]) -> UopId {
     let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
     assert_eq!(self_shape.len(), arg.len(), "TGERR: ndim != len(arg)");
+    // graph-level SHRINK pairs are (start, size) — python's mixin converts the
+    // slice bounds: `(x[0], x[1]-x[0])` (mixin/movement.py:212).
     let pairs: Vec<(SVal, SVal)> = arg
         .iter()
         .zip(self_shape.iter())
@@ -397,12 +399,14 @@ pub fn transpose(ctx: &mut UOpCtx, x: UopId, dim0: i64, dim1: i64) -> UopId {
 pub fn flatten(ctx: &mut UOpCtx, x: UopId, start_dim: i64, end_dim: i64) -> UopId {
     let shape = ctx.shape(x).unwrap().unwrap_or_default();
     let n = shape.len() as i64;
-    let start = if start_dim < 0 { start_dim + n } else { start_dim };
-    let end = if end_dim < 0 { end_dim + n } else { end_dim };
-    let mid = prod_sval(ctx, &shape[start as usize..=(end as usize)]);
-    let mut new_shape: Vec<SVal> = shape[..start as usize].to_vec();
+    // python slices clamp; negative dims resolve against ndim (0-dim -> (1,))
+    let res = |d: i64| (if d < 0 { d + n } else { d }).clamp(0, n) as usize;
+    let start = res(start_dim);
+    let end = res(end_dim);
+    let mid = prod_sval(ctx, &shape[start..end.max(start)]);
+    let mut new_shape: Vec<SVal> = shape[..start].to_vec();
     new_shape.push(mid);
-    new_shape.extend_from_slice(&shape[end as usize + 1..]);
+    new_shape.extend_from_slice(&shape[end..]);
     reshape_internal(ctx, x, &new_shape)
 }
 

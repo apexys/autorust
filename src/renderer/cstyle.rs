@@ -27,6 +27,8 @@ struct Info {
 /// `CStyleLanguage` (renderer/cstyle.py:117) — the language options a C-style
 /// backend tweaks. A new C-style backend is a `CStyleLang` literal + facts.
 pub struct CStyleLang {
+    /// clang flavor swaps sqrt/trunc for __builtin_* with f64 dispatch
+    clang_builtins: bool,
     buffer_prefix: &'static str,
     buffer_suffix: &'static str,
     var_prefix: &'static str,
@@ -53,6 +55,7 @@ impl CStyleLang {
     /// `ClangRenderer` language options.
     pub fn clang() -> CStyleLang {
         CStyleLang {
+            clang_builtins: true,
             buffer_prefix: "",
             buffer_suffix: " restrict",
             var_prefix: "const ",
@@ -75,6 +78,7 @@ impl CStyleLang {
     /// `OpenCLRenderer` language options (cstyle.py:308).
     pub fn opencl() -> CStyleLang {
         CStyleLang {
+            clang_builtins: false,
             buffer_prefix: "__global ",
             buffer_suffix: "",
             var_prefix: "const ",
@@ -509,7 +513,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                         }
                     })
                     .collect();
-                code_for_op(i.op, &args)
+                code_for_op(i.op, &args, lang.clang_builtins, i.dt)
             }
             other => panic!("TGERR: cstyle op {other:?} not ported"),
         };
@@ -713,9 +717,25 @@ fn wmma_name(ctx: &mut UOpCtx, u: UopId) -> String {
 }
 
 /// `CStyleLanguage.code_for_op` (clang subset).
-fn code_for_op(op: Ops, a: &[String]) -> String {
+fn code_for_op(op: Ops, a: &[String], clang: bool, dt: crate::dtype::DTypeId) -> String {
     match op {
-        Ops::Sqrt => format!("__builtin_sqrt({})", a[0]),
+        Ops::Sqrt => {
+            if clang {
+                if dt == crate::dtype::FLOAT64 { format!("__builtin_sqrt({})", a[0]) } else { format!("__builtin_sqrtf({})", a[0]) }
+            } else {
+                format!("sqrt({})", a[0])
+            }
+        }
+        Ops::Exp2 => format!("exp2({})", a[0]),
+        Ops::Log2 => format!("log2({})", a[0]),
+        Ops::Sin => format!("sin({})", a[0]),
+        Ops::Trunc => {
+            if clang {
+                if dt == crate::dtype::FLOAT64 { format!("__builtin_trunc({})", a[0]) } else { format!("__builtin_truncf({})", a[0]) }
+            } else {
+                format!("trunc({})", a[0])
+            }
+        }
         Ops::Reciprocal => format!("(1/{})", a[0]),
         Ops::Neg => format!("-{}", a[0]),
         Ops::And => format!("({}&{})", a[0], a[1]),

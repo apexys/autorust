@@ -38,7 +38,17 @@ pub fn from_storage_scalar(bytes: &[u8], dt: DTypeId) -> f64 {
         }
         d if d == dtype::INT16 => i16::from_le_bytes([b(0), b(1)]) as f64,
         d if d == dtype::UINT16 => u16::from_le_bytes([b(0), b(1)]) as f64,
-        d if d == dtype::FLOAT16 => panic!("TGERR: f16 storage scalar not ported"),
+        d if d == dtype::FLOAT16 => {
+            let raw = u16::from_le_bytes([b(0), b(1)]);
+            dtype::f16_bits_to_f64(raw)
+        }
+        d if d == dtype::BFLOAT16 => {
+            let raw = u16::from_le_bytes([b(0), b(1)]) as u32;
+            f32::from_bits(raw << 16) as f64
+        }
+        d if d == dtype::FP8E4M3 || d == dtype::FP8E5M2 || d == dtype::FP8E4M3FNUZ || d == dtype::FP8E5M2FNUZ => {
+            dtype::fp8_to_float(b(0), d)
+        }
         _ => panic!("TGERR: from_storage_scalar {dt:?}"),
     }
 }
@@ -56,7 +66,14 @@ pub fn to_storage_scalar(v: f64, dt: DTypeId) -> Vec<u8> {
         d if d == dtype::FLOAT64 => v.to_le_bytes().to_vec(),
         d if d == dtype::INT16 => (v as i16).to_le_bytes().to_vec(),
         d if d == dtype::UINT16 => (v as u16).to_le_bytes().to_vec(),
-        d if d == dtype::FLOAT16 => panic!("TGERR: f16 storage scalar not ported"),
+        d if d == dtype::FLOAT16 => dtype::f64_to_f16_bits(v).to_le_bytes().to_vec(),
+        d if d == dtype::BFLOAT16 => {
+            let f32_bits = (dtype::float_to_bf16(v) as f32).to_bits();
+            ((f32_bits >> 16) as u16).to_le_bytes().to_vec()
+        }
+        d if d == dtype::FP8E4M3 || d == dtype::FP8E5M2 || d == dtype::FP8E4M3FNUZ || d == dtype::FP8E5M2FNUZ => {
+            vec![dtype::float_to_fp8(v, d)]
+        }
         _ => panic!("TGERR: to_storage_scalar {dt:?}"),
     }
 }
@@ -74,6 +91,7 @@ enum Val {
 }
 
 /// `exec_alu` (corpus subset).
+/// `python_alu` (ops.py:1287) over f64 lanes; int ops go through i64 bitops.
 fn exec_alu(op: Ops, a: f64, b: f64) -> f64 {
     match op {
         Ops::Add => a + b,
@@ -81,23 +99,115 @@ fn exec_alu(op: Ops, a: f64, b: f64) -> f64 {
         Ops::Sub => a - b,
         Ops::Fdiv => a / b,
         Ops::Max => a.max(b),
-        _ => panic!("TGERR: interp ALU {op:?} not ported"),
+        Ops::Neg => -a,
+        Ops::Exp2 => {
+            let r = (2.0f64).powf(a);
+            if r.is_infinite() { f64::INFINITY } else { r }
+        }
+        Ops::Log2 => {
+            if a > 0.0 { a.log2() } else if a == 0.0 { f64::NEG_INFINITY } else { f64::NAN }
+        }
+        Ops::Sqrt => {
+            if a >= 0.0 { a.sqrt() } else { f64::NAN }
+        }
+        Ops::Reciprocal => {
+            if a != 0.0 { 1.0 / a } else { f64::copysign(f64::INFINITY, a) }
+        }
+        Ops::Sin => {
+            if a.is_infinite() { f64::NAN } else { a.sin() }
+        }
+        Ops::Pow => {
+            let p = a.powf(b);
+            if p.is_nan() && !(a.is_nan() || b.is_nan()) {
+                // python pow(neg, non-integer) -> complex -> nan; 0^neg -> inf
+                if a == 0.0 { f64::INFINITY } else { f64::NAN }
+            } else if p.is_infinite() && a == 0.0 && b < 0.0 {
+                f64::INFINITY
+            } else {
+                p
+            }
+        }
+        Ops::Trunc => {
+            if a.is_finite() { a.trunc() } else { a }
+        }
+        Ops::Cmpne => (a != b) as i64 as f64,
+        Ops::Cmpeq => (a == b) as i64 as f64,
+        Ops::Cmplt => (a < b) as i64 as f64,
+        Ops::Xor => ((a as i64) ^ (b as i64)) as f64,
+        Ops::Or => ((a as i64) | (b as i64)) as f64,
+        Ops::And => ((a as i64) & (b as i64)) as f64,
+        Ops::Shr => (((a as i64) >> (b as i64)) as i64) as f64,
+        Ops::Shl => ((a as i64) << (b as i64)) as f64,
+        Ops::Cdiv => {
+            // helpers.py:71 — abs(x)//abs(y)*sign, 0 on y==0
+            if b as i64 == 0 {
+                0.0
+            } else {
+                let (ai, bi) = (a as i64, b as i64);
+                (ai.abs() / bi.abs() * if ai ^ bi < 0 { -1 } else { 1 }) as f64
+            }
+        }
+        Ops::Floordiv => {
+            // helpers.py:74 — python floor semantics, 0 on y==0
+            if b as i64 == 0 {
+                0.0
+            } else {
+                let (ai, bi) = (a as i64, b as i64);
+                ai.div_euclid(bi) as f64
+            }
+        }
+        Ops::Cmod => {
+            // helpers.py:72 — cmod(x,y) = x - cdiv(x,y)*y
+            let d = exec_alu(Ops::Cdiv, a, b);
+            a - d * b
+        }
+        Ops::Floormod => {
+            // helpers.py:75 — floormod(x,y) = x - floordiv(x,y)*y
+            let d = exec_alu(Ops::Floordiv, a, b);
+            a - d * b
+        }
+        other => panic!("TGERR: interp ALU {other:?} not ported"),
+    }
+}
+
+/// ops.py:1295 — MULACC/WHERE are the ternary ALU ops.
+fn exec_alu_ternary(op: Ops, a: f64, b: f64, c: f64) -> f64 {
+    match op {
+        Ops::Mulacc => (a * b) + c,
+        Ops::Where => {
+            if a != 0.0 {
+                b
+            } else {
+                c
+            }
+        }
+        other => panic!("TGERR: interp ternary ALU {other:?} not ported"),
     }
 }
 
 /// `truncate` (ops.py:1278) — round/clamp to the dtype's representable values.
 fn truncate(v: f64, dt: DTypeId) -> f64 {
-    if dt == dtype::FLOAT64 { v }
-    else if dt == dtype::FLOAT32 { (v as f32) as f64 }
-    else if dt == dtype::FLOAT16 { panic!("TGERR: f16 truncate not ported") }
-    else if dt == dtype::BOOL { (v != 0.0) as i64 as f64 }
+    if dt == dtype::BOOL { (v != 0.0) as i64 as f64 }
+    else if dtype::is_float(dt) { dtype::trunc_float(dt, v) }
     else {
-        let i = v as i64;
-        let (lo, hi) = match (dtype::dtype_min(dt), dtype::dtype_max(dt)) {
-            (ConstVal::Int(l), ConstVal::Int(h)) => (l as i64, h as i64),
-            _ => (i64::MIN, i64::MAX),
+        // clang C-cast semantics (what tinygrad realize produces): unsigned
+        // dests clamp negatives to 0 at the float level, then the truncated
+        // integer wraps to the dtype width (two's complement low bits).
+        let i = if dtype::in_set(dtype::UINTS, dt) {
+            (if v < 0.0 { 0.0 } else { v }) as i64
+        } else {
+            v as i64
         };
-        i.clamp(lo, hi) as f64
+        let unsigned = dtype::in_set(dtype::UINTS, dt);
+        match dt.bitsize() {
+            8 if unsigned => (i as u8) as f64,
+            8 => (i as i8) as f64,
+            16 if unsigned => (i as u16) as f64,
+            16 => (i as i16) as f64,
+            32 if unsigned => (i as u32) as f64,
+            32 => (i as i32) as f64,
+            _ => i as f64,
+        }
     }
 }
 
@@ -111,7 +221,7 @@ fn _load(m: &MemView, i: usize, dt: DTypeId) -> f64 {
 fn _store(m: &MemView, i: usize, v: f64, dt: DTypeId) {
     if i >= m.3 { panic!("TGERR: store out of bounds, size is {}, access is {i}", m.3); }
     // python packs sub-dword views; the corpus stores at matching itemsize
-    assert!(m.2 >= dt.itemsize(), "TGERR: sub-dword store not ported");
+    assert!(m.2 >= dt.itemsize(), "TGERR: sub-dword store not ported (elemsize={} dt={:?} itemsize={} off={} size={})", m.2, dt, dt.itemsize(), m.1, m.3);
     let boff = m.1 + i * m.2;
     let sval = to_storage_scalar(v, dt);
     let mut b = m.0.borrow_mut();
@@ -204,13 +314,41 @@ fn exec_launch(
                     Val::V(lanes) => lanes.clone(),
                     _ => panic!("TGERR: interp store value"),
                 };
+                let pairs_owned: Vec<(MemView, usize)>;
                 let pairs: &Vec<(MemView, usize)> = match &src_vals[0] {
                     Val::P(p) => p,
-                    _ => panic!("TGERR: interp store src"),
+                    // a stacked DEST view (devectorized store: one dest view
+                    // per lane) — treat each element as its own pair list
+                    Val::V(_) | Val::S(_) => {
+                        pairs_owned = Vec::new();
+                        &pairs_owned
+                    }
+                    _ => panic!("TGERR: interp store src node {} val={:?}", u.0, ctx.op_of(srcs[0])),
                 };
+                // the store writes the DEST buffer's dtype (python's kernel
+                // invariant: value dtype == buffer dtype; the codegen may
+                // widen ALU to f32 for sub-dword types — cast back here)
+                let store_dt = ctx.dt_of(ctx.srcs(srcs[0])[0]);
+                if ctx.op_of(srcs[0]) == Ops::Stack && matches!(src_vals[0], Val::S(_)) {
+                    // devectorized store: Stack(dest view per lane) — each
+                    // lane writes through its own view at its own offset
+                    let dest_srcs = ctx.srcs(srcs[0]).to_vec();
+                    for (j, val) in vals_lane.iter().enumerate() {
+                        let dj = dest_srcs.get(j).copied().unwrap_or(dest_srcs[0]);
+                        let dpairs = match values.get(&dj) {
+                            Some(Val::P(p)) => p.clone(),
+                            _ => continue,
+                        };
+                        for (t, ((m, o), v)) in dpairs.iter().zip(val.iter()).enumerate() {
+                            if gate[t] { _store(m, *o, *v, store_dt); }
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
                 for (j, val) in vals_lane.iter().enumerate() {
                     for (t, ((m, o), v)) in pairs.iter().zip(val.iter()).enumerate() {
-                        if gate[t] { _store(m, *o + j, *v, ctx.dt_of(srcs[1])); }
+                        if gate[t] { _store(m, *o + j, *v, store_dt); }
                     }
                 }
             }
@@ -261,8 +399,9 @@ fn exec_launch(
             }
             Ops::Index | Ops::Shrink => {
                 // (view, element offset) pairs
-                if ctx.addrspace_derived(srcs[0]) == Some(AddrSpace::Alu) {
-                    // ALU-storage index over a vector value: [lane][thread] pick
+                if ctx.addrspace_derived(srcs[0]) == Some(AddrSpace::Alu) || matches!(src_vals[0], Val::V(_)) {
+                    // index over a vector value: [lane][thread] pick (ALU
+                    // storage or a devectorized multi-lane load)
                     // python: ret = [src_values[0][i][t] for t, i in enumerate(src_values[1])]
                     let ret: Vec<f64> = match (&src_vals[0], &src_vals[1]) {
                         (Val::V(a), Val::S(b)) => (0..wsize).map(|t| a[b[t.min(b.len() - 1)] as usize][t.min(a[0].len() - 1)]).collect(),
@@ -331,15 +470,59 @@ fn exec_launch(
             Ops::Stack => {
                 // values[u] = src_values (list of src values)
                 let mut lanes: Vec<Vec<f64>> = Vec::new();
-                for sv_ in &src_vals {
+                for (k, sv_) in src_vals.iter().enumerate() {
                     match sv_ {
                         Val::S(vs) => lanes.push(vs.clone()),
-                        _ => panic!("TGERR: interp STACK src"),
+                        Val::V(l) => {
+                            // a stacked lane value: each src contributes its
+                            // per-thread lane list flattened at the same width
+                            let width = l.first().map(|t| t.len()).unwrap_or(1);
+                            for j in 0..width {
+                                lanes.push(l.iter().map(|t| t.get(j).copied().unwrap_or(0.0)).collect());
+                            }
+                        }
+                        // a stacked VIEW (coalesce folds the load into its
+                        // index): the lanes are the memory values it addresses
+                        Val::P(ps) => {
+                            let dt = ctx.dt_of(srcs[k]);
+                            lanes.push(ps.iter().map(|(m, o)| _load(m, *o, dt)).collect());
+                        }
+                        _ => panic!("TGERR: interp STACK src node {} src_ops={:?}", u.0, srcs.iter().map(|x| (x.0, ctx.op_of(*x), ctx.dt_of(*x).attr())).collect::<Vec<_>>()),
                     }
                 }
                 values.insert(u, Val::V(lanes));
             }
             _ if group::in_(group::ALU, op) => {
+                if src_vals.len() == 1 {
+                    match &src_vals[0] {
+                        Val::S(a) => {
+                            let r: Vec<f64> = a.iter().map(|&x| truncate(exec_alu(op, x, 0.0), ctx.dt_of(u))).collect();
+                            values.insert(u, Val::S(r));
+                        }
+                        Val::V(a) => {
+                            let r: Vec<Vec<f64>> = a.iter().map(|tv| tv.iter().map(|&x| truncate(exec_alu(op, x, 0.0), ctx.dt_of(u))).collect()).collect();
+                            values.insert(u, Val::V(r));
+                        }
+                        _ => panic!("TGERR: interp unary alu src"),
+                    }
+                    i += 1;
+                    continue;
+                }
+                if src_vals.len() == 3 {
+                    let sv = |v: &Val| match v {
+                        Val::S(vs) => vs.clone(),
+                        Val::V(l) => l.iter().map(|t| t.first().copied().unwrap_or(0.0)).collect(),
+                        _ => panic!("TGERR: interp ternary alu src"),
+                    };
+                    let (a, b, c) = (sv(&src_vals[0]), sv(&src_vals[1]), sv(&src_vals[2]));
+                    let n = a.len().max(b.len()).max(c.len());
+                    let r: Vec<f64> = (0..n)
+                        .map(|k| truncate(exec_alu_ternary(op, a[k.min(a.len() - 1)], b[k.min(b.len() - 1)], c[k.min(c.len() - 1)]), ctx.dt_of(u)))
+                        .collect();
+                    values.insert(u, Val::S(r));
+                    i += 1;
+                    continue;
+                }
                 match (&src_vals[0], &src_vals[1]) {
                     (Val::S(a), Val::S(b)) => {
                         let r: Vec<f64> = a.iter().zip(b.iter()).map(|(&x, &y)| truncate(exec_alu(op, x, y), ctx.dt_of(u))).collect();

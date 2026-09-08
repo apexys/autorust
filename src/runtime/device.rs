@@ -274,6 +274,16 @@ pub fn total_compiles() -> usize {
     REGISTRY.with(|reg| reg.borrow().values().filter_map(|(_, d)| d.as_ref()).map(|d| d.compile_count()).sum())
 }
 
+/// The registered device names (sorted; built-ins included). A device is
+/// only "available" if constructing it succeeds — callers should probe by
+/// calling `device(name)` inside `catch_unwind` for availability checks.
+pub fn registered_devices() -> Vec<String> {
+    ensure_builtins();
+    let mut names: Vec<String> = REGISTRY.with(|reg| reg.borrow().keys().cloned().collect());
+    names.sort();
+    names
+}
+
 /// `Device[name]` — the registered device singletons (interp "CPU"/"INTERP";
 /// "CL" when built with `backend_cl`). Unknown names fall back to an
 /// interp-backed device (the M6 stub — concrete GPU runtimes are not ported).

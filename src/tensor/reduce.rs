@@ -95,7 +95,7 @@ pub fn sum(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, dt
     let dt = dtype.unwrap_or_else(|| sum_acc_dtype(self_dt));
     let ret = reduce(ctx, x, Ops::Add, axis, keepdim);
     let ret = ctx.cast(ret, dt);
-    if dtype.is_none() && dtype::in_set(&[dtype::FLOAT16, dtype::BFLOAT16], self_dt) {
+    if dtype.is_none() && sum_cast_back(self_dt) {
         return ctx.cast(ret, self_dt);
     }
     ret
@@ -107,10 +107,16 @@ pub fn prod(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, d
     let dt = dtype.unwrap_or_else(|| sum_acc_dtype(self_dt));
     let ret = reduce(ctx, x, Ops::Mul, axis, keepdim);
     let ret = ctx.cast(ret, dt);
-    if dtype.is_none() && dtype::in_set(&[dtype::FLOAT16, dtype::BFLOAT16], self_dt) {
+    if dtype.is_none() && sum_cast_back(self_dt) {
         return ctx.cast(ret, self_dt);
     }
     ret
+}
+
+/// sum/prod cast back to the source dtype for low-precision floats
+/// (reduce.py: `self.dtype in (dtypes.float16, dtypes.bfloat16, *dtypes.fp8s)`).
+fn sum_cast_back(dt: DTypeId) -> bool {
+    dtype::in_set(&[dtype::FLOAT16, dtype::BFLOAT16, dtype::FP8E4M3, dtype::FP8E5M2, dtype::FP8E4M3FNUZ, dtype::FP8E5M2FNUZ], dt)
 }
 
 /// `ReduceMixin.max` (reduce.py:73-94): `max()` over a bool tensor errors in Python.

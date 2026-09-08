@@ -280,7 +280,7 @@ impl_slice_elem!(
 /// .shrink_to(shape)` — both noops for static shapes.
 pub fn copy_to_device(ctx: &mut UOpCtx, x: UopId, device: &str) -> UopId {
     let shape = ctx.shape(x).unwrap().unwrap_or_default();
-    assert!(!dtype::is_weak(ctx.dt_of(x)), "TGERR: cannot create storage for weak dtype");
+    assert!(!dtype::is_weak(ctx.dt_of(x)), "TGERR: cannot create storage for weak dtype (node {} op {:?})", x.0, ctx.op_of(x));
     let padded = movement::pad_to(ctx, x, &shape);
     let copy = ctx.uop(Ops::Copy, None, vec![padded], Arg::Str(device.to_string()));
     movement::shrink_to(ctx, copy, &shape)

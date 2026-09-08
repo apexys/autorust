@@ -415,6 +415,29 @@ interp stubs (M6 semantics).
 - [ ] M7 user kernels (`@function`/custom_kernel + flash attention), TinyJit, autograd, BEAM/TC activation
 - [x] M8 OpenCL backend (render byte-diff + DEV=CL numerics + kernel-count parity on the RTX 3060)
 
+- [x] M8.1 backend conformance harness (tests/backend_harness.rs): smoke (upload/
+  compute/download + allocator-reuse run-twice), ALU battery driven by
+  `facts.code_for_op`, dtype battery over `facts.supported_dtypes` (roundtrip),
+  casts, goldens computed once by tinygrad (py/dump_golden.py -> tests/golden.rs,
+  buffer-byte semantics for sub-f32 dtypes). Found + fixed: interp truncate for
+  bf16/f16/fp8 (was silently clamping bf16 through the int path — clang C-cast
+  semantics now: unsigned clamps negatives at the float level then wraps),
+  from/to_storage_scalar for f16/bf16/fp8, unary + ternary ALU exec (Where,
+  Mulacc), store-at-dest-dtype (codegen widens sub-dword ALU to f32), the
+  symbolic LOCAL-window shrink shape (gid-derived start), scalar flatten/expand
+  slicing, sum/prod fp8 cast-back parity, cstyle code_for_op completed to
+  python's set (exp2/log2/sin/trunc + __builtin f64 dispatch) with MAX removed
+  (it decomposes via WHERE).
+- [ ] M8.2 known-open gaps the harness exposed (each has a skipped/ignored
+  test): (a) weak-const commit passes — tinygrad `uop/weak.py`
+  (commit_weak_srcs on Broadcastable, the STORE commit at dest dtype,
+  pm_lower_weak); (b) non-native-float decomp — create_non_native_float_pats +
+  pm_manual_bf16_cast (M8.5 extra_matcher); (c) arange realize: the
+  cumsum-based arange's loop-carried accumulator collapses to its final value
+  (arange(4) -> [3,3,3,3]) — reduce->range PHI handling; (d) sub-dword
+  vectorized memory coalescing bitcasts (bool4/fp8 vector stores unrenderable);
+  (e) XOR training gate slots in as M7 acceptance (#[ignore] placeholder).
+
 ### M5 in-progress state (committed)
 - `src/codegen/pipeline.rs`: `full_rewrite_to_sink` opening block ("early movement ops"
   = `pm_mops`+`mop_cleanup` bottom-up, "initial symbolic" = sym+pm_flatten_range,

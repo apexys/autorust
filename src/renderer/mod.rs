@@ -18,6 +18,7 @@ fn python_alu_keys() -> Vec<Ops> {
 
 /// `CStyleLanguage.code_for_op.keys()` — the C-style table.
 fn cstyle_alu_keys() -> Vec<Ops> {
+    // python cstyle.py:136 — note NO MAX (max decomposes via WHERE)
     vec![
         Ops::Sqrt, Ops::Reciprocal, Ops::Neg, Ops::Exp2, Ops::Log2, Ops::Sin, Ops::Trunc, Ops::And, Ops::Xor, Ops::Or,
         Ops::Add, Ops::Sub, Ops::Mul, Ops::Cmod, Ops::Cdiv, Ops::Cmpne, Ops::Shr, Ops::Shl, Ops::Cmplt, Ops::Where, Ops::Cmpeq,
@@ -49,6 +50,8 @@ pub struct Renderer {
     /// else decomposes in the pipeline). python_alu for the interp, the
     /// C-style table for cstyle renderers.
     pub code_for_op: Vec<crate::uop::Ops>,
+    /// `supported_dtypes()` — the dtype set the backend computes in.
+    pub supported_dtypes: Vec<crate::dtype::DTypeId>,
 }
 
 impl Renderer {
@@ -63,6 +66,8 @@ impl Renderer {
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
             code_for_op: python_alu_keys(),
+            // ops_python.py:235 — 3.12+ keeps half, everything else stays.
+            supported_dtypes: crate::dtype::ALL.to_vec(),
         }
     }
 
@@ -77,6 +82,8 @@ impl Renderer {
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
             code_for_op: cstyle_alu_keys_clang(),
+            // cstyle.py:300 — fp8s excluded everywhere; bf16 only on x86/arm arch.
+            supported_dtypes: crate::dtype::ALL.iter().copied().filter(|&d| !in_fp8s(d)).collect(),
         }
     }
 
@@ -91,8 +98,35 @@ impl Renderer {
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
             code_for_op: cstyle_alu_keys(),
+            supported_dtypes: opencl_supported_dtypes(""),
         }
     }
+
+    /// `OpenCLRenderer.supported_dtypes` (cstyle.py:339) — fp8s never, half
+    /// only with `cl_khr_fp16` in the arch, double only with `cl_khr_fp64`.
+    pub fn opencl_arch(arch: &str) -> Renderer {
+        let mut r = Renderer::opencl();
+        r.supported_dtypes = opencl_supported_dtypes(arch);
+        r
+    }
+}
+
+fn in_fp8s(d: crate::dtype::DTypeId) -> bool {
+    crate::dtype::in_set(crate::dtype::FP8S, d)
+}
+
+/// cstyle.py:339 — the CL dtype gate over the device's extension arch string.
+fn opencl_supported_dtypes(arch: &str) -> Vec<crate::dtype::DTypeId> {
+    crate::dtype::ALL
+        .iter()
+        .copied()
+        .filter(|&d| {
+            let fp8 = in_fp8s(d);
+            let half = d == crate::dtype::FLOAT16;
+            let dbl = d == crate::dtype::FLOAT64;
+            !fp8 && (!half || arch.contains("cl_khr_fp16")) && (!dbl || arch.contains("cl_khr_fp64"))
+        })
+        .collect()
 }
 
 /// The per-device render seam: pipeline facts + linear-uops-to-source text.
