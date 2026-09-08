@@ -424,7 +424,21 @@ fn aranges_all_backends() {
 }
 
 #[test]
-#[ignore = "reduce-over-arange still broken: the arange cumsum kernel graph is now correct (arange4/arange_step pass), but reducing over the cumsum output nests two REDUCEs in one kernel — the expander's range-map reshape and memory coalescing both panic (multiple stores). Needs the reduce-over-reduce staging decision (python stages the inner reduce); un-ignore when nested reduces stage correctly."]
+fn reductions_basic_all_backends() {
+    let gm = goldens();
+    for b in backends() {
+        run_named(&b, &gm, &[
+            "red_sum_arange",
+            "red_mean_arange",
+            "red_max_arange",
+            "red_sum_axis",
+            "red_max_axis_keepdim",
+        ]);
+    }
+}
+
+#[test]
+#[ignore = "red_sum_2d_all: the fully-unrolled 2D reduce (sum over both axes of a (2,3)) const-folds to a plain store in python — the reduce vanishes via sum-split + unparented-range folding in postopt symbolic and the kernel degenerates. Our port leaves the reduce (with const-stack range srcs), takes the acc path, and leaks Expand nodes into the interp. Needs the sum-of-bare-range arithmetic folding; un-ignore when the 2D-all reduce folds like python."]
 fn reductions_all_backends() {
     let gm = goldens();
     for b in backends() {

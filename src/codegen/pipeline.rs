@@ -525,6 +525,28 @@ pub fn full_rewrite_to_sink(ctx: &mut UOpCtx, ast: UopId) -> UopId {
     full_rewrite_to_sink_with(ctx, ast, &Renderer::cpu_interp())
 }
 
+/// temporary: readable one-line-per-node dump of the graph below `sink`.
+fn dump_ast(ctx: &mut UOpCtx, sink: UopId) -> String {
+    let order = ctx.toposort(sink);
+    let mut out = String::new();
+    for &n in order.iter() {
+        let (op, dt, srcs, arg, _tag) = ctx.snapshot(n);
+        let dt_s = format!("{dt:?}");
+        let src_s: Vec<String> = srcs.iter().map(|s| s.0.to_string()).collect();
+        let shape = ctx.shape(n).ok().flatten().map(|s| format!("{s:?}")).unwrap_or_default();
+        out.push_str(&format!(
+            "{} = {:?}{} ({}) src=[{}] arg={:?}\n",
+            n.0,
+            op,
+            dt_s,
+            shape,
+            src_s.join(","),
+            arg
+        ));
+    }
+    out
+}
+
 pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
     let limit = stage_limit();
     let mut i = 0usize;
@@ -536,6 +558,11 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         cur = graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, CtxVal::None)
             .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name));
         i += 1;
+        // temporary: dump the pre-expander AST (TG_DUMP_PRE_EXPAND=1)
+        if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
+            eprintln!("=== after stage {} ({}) ===", i, st.name);
+            eprintln!("{}", dump_ast(ctx, cur));
+        }
     }
     if i + 1 > limit {
         return cur;
@@ -543,6 +570,10 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
     // do postrange optimization, BEAM or hand_coded_optimizations
     cur = apply_opts(ctx, cur, ren);
     i += 1;
+    if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
+        eprintln!("=== after stage {} (apply_opts) ===", i);
+        eprintln!("{}", dump_ast(ctx, cur));
+    }
     for st in post_stages() {
         if i + 1 > limit {
             return cur;
@@ -561,6 +592,10 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         };
         i += 1;
+        if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
+            eprintln!("=== after stage {} ({}) ===", i, st.name);
+            eprintln!("{}", dump_ast(ctx, cur));
+        }
     }
     cur
 }

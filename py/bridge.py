@@ -151,7 +151,11 @@ def _arg_py(j, dts):
     if kind == "UInt":
         return v[0]
     if kind == "Big":
-        neg, limbs = v[0], v[1]
+        # rust serde emits the struct variant as a map, older bridge a 2-list
+        if isinstance(v, dict):
+            neg, limbs = v["neg"], v["limbs"]
+        else:
+            neg, limbs = v[0], v[1]
         mag = 0
         for limb in reversed(limbs):
             mag = (mag << 64) | limb

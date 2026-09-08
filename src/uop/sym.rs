@@ -1255,8 +1255,8 @@ fn build_symbolic_phase2() -> PatternMatcher {
         r(|ctx, st, _| {
             let (cond, t, f) = (sget(st, "cond"), sget(st, "t"), sget(st, "f"));
             if !is_invalid_node(ctx, f) {
-                let nc = ctx.logical_not(cond);
-                Some(ctx.where_(nc, t, f))
+                // python: cond.where(f, t) — the branches swap
+                Some(ctx.where_(cond, f, t))
             } else {
                 None
             }

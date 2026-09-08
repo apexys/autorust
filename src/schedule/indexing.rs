@@ -344,8 +344,11 @@ fn convert_pad_to_where(ictx: &mut IndexingContext, ctx: &mut UOpCtx, x: UopId) 
         }
     };
     let bx_srcs = ctx.srcs(bx).to_vec();
-    let zero = ctx.const_like(bx_srcs[0], ConstVal::Int(0));
-    Some(ctx.where_(valid, bx_srcs[0], zero))
+    // python: UOp.const(x.dtype.const(0)) — a SCALAR const (no expand;
+    // const_like would expand it to x's shape and break the sum-of-gate fold)
+    let zero = ctx.const_py(ConstVal::Int(0), Some(ctx.dt_of(bx_srcs[0])));
+    let w = ctx.where_(valid, bx_srcs[0], zero);
+    Some(w)
 }
 
 /// `convert_reduce_to_reduce_with_ranges` (indexing.py:113).
@@ -937,6 +940,43 @@ pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool) -> UopId {
         ending_ranges.get_mut(&x).unwrap().extend(broadcast_ending_ranges.iter().copied());
 
         finish_node(&mut ictx, ctx, x, &x_shape, &out_rngs, &mut ending_ranges);
+
+        // python: DEBUG_RANGEIFY trace (indexing.py:306)
+        if _debug {
+            let rdesc = |ctx: &UOpCtx, rs: &[UopId]| -> String {
+                rs.iter()
+                    .map(|&r| match ctx.arg_of(r) {
+                        Arg::Seq { tuple: true, items } if matches!(items.as_slice(), [Arg::Int(_), _]) => {
+                            format!(
+                                "r{}({:?})",
+                                crate::uop::range::AxisType::range_axis_id(ctx, r),
+                                crate::uop::range::AxisType::from_arg(&items[1])
+                            )
+                        }
+                        _ => format!("#{}", r.0),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let shape_s: Vec<String> = x_shape
+                .iter()
+                .map(|s| match s {
+                    crate::uop::sint::SVal::I(i) => i.to_string(),
+                    crate::uop::sint::SVal::U(u) => format!("#{}", u.0),
+                    _ => "?".into(),
+                })
+                .collect();
+            eprintln!(
+                "{} {:2} {:?} ({}) {} [{}] -> [{}]",
+                if ictx.realize_map.contains_key(&x) { "***" } else { "   " },
+                consumers.len(),
+                ctx.op_of(x),
+                shape_s.join(","),
+                ending_ranges.get(&x).map(|v| v.len()).unwrap_or(0),
+                rdesc(ctx, &ictx.range_map[&x].0),
+                rdesc(ctx, &ictx.range_map[&x].1)
+            );
+        }
     }
 
     // apply rangeify (bottom up)

@@ -1562,8 +1562,9 @@ impl UOpCtx {
             let m = self.alu2(Ops::Max, nt, nx);
             return self.neg(m);
         }
-        let k = dtype::dtype_const(dt, num_add(dtype::dtype_min(dt), dtype::dtype_max(dt)));
-        let k = self.const_py(k, Some(dt));
+        // python: k = dt.const(dt.min + dt.max) — for every two's-complement
+        // int dtype (weakint included) min+max == -1
+        let k = self.const_py(ConstVal::Int(-1), Some(dt));
         let a1 = self.alu2(Ops::Xor, t, k);
         let b1 = self.alu2(Ops::Xor, x, k);
         let m = self.alu2(Ops::Max, a1, b1);

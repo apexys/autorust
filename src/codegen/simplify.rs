@@ -11,7 +11,7 @@ use crate::uop::{arg::Arg, ctx::UOpCtx, UopId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn red_add_arg() -> Arg {
+pub fn red_add_arg() -> Arg {
     Arg::Seq { tuple: true, items: vec![Arg::Enum(crate::uop::arg::EnumVal { class: crate::uop::arg::EnumClass::Ops, value: Ops::Add as u16 }), Arg::Int(0)] }
 }
 
@@ -131,8 +131,12 @@ pub fn reduce_collapse(ctx: &mut UOpCtx, red: UopId, pm: &PatternMatcher) -> Opt
     let mut u = ctx.srcs(red)[0];
     for &r in &rngs {
         // included = u.toposort(gate=lambda x: r in x.ranges)
-        let ranges_of_r = ctx.ranges(r).to_vec();
-        let included = ctx.toposort_gated(u, Some(&|x| ranges_of_r.contains(&x)), true);
+        // precompute ranges for every node below u (the gate needs an immutable ctx)
+        let mut rng_map: std::collections::HashMap<UopId, std::rc::Rc<Vec<UopId>>> = std::collections::HashMap::new();
+        for &nd in ctx.toposort(u).iter() {
+            rng_map.insert(nd, ctx.ranges(nd));
+        }
+        let included = ctx.toposort_gated(u, Some(&|x| rng_map.get(&x).map_or(false, |v| v.contains(&r))), true);
         if included.iter().any(|&x| matches!(ctx.op_of(x), Ops::Store | Ops::Reduce)) {
             return None;
         }
@@ -329,6 +333,7 @@ pub fn pm_reduce_simplify() -> PatternMatcher {
         UPat::ops1(Ops::Reduce)
             .with_arg(Some(red_add_arg()))
             .with_src_list(vec![var("u")])
+            .allow_all_srcs()
             .named("red"),
         r(|ctx, st, _| {
             let red = sget(st, "red");
@@ -612,7 +617,7 @@ pub fn pm_reduce_local() -> PatternMatcher {
         ),
         (
             UPat::ops1(Ops::Reduce)
-                .with_src_tup(vec![UPat::any(vec![]), UPat::any(vec![])])
+                .with_src_tup(vec![UPat::var(None, None), UPat::var(None, None)])
                 .allow_all_srcs()
                 .named("r"),
             crate::uop::upat::r_cnt(|c: &std::cell::Cell<i64>, ctx: &mut UOpCtx, st: &Store| {

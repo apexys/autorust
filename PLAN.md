@@ -433,10 +433,10 @@ interp stubs (M6 semantics).
   (commit_weak_srcs on Broadcastable, the STORE commit at dest dtype,
   pm_lower_weak); (b) non-native-float decomp — create_non_native_float_pats +
   pm_manual_bf16_cast (M8.5 extra_matcher); (c) ~~arange realize~~ FIXED (see
-  M8.2a below); (c') reduce-over-reduce staging: reducing over an arange (two
-  nested REDUCEs in one graph) panics in the expander's range-map reshape and
-  in memory coalescing ("multiple stores") — python stages the inner reduce
-  (realize_map decision); un-ignores `reductions_all_backends`; (d) sub-dword
+  M8.2a); (c') ~~reduce-over-reduce staging~~ MOSTLY FIXED (see M8.2b) —
+  remaining: red_sum_2d_all, the fully-unrolled 2D reduce that python
+  const-folds to a plain store (sum-split + unparented folding of a bare-range
+  sum; our port leaks Expand grids into the interp); (d) sub-dword
   vectorized memory coalescing bitcasts (bool4/fp8 vector stores unrenderable);
   (e) XOR training gate slots in as M7 acceptance (#[ignore] placeholder).
 
@@ -457,6 +457,44 @@ interp stubs (M6 semantics).
      mask sums into bool OR chains (wrong for sums of overlapping masks).
      Fixed by constraining the branch consts to BOOL.
 - `aranges_all_backends` harness test + `arange4`/`arange_step` goldens added.
+
+### M8.2b done (reduce-over-reduce / gated-sum fold — reductions battery)
+Python const-folds `sum(arange(n))` to closed form via the gated-sum rule
+chain in `pm_reduce_collapse` (simplify.py:95-129) run inside
+`reduce_collapse` during get_kernel_graph's "symbolic+reduce_collapse" pass;
+the cumsum reduce folds to `cast(r0)+1` and the kernel keeps ONE real reduce.
+Port fixes that made it work:
+  1. `sym.rs` where-swap rule (symbolic.py:244 `not(cond).where(t,f)`):
+     our rewrite rebuilt `not(cond).where(t,f)` — an identity for bool conds —
+     instead of swapping branches (`cond.where(f,t)`). The swap is what turns
+     the pad mask into a matchable `(r < lower).where(0, val)`.
+  2. `ctx.rs minimum()`: the XOR-with-k decomposition used
+     `dtype_min+dtype_max` via bignum — for weakint that is a huge const that
+     panics `exec_alu`. python's `dt.min+dt.max` is ALWAYS -1 (two's
+     complement); hardcode `ConstVal::Int(-1)`.
+  3. `simplify.rs reduce_collapse`: the `included` gate was inverted — it
+     checked `node in ranges(r)` instead of python's `r in node.ranges`. Now
+     precomputes per-node ranges and gates correctly (also: python's gated
+     toposort prunes rejected nodes — our toposort_gated matches).
+  4. `simplify.rs pm_reduce_simplify` rule: python matches REDUCE with
+     `allow_any_len` (src[0]=u + any ranges); our `with_src_list` was strict,
+     so 2+ src reduces never reached reduce_collapse. Added `.allow_all_srcs()`.
+  5. `simplify.rs pm_reduce_local` acc rule: `UPat::any(vec![])` (empty
+     alternatives) matches NOTHING — python's `UPat()` matches anything. The
+     reduce_ranges_to_acc rule never fired. Replaced with `UPat::var(None,None)`.
+  6. `indexing.rs convert_pad_to_where`: the false-branch const used
+     `const_like` (which EXPANDS to x's shape); python uses a scalar
+     `UOp.const(0)` — the expanded const breaks the gated-sum patterns.
+  7. `interp.rs`: AFTER now copies its first non-void src's value (python
+     ops_python.py:92 `values[u] = src_values[0]`); previously a NOOP, so
+     `Load(Index(After(acc, End)))` had no value.
+  8. `py/bridge.py`: decode the Rust serde struct-variant shape for
+     `ConstVal::Big` (`{"neg","limbs"}` map) — the ew-reduce-chain diff now
+     compares equal.
+- Results: `reductions_basic_all_backends` (sum/mean/max over arange(100),
+  sum over axis 1, max over axis 0 keepdim) passes on INTERP and CL;
+  sum(arange(100)) == 4950 exactly. `reductions_all_backends` stays ignored
+  only for `red_sum_2d_all` (fully-unrolled 2D reduce const-fold).
 
 ### M5 in-progress state (committed)
 - `src/codegen/pipeline.rs`: `full_rewrite_to_sink` opening block ("early movement ops"

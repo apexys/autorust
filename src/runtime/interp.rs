@@ -266,7 +266,7 @@ fn exec_launch(
         let u = uops[i];
         let op = ctx.op_of(u);
         let srcs: Vec<UopId> = ctx.srcs(u).to_vec();
-        let src_vals: Vec<Val> = srcs.iter().filter(|s| ctx.dt_of(**s) != dtype::VOID).map(|s| values.get(s).cloned().expect("TGERR: interp missing value")).collect();
+        let src_vals: Vec<Val> = srcs.iter().filter(|s| ctx.dt_of(**s) != dtype::VOID).map(|s| values.get(s).cloned().unwrap_or_else(|| panic!("TGERR: interp missing value: src {} op {:?} of u {} op {:?}", s.0, ctx.op_of(*s), u.0, op))).collect();
         match op {
             Ops::End => {
                 if srcs.len() == 3 {
@@ -305,7 +305,18 @@ fn exec_launch(
             Ops::Endif => {
                 exec_masks.pop();
             }
-            Ops::Barrier | Ops::Sink | Ops::Noop | Ops::Group | Ops::After => {}
+            Ops::After => {
+                // python: values[u] = src_values[0] — the After node carries
+                // its first (non-void) src's value forward
+                let v = srcs
+                    .iter()
+                    .find(|s| ctx.dt_of(**s) != dtype::VOID)
+                    .and_then(|s| values.get(s).cloned());                match v {
+                    Some(v) => { values.insert(u, v); }
+                    None => panic!("TGERR: interp AFTER src missing value"),
+                }
+            }
+            Ops::Barrier | Ops::Sink | Ops::Noop | Ops::Group => {}
             Ops::Store => {
                 let gate = exec_masks.last().unwrap().clone();
                 let store_n = numels.get(&u).copied().unwrap_or(1);
