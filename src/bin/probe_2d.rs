@@ -1,0 +1,22 @@
+use autorust::uop::ctx::UOpCtx;
+use autorust::tensor::Tensor;
+use autorust::engine::realize::{tensor_values, ProgCache};
+use autorust::runtime::buffer::BufTable;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+fn main() {
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        let mut ctx = UOpCtx::new();
+        let t = Tensor::arange(&mut ctx, 0.0, Some(6.0), 1.0, None).reshape(&mut ctx, [2usize, 3]).sum(&mut ctx, None, false, None);
+        let mut cache = ProgCache::default();
+        let vals = tensor_values(&mut ctx, t.uop, &mut BufTable::default(), &mut cache);
+        println!("VALUES: {vals:?}");
+    }));
+    match res {
+        Ok(()) => {}
+        Err(e) => {
+            let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
+            eprintln!("PANIC: {msg:?}");
+        }
+    }
+}

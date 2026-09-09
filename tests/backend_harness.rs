@@ -438,7 +438,6 @@ fn reductions_basic_all_backends() {
 }
 
 #[test]
-#[ignore = "red_sum_2d_all: the fully-unrolled 2D reduce (sum over both axes of a (2,3)) const-folds to a plain store in python — the reduce vanishes via sum-split + unparented-range folding in postopt symbolic and the kernel degenerates. Our port leaves the reduce (with const-stack range srcs), takes the acc path, and leaks Expand nodes into the interp. Needs the sum-of-bare-range arithmetic folding; un-ignore when the 2D-all reduce folds like python."]
 fn reductions_all_backends() {
     let gm = goldens();
     for b in backends() {

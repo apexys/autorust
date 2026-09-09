@@ -49,7 +49,7 @@ fn stages() -> Vec<Stage> {
             bottom_up: true,
         },
         Stage { name: "initial symbolic", pm: symbolic().add(&pm_flatten_range()), bottom_up: false },
-        Stage { name: "simplify ranges", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "simplify ranges", pm: crate::codegen::simplify::pm_simplify_ranges(), bottom_up: false },
     ]
 }
 
@@ -557,6 +557,9 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         }
         cur = graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, CtxVal::None)
             .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name));
+        if st.name == "simplify ranges" {
+            cur = crate::codegen::simplify::range_gates(ctx, cur);
+        }
         i += 1;
         // temporary: dump the pre-expander AST (TG_DUMP_PRE_EXPAND=1)
         if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {

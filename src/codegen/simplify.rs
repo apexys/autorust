@@ -3,10 +3,10 @@
 
 use crate::dtype::{self, ConstVal};
 use crate::uop::ops::{group, Ops};
-use crate::uop::sym::{r, sget, sget_opt, var, CtxVal};
+use crate::uop::sym::{r, sget, sget_opt, symbolic, var, CtxVal};
 use crate::uop::sint::SVal;
 use crate::uop::range::AxisType;
-use crate::uop::upat::{PatternMatcher, RuleFn, Store, UPat, UPatOrConst};
+use crate::uop::upat::{graph_rewrite, substitute, PatternMatcher, RuleFn, Store, UPat, UPatOrConst};
 use crate::uop::{arg::Arg, ctx::UOpCtx, UopId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,6 +56,162 @@ pub fn pm_flatten_range() -> PatternMatcher {
         UPat::op_var(vec![Ops::Reduce, Ops::End]).named("r"),
         r(|ctx, st, _| flatten_range(ctx, sget(st, "r"))),
     )])
+}
+
+fn const_i(ctx: &UOpCtx, u: UopId) -> i128 {
+    match ctx.val(u) {
+        ConstVal::Int(i) => i,
+        other => panic!("TGERR: expected int const, got {other:?}"),
+    }
+}
+
+/// `count_divmod` (simplify.py:22).
+fn count_divmod(ctx: &UOpCtx, u: UopId) -> usize {
+    ctx.backward_slice(u)
+        .iter()
+        .filter(|&&x| matches!(ctx.op_of(x), Ops::Floordiv | Ops::Floormod))
+        .count()
+}
+
+/// `simplify_merge_adjacent` (simplify.py:23).
+pub fn simplify_merge_adjacent(ctx: &mut UOpCtx, u0: UopId) -> Option<UopId> {
+    let er = ctx.ended_ranges(u0);
+    if er.is_empty() || !er.iter().all(|&r| ctx.op_of(r) == Ops::Range) {
+        return None;
+    }
+    let bs = ctx.backward_slice_with_self(u0);
+    let reds: Vec<UopId> = bs.iter().filter(|&&x| ctx.op_of(x) == Ops::Reduce).copied().collect();
+    let reduce_ranges: Vec<std::rc::Rc<Vec<UopId>>> = reds.into_iter().map(|x| ctx.ranges(x)).collect();
+    // on END we only want to merge adjacent ranges, on REDUCE we want to try all combinations
+    let pairs: Vec<(UopId, UopId)> = if ctx.op_of(u0) == Ops::End {
+        er.iter().zip(er[1..].iter()).map(|(&a, &b)| (a, b)).collect()
+    } else {
+        let mut p = Vec::new();
+        for i in 0..er.len() {
+            for j in 0..er.len() {
+                if i != j {
+                    p.push((er[i], er[j]));
+                }
+            }
+        }
+        p
+    };
+    let mut cur = u0;
+    for (r0, r1) in pairs {
+        if AxisType::range_axis_type(ctx, r0) != AxisType::range_axis_type(ctx, r1) {
+            continue;
+        }
+        // check if the ranges to merge are in the same reduces
+        if !reduce_ranges.iter().all(|rr| rr.contains(&r0) == rr.contains(&r1)) {
+            continue;
+        }
+        let s0 = ctx.srcs(r0)[0];
+        let s1 = ctx.srcs(r1)[0];
+        let prod = ctx.mul(s0, s1);
+        let new_range =
+            ctx.replace(r0, Ops::Range, ctx.dt_of(r0), vec![prod], ctx.arg_of(r0).clone(), ctx.tag_of(r0).clone());
+        let d = ctx.div_floor(new_range, s1);
+        let m = ctx.mod_(new_range, s1);
+        let mut map = HashMap::new();
+        map.insert(r0, d);
+        map.insert(r1, m);
+        let nidx = substitute(ctx, cur, map, false, false);
+        let pmf = symbolic().add(&pm_flatten_range());
+        let nidx = graph_rewrite(ctx, nidx, &pmf, false, None, false, false, CtxVal::None)
+            .unwrap_or_else(|e| panic!("TGERR: merge rewrite failed: {e}"));
+        // check if it simplifies
+        if count_divmod(ctx, nidx) <= count_divmod(ctx, cur) {
+            cur = nidx;
+        }
+    }
+    if cur == u0 {
+        None
+    } else {
+        Some(cur)
+    }
+}
+
+/// `pm_simplify_ranges` merge rule (simplify.py:54; gating done by `range_gates`).
+pub fn pm_simplify_ranges() -> PatternMatcher {
+    PatternMatcher::new(vec![(
+        UPat::op_var(vec![Ops::End, Ops::Reduce]).named("u"),
+        r(|ctx, st, _| simplify_merge_adjacent(ctx, sget(st, "u"))),
+    )])
+}
+
+/// `mark_gated` (simplify.py:43) — collected over the graph by `range_gates`.
+fn mark_gated(ctx: &mut UOpCtx, idx: UopId, g: &mut HashMap<UopId, UopId>) {
+    let srcs = ctx.srcs(idx).to_vec();
+    let mut guards: HashMap<UopId, UopId> = HashMap::new();
+    let x;
+    if srcs.len() > 1 && ctx.op_of(srcs[1]) == Ops::Where {
+        let ws = ctx.srcs(srcs[1]).to_vec();
+        let cond = ws[0];
+        let stmts = ctx.split_uop_vec(cond, Ops::And);
+        for &v in &stmts {
+            if ctx.op_of(v) == Ops::Cmplt {
+                let vs = ctx.srcs(v);
+                if ctx.op_of(vs[0]) == Ops::Range && ctx.op_of(vs[1]) == Ops::Const {
+                    guards.insert(vs[0], vs[1]);
+                }
+            }
+        }
+        x = ws[1];
+    } else {
+        x = idx;
+    }
+    for (&r, &c) in &guards {
+        match g.get(&r) {
+            Some(&cur) => {
+                if const_i(ctx, cur) < const_i(ctx, c) {
+                    g.insert(r, c);
+                }
+            }
+            None => {
+                g.insert(r, c);
+            }
+        }
+    }
+    for &r in ctx.ranges(x).iter() {
+        if !guards.contains_key(&r) && ctx.op_of(r) == Ops::Range {
+            let s0 = ctx.srcs(r)[0];
+            g.insert(r, s0);
+        }
+    }
+}
+
+/// `pm_simplify_ranges` gating half (mark_gated + REDUCE pin + SINK substitute).
+pub fn range_gates(ctx: &mut UOpCtx, sink: UopId) -> UopId {
+    let mut g: HashMap<UopId, UopId> = HashMap::new();
+    let order = ctx.toposort(sink);
+    for &x in order.iter().rev() {
+        match ctx.op_of(x) {
+            Ops::Index => mark_gated(ctx, x, &mut g),
+            Ops::Reduce => {
+                let srcs = ctx.srcs(x).to_vec();
+                for &r in &srcs[1..] {
+                    if ctx.op_of(r) == Ops::Range {
+                        let s0 = ctx.srcs(r)[0];
+                        g.insert(r, s0);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut map: HashMap<UopId, UopId> = HashMap::new();
+    let entries: Vec<(UopId, UopId)> = g.into_iter().collect();
+    for (r, c) in entries {
+        if ctx.srcs(r)[0] != c {
+            let nr = ctx.replace(r, Ops::Range, ctx.dt_of(r), vec![c], ctx.arg_of(r).clone(), ctx.tag_of(r).clone());
+            map.insert(r, nr);
+        }
+    }
+    if map.is_empty() {
+        return sink;
+    }
+    let ret = substitute(ctx, sink, map, false, false);
+    crate::uop::upat::simplify(ctx, ret)
 }
 
 /// `reduce_unparented` (simplify.py:118).
