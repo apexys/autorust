@@ -557,11 +557,57 @@ Port fixes that made it work:
      so a DEV=RUST python driver would only test throwaway marshaling glue;
      M6's end-to-end native realize covers the same exec_kernel path in
      pure Rust.
-  4. linearize heap FIXED: BinaryHeap must pop LARGEST nkey first (python
-     pushes -nkey); the old Reverse() popped smallest, inverting tie order
-     (caught by the render gate via buf declaration order).
-  Deferred: `load collapse`/`split ranges`/`simplify ranges` are no-ops on the current
-  corpus (key-equal with empty PMs; port with the sum/reduce kernel work).
+   4. linearize heap FIXED: BinaryHeap must pop LARGEST nkey first (python
+      pushes -nkey); the old Reverse() popped smallest, inverting tie order
+      (caught by the render gate via buf declaration order).
+
+### Codegen rule parity (`full_rewrite_to_sink`) — status + TODO
+
+Authoritative stage list: `codegen/__init__.py:294-393`. Parity of each python PM
+with the Rust pipeline (`codegen/pipeline.rs` `stages()`/`post_stages()`), as of the
+rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on corpus),
+❌ = not ported.
+
+| # | python stage (PM) | Rust | note |
+|---|-------------------|------|------|
+| 1 | `multi_pm` | ❌ | in-kernel UNSHARD resolve; multi-device descoped |
+| 2 | early movement ops `pm_mops`+`mop_cleanup` | ✅ | |
+| 3 | load collapse `pm_load_collapse` | ❌ | **TODO**: gated-load collapse (indexing-by-tensor); reuse `reduce_collapse` toposort infra. `optimize`-gated |
+| 4 | split ranges `pm_split_ranges`+`pm_flatten_range` | ❌ | **TODO**: split ranges for upcast/local; `optimize`-gated |
+| 5 | initial symbolic `sym`+`pm_flatten_range` | ✅ | |
+| 6 | simplify ranges `pm_flatten_range`+`pm_simplify_ranges` | ✅ | ported (merge_adjacent + range_gates) |
+| — | `apply_opts` | ✅ | between the two stage lists |
+| 7 | postopt symbolic `sym`+`pm_move_where_on_load`+`pm_flatten_range`+`pm_reduce_unparented` | ✅ | `where_on_load` ported |
+| 8 | expander `expander2` | ✅ | |
+| 9 | remove reduces `mop_cleanup`+`pm_reduce_local` | ✅ | |
+| 10 | add local buffers `pm_add_local_buffers` | ⬜ | **TODO**: STAGE→LOCAL buffer (local reductions / gemm); placeholder today |
+| 11 | add gpudims `pm_add_gpudims` | ✅ | |
+| 12 | expand broadcast / add loads `symbolic_simple`+`pm_expand_broadcast`+`pm_add_loads` | ✅ | |
+| 13 | devectorize2 `symbolic_simple`+`devectorizer2`+`indexing_simplify` | ✅ | `indexing_simplify` ported |
+| 14 | early symbolic `sym` | ✅ | |
+| 15 | memory coalescing `memory_coalescing` | ✅ | `coalesce.rs` |
+| 16 | add images `symbolic_simple`+`ew_devectorizer`+`pm_simplify_add_image` | ⬜ | images descoped; `ew_devectorizer` inline no-op |
+| 17 | extra symbolic `sym`+`indexing_simplify` | ✅ | |
+| 18 | lower all index dtypes `symbolic_simple`+`pm_lower_index_dtype`+`indexing_simplify` | ✅ | weak lowering wired; **bug fix**: `_lower_weak_ops` must exclude COMPARISON (Cmpne oscillation, fixed in weak.rs) |
+| 19 | final symbolic `symbolic` | ✅ | |
+| 20 | cast float alu `pm_cast_float_alu` | ✅ | |
+| 21 | early decompositions `symbolic_simple`+`get_simplifying_rewrite_patterns` | ⬜ | **TODO**: floordiv/floormod/idiv decomposition (only `symbolic_simple` today) |
+| 22 | decomp dtypes `pm_dtype_decomps`+`pm_commit_weak` | ⬜ | **TODO**: non-native-float decomp (fp16/bf16/fp8); fp32 corpus unaffected |
+| 23 | late decompositions `pm_decomp` | ⬜ | same as #21 |
+| 24 | move gates from index `pm_move_gates_from_index` | ✅ | `gater.rs` (4 non-image rules) |
+| 25 | final rewrite `pm_final_rewrite`+`pm_remove_invalid` | ✅ | |
+| 26 | casted consts `pm_casted_consts` | ✅ | walk |
+| 27 | add implicit barriers `pm_implicit_barriers` | ⬜ | **TODO**: LOCAL load/store WAR/WAR barriers (needed with #10) |
+| 28 | add control flow `pm_add_control_flow` | ⬜ | **TODO**: IF/ENDIF for non-unrolled local reduces |
+| 29 | number params `pm_number_params` | ⬜ | **TODO**: param renumbering (corpus params already distinct) |
+
+Highest-value remaining gaps, ordered: (A) `pm_add_local_buffers`+`pm_implicit_barriers`+
+`pm_add_control_flow` (the local-memory triad — unblocks shared-memory reductions/gemm);
+(B) `pm_split_ranges` (unlocks finer upcast/local splitting); (C)
+`get_simplifying_rewrite_patterns` floordiv/mod decomp + `pm_dtype_decomps` (needed for
+int-index-heavy + non-native-float kernels). Each is currently a no-op on the fp32 corpus,
+so no gate regressed; port each with a targeted differential kernel.
+
 
 ### M2 deferred (finish alongside M5/M6 consumers)
 - `pm_simplify_valid` / `uop_given_valid` / `simplify_valid` (symbolic.py:313-429) — needed by
