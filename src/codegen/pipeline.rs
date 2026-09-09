@@ -13,7 +13,7 @@
 use crate::codegen::postrange::apply_opts;
 use crate::renderer::Renderer;
 use crate::codegen::simplify::{pm_flatten_range, pm_reduce_unparented};
-use crate::uop::sym::{pm_clean_up_group_sink, pm_mop_cleanup, symbolic, symbolic_simple, sget};
+use crate::uop::sym::{pm_cast_float_alu, pm_clean_up_group_sink, pm_mop_cleanup, pm_move_where_on_load, pm_remove_invalid, sym, symbolic, symbolic_simple, sget};
 use crate::schedule::rangeify::pm_mops;
 use crate::dtype;
 use crate::uop::range::AxisType;
@@ -48,32 +48,32 @@ fn stages() -> Vec<Stage> {
             pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()).add(&pm_mop_cleanup()),
             bottom_up: true,
         },
-        Stage { name: "initial symbolic", pm: symbolic().add(&pm_flatten_range()), bottom_up: false },
-        Stage { name: "simplify ranges", pm: crate::codegen::simplify::pm_simplify_ranges(), bottom_up: false },
+        Stage { name: "initial symbolic", pm: sym().add(&pm_flatten_range()), bottom_up: false },
+        Stage { name: "simplify ranges", pm: pm_flatten_range().add(&crate::codegen::simplify::pm_simplify_ranges()), bottom_up: false },
     ]
 }
 
 /// The stages after apply_opts.
 fn post_stages() -> Vec<Stage> {
     vec![
-        Stage { name: "postopt symbolic", pm: symbolic().add(&pm_flatten_range()).add(&pm_reduce_unparented()), bottom_up: false },
+        Stage { name: "postopt symbolic", pm: sym().add(&pm_move_where_on_load()).add(&pm_flatten_range()).add(&pm_reduce_unparented()), bottom_up: false },
         Stage { name: "expander", pm: expander_pm(), bottom_up: false },
         Stage { name: "remove reduces", pm: PatternMatcher::new(vec![]).add(&pm_mop_cleanup()).add(&crate::codegen::simplify::pm_reduce_local()), bottom_up: false },
         Stage { name: "add local buffers", pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()), bottom_up: true },
         Stage { name: "add gpudims", pm: crate::codegen::gpudims::pm_add_gpudims(), bottom_up: false },
         Stage { name: "*** expand broadcast / add loads", pm: symbolic_simple().add(&pm_expand_broadcast()).add(&pm_add_loads()), bottom_up: false },
-        Stage { name: "devectorize2", pm: devectorizer2().add(&pm_mop_cleanup()).add(&pm_mops()), bottom_up: false },
+        Stage { name: "devectorize2", pm: symbolic_simple().add(&devectorizer2()).add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
         Stage { name: "early symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()).add(&pm_clean_up_group_sink()), bottom_up: false },
         Stage { name: "add images", pm: PatternMatcher::new(vec![]), bottom_up: true },
-        Stage { name: "extra symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
-        Stage { name: "lower all index dtypes", pm: crate::uop::weak::pm_lower_index_dtype(), bottom_up: false },
+        Stage { name: "extra symbolic", pm: sym().add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
+        Stage { name: "lower all index dtypes", pm: symbolic_simple().add(&crate::uop::weak::pm_lower_index_dtype()).add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
         Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
-        Stage { name: "cast float alu operands", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "cast float alu operands", pm: pm_cast_float_alu(), bottom_up: false },
         Stage { name: "early decompositions", pm: PatternMatcher::new(vec![]).add(&symbolic_simple()), bottom_up: false },
         Stage { name: "decomp dtypes", pm: PatternMatcher::new(vec![]).add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
         Stage { name: "late decompositions", pm: PatternMatcher::new(vec![]), bottom_up: false },
-        Stage { name: "move gates from index", pm: PatternMatcher::new(vec![]), bottom_up: false },
-        Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()), bottom_up: false },
+        Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },
+        Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&pm_remove_invalid()), bottom_up: false },
         Stage { name: "casted consts", pm: pm_casted_consts(), bottom_up: false,  },
         Stage { name: "add implicit barriers", pm: PatternMatcher::new(vec![]), bottom_up: false },
         Stage { name: "add control flow", pm: PatternMatcher::new(vec![]), bottom_up: true },

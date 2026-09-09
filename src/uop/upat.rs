@@ -809,9 +809,13 @@ impl PatternMatcher {
             rule.pat.match_uop(ctx, uop, Store::new(), &mut stores);
             for store in &stores {
                 if std::env::var("TG_TRACE").is_ok() {
-                    eprintln!("RULE[{}] fire on op {:?}", i, ctx.op_of(uop));
+                    eprintln!("RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}", i, self.rules.len(), rule.pat.name, rule.pat.op, uop.0, ctx.op_of(uop));
                 }
-                if let Some(ret) = (rule.f)(ctx, store, ctxval) {
+                let _r = (rule.f)(ctx, store, ctxval);
+                if std::env::var("TG_TRACE").is_ok() {
+                    eprintln!("  -> u{} op {:?}", _r.map(|x| x.0).unwrap_or(0), _r.map(|x| ctx.op_of(x)));
+                }
+                if let Some(ret) = _r {
                     if ret != uop {
                         return Some(ret);
                     }
@@ -958,7 +962,12 @@ impl<'a> RewriteCtxt<'a> {
             Rebuild(UopId),
         }
         let mut stack = vec![Step::Enter(root)];
+        let mut iters = 0usize;
         while let Some(step) = stack.pop() {
+            iters += 1;
+            if iters > 400_000 {
+                return Err("rewrite step limit (walk)".into());
+            }
             match step {
                 Step::Enter(n) => {
                     if self.replace.contains_key(&n) {
@@ -1013,7 +1022,12 @@ impl<'a> RewriteCtxt<'a> {
         let mut stack: Vec<(UopId, Stage, UopId)> = vec![(root, Stage::S0, root)];
         let mut on_stack: HashSet<UopId> = HashSet::from([root]);
         let mut waitlist: HashMap<UopId, Vec<(UopId, Stage, UopId)>> = HashMap::new();
+        let mut iters = 0usize;
         while let Some((n, stage, new_n)) = stack.pop() {
+            iters += 1;
+            if iters > 400_000 {
+                return Err("rewrite step limit".into());
+            }
             if stack.len() > REWRITE_STACK_LIMIT {
                 return Err("infinite loop in graph_rewrite (stack too big)".into());
             }

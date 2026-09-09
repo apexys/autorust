@@ -208,7 +208,7 @@ pub fn cvar_arg(name: &'static str, a: CV) -> UPat {
 
 // ---------- pm_data_invalid (symbolic.py:74-96) ----------
 
-fn invalid_pat() -> UPat {
+pub fn invalid_pat() -> UPat {
     UPat::cvar(Some("i"), None, Some(Arg::Const(CV::Invalid)))
 }
 
@@ -1965,4 +1965,370 @@ pub fn pm_simplify_valid() -> PatternMatcher {
             }),
         ),
     ])
+}
+
+// ---------- pm_move_where_on_load (symbolic.py:398-423) ----------
+
+/// `where_on_load` (symbolic.py:398).
+pub fn where_on_load(ctx: &mut UOpCtx, cond: UopId, buf: UopId, idx: UopId, or_cast: UopId) -> Option<UopId> {
+    let where_clauses = ctx.split_uop_vec(cond, Ops::And);
+    let load_valid = ctx.get_valid(idx);
+    let in_load: std::collections::HashSet<UopId> =
+        ctx.split_uop_vec(load_valid, Ops::And).into_iter().collect();
+    let idx_index: std::collections::HashSet<UopId> = ctx
+        .backward_slice_with_self(idx)
+        .iter()
+        .filter(|&&u| ctx.op_of(u) == Ops::Index)
+        .copied()
+        .collect();
+    let idx_ranges: std::collections::HashSet<UopId> = ctx.ranges(idx).iter().copied().collect();
+    // can move if: condition's ranges are subset of idx's ranges, and no data dependent INDEX
+    let mut moved: Vec<UopId> = Vec::new();
+    let mut keep: Vec<UopId> = Vec::new();
+    let cands: Vec<UopId> = where_clauses.iter().filter(|c| !in_load.contains(c)).copied().collect();
+    for &c in &cands {
+        let cbs = ctx.backward_slice_with_self(c);
+        let sub = ctx.ranges(c).iter().all(|r| idx_ranges.contains(r));
+        let no_idx = cbs.iter().filter(|&&u| ctx.op_of(u) == Ops::Index).all(|u| idx_index.contains(u));
+        if sub && no_idx {
+            moved.push(c);
+        } else {
+            keep.push(c);
+        }
+    }
+    if keep.len() == where_clauses.len() {
+        return None;
+    }
+    let new_valid = ctx.uprod(load_valid, &moved);
+    let gi = ctx.get_idx(idx);
+    let gv = ctx.valid(gi, new_valid);
+    let new_idx = ctx.index(buf, vec![gv]);
+    let ret_idx = if ctx.op_of(or_cast) == Ops::Cast { ctx.cast(new_idx, ctx.dt_of(or_cast)) } else { new_idx };
+    let ct = ctx.const_bool(true);
+    let k = ctx.uprod(ct, &keep);
+    let zero = ctx.const_like(ret_idx, CV::Int(0));
+    Some(ctx.where_(k, ret_idx, zero))
+}
+
+/// `pm_move_where_on_load` (symbolic.py:412).
+pub fn pm_move_where_on_load() -> PatternMatcher {
+    PatternMatcher::new(vec![
+        (
+            var("cond").where_(
+                var("buf").index(vec![var("idx")]).or_casted(Some("or_cast")),
+                UPatOrConst::Val(CV::Int(0)),
+            ),
+            r(|ctx, st, _| {
+                let (cond, buf, idx, or_cast) =
+                    (sget(st, "cond"), sget(st, "buf"), sget(st, "idx"), sget(st, "or_cast"));
+                where_on_load(ctx, cond, buf, idx, or_cast)
+            }),
+        ),
+        (
+            var("cond").where_(
+                UPatOrConst::Val(CV::Int(0)),
+                var("buf").index(vec![var("idx")]).or_casted(Some("or_cast")),
+            ),
+            r(|ctx, st, _| {
+                let (cond, buf, idx, or_cast) =
+                    (sget(st, "cond"), sget(st, "buf"), sget(st, "idx"), sget(st, "or_cast"));
+                let nc = ctx.logical_not(cond);
+                where_on_load(ctx, nc, buf, idx, or_cast)
+            }),
+        ),
+    ])
+}
+
+/// `pm_remove_invalid` (symbolic.py:98).
+pub fn pm_remove_invalid() -> PatternMatcher {
+    PatternMatcher::new(vec![
+        (
+            invalid_gate().named("w"),
+            r(|ctx, st, _| {
+                let (cond, x, w) = (sget(st, "cond"), sget(st, "x"), sget(st, "w"));
+                let zero = ctx.const_like(w, CV::Int(0));
+                let srcs = ctx.srcs(w).to_vec();
+                if srcs[0] == cond && srcs[1] == x && srcs[2] == zero {
+                    return None;
+                }
+                Some(ctx.uop(Ops::Where, Some(ctx.dt_of(w)), vec![cond, x, zero], Arg::None))
+            }),
+        ),
+        (
+            UPat::op_var(vec![Ops::Stack]).named("s"),
+            r(|ctx, st, _| {
+                let s = sget(st, "s");
+                let srcs = ctx.srcs(s).to_vec();
+                if !srcs.iter().any(|&x| ctx.is_invalid(x)) {
+                    return None;
+                }
+                let dt = ctx.dt_of(s);
+                let new_srcs: Vec<UopId> = srcs
+                    .iter()
+                    .map(|&x| if ctx.is_invalid(x) { ctx.const_py(CV::Int(0), Some(dt)) } else { x })
+                    .collect();
+                Some(ctx.uop(Ops::Stack, Some(dt), new_srcs, Arg::None))
+            }),
+        ),
+    ])
+}
+
+/// `pm_cast_float_alu` (codegen/__init__.py:254).
+pub fn pm_cast_float_alu() -> PatternMatcher {
+    PatternMatcher::new(vec![(
+        UPat::op_var(vec![Ops::Sin, Ops::Log2, Ops::Exp2, Ops::Sqrt, Ops::Reciprocal])
+            .with_src_tup(vec![UPat::var(None, None)])
+            .named("u"),
+        r(|ctx, st, _| {
+            let u = sget(st, "u");
+            let x = ctx.srcs(u)[0];
+            if ctx.dt_of(x) == ctx.dt_of(u) {
+                return None;
+            }
+            let (op, dt, _, arg, tag) = ctx.snapshot(u);
+            let cx = ctx.cast(x, dt);
+            Some(ctx.replace(u, op, dt, vec![cx], arg, tag))
+        }),
+    )])
+}
+
+// ---------- sym = symbolic+pm_simplify_valid+extra (symbolic.py:441-466) ----------
+
+fn noop(ctx: &mut UOpCtx) -> UopId {
+    ctx.uop(Ops::Noop, Some(crate::dtype::VOID), vec![], Arg::None)
+}
+
+fn store2(ctx: &mut UOpCtx, idx: UopId, val: UopId) -> UopId {
+    ctx.uop(Ops::Store, Some(crate::dtype::VOID), vec![idx, val], Arg::None)
+}
+
+/// `reduce_mul_chain` (symbolic.py:381).
+fn reduce_mul_chain(ctx: &mut UOpCtx, r: UopId) -> Option<UopId> {
+    let (rop, rdt, srcs, arg, _tag) = ctx.snapshot(r);
+    let top: Ops = match &arg {
+        Arg::Seq { tuple: true, items } => match &items[0] {
+            Arg::Enum(e) if e.class == crate::uop::arg::EnumClass::Ops => Ops::from_u16(e.value)?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !matches!(top, Ops::Add | Ops::Max) || rdt != ctx.dt_of(srcs[0]) {
+        return None;
+    }
+    let reds = &srcs[1..];
+    let mut inside: Vec<UopId> = Vec::new();
+    let mut outside: Vec<UopId> = Vec::new();
+    for m in ctx.split_uop_vec(srcs[0], Ops::Mul) {
+        let mp = ctx.backward_slice(m);
+        if !reds.contains(&m)
+            && reds.iter().all(|rr| !mp.contains(rr))
+            && (top != Ops::Max || matches!(ctx.vmin(m), Ok(SVal::I(i)) if i >= 0))
+        {
+            outside.push(m);
+        } else {
+            inside.push(m);
+        }
+    }
+    if outside.is_empty() {
+        return None;
+    }
+    let one = ctx.const_like(srcs[0], CV::Int(1));
+    let inner = if inside.is_empty() { one } else { ctx.uprod(inside[0], &inside[1..]) };
+    let new_red = ctx.replace(
+        r,
+        rop,
+        rdt,
+        std::iter::once(inner).chain(reds.iter().copied()).collect(),
+        arg,
+        Arg::None,
+    );
+    let mut prod = outside[0];
+    for &m in &outside[1..] {
+        prod = ctx.mul(prod, m);
+    }
+    Some(ctx.mul(new_red, prod))
+}
+
+/// The extra rules of python `sym` (symbolic.py:441-466).
+fn pm_sym_extra() -> PatternMatcher {
+    let idx_pat = || UPat::op_var(vec![Ops::Index]).allow_all_srcs().named("index");
+    let recip1p = || {
+        UPat::op_var(vec![Ops::Add])
+            .with_src_tup(vec![UPat::cvar(None, None, Some(Arg::Int(1))), var("x")])
+            .reciprocal()
+            .named("d")
+    };
+    PatternMatcher::new(vec![
+        // reorder ALU/STACK
+        (
+            UPat::op_var(group::ALU.to_vec())
+                .with_src_tup(vec![
+                    UPat::op_var(vec![Ops::Stack]).with_src_tup(vec![var("x")]),
+                    UPat::op_var(vec![Ops::Stack]).with_src_tup(vec![var("y")]),
+                ])
+                .named("alu"),
+            r(|ctx, st, _| {
+                let (alu, x, y) = (sget(st, "alu"), sget(st, "x"), sget(st, "y"));
+                let inner = ctx.uop(ctx.op_of(alu), Some(ctx.dt_of(alu)), vec![x, y], ctx.arg_of(alu).clone());
+                Some(ctx.uop(Ops::Stack, Some(ctx.dt_of(alu)), vec![inner], Arg::None))
+            }),
+        ),
+        // push cast to branches: WHERE(a,b).cast(dt)
+        (
+            var("s").where_(UPatOrConst::Pat(var("a")), UPatOrConst::Pat(var("b"))).cast(None).named("cast"),
+            r(|ctx, st, _| {
+                let (s, a, b, cast) = (sget(st, "s"), sget(st, "a"), sget(st, "b"), sget(st, "cast"));
+                let dt = ctx.dt_of(cast);
+                let ca = commit_weak(ctx, a, dt);
+                let cb = commit_weak(ctx, b, dt);
+                Some(ctx.where_(s, ca, cb))
+            }),
+        ),
+        // load/store folding: STORE(idx, LOAD(idx)) -> NOOP
+        (
+            UPat::op_var(vec![Ops::Store])
+                .with_src_tup(vec![idx_pat(), UPat::op_var(vec![Ops::Load]).with_src_tup(vec![idx_pat()])]),
+            r(|ctx, st, _| {
+                let _ = st;
+                Some(noop(ctx))
+            }),
+        ),
+        // STORE(idx, WHERE(gate, alt, LOAD(idx))) -> STORE(idx', alt)
+        (
+            UPat::op_var(vec![Ops::Store]).with_src_tup(vec![
+                idx_pat(),
+                var("gate").where_(
+                    UPatOrConst::Pat(var("alt")),
+                    UPatOrConst::Pat(UPat::op_var(vec![Ops::Load]).with_src_tup(vec![idx_pat()])),
+                ),
+            ]),
+            r(|ctx, st, _| {
+                let (index, gate, alt) = (sget(st, "index"), sget(st, "gate"), sget(st, "alt"));
+                let isrc = ctx.srcs(index).to_vec();
+                let gv = ctx.valid(isrc[1], gate);
+                let ni = ctx.index(isrc[0], vec![gv]);
+                Some(store2(ctx, ni, alt))
+            }),
+        ),
+        // fold invalid stores: STORE(_, invalid) -> NOOP
+        (
+            UPat::op_var(vec![Ops::Store]).with_src_tup(vec![UPat::var(None, None), invalid_pat()]),
+            r(|ctx, st, _| {
+                let _ = st;
+                Some(noop(ctx))
+            }),
+        ),
+        // store of where with invalid -> gated store
+        (
+            UPat::op_var(vec![Ops::Store]).with_src_tup(vec![
+                idx_pat(),
+                var("cond").where_(UPatOrConst::Pat(var("val")), UPatOrConst::Pat(invalid_pat())),
+            ]),
+            r(|ctx, st, _| {
+                let (index, cond, val) = (sget(st, "index"), sget(st, "cond"), sget(st, "val"));
+                let isrc = ctx.srcs(index).to_vec();
+                let gv = ctx.valid(isrc[1], cond);
+                let ni = ctx.index(isrc[0], vec![gv]);
+                Some(store2(ctx, ni, val))
+            }),
+        ),
+        // 1/(x*x) -> (1/x)*(1/x)
+        (
+            var("x").mul(var("x")).reciprocal(),
+            r(|ctx, st, _| {
+                let x = sget(st, "x");
+                let rx = ctx.reciprocal(x);
+                Some(ctx.mul(rx, rx))
+            }),
+        ),
+        // 1/(x*x*x) -> (1/x)*(1/x)*(1/x)
+        (
+            var("x").mul(var("x")).mul(var("x")).reciprocal(),
+            r(|ctx, st, _| {
+                let x = sget(st, "x");
+                let rx = ctx.reciprocal(x);
+                let a = ctx.mul(rx, rx);
+                Some(ctx.mul(a, rx))
+            }),
+        ),
+        // 1/(x*c) -> (1/x)*(1/c)
+        (
+            var("x").mul(UPat::cvar(Some("c"), None, None)).reciprocal(),
+            r(|ctx, st, _| {
+                let (x, c) = (sget(st, "x"), sget(st, "c"));
+                let rx = ctx.reciprocal(x);
+                let rc = ctx.reciprocal(c);
+                Some(ctx.mul(rx, rc))
+            }),
+        ),
+        // x*(1/(1+x)) -> 1-1/(1+x)
+        (var("x").mul(recip1p()), r(|ctx, st, _| {
+            let d = sget(st, "d");
+            let one = ctx.const_py(CV::Int(1), Some(ctx.dt_of(d)));
+            Some(ctx.sub(one, d))
+        })),
+        // x*(1/(1+x)*y) -> y*(1-1/(1+x))
+        (
+            UPat::op_var(vec![Ops::Mul])
+                .with_src_tup(vec![var("x"), UPat::op_var(vec![Ops::Mul]).with_src_tup(vec![recip1p(), var("y")])]),
+            r(|ctx, st, _| {
+                let (d, y) = (sget(st, "d"), sget(st, "y"));
+                let one = ctx.const_py(CV::Int(1), Some(ctx.dt_of(d)));
+                let t = ctx.sub(one, d);
+                Some(ctx.mul(y, t))
+            }),
+        ),
+        // x*(1/(1+x)+y) -> (1-1/(1+x))+x*y
+        (
+            UPat::op_var(vec![Ops::Mul])
+                .with_src_tup(vec![var("x"), UPat::op_var(vec![Ops::Add]).with_src_tup(vec![recip1p(), var("y")])]),
+            r(|ctx, st, _| {
+                let (x, d, y) = (sget(st, "x"), sget(st, "d"), sget(st, "y"));
+                let one = ctx.const_py(CV::Int(1), Some(ctx.dt_of(d)));
+                let t = ctx.sub(one, d);
+                let xy = ctx.mul(x, y);
+                Some(ctx.add(t, xy))
+            }),
+        ),
+        // move const multiply after the reduce (ADD)
+        (
+            var("x")
+                .mul(UPat::cvar(Some("c"), None, None))
+                .reduce(vec![], Some(crate::codegen::simplify::red_add_arg()), true)
+                .named("r"),
+            r(|ctx, st, _| {
+                let (r, x, c) = (sget(st, "r"), sget(st, "x"), sget(st, "c"));
+                let (op, dt, srcs, arg, tag) = ctx.snapshot(r);
+                if srcs.len() < 2 {
+                    return None;
+                }
+                let cv = match ctx.const_arg(c) {
+                    Some(CV::Int(i)) => CV::Int(i),
+                    Some(CV::Float(f)) => CV::Float(f),
+                    _ => return None,
+                };
+                let inner = ctx.replace(
+                    r,
+                    op,
+                    dt,
+                    std::iter::once(x).chain(srcs[1..].iter().copied()).collect(),
+                    arg,
+                    tag,
+                );
+                let kc = ctx.const_py(cv, Some(dt));
+                Some(ctx.mul(inner, kc))
+            }),
+        ),
+        // reduce mul chain
+        (
+            UPat::op_var(vec![Ops::Reduce]).allow_all_srcs().named("r"),
+            r(|ctx, st, _| reduce_mul_chain(ctx, sget(st, "r"))),
+        ),
+    ])
+}
+
+/// python `sym` (symbolic.py:441) = symbolic + pm_simplify_valid + extra.
+pub fn sym() -> &'static PatternMatcher {
+    static SYM: OnceLock<PatternMatcher> = OnceLock::new();
+    SYM.get_or_init(|| symbolic().add(&pm_simplify_valid()).add(&pm_sym_extra()))
 }

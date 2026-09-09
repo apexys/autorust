@@ -138,7 +138,7 @@ pub fn pm_commit_weak() -> PatternMatcher {
 
 /// `_lower_weak_ops` (weak.py:45).
 fn in_lower_weak_ops(op: Ops) -> bool {
-    group::in_(group::BINARY, op) || group::in_(group::UNARY, op) || matches!(op, Ops::Where | Ops::Range | Ops::Stack | Ops::Special)
+    (group::in_(group::BINARY, op) && !group::in_(group::COMPARISON, op)) || group::in_(group::UNARY, op) || matches!(op, Ops::Where | Ops::Range | Ops::Stack | Ops::Special)
 }
 
 /// `lower_weak_node` (weak.py:47).
@@ -159,7 +159,7 @@ fn lower_weak_node(ctx: &mut UOpCtx, u: UopId) -> Option<UopId> {
         return None;
     }
     let dd = default_dtype(ctx, u);
-    let dt = if group::in_(group::BINARY, op) {
+    let dt = if group::in_(group::BINARY, op) && !group::in_(group::COMPARISON, op) {
         let mut dts = vec![dd];
         dts.extend(src.iter().map(|&s| ctx.dt_of(s)));
         dtype::strong_dtype(dtype::least_upper_dtype(&dts))

@@ -201,3 +201,40 @@ enum Key {
     Const,
     Uop(UopId),
 }
+
+// ---------- indexing_simplify (late/coalesce.py:57) ----------
+
+/// `simplify_valid_load` (late/coalesce.py:40).
+fn simplify_valid_load(ctx: &mut UOpCtx, buf: UopId, start_idx: UopId, valid: UopId) -> Option<UopId> {
+    let idx = crate::uop::sym::uop_given_valid(ctx, valid, start_idx, true);
+    if idx == start_idx {
+        return None;
+    }
+    let start_s = crate::uop::upat::simplify(ctx, start_idx);
+    if idx == start_s {
+        return None;
+    }
+    let iv = ctx.valid(idx, valid);
+    Some(ctx.index(buf, vec![iv]))
+}
+
+/// `indexing_simplify` (late/coalesce.py:57) — scalar rule; the image rule is
+/// not ported (no images until CL image support).
+pub fn indexing_simplify() -> &'static crate::uop::upat::PatternMatcher {
+    static PM: std::sync::OnceLock<crate::uop::upat::PatternMatcher> = std::sync::OnceLock::new();
+    PM.get_or_init(|| {
+        use crate::uop::sym::{r, sget};
+        use crate::uop::upat::{PatternMatcher, UPat};
+        PatternMatcher::new(vec![(
+            UPat::op_var(vec![Ops::Index])
+                .with_src_tup(vec![
+                    crate::uop::sym::var("buf"),
+                    crate::uop::sym::invalid_gate(),
+                ]),
+            r(|ctx, st, _| {
+                let (buf, x, cond) = (sget(st, "buf"), sget(st, "x"), sget(st, "cond"));
+                simplify_valid_load(ctx, buf, x, cond)
+            }),
+        )])
+    })
+}
