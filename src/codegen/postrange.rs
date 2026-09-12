@@ -558,8 +558,12 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
                     }
                 }
             }
+            // python: `for axis, local_sz in sorted(to_local[:3])` — sort ascending so that
+            // deleting an earlier axis never shifts a later one below `deleted_shape`.
+            let mut sorted_local = to_local.clone();
+            sorted_local.sort();
             let mut deleted_shape = 0usize;
-            let picks: Vec<(usize, i64)> = to_local.iter().take(3).copied().collect();
+            let picks: Vec<(usize, i64)> = sorted_local.iter().take(3).copied().collect();
             for (axis, local_sz) in picks {
                 let axis = axis - deleted_shape;
                 let will_delete = local_sz == k.full_shape(ctx)[axis];

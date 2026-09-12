@@ -318,6 +318,32 @@ fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>,
                 Tensor::arange(ctx, 0.0, Some(12.0), 1.0, None).reshape(ctx, [3usize, 4]).max(ctx, Some(&[0]), true)
             }
             "red_sum_2d_all" => Tensor::arange(ctx, 0.0, Some(6.0), 1.0, None).reshape(ctx, [2usize, 3]).sum(ctx, None, false, None),
+            "mm_2x3_3x2" => {
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape(ctx, [2usize, 3]);
+                let b = Tensor::from_slice(ctx, &[7i32, 8, 9, 10, 11, 12], None, dev).reshape(ctx, [3usize, 2]);
+                a.matmul(ctx, b)
+            }
+            "mm_3x3" => {
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6, 7, 8, 9], None, dev).reshape(ctx, [3usize, 3]);
+                let b = Tensor::from_slice(ctx, &[1i32, 0, 0, 1, 1, 0], None, dev).reshape(ctx, [3usize, 2]);
+                a.matmul(ctx, b)
+            }
+            "permute_2x4" => {
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6, 7, 8], None, dev).reshape(ctx, [2usize, 4]);
+                a.permute(ctx, &[1, 0])
+            }
+            "expand_1x3_2x3" => {
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev).reshape(ctx, [1usize, 3]);
+                a.expand(ctx, [2usize, 3])
+            }
+            "cumsum_axis1" => {
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape(ctx, [2usize, 3]);
+                a.cumsum(ctx, 1)
+            }
+            "cumsum_axis0" => {
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape(ctx, [2usize, 3]);
+                a.cumsum(ctx, 0)
+            }
             "cast_f2i" => {
                 let x = Tensor::from_slice(ctx, &[-2.0f32, -1.0, 1.7, 2.5], None, dev);
                 Tensor::from_uop(ctx.cast(x.uop, dtype::INT32))
@@ -449,6 +475,30 @@ fn reductions_all_backends() {
             "red_max_axis_keepdim",
             "red_sum_2d_all",
         ]);
+    }
+}
+
+#[test]
+fn matmul_all_backends() {
+    let gm = goldens();
+    for b in backends() {
+        run_named(&b, &gm, &["mm_2x3_3x2", "mm_3x3"]);
+    }
+}
+
+#[test]
+fn movement_all_backends() {
+    let gm = goldens();
+    for b in backends() {
+        run_named(&b, &gm, &["permute_2x4", "expand_1x3_2x3"]);
+    }
+}
+
+#[test]
+fn cumsum_all_backends() {
+    let gm = goldens();
+    for b in backends() {
+        run_named(&b, &gm, &["cumsum_axis1", "cumsum_axis0"]);
     }
 }
 

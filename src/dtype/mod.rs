@@ -136,6 +136,40 @@ impl DTypeId {
     }
 }
 
+/// A Rust scalar a `Tensor` can be read back as (`Tensor::to_list`/`item`).
+/// `DTYPE` is the tinygrad dtype the tensor is cast to in-graph before its
+/// little-endian storage bytes are reinterpreted as `[Self]`, so the read never
+/// round-trips through `f64`. `from_bytes_le` reads exactly `DTYPE.itemsize()`
+/// bytes. `f16`/`bf16`/`fp8` tensors are read via a graph cast to a wider type.
+pub trait ReadDtype: Sized + Clone + PartialEq + core::fmt::Debug {
+    const DTYPE: DTypeId;
+    fn from_bytes_le(bytes: &[u8]) -> Self;
+}
+
+macro_rules! impl_read_dtype {
+    ($($t:ty => $dt:expr, $n:expr);* $(;)?) => {$(
+        impl ReadDtype for $t {
+            const DTYPE: DTypeId = $dt;
+            fn from_bytes_le(bytes: &[u8]) -> Self {
+                let mut a = [0u8; $n];
+                a.copy_from_slice(&bytes[..$n]);
+                <$t>::from_le_bytes(a)
+            }
+        }
+    )*};
+}
+impl_read_dtype!(
+    i8 => INT8, 1; i16 => INT16, 2; i32 => INT32, 4; i64 => INT64, 8;
+    u8 => UINT8, 1; u16 => UINT16, 2; u32 => UINT32, 4; u64 => UINT64, 8;
+    f32 => FLOAT32, 4; f64 => FLOAT64, 8;
+);
+impl ReadDtype for bool {
+    const DTYPE: DTypeId = BOOL;
+    fn from_bytes_le(bytes: &[u8]) -> Self {
+        bytes[0] != 0
+    }
+}
+
 pub static BY_ATTR: LazyLock<HashMap<&'static str, DTypeId>> = LazyLock::new(|| {
     DTYPES.iter().enumerate().map(|(i, d)| (d.attr, DTypeId(i as u16))).collect()
 });

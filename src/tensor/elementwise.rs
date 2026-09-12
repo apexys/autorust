@@ -162,6 +162,20 @@ pub fn sin(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Sin, x)
 }
 
+/// `tanh()`: `(exp(2x) - 1) / (exp(2x) + 1)`.
+pub fn tanh(ctx: &mut UOpCtx, x: UopId) -> UopId {
+    // exp(2x) == exp2(2x/ln2)
+    let two = binop_c(ctx, Ops::Mul, x, ConstVal::Float(2.0));
+    let scaled = binop_c(ctx, Ops::Mul, two, ConstVal::Float(1.0 / std::f64::consts::LN_2));
+    let exp_2x = ctx.alu1(Ops::Exp2, scaled);
+    let one = ConstVal::Float(1.0);
+    let one_const = ctx.const_py(one, None);
+    let num = ctx.alu2(Ops::Sub, exp_2x, one_const);
+    let den = ctx.alu2(Ops::Add, exp_2x, one_const);
+    let recip = ctx.alu1(Ops::Reciprocal, den);
+    ctx.alu2(Ops::Mul, num, recip)
+}
+
 pub fn log2(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Log2, x)
 }
@@ -184,14 +198,14 @@ pub fn exp(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.cast(e, dt)
 }
 
-/// `log()`: `div(self.cast(...).log2(), log2(e))` — cast to lub(float32) first,
-/// divide by ln(2), cast back.
+/// `log()`: natural log = `self.cast(...).log2() * ln2` — cast to lub(float32)
+/// first, multiply by ln(2), cast back (matches tinygrad `tensor.log`).
 pub fn log(ctx: &mut UOpCtx, x: UopId) -> UopId {
     let dt = ctx.dt_of(x);
     let up = dtype::least_upper_dtype(&[dt, dtype::default_float()]);
     let casted = ctx.cast(x, up);
     let l2 = ctx.alu1(Ops::Log2, casted);
-    let scaled = div_c(ctx, l2, ConstVal::Float(std::f64::consts::LN_2), None);
+    let scaled = binop_c(ctx, Ops::Mul, l2, ConstVal::Float(std::f64::consts::LN_2));
     ctx.cast(scaled, dt)
 }
 

@@ -217,7 +217,19 @@ pub struct BufTable {
 /// resolve to `base.view(size, dtype, byte_offset)`.
 pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
     match ctx.op_of(u) {
-        Ops::Contiguous | Ops::Reshape | Ops::After | Ops::Cast | Ops::Index | Ops::Mselect => {
+        Ops::Contiguous
+        | Ops::Reshape
+        | Ops::After
+        | Ops::Cast
+        | Ops::Index
+        | Ops::Mselect
+        | Ops::Permute
+        | Ops::Pad
+        | Ops::Flip
+        | Ops::Expand => {
+            // view/movement ops share the base buffer; the reshape/permute/pad/
+            // expand/flip mapping is applied through the kernel's index math, so
+            // storage resolution just walks to src[0]'s buffer.
             let s0 = ctx.srcs(u)[0];
             buffer_of(ctx, t, s0)
         }
@@ -266,6 +278,12 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
             let b = inner.view(n, dt, 0);
             t.views.insert(u.0, b.clone());
             b
+        }
+        Ops::Copy => {
+            // single-device corpus: a COPY aliases its source's storage (the
+            // copy-in/copy-out through the allocator keeps bytes in sync).
+            let s0 = ctx.srcs(u)[0];
+            buffer_of(ctx, t, s0)
         }
         Ops::Shrink => {
             if let Some(b) = t.views.get(&u.0) {

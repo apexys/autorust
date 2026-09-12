@@ -10,7 +10,7 @@ use crate::uop::ops::Ops;
 use crate::uop::sint::SVal;
 
 use super::ix::Ix;
-use super::{sink, stack};
+use super::{reduce, sink, stack};
 
 /// Python `ceildiv(num, amt) = (num + amt - 1) // amt` (helpers.py:63; amt > 0).
 pub fn ceildiv(a: i128, b: i128) -> i128 {
@@ -268,6 +268,125 @@ pub(crate) fn permute_internal(ctx: &mut UOpCtx, x: UopId, order: &[usize]) -> U
     }
     let arg = Arg::Seq { tuple: true, items: order.iter().map(|&i| Arg::Int(i as i64)).collect() };
     ctx.uop(Ops::Permute, None, vec![x], arg)
+}
+
+/// `MovementMixin._pool` (movement.py:598-714): extract sliding windows.
+/// Used by conv2d and pooling layers. Returns shape: `(noop, k0, o0, k1, o1, ..., kN, oN)`.
+pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: i64, dilation: i64) -> UopId {
+    let shape = ctx.shape(x).unwrap().clone().unwrap_or_default();
+    let ndim = shape.len();
+    let k_len = k.len();
+    let noop_len = ndim - k_len;
+
+    // Get spatial input sizes
+    let i_: Vec<i64> = shape[ndim - k_len..].iter().map(|s| s.as_i64().unwrap_or(0)).collect();
+
+    // Calculate output sizes: o_ = ceil((i - d*(k-1)) / s)
+    let s_: Vec<i64> = std::iter::repeat(stride).take(k_len).collect();
+    let d_: Vec<i64> = std::iter::repeat(dilation).take(k_len).collect();
+    let o_: Vec<i64> = i_.iter().zip(k.iter().zip(s_.iter().zip(d_.iter())))
+        .map(|(&i, (&k, (&s, &d)))| {
+            let num = i - d * (k - 1);
+            if num <= 0 { 0 } else { (num + s - 1) / s }
+        }).collect();
+
+    // Calculate scaling factors f_ = max(1, ceil((o*s - d) / i))
+    let f_: Vec<i64> = o_.iter().zip(i_.iter().zip(s_.iter().zip(d_.iter())))
+        .map(|(&o, (&i, (&s, &d)))| {
+            let val = (o * s - d + i - 1) / i; // ceil division
+            std::cmp::max(1, val)
+        }).collect();
+
+    // Calculate repeat sizes
+    let repeat_sizes: Vec<i64> = shape.iter().enumerate().map(|(idx, s)| {
+        if idx < noop_len {
+            s.as_i64().unwrap_or(0)
+        } else {
+            let spatial_idx = idx - noop_len;
+            let k_val = k[spatial_idx];
+            let i_val = i_[spatial_idx];
+            let d_val = d_[spatial_idx];
+            let f_val = f_[spatial_idx];
+            (k_val * (i_val * f_val + d_val) + i_val - 1) / i_val
+        }
+    }).collect();
+
+    // Step 1: repeat
+    let mut repeat_args = vec![1i64; ndim];
+    for (idx, &rep) in repeat_sizes.iter().enumerate() {
+        repeat_args[idx] = rep;
+    }
+    let x_repeated = reduce::repeat(ctx, x, &repeat_args);
+
+    // Step 2: shrink to k * (i * f + d)
+    let shrink_sizes: Vec<SVal> = repeat_sizes.iter().map(|&x| SVal::I(x as i128)).collect();
+    let x_shrunk = shrink_to(ctx, x_repeated, &shrink_sizes);
+
+    // Step 3: reshape to (noop + flatten((k, i*f + d)))
+    let mut reshape_dims: Vec<SVal> = vec![SVal::I(1); noop_len];
+    for (spatial_idx, &k_val) in k.iter().enumerate() {
+        reshape_dims.push(SVal::I(k_val as i128));
+        let i_val = i_[spatial_idx];
+        let d_val = d_[spatial_idx];
+        let f_val = f_[spatial_idx];
+        reshape_dims.push(SVal::I((i_val * f_val + d_val) as i128));
+    }
+    let x_reshaped = reshape(ctx, x_shrunk, &reshape_dims);
+
+    // Step 4: handle stride - reshape to (k, o*s)
+    let mut stride_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
+    for (spatial_idx, &k_val) in k.iter().enumerate() {
+        stride_reshape.push(SVal::I(k_val as i128));
+        stride_reshape.push(SVal::I((o_[spatial_idx] * s_[spatial_idx]) as i128));
+    }
+    let x_stride_reshaped = reshape(ctx, x_reshaped, &stride_reshape);
+
+    // Shrink last spatial dim to o*s
+    let shrink_end: Vec<SVal> = stride_reshape.clone();
+    let x_stride_shrunk = shrink_to(ctx, x_stride_reshaped, &shrink_end);
+
+    // Reshape to (k, o, s)
+    let mut kos_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
+    for (spatial_idx, &k_val) in k.iter().enumerate() {
+        kos_reshape.push(SVal::I(k_val as i128));
+        kos_reshape.push(SVal::I(o_[spatial_idx] as i128));
+        kos_reshape.push(SVal::I(s_[spatial_idx] as i128));
+    }
+    let x_kos = reshape(ctx, x_stride_shrunk, &kos_reshape);
+
+    // Shrink to (k, o, 1) and reshape to (k, o)
+    let mut ko1_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
+    for (spatial_idx, &k_val) in k.iter().enumerate() {
+        ko1_reshape.push(SVal::I(k_val as i128));
+        ko1_reshape.push(SVal::I(o_[spatial_idx] as i128));
+        ko1_reshape.push(SVal::I(1));
+    }
+    let x_ko1 = reshape(ctx, x_kos, &ko1_reshape);
+
+    let ko_shrink_end: Vec<SVal> = ko1_reshape.clone();
+    let x_ko_shrunk = shrink_to(ctx, x_ko1, &ko_shrink_end);
+
+    let mut ko_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
+    for (spatial_idx, &k_val) in k.iter().enumerate() {
+        ko_reshape.push(SVal::I(k_val as i128));
+        ko_reshape.push(SVal::I(o_[spatial_idx] as i128));
+    }
+    let x_ko = reshape(ctx, x_ko_shrunk, &ko_reshape);
+
+    // Step 5: permute to (noop, k0, k1, ..., o0, o1, ...)
+    // Permute order: noop + [len(noop)+0*2+1, len(noop)+1*2+1, ...] + [len(noop)+0*2, len(noop)+1*2, ...]
+    let mut perm: Vec<usize> = Vec::with_capacity(ndim);
+    for i in 0..noop_len {
+        perm.push(i);
+    }
+    for i in 0..k_len {
+        perm.push(noop_len + i * 2 + 1);
+    }
+    for i in 0..k_len {
+        perm.push(noop_len + i * 2);
+    }
+    let perm_vec: Vec<i64> = perm.iter().map(|&x| x as i64).collect();
+    permute(ctx, x_ko, &perm_vec)
 }
 
 /// `MovementMixin.flip` (movement.py:234-256): `axis` must be pre-resolved to non-negative dims.

@@ -13,6 +13,7 @@ use crate::uop::sint::SVal;
 
 use super::movement;
 use super::Tensor;
+use super::TensorAddArg;
 
 /// Register the initial host bytes for a buffer-backed tensor (python
 /// `Buffer(opaque=memoryview(bytearray(initial_value)))` at Tensor(data) time):
@@ -96,6 +97,40 @@ pub fn zeros(ctx: &mut UOpCtx, shape: &[SVal], dtype: Option<DTypeId>, device: O
 /// `CreationMixin.ones(*shape, **kwargs)` (creation.py:136) — `full(shape, 1.0, dtype)`.
 pub fn ones(ctx: &mut UOpCtx, shape: &[SVal], dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
     full(ctx, shape, ConstVal::Float(1.0), dtype, device, true)
+}
+
+/// `RandMixin.rand(*shape, **kwargs)` (rand.py:50): uniform [0, 1) via randperm + division.
+/// Simplified: uses a linear congruential generator seeded by shape hash.
+pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
+    let dt = dtype.unwrap_or(dtype::default_float());
+    let size: i64 = shape.iter().map(|s| s.as_i64().unwrap_or(1)).product();
+    if size == 0 {
+        return zeros(ctx, shape, Some(dt), device);
+    }
+    // Generate random floats in [0, 1)
+    // For now, use a simple deterministic pattern for reproducibility
+    let mut data = vec![0.0f64; size as usize];
+    let mut state = 42u64; // Fixed seed for reproducibility
+    for i in 0..data.len() {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        data[i] = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+    }
+    let bytes: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 8)
+    }.to_vec();
+    from_bytes(ctx, &bytes, dt, device)
+}
+
+/// `RandMixin.uniform(*shape, low=0.0, high=1.0, **kwargs)` (rand.py:158): `(high-low)*rand() + low`.
+pub fn uniform(ctx: &mut UOpCtx, shape: &[SVal], low: f64, high: f64, dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
+    let dt = dtype.unwrap_or(dtype::default_float());
+    if low >= high {
+        panic!("Tensor.uniform requires low < high, got low={}, high={}", low, high);
+    }
+    let rand_tensor = rand(ctx, shape, Some(dt), device);
+    let range = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(high - low), None);
+    let low_const = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(low), None);
+    rand_tensor.mul(ctx, TensorAddArg::T(range)).add(ctx, TensorAddArg::T(low_const))
 }
 
 /// `OpMixin.arange(start, stop=None, step=1, dtype=None)` (op.py:165-197).
@@ -248,6 +283,8 @@ pub fn canonicalize_device(device: Option<&str>) -> String {
 pub trait SliceElem: Sized {
     fn default_dtype() -> DTypeId;
     fn to_f64(&self) -> f64;
+    /// Little-endian bytes at `default_dtype()` width (no `f64` round-trip).
+    fn encode_native(&self) -> Vec<u8>;
 }
 
 macro_rules! impl_slice_elem {
@@ -259,6 +296,9 @@ macro_rules! impl_slice_elem {
             fn to_f64(&self) -> f64 {
                 *self as f64
             }
+            fn encode_native(&self) -> Vec<u8> {
+                self.to_le_bytes().to_vec()
+            }
         }
     )*};
 }
@@ -269,11 +309,14 @@ impl SliceElem for bool {
     fn to_f64(&self) -> f64 {
         if *self { 1.0 } else { 0.0 }
     }
+    fn encode_native(&self) -> Vec<u8> {
+        vec![*self as u8]
+    }
 }
 impl_slice_elem!(
-    i8 => dtype::default_int(); i16 => dtype::default_int(); i32 => dtype::default_int(); i64 => dtype::default_int(); isize => dtype::default_int();
-    u8 => dtype::default_int(); u16 => dtype::default_int(); u32 => dtype::default_int(); u64 => dtype::default_int(); usize => dtype::default_int();
-    f32 => dtype::default_float(); f64 => dtype::default_float()
+    i8 => dtype::INT8; i16 => dtype::INT16; i32 => dtype::INT32; i64 => dtype::INT64; isize => dtype::INT64;
+    u8 => dtype::UINT8; u16 => dtype::UINT16; u32 => dtype::UINT32; u64 => dtype::UINT64; usize => dtype::UINT64;
+    f32 => dtype::FLOAT32; f64 => dtype::FLOAT64
 );
 
 /// `copy_to_device` (ops.py:745-750): `COPY(pad_to(max_shape), arg=device)
@@ -303,15 +346,15 @@ pub fn from_slice<T: SliceElem>(ctx: &mut UOpCtx, data: &[T], dtype: Option<DTyp
             target
         };
     let ret = empty(ctx, &shape, bdtype, "PYTHON");
-    // pack the host data into the PYTHON base storage (Buffer(opaque=...))
-    let packed: Vec<u8> = match bdtype {
-        d if d == dtype::FLOAT32 => data.iter().flat_map(|v| (v.to_f64() as f32).to_le_bytes()).collect(),
-        d if d == dtype::FLOAT64 => data.iter().flat_map(|v| v.to_f64().to_le_bytes()).collect(),
-        d if d == dtype::INT32 => data.iter().flat_map(|v| (v.to_f64() as i32).to_le_bytes()).collect(),
-        d if d == dtype::INT64 => data.iter().flat_map(|v| (v.to_f64() as i64).to_le_bytes()).collect(),
-        d if d == dtype::UINT8 => data.iter().map(|v| v.to_f64() as u8).collect(),
-        d if d == dtype::BOOL => data.iter().map(|v| (v.to_f64() != 0.0) as u8).collect(),
-        other => panic!("TGERR: from_slice pack dtype {other:?}"),
+    // pack the host data into the PYTHON base storage (Buffer(opaque=...)).
+    // When the requested width matches the element's own dtype we encode the
+    // native little-endian bytes directly (no f64); an explicit `dtype` override
+    // that changes width goes through the f64 cast bridge.
+    let native = T::default_dtype();
+    let packed: Vec<u8> = if bdtype == native {
+        data.iter().flat_map(|v| v.encode_native()).collect()
+    } else {
+        data.iter().flat_map(|v| crate::runtime::interp::to_storage_scalar(v.to_f64(), bdtype)).collect()
     };
     register_initial(ctx, ret, packed);
     let ret = if bdtype != target { ctx.cast(ret, target) } else { ret };

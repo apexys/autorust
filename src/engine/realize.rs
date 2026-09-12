@@ -384,3 +384,14 @@ pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cach
         .map(|i| crate::runtime::interp::from_storage_scalar(&bytes[i * isz..(i + 1) * isz], b.dtype))
         .collect()
 }
+
+/// Read a realized tensor's raw storage bytes at its own dtype (python
+/// `_buffer()` copyout). `Tensor::to_bytes`/`to_list` build on this so typed
+/// read-out never round-trips through `f64`.
+pub fn tensor_bytes(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<u8> {
+    let b = realize_tensor(ctx, tensor_uop, t, cache);
+    let dev = device(b.device());
+    b.ensure_allocated(&dev);
+    let o = b.get_buf(&dev);
+    dev.copyout(&*o)
+}

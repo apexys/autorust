@@ -1,0 +1,156 @@
+# CURRENT_STATE.md
+
+Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PLAN.md`
+(codegen-rule parity). Reference tree: `../tinygrad/tinygrad/`.
+
+## 1. What we have right now
+
+### Core graph engine (mature)
+- `UOpCtx` graph (`src/uop/`): interned UOps, `UopId(u32)` (Copy), shapes, dtypes,
+  `Ops` enum, `Arg`, `SVal`/`SInt`, const folding, `graph_rewrite`/`UPat`/`PatternMatcher`,
+  min/max range analysis, `substitute`.
+- Rewrite/simplify engine: `src/codegen/` (simplify, postrange, coalesce, gater, linearize,
+  pipeline `full_rewrite_to_sink`), `src/schedule/` (rangeify, sched, indexing, memory).
+- Backends/runtime (`src/runtime/`, `src/renderer/`): INTERP always on; CL behind `backend_cl`.
+  `interp::{exec_kernel, exec_launch, from_storage_scalar, to_storage_scalar}`.
+- Realize/execution (`src/engine/realize.rs`): `realize_tensor(...) -> Buffer`,
+  `run_linear`, `tensor_values(...) -> Vec<f64>` (copies out a buffer and decodes each element
+  via `from_storage_scalar`). **The eval path exists** — it is how the golden harness runs.
+
+### Tensor front-end (`src/tensor/`)
+- `Tensor { uop: UopId, grad: Option<Box<Tensor>>, is_param: bool }` (mod.rs:57). All wrapper
+  methods are now `&self` (idiomatic; `uop` is `Copy`). `TensorAddArg` with
+  `From<Tensor>` / `From<&Tensor>` / `From<f64>` / `From<i64>`.
+- Movement (`movement.rs`): reshape, expand, unsqueeze, pad, permute, flip, transpose, squeeze,
+  flatten, getitem, shrink/shrink_to, `pool`.
+- Elementwise (`elementwise.rs`): add/sub/mul/div(neg·mul)/neg, maximum/minimum, exp2/log2/sqrt/
+  sin/trunc/ceil/floor/reciprocal, binop/binop_c, `where`.
+- Reduce (`reduce.rs`): sum/prod/max/mean/var/cumsum.
+- Creation (`creation.rs`): `from_slice<T: SliceElem>` (dtype now **inferred from the generic
+  width**: `&[i16]→INT16`, `&[u32]→UINT32`, `&[f32]→FLOAT32`, …; explicit `Some(dtype)` overrides
+  and inserts a graph cast; native-width packing is exact, no `f64`), `from_bytes`, `empty`,
+  `new_buffer`, `full_const`, `zeros/ones`, `arange`, `rand`, `uniform`.
+- **Typed marshalling (DONE):** `Tensor::{realize, to_bytes, to_list::<T>, item::<T>}` + the
+  `ReadDtype` trait (`dtype/mod.rs`); `engine::realize::tensor_bytes` returns native-dtype bytes.
+  No `f64` round-trip; cross-dtype reads insert a graph `cast`, weak dtypes panic.
+- NN layers (`nn.rs`): `Linear`, `BatchNorm`, `LayerNorm`, `GroupNorm`, `Conv2d` (**forward is a
+  stub**), activations (relu/gelu/softmax/log_softmax/sigmoid/tanh/sin/cos/abs/sqrt/rsqrt).
+
+### Tests today
+- `tests/backend_harness.rs` + `tests/golden.rs` (~90 goldens): ALU battery, reductions, casts,
+  full dtype battery — asserted against tinygrad-interp goldens. This covers **UOp/engine-level
+  op correctness**, driven through `tensor_values` (i.e. realize is exercised), but there are
+  **no Tensor-level `tolist`/`item` assertions** and **no autograd tests**.
+- `tests/marshal.rs` (new): typed marshalling — dtype inference in `from_slice`, `to_bytes`
+  native-width storage, `to_list::<T>` round-trip + cross-dtype casts, `item::<T>`, and the
+  `item()` multi-element panic.
+- `tests/m2_smoke.rs`: graph construction/shape/rewrite/getitem (symbolic only).
+
+### Build status
+- `cargo build` and `cargo test` are green (7+2+7 tests pass, 0 errors). The `&self` refactor
+  landed cleanly.
+
+## 2. What is missing
+
+### Realize / data marshalling (no user-facing API yet)
+- No `Tensor::realize`, `item`, `tolist`, `to_bytes` — the engine (`tensor_values`,
+  `realize_tensor`) is only reachable from the harness, not from `Tensor`.
+- `from_slice` dtype inference is lossy: all int widths map to `default_int`
+  (`creation.rs:308`), so `&[i16]` does **not** become an int16 tensor. Needs precise
+  `SliceElem → DTypeId` per width.
+- Everything round-trips through `f64` (`tensor_values`); no typed decode.
+
+### Autograd (absent)
+- No `backward`/`backward_to`/`gradient`, no `grad` population (the field exists, never set),
+  no `requires_grad`/`no_grad` context, no `detach`. tinygrad: `tensor.py:657` (`backward`).
+
+### NN gaps
+- `Conv2d::forward` is a stub (`nn.rs`) — full conv2d (pad → pool → reshape/permute → mul →
+  sum → bias) unported (`tinygrad/mixin/op.py` conv2d).
+- BatchNorm/LayerNorm/GroupNorm running-stat updates are stubbed/simplified.
+- No `nn/optim.py` (SGD, Adam) and no `nn/state.py` (param fetch/init, `nn_state`,
+  `init_weight`, visit).
+
+### Tests we should have but don't
+- Tensor-level op tests vs `test/backend/test_ops.py` (unary/binary/ternary/reduce/
+  cast/dtype) driven through `to_list`/`item`.
+- Autograd tests vs `test/unit/test_gradient.py` (+ `test_winograd.py` later).
+- NN tests vs `test/backend/test_nn.py` and `test/backend/test_optim.py`.
+
+## 3. Typed data marshalling — IMPLEMENTED
+
+No `f64` round-trip; reads reinterpret native-dtype bytes, cross-dtype reads insert a graph cast.
+
+### Output (tensor → Rust) — `src/tensor/mod.rs`
+- `Tensor::to_bytes(&self, ctx) -> Vec<u8>` — native-dtype storage bytes via
+  `engine::realize::tensor_bytes` (realize + `copyout`).
+- `Tensor::to_list<T: ReadDtype>(&self, ctx) -> Vec<T>` — graph-casts to `T::DTYPE` (no-op if
+  equal), realizes, reinterprets little-endian bytes as `[T]`. Panics on weak dtypes.
+- `Tensor::item<T: ReadDtype>(&self, ctx) -> T` — asserts `numel==1`, then one `to_list` element.
+- `Tensor::realize(&self, ctx) -> &Tensor` — forces compute, returns `&self`.
+- `*_with` variants (`to_bytes_with`/`to_list_with`) take a caller-owned `&mut BufTable` +
+  `&mut ProgCache` so a caller (e.g. the harness) can reuse realized buffers across reads.
+
+### Input (Rust → tensor) — `src/tensor/creation.rs`
+- `SliceElem::default_dtype()` is width-precise (`i8→INT8 … f64→FLOAT64`, `bool→BOOL`), so
+  `from_slice` infers the dtype from the generic. `SliceElem::encode_native()` packs exact
+  little-endian bytes; an explicit `Some(dtype)` of a different width falls back to the
+  `to_storage_scalar` f64 bridge.
+
+### Traits
+- `ReadDtype` (`src/dtype/mod.rs`): `const DTYPE: DTypeId; fn from_bytes_le(&[u8]) -> Self;` —
+  implemented for `i8/i16/i32/i64/u8/u16/u32/u64/f32/f64/bool`. `f16`/`bf16`/`fp8` tensors are read
+  by casting to a wider type (no native Rust half type yet).
+
+## 3b. Milestone 2 — tensor-op tests (`tests/ops.rs`) — IN PROGRESS
+
+Suite drives op → `to_list`/`item`. Current: **6/9 green** (no regressions: golden 7, marshal 6).
+
+Green: `binary_arithmetic`, `neg_abs_and_bounds`, `unary_pow_log`, `unary_misc`,
+`casts_across_dtypes`, `activations` (relu/gelu/softmax).
+
+Op bugs found & FIXED (port vs tinygrad):
+- `elementwise::log` did `log2 / ln2`; tinygrad is `log2 * ln2`. Now multiply. (`log(2)` was 1.4427, now 0.6931.)
+- `Tensor::dot` reshape math wrong for N-D `w` (2D@2D produced a bad `w` reshape → size-mismatch panic).
+  Rewritten to mirror tinygrad `dot` (`axis_w=-min(ndim,2)`, `x.reshape(...,[1]*rep,N)`,
+  `w.reshape(*[:-2],[1]*rep,*w[axis_w:]).transpose(-1,axis_w)`, `(x*w).sum(-1)`). 2x3@3x2 verified.
+- `elementwise::tanh` computed `exp2(2x·x/ln2)` = `2x²/ln2` (multiplied by `x` twice). Now `2x/ln2`
+  (was wrong-sign for negatives).
+- `runtime::buffer::buffer_of` now treats `Permute/Pad/Flip/Expand` like the other view ops (storage =
+  base buffer; mapping applied via kernel index math).
+- `to_bytes_with` now forces a materializing copy (contiguous + `copy_to_device`) so read-out is in
+  logical C order for views.
+
+Still RED — engine-level, need a decision before deeper surgery:
+- `movement_ops` (permute read-out): with materializing copy, `buffer_of` now fails on `Ops::Copy` —
+  the schedule doesn't turn a permuted-view copy into a realized STORE for read-out. Realize/schedule gap.
+- `reductions` → only `cumsum` fails: `sym.rs:1777 TGERR: no bounds` (symbolic simplify / simplex path).
+  All other reductions (sum/mean/prod/max/axis-sum) are green.
+- `matmul_ops`: `codegen/postrange.rs:564 attempt to subtract with overflow` — the local-assignment
+  opt does `axis - deleted_shape` (usize underflow) when lowering the dot's reduce. Codegen bug.
+
+## 4. Next milestones (in order)
+
+1. ~~**Data marshalling.**~~ **DONE** (`to_bytes`/`to_list<T>`/`item<T>`/`realize` + `ReadDtype`;
+   width-precise `from_slice` inference; `tensor_bytes`; `tests/marshal.rs`).
+2. **Tensor-op tests (tensor level).** Port `test/backend/test_ops.py` coverage as Rust tests:
+   build op → `to_list` → compare against `golden.rs`/tinygrad. One test per op family
+   (unary/binary/ternary/reduce/cast/dtype). Fill any op gaps the tests reveal (e.g.
+   `pow`, `where` variants, floordiv/floormod already partly present).
+3. **Backward.** Port `Tensor::backward` + `gradient`/`backward_slice` (tinygrad `tensor.py:657`)
+   and `grad` population on `Tensor`; `no_grad`/`detach`. This is the biggest unknown — mirror the
+   UOp `backward_slice` machinery rather than inventing a new autograd.
+4. **Backward tests.** Port `test/unit/test_gradient.py` (gradcheck) vs the same goldens.
+5. **NN tests.** Port `test/backend/test_nn.py` (Linear/Conv2d/BatchNorm/LayerNorm/GroupNorm
+   forward) — requires implementing full `Conv2d::forward`. Then `test/backend/test_optim.py`
+   (needs `nn/optim.py`: SGD, Adam) and `nn/state.py` (a `Parameter`/`Module` trait with an
+   explicit `named_parameters()` traversal — no reflection-style recursion).
+
+## 5. Open questions (resolved during milestone 1)
+- **Buffer handle:** kept call-scoped. The `to_bytes`/`to_list`/`item` conveniences allocate fresh
+  `BufTable`/`ProgCache` per call; `*_with` variants accept caller-owned tables for buffer reuse.
+  A persistent `Session`/`Runner` (tinygrad-style buffers-on-uop) is deferred to milestone 3
+  (backward/optim need mutation + persistent buffers).
+- **f16/bf16/fp8 read:** cast to `f32`/`f64` via `to_list::<f32>()`; no native half Rust type yet.
+- **Shape of `to_list`:** flat row-major `Vec` (matches `tensor_values`); nested N-D list deferred
+  until a test needs it.

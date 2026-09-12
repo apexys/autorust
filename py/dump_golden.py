@@ -104,6 +104,14 @@ def make_programs():
     add("red_max_axis_keepdim", lambda: Tensor.arange(12).reshape(3, 4).max(axis=0, keepdim=True))
     add("red_sum_2d_all", lambda: Tensor.arange(6).reshape(2, 3).sum())
 
+    # -- movement / matmul battery (integer-valued, exact) --
+    add("mm_2x3_3x2", lambda: tf([[1, 2, 3], [4, 5, 6]]).matmul(tf([[7, 8], [9, 10], [11, 12]])))
+    add("mm_3x3", lambda: tf([[1, 2, 3], [4, 5, 6], [7, 8, 9]]).matmul(tf([[1, 0], [0, 1], [1, 0]])))
+    add("permute_2x4", lambda: tf([[1, 2, 3, 4], [5, 6, 7, 8]]).permute(1, 0))
+    add("expand_1x3_2x3", lambda: tf([[1, 2, 3]]).expand(2, 3))
+    add("cumsum_axis1", lambda: tf([[1, 2, 3], [4, 5, 6]]).cumsum(1))
+    add("cumsum_axis0", lambda: tf([[1, 2, 3], [4, 5, 6]]).cumsum(0))
+
     # -- casts (ctypes truncation semantics) --
     add("cast_f2i", lambda: tf([-2.0, -1.0, 1.7, 2.5]).cast(dtypes.int32))
     add("cast_i2f", lambda: tf([3, -7, 0, 12]).cast(dtypes.int32).cast(dtypes.float32))
