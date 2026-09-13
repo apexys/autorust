@@ -308,38 +308,43 @@ pub fn repeat(ctx: &mut UOpCtx, x: UopId, repeats: &[i64]) -> UopId {
 /// `noop = nd - 1` leading dims pass through untouched.
 fn pool_for_cumalu(ctx: &mut UOpCtx, x: UopId, k: usize, nd: usize) -> UopId {
     let noop = nd - 1;
+    // the leading (non-pooled) dims pass through untouched: mirror _pool's
+    // `noop = [None] * (ndim - len(k_))` by reusing their real sizes in every
+    // shrink/reshape (filling them with 1 would collapse them).
+    let xshape = ctx.shape(x).unwrap().unwrap_or_default();
+    let lead: Vec<SVal> = xshape[..noop].to_vec();
     let i = 2 * k as i128 - 1; // padded trailing dim
     let o = i - (k as i128 - 1); // ceildiv(i - 1*(k-1), 1)
     let f = std::cmp::max(1, movement::ceildiv(o - 1, i)); // smax(1, ceildiv(o*1-1, i))
-    let one = SVal::I(1);
-    // repeats such that we don't need padding: ceildiv(k*(i*f+d), i)
     let rep = movement::ceildiv(k as i128 * (i * f + 1), i);
+    let one = SVal::I(1); // trailing stride dim (s=1)
+    // repeats are REPEAT COUNTS (not sizes): _pool uses [1]*len(noop) + [rep].
     let mut rep_shape: Vec<SVal> = vec![one; noop];
     rep_shape.push(SVal::I(rep));
     let rep_ints: Vec<i64> = rep_shape.iter().map(|s| s.as_i128_or_panic() as i64).collect();
     let mut xx = repeat(ctx, x, &rep_ints);
     // handle dilation: shrink_to(noop + [k*(i*f+d)]) then reshape(noop + (k, i*f+d))
     let seg = k as i128 * (i * f + 1);
-    let mut shr: Vec<SVal> = vec![one; noop];
+    let mut shr: Vec<SVal> = lead.clone();
     shr.push(SVal::I(seg));
     xx = movement::shrink_to(ctx, xx, &shr);
-    let mut resh: Vec<SVal> = vec![one; noop];
+    let mut resh: Vec<SVal> = lead.clone();
     resh.push(SVal::I(k as i128));
     resh.push(SVal::I(i * f + 1));
     xx = movement::reshape_internal(ctx, xx, &resh);
     // handle stride (s=1): shrink_to(noop + (k, o)) reshape(noop + (k, o, 1))
     //                  shrink_to(noop + (k, o, 1)) reshape(noop + (k, o))
-    let mut s1: Vec<SVal> = vec![one; noop];
+    let mut s1: Vec<SVal> = lead.clone();
     s1.push(SVal::I(k as i128));
     s1.push(SVal::I(o));
     xx = movement::shrink_to(ctx, xx, &s1);
-    let mut s2: Vec<SVal> = vec![one; noop];
+    let mut s2: Vec<SVal> = lead.clone();
     s2.push(SVal::I(k as i128));
     s2.push(SVal::I(o));
     s2.push(one);
     xx = movement::reshape_internal(ctx, xx, &s2);
     xx = movement::shrink_to(ctx, xx, &s2);
-    let mut s4: Vec<SVal> = vec![one; noop];
+    let mut s4: Vec<SVal> = lead.clone();
     s4.push(SVal::I(k as i128));
     s4.push(SVal::I(o));
     xx = movement::reshape_internal(ctx, xx, &s4);
