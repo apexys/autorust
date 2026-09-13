@@ -373,9 +373,19 @@ pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cac
     // python `_buffer()`: a device-less (virtual) tensor is made real via
     // contiguous + clone to the default device before realizing.
     let mut target = tensor_uop;
-    if crate::schedule::indexing::device_of(ctx, target).is_none() || crate::dtype::is_weak(ctx.dt_of(target)) {
+    let is_view = crate::uop::group::in_(crate::uop::group::MOVEMENT, ctx.op_of(target));
+    if crate::schedule::indexing::device_of(ctx, target).is_none()
+        || crate::dtype::is_weak(ctx.dt_of(target))
+        || is_view
+    {
+        let dev = crate::schedule::indexing::device_of(ctx, target)
+            .map(|d| match d {
+                crate::uop::arg::DeviceSpec::Single(s) => s,
+                crate::uop::arg::DeviceSpec::Multi(v) => v[0].clone(),
+            })
+            .unwrap_or_else(|| "PYTHON".to_string());
         let cont = ctx.uop(Ops::Contiguous, Some(ctx.dt_of(target)), vec![target], Arg::None);
-        target = crate::tensor::creation::copy_to_device(ctx, cont, "PYTHON");
+        target = crate::tensor::creation::copy_to_device(ctx, cont, &dev);
     }
     let sink = crate::tensor::sink(ctx, vec![target]);
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
