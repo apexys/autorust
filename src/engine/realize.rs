@@ -215,13 +215,33 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
     }
     // 1. full_rewrite_to_sink
     let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts());
+    if std::env::var("TG_DUMP_IDX").is_ok() {
+        crate::codegen::postrange::dump_index_exprs(ctx, sunk, "SUNK");
+    }
     // 2. ProgramInfo.from_sink
     let pi = program_info_from_sink(ctx, sunk);
     // 3. do_linearize: linearize + pm_linearize_cleanups
     let lst = linearize(ctx, sunk);
+    if std::env::var("TG_DUMP_IDX").is_ok() {
+        crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "LINEAR");
+    }
     let lst = pm_linearize_cleanups(ctx, lst);
+    if std::env::var("TG_DUMP_IDX").is_ok() {
+        crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "CLEAN");
+    }
     // 4. do_render: SOURCE through the device's renderer seam
     let src_text = dev.renderer.render(ctx, &lst);
+    if std::env::var("TG_DUMP_LST").is_ok() {
+        for &o in &lst {
+            let (op, _dt, so, arg, tag) = ctx.snapshot(o);
+            let tag_s = match &tag {
+                crate::uop::arg::Arg::Int(i) => format!(" tag={}", i),
+                _ => String::new(),
+            };
+            let srcs: Vec<String> = so.iter().map(|s| s.0.to_string()).collect();
+            eprintln!("LST {} {:?}({}){} arg={:?}", o.0, op, srcs.join(","), tag_s, arg);
+        }
+    }
     // 5. do_compile: through the device's compiler seam
     let lib = dev.compiler.compile_cached(&src_text);
     let linear_uop = ctx.uop(Ops::Linear, Some(crate::dtype::VOID), lst.clone(), Arg::None);

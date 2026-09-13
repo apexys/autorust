@@ -120,17 +120,18 @@ fn get_grouped_dims(ctx: &mut UOpCtx, prefix: &str, dims: &[i64], max_sizes: Opt
         }
         let flat = flat.unwrap();
         let div_amount: i64 = dims[i + 1..].iter().product();
-        if div_amount == 1 {
-            out.push(flat);
+        let q = if div_amount == 1 {
+            flat
         } else {
             let dv = ctx.const_py(crate::dtype::ConstVal::Int(div_amount as i128), Some(crate::dtype::WEAKINT));
-            let q = ctx.div_floor(flat, dv);
-            if i == 0 {
-                out.push(crate::uop::upat::simplify(ctx, q));
-            } else {
-                let m = ctx.mod_(q, dv);
-                out.push(crate::uop::upat::simplify(ctx, m));
-            }
+            ctx.div_floor(flat, dv)
+        };
+        if i == 0 {
+            out.push(crate::uop::upat::simplify(ctx, q));
+        } else {
+            let dm = ctx.const_py(crate::dtype::ConstVal::Int(dims[i] as i128), Some(crate::dtype::WEAKINT));
+            let m = ctx.mod_(q, dm);
+            out.push(crate::uop::upat::simplify(ctx, m));
         }
     }
     out

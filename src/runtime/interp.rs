@@ -396,7 +396,11 @@ fn exec_launch(
                     values.insert(u, Val::S(vec![gidx[2 - dim] as f64; wsize]));
                 } else {
                     let dim: usize = name[name.len() - 1..].parse().unwrap();
-                    values.insert(u, Val::S(warp.iter().map(|w| w[2 - dim] as f64).collect()));
+                    let vv: Vec<f64> = warp.iter().map(|w| w[2 - dim] as f64).collect();
+                    if std::env::var("TG_DEBUG_LOAD").is_ok() {
+                        eprintln!("TGDBG lidx name={} dim={} vals={:?} warp={:?}", name, dim, vv, warp);
+                    }
+                    values.insert(u, Val::S(vv));
                 }
             }
             Ops::Const => {
@@ -459,6 +463,10 @@ fn exec_launch(
                     let lanes: Vec<Vec<f64>> = (0..load_sz).map(|j| pairs.iter().map(|(m, o)| _load(m, o + j, ctx.dt_of(u))).collect()).collect();
                     values.insert(u, Val::V(lanes));
                 } else {
+                    if std::env::var("TG_DEBUG_LOAD").is_ok() {
+                        let offs: Vec<usize> = pairs.iter().map(|(_, o)| *o).collect();
+                        eprintln!("TGDBG load uop={} size={} offs={:?}", u.0, pairs[0].0.3, offs);
+                    }
                     let tv: Vec<f64> = pairs.iter().enumerate().map(|(t, (m, o))| {
                         if exec_masks.last().unwrap()[t] { _load(m, *o, ctx.dt_of(u)) } else { 0.0 }
                     }).collect();

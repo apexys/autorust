@@ -422,6 +422,87 @@ fn sval_render(ctx: &mut UOpCtx, u: UopId) -> String {
     }
 }
 
+/// Debug: dump every Index offset expr in a linear op list (post-linearize).
+pub fn dump_lst_index_offsets(ctx: &mut UOpCtx, lst: &[UopId], label: &str) {
+    fn pexpr(ctx: &mut UOpCtx, u: UopId, out: &mut String) {
+        let (op, _dt, srcs, _arg, _tag) = ctx.snapshot(u);
+        match op {
+            Ops::Const => { let _ = std::fmt::Write::write_fmt(out, format_args!("{}", sval_render(ctx, u))); }
+            Ops::Range | Ops::Special => {
+                let tag = match ctx.arg_of(u) { Arg::Str(s) => s.clone(), _ => format!("r{}", AxisType::range_axis_id(ctx, u)) };
+                let _ = std::fmt::Write::write_fmt(out, format_args!("{}", tag));
+            }
+            other => {
+                if srcs.len() == 2 {
+                    let _ = std::fmt::Write::write_fmt(out, format_args!("("));
+                    for (i, &s) in srcs.iter().enumerate() {
+                        if i > 0 { let _ = std::fmt::Write::write_fmt(out, format_args!(" {:?} ", other)); }
+                        pexpr(ctx, s, out);
+                    }
+                    let _ = std::fmt::Write::write_fmt(out, format_args!(")"));
+                } else {
+                    let _ = std::fmt::Write::write_fmt(out, format_args!("{:?}[{}]", other, srcs.len()));
+                }
+            }
+        }
+    }
+    for &o in lst {
+        if ctx.op_of(o) == Ops::Index {
+            let isrcs = ctx.srcs(o).to_vec();
+            if isrcs.len() < 2 { continue; }
+            let mut s = String::new();
+            pexpr(ctx, isrcs[1], &mut s);
+            eprintln!("[{}] idx{} off = {}", label, o.0, s);
+        }
+    }
+}
+
+/// Debug: dump RANGE/SPECIAL ops and every LOAD/STORE INDEX offset expr.
+pub fn dump_index_exprs(ctx: &mut UOpCtx, ast: UopId, label: &str) {
+    fn pexpr(ctx: &mut UOpCtx, u: UopId, out: &mut String) {
+        let (op, _dt, srcs, _arg, _tag) = ctx.snapshot(u);
+        match op {
+            Ops::Const => { let _ = std::fmt::Write::write_fmt(out, format_args!("{}", sval_render(ctx, u))); }
+            Ops::Range | Ops::Special => {
+                let tag = match ctx.arg_of(u) { Arg::Str(s) => s.clone(), _ => format!("r{}", AxisType::range_axis_id(ctx, u)) };
+                let _ = std::fmt::Write::write_fmt(out, format_args!("{}", tag));
+            }
+            other => {
+                if srcs.len() == 2 {
+                    let _ = std::fmt::Write::write_fmt(out, format_args!("("));
+                    for (i, &s) in srcs.iter().enumerate() {
+                        if i > 0 { let _ = std::fmt::Write::write_fmt(out, format_args!(" {:?} ", other)); }
+                        pexpr(ctx, s, out);
+                    }
+                    let _ = std::fmt::Write::write_fmt(out, format_args!(")"));
+                } else {
+                    let _ = std::fmt::Write::write_fmt(out, format_args!("{:?}[{}]", other, srcs.len()));
+                }
+            }
+        }
+    }
+    for &o in &ctx.toposort(ast) {
+        match ctx.op_of(o) {
+            Ops::Range | Ops::Special => {
+                let ext = ctx.srcs(o)[0];
+                let (tag, at) = match ctx.arg_of(o) {
+                    Arg::Str(s) => (s.clone(), String::from("special")),
+                    _ => (String::new(), format!("{:?}", AxisType::range_axis_type(ctx, o))),
+                };
+                eprintln!("[{}] rng {} ext={} at={}", label, tag, sval_render(ctx, ext), at);
+            }
+            Ops::Index => {
+                let isrcs = ctx.srcs(o).to_vec();
+                if isrcs.len() < 2 { continue; }
+                let mut s = String::new();
+                pexpr(ctx, isrcs[1], &mut s);
+                eprintln!("[{}] {:?} idx{} off = {}", label, ctx.op_of(o), o.0, s);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// `KernelInfo(name=..., applied_opts=(...Opt...), dont_use_locals=...)`.
 fn kernel_info_with_opts(name: &str, opts: &[Arg], dont_use_locals: bool) -> DataArg {
     DataArg {
@@ -592,9 +673,15 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
         },
         _ => None,
     };
+    if std::env::var("TG_DUMP_IDX").is_ok() {
+        dump_index_exprs(ctx, k.ast, "PRE");
+    }
     match opts_to_apply {
         Some(_) => panic!("TGERR: opts_to_apply path not ported for corpus"),
         None => hand_coded_optimizations(&mut k, ctx),
+    }
+    if std::env::var("TG_DUMP_IDX").is_ok() {
+        dump_index_exprs(ctx, k.ast, "POST");
     }
     let name_override = match ctx.arg_of(ast) {
         Arg::Data(d) => match d.get("name") {
@@ -603,5 +690,9 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
         },
         _ => None,
     };
-    k.get_optimized_ast(ctx, name_override.as_deref())
+    let out = k.get_optimized_ast(ctx, name_override.as_deref());
+    if std::env::var("TG_DUMP_IDX").is_ok() {
+        dump_index_exprs(ctx, out, "RESULT");
+    }
+    out
 }

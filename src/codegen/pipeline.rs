@@ -595,6 +595,9 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         };
         i += 1;
+        if std::env::var("TG_DUMP_IDX").is_ok() {
+            crate::codegen::postrange::dump_index_exprs(ctx, cur, &st.name);
+        }
         if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
             eprintln!("=== after stage {} ({}) ===", i, st.name);
             eprintln!("{}", dump_ast(ctx, cur));
