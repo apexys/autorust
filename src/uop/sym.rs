@@ -1747,8 +1747,6 @@ pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simpl
 
     // all_candidates
     let mut all_candidates: Vec<(UopId, UopId)> = Vec::new();
-    let mut last_expr: Option<UopId> = None;
-    let mut last_v0: Option<SVal> = None;
     for (i, (expr, v)) in bounds.iter().enumerate() {
         let (vmn, vmx) = ctx.min_max(*expr).unwrap_or_else(|e| panic!("TGERR: bounds vmin/vmax: {e}"));
         let v0 = match &v[0] {
@@ -1769,60 +1767,58 @@ pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simpl
         };
         let fake = ctx.variable(&format!("fake{i}"), sval_cv(v0), sval_cv(v1), ctx.dt_of(*expr), true);
         all_candidates.push((*expr, fake));
-        last_expr = Some(*expr);
-        last_v0 = Some(v0);
-    }
 
-    if try_simplex {
-        let mut candidates: Vec<Vec<(UopId, UopId)>> = vec![vec![*all_candidates.last().expect("TGERR: no bounds")]];
-        // python quirk: `expr` and `v0` leak from the last loop iteration
-        let (le_expr, le_v0) = (last_expr.expect("TGERR: no bounds"), last_v0.expect("TGERR: no bounds"));
-        let is_add_simplex = ctx.op_of(le_expr) == Ops::Add && le_v0 == SVal::I(1);
-        let irreducible = |x: UopId| group::in_(group::IRREDUCIBLE, ctx.op_of(x));
-        if is_add_simplex {
-            let mut parts: Vec<UopId> = Vec::new();
-            ctx.split_uop(le_expr, Ops::Add, &mut parts);
-            if parts.iter().all(|&u| irreducible(u)) {
-                let cand: Vec<(UopId, UopId)> = parts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &Xi)| {
-                        let (_, vmx) = ctx.min_max(Xi).unwrap_or((SVal::I(0), SVal::I(0)));
-                        (Xi, ctx.variable(&format!("fake{i}"), ConstVal::Int(1), sval_cv(vmx), ctx.dt_of(Xi), true))
-                    })
-                    .collect();
-                candidates.push(cand);
-            }
-        }
-        for candidate in candidates {
-            let back = ctx.backward_slice_with_self(uop);
-            if candidate.iter().any(|(x, _)| !back.contains(x)) {
-                continue;
-            }
-            let mut newuops: Vec<UopId> = Vec::new();
-            for (x, newx) in &candidate {
-                let mut d = HashMap::new();
-                d.insert(*x, *newx);
-                let sub = crate::uop::upat::substitute(ctx, uop, d.clone(), true, true);
-                let simp = crate::uop::upat::simplify(ctx, sub);
-                let mut back2 = HashMap::new();
-                back2.insert(*newx, *x);
-                let res = crate::uop::upat::substitute(ctx, simp, back2, true, true);
-                newuops.push(crate::uop::upat::simplify(ctx, res));
-            }
-            let all_same = newuops.iter().all(|&n| n == newuops[0]);
-            if all_same {
-                uop = newuops[0];
-            } else if ctx.op_of(uop) == Ops::Stack && ctx.srcs(uop).len() == 2 {
-                let s0s: Vec<UopId> = newuops.iter().map(|&n| ctx.srcs(n)[0]).collect();
-                let s1s: Vec<UopId> = newuops.iter().map(|&n| ctx.srcs(n)[1]).collect();
-                if s0s.iter().all(|&n| n == s0s[0]) {
-                    let srcs = ctx.srcs(uop).to_vec();
-                    uop = ctx.uop(Ops::Stack, None, vec![s0s[0], srcs[1]], Arg::None);
+        if try_simplex {
+            // every candidate is a set of constrained UOp based on valid, and if every item
+            // in a set simplifies the uop into a same output, we rewrite uop. This runs per
+            // bound (inside the loop), matching symbolic.py:344.
+            let mut candidates: Vec<Vec<(UopId, UopId)>> = vec![vec![*all_candidates.last().expect("TGERR: no bounds")]];
+            let irreducible = |x: UopId| group::in_(group::IRREDUCIBLE, ctx.op_of(x));
+            if ctx.op_of(*expr) == Ops::Add && v0 == SVal::I(1) {
+                let mut parts: Vec<UopId> = Vec::new();
+                ctx.split_uop(*expr, Ops::Add, &mut parts);
+                if parts.iter().all(|&u| irreducible(u)) {
+                    let cand: Vec<(UopId, UopId)> = parts
+                        .iter()
+                        .enumerate()
+                        .map(|(j, &Xi)| {
+                            let (_, vmx) = ctx.min_max(Xi).unwrap_or((SVal::I(0), SVal::I(0)));
+                            (Xi, ctx.variable(&format!("fake{j}"), ConstVal::Int(1), sval_cv(vmx), ctx.dt_of(Xi), true))
+                        })
+                        .collect();
+                    candidates.push(cand);
                 }
-                if s1s.iter().all(|&n| n == s1s[0]) {
-                    let srcs = ctx.srcs(uop).to_vec();
-                    uop = ctx.uop(Ops::Stack, None, vec![srcs[0], s1s[0]], Arg::None);
+            }
+            for candidate in candidates {
+                let back = ctx.backward_slice_with_self(uop);
+                if candidate.iter().any(|(x, _)| !back.contains(x)) {
+                    continue;
+                }
+                let mut newuops: Vec<UopId> = Vec::new();
+                for (x, newx) in &candidate {
+                    let mut d = HashMap::new();
+                    d.insert(*x, *newx);
+                    let sub = crate::uop::upat::substitute(ctx, uop, d.clone(), true, true);
+                    let simp = crate::uop::upat::simplify(ctx, sub);
+                    let mut back2 = HashMap::new();
+                    back2.insert(*newx, *x);
+                    let res = crate::uop::upat::substitute(ctx, simp, back2, true, true);
+                    newuops.push(crate::uop::upat::simplify(ctx, res));
+                }
+                let all_same = newuops.iter().all(|&n| n == newuops[0]);
+                if all_same {
+                    uop = newuops[0];
+                } else if ctx.op_of(uop) == Ops::Stack && ctx.srcs(uop).len() == 2 {
+                    let s0s: Vec<UopId> = newuops.iter().map(|&n| ctx.srcs(n)[0]).collect();
+                    let s1s: Vec<UopId> = newuops.iter().map(|&n| ctx.srcs(n)[1]).collect();
+                    if s0s.iter().all(|&n| n == s0s[0]) {
+                        let srcs = ctx.srcs(uop).to_vec();
+                        uop = ctx.uop(Ops::Stack, None, vec![s0s[0], srcs[1]], Arg::None);
+                    }
+                    if s1s.iter().all(|&n| n == s1s[0]) {
+                        let srcs = ctx.srcs(uop).to_vec();
+                        uop = ctx.uop(Ops::Stack, None, vec![srcs[0], s1s[0]], Arg::None);
+                    }
                 }
             }
         }
