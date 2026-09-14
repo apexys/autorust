@@ -102,12 +102,14 @@ No `f64` round-trip; reads reinterpret native-dtype bytes, cross-dtype reads ins
   implemented for `i8/i16/i32/i64/u8/u16/u32/u64/f32/f64/bool`. `f16`/`bf16`/`fp8` tensors are read
   by casting to a wider type (no native Rust half type yet).
 
-## 3b. Milestone 2 — tensor-op tests (`tests/ops.rs`) — IN PROGRESS
+## 3b. Milestone 2 — tensor-op tests (`tests/ops.rs`) — DONE
 
-Suite drives op → `to_list`/`item`. Current: **6/9 green** (no regressions: golden 7, marshal 6).
+Suite drives op → `to_list`/`item`. Current: **9/9 green** (no regressions: golden 7, marshal 6,
+backend_harness 12 passed / 1 ignored).
 
 Green: `binary_arithmetic`, `neg_abs_and_bounds`, `unary_pow_log`, `unary_misc`,
-`casts_across_dtypes`, `activations` (relu/gelu/softmax).
+`casts_across_dtypes`, `activations` (relu/gelu/softmax), `reductions` (incl. `cumsum`),
+`movement_ops` (permute/transpose/flip/flatten read-out), `matmul_ops` (2D@2D `dot`).
 
 Op bugs found & FIXED (port vs tinygrad):
 - `elementwise::log` did `log2 / ln2`; tinygrad is `log2 * ln2`. Now multiply. (`log(2)` was 1.4427, now 0.6931.)
@@ -121,26 +123,28 @@ Op bugs found & FIXED (port vs tinygrad):
 - `to_bytes_with` now forces a materializing copy (contiguous + `copy_to_device`) so read-out is in
   logical C order for views.
 
-Still RED — engine-level, need a decision before deeper surgery:
-- `movement_ops` (permute read-out): with materializing copy, `buffer_of` now fails on `Ops::Copy` —
-  the schedule doesn't turn a permuted-view copy into a realized STORE for read-out. Realize/schedule gap.
-- `reductions` → only `cumsum` fails: `sym.rs:1777 TGERR: no bounds` (symbolic simplify / simplex path).
-  All other reductions (sum/mean/prod/max/axis-sum) are green.
-- `matmul_ops`: `codegen/postrange.rs:564 attempt to subtract with overflow` — the local-assignment
-  opt does `axis - deleted_shape` (usize underflow) when lowering the dot's reduce. Codegen bug.
+Formerly RED — now GREEN (resolved during M6/M8 hardening, not by further ops-suite surgery):
+- `movement_ops` (permute/transpose/flip/flatten read-out): the materializing copy (`to_bytes_with`)
+  now lowers a permuted-view copy to a realized STORE correctly; `buffer_of` handles the `Ops::Copy`.
+- `reductions` → `cumsum`: root cause was `_broadcast_to` building the final perm by block
+  (expand-at then kept) instead of original dim order, so a middle/trailing size-1 broadcast landed
+  at dim 0 and corrupted the pool's `repeat` (cumsum collapsed the batch dim). Fixed in
+  `tensor/movement.rs` (commit `5c3abd5`); regression test `expand_all_positions`.
+- `matmul_ops` (`postrange` `axis - deleted_shape` underflow): resolved by the `dot` rewrite above;
+  no postrange surgery needed.
 
 ## 4. Next milestones (in order)
 
 1. ~~**Data marshalling.**~~ **DONE** (`to_bytes`/`to_list<T>`/`item<T>`/`realize` + `ReadDtype`;
    width-precise `from_slice` inference; `tensor_bytes`; `tests/marshal.rs`).
-2. **Tensor-op tests (tensor level).** Port `test/backend/test_ops.py` coverage as Rust tests:
-   build op → `to_list` → compare against `golden.rs`/tinygrad. One test per op family
-   (unary/binary/ternary/reduce/cast/dtype). Fill any op gaps the tests reveal (e.g.
-   `pow`, `where` variants, floordiv/floormod already partly present).
-3. **Backward.** Port `Tensor::backward` + `gradient`/`backward_slice` (tinygrad `tensor.py:657`)
-   and `grad` population on `Tensor`; `no_grad`/`detach`. This is the biggest unknown — mirror the
-   UOp `backward_slice` machinery rather than inventing a new autograd.
-4. **Backward tests.** Port `test/unit/test_gradient.py` (gradcheck) vs the same goldens.
+2. ~~**Tensor-op tests (tensor level).**~~ **DONE** (`tests/ops.rs` 9/9 green; op→`to_list`/`item`
+   families for binary/unary/reduce/cast/activation/movement/matmul). Movement/broadcast gaps found
+   while fixing (`expand`/`broadcast_to` axis order) got regression coverage in
+   `backend_harness.rs` (`pad_fill_repro`, `expand_all_positions`).
+3. **Backward** *(IN PROGRESS — NN precursor)*. Port `Tensor::backward` + `gradient`/`backward_slice`
+   (tinygrad `tensor.py:657`) and `grad` population on `Tensor`; `no_grad`/`detach`. Mirror the UOp
+   `backward_slice` machinery rather than inventing a new autograd.
+4. **Backward tests** *(NN precursor)*. Port `test/unit/test_gradient.py` (gradcheck) vs the same goldens.
 5. **NN tests.** Port `test/backend/test_nn.py` (Linear/Conv2d/BatchNorm/LayerNorm/GroupNorm
    forward) — requires implementing full `Conv2d::forward`. Then `test/backend/test_optim.py`
    (needs `nn/optim.py`: SGD, Adam) and `nn/state.py` (a `Parameter`/`Module` trait with an
