@@ -4,7 +4,6 @@ use crate::dtype::{ConstVal as CV, BOOL};
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
-use crate::uop::sint::SVal;
 use crate::uop::sym::{invalid_pat, r, sget, var};
 use crate::uop::upat::{PatternMatcher, UPat, UPatOrConst};
 use crate::uop::UopId;
@@ -12,8 +11,12 @@ use crate::uop::UopId;
 fn vconst_like(ctx: &mut UOpCtx, l: UopId, val: i64) -> UopId {
     let dt = ctx.dt_of(l);
     let c = ctx.const_py(CV::Int(val as i128), Some(dt));
-    let n = ctx.max_numel(l);
-    crate::tensor::movement::expand(ctx, c, &[SVal::I(n as i128)])
+    // mirror UOp.broadcast (ops.py:589): count==1 -> plain const, else STACK of copies.
+    let n = ctx.max_numel(l) as usize;
+    if n <= 1 {
+        return c;
+    }
+    ctx.uop(Ops::Stack, Some(dt), vec![c; n], Arg::None)
 }
 
 fn store2(ctx: &mut UOpCtx, idx: UopId, srcs: Vec<UopId>) -> UopId {
@@ -40,7 +43,7 @@ fn move_where_load(ctx: &mut UOpCtx, l: UopId, a: UopId, w: UopId) -> Option<Uop
 /// ported (no image support yet).
 pub fn pm_move_gates_from_index() -> PatternMatcher {
     {
-        let mop = |extra: UPat| {
+        let mop = || {
             UPat::op_var(vec![Ops::Index, Ops::Shrink])
                 .with_src_tup(vec![
                     UPat::var(None, None),
@@ -48,7 +51,8 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
                 ])
                 .allow_all_srcs()
                 .named("mop")
-                .load(vec![extra], true)
+                .load(vec![], true)
+                .named("l")
         };
         let load_pat = |gate_src: UPat| {
             UPat::op_var(vec![Ops::Load])
@@ -60,7 +64,7 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
         PatternMatcher::new(vec![
             // INDEX/SHRINK with gated-Invalid index -> load with 0-alt + gate
             (
-                mop(UPat::var(None, None)),
+                mop(),
                 r(|ctx, st, _| {
                     let (mop, gate, idx, l) = (sget(st, "mop"), sget(st, "gate"), sget(st, "idx"), sget(st, "l"));
                     let msrc = ctx.srcs(mop).to_vec();

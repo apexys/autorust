@@ -458,9 +458,29 @@ fn exec_launch(
                     Val::P(p) => p.clone(),
                     _ => panic!("TGERR: interp load src"),
                 };
+                // gated load: srcs = [index, alt(fill), gate(valid)].
+                // python eval: buf[i] if valid else alt — the gate combines with
+                // the active control-flow mask; out-of-range reads yield `alt`
+                // (e.g. PAD fill), never a clamped base index.
+                let gated = src_vals.len() >= 3;
+                let tovec = |v: &Val| -> Vec<f64> {
+                    match v {
+                        Val::S(s) => s.clone(),
+                        Val::V(l) => l.iter().map(|t| *t.first().unwrap_or(&0.0)).collect(),
+                        _ => panic!("TGERR: interp load gate/alt src"),
+                    }
+                };
+                let (alt, gate) = if gated { (tovec(&src_vals[1]), tovec(&src_vals[2])) } else { (Vec::new(), Vec::new()) };
+                let mask_at = |t: usize| -> bool {
+                    let em = exec_masks.last().unwrap();
+                    em[t.min(em.len() - 1)] && (!gated || gate[t.min(gate.len() - 1)] != 0.0)
+                };
+                let alt_at = |t: usize| -> f64 { if gated { alt[t.min(alt.len() - 1)] } else { 0.0 } };
                 if load_sz > 1 {
                     // lane-major vector load
-                    let lanes: Vec<Vec<f64>> = (0..load_sz).map(|j| pairs.iter().map(|(m, o)| _load(m, o + j, ctx.dt_of(u))).collect()).collect();
+                    let lanes: Vec<Vec<f64>> = (0..load_sz)
+                        .map(|j| pairs.iter().enumerate().map(|(t, (m, o))| if mask_at(t) { _load(m, o + j, ctx.dt_of(u)) } else { alt_at(t) }).collect())
+                        .collect();
                     values.insert(u, Val::V(lanes));
                 } else {
                     if std::env::var("TG_DEBUG_LOAD").is_ok() {
@@ -468,7 +488,7 @@ fn exec_launch(
                         eprintln!("TGDBG load uop={} size={} offs={:?}", u.0, pairs[0].0.3, offs);
                     }
                     let tv: Vec<f64> = pairs.iter().enumerate().map(|(t, (m, o))| {
-                        if exec_masks.last().unwrap()[t] { _load(m, *o, ctx.dt_of(u)) } else { 0.0 }
+                        if mask_at(t) { _load(m, *o, ctx.dt_of(u)) } else { alt_at(t) }
                     }).collect();
                     values.insert(u, Val::S(tv));
                 }

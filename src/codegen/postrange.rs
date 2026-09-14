@@ -468,7 +468,15 @@ pub fn dump_index_exprs(ctx: &mut UOpCtx, ast: UopId, label: &str) {
                 let _ = std::fmt::Write::write_fmt(out, format_args!("{}", tag));
             }
             other => {
-                if srcs.len() == 2 {
+                if op == Ops::Where && srcs.len() == 3 {
+                    let _ = std::fmt::Write::write_fmt(out, format_args!("("));
+                    pexpr(ctx, srcs[0], out);
+                    let _ = std::fmt::Write::write_fmt(out, format_args!("?"));
+                    pexpr(ctx, srcs[1], out);
+                    let _ = std::fmt::Write::write_fmt(out, format_args!(":"));
+                    pexpr(ctx, srcs[2], out);
+                    let _ = std::fmt::Write::write_fmt(out, format_args!(")"));
+                } else if srcs.len() == 2 {
                     let _ = std::fmt::Write::write_fmt(out, format_args!("("));
                     for (i, &s) in srcs.iter().enumerate() {
                         if i > 0 { let _ = std::fmt::Write::write_fmt(out, format_args!(" {:?} ", other)); }

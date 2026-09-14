@@ -583,3 +583,24 @@ fn xor_training_nn() {
     // A 2-8-1 MLP trained to XOR on every backend: forward/backward through
     // the realize pipeline, weights updated with Adam. Lands with M7 (nn).
 }
+
+#[test]
+fn pad_fill_repro() {
+    // 1D left-pad: [1,2,3] pad (2,0) -> [0,0,1,2,3]
+    let (vals, shape) = run_prog("pad1d", None, |ctx, dev| {
+        Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev).pad(ctx, &[(2, 0)])
+    });
+    eprintln!("PAD1D shape={shape:?} vals={vals:?}");
+    assert_eq!(shape, vec![5], "pad1d shape");
+    assert_eq!(vals, vec![0.0, 0.0, 1.0, 2.0, 3.0], "pad1d values");
+
+    // 2D left-pad: [[1,2,3],[4,5,6]] pad (2,0) -> [[0,0,1,2,3],[0,0,4,5,6]]
+    let (vals2, shape2) = run_prog("pad2d", None, |ctx, dev| {
+        Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev)
+            .reshape(ctx, [2usize, 3])
+            .pad(ctx, &[(0, 0), (2, 0)])
+    });
+    eprintln!("PAD2D shape={shape2:?} vals={vals2:?}");
+    assert_eq!(shape2, vec![2, 5], "pad2d shape");
+    assert_eq!(vals2, vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0, 4.0, 5.0, 6.0], "pad2d values");
+}
