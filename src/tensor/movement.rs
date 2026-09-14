@@ -185,22 +185,25 @@ pub fn broadcast_to(ctx: &mut UOpCtx, x: UopId, new_shape: &[SVal]) -> UopId {
         assert!(same || is_one, "TGERR: cannot broadcast {self_shape:?} to {new_shape:?}");
     }
     let n_left = new_shape.len() - self_shape.len();
+    // broadcast_axes returns absolute (aligned) indices; keep only those inside the
+    // self region and shift them to be self-relative (tinygrad: `i - n_left`).
     let axes = broadcast_axes(ctx, &shape, new_shape);
-    let expand_at: Vec<usize> = axes.into_iter().filter(|&i| i >= n_left).collect();
+    let expand_at: Vec<usize> = axes.into_iter().filter(|&i| i >= n_left).map(|i| i - n_left).collect();
     let kept: Vec<usize> = (0..self_shape.len()).filter(|i| !expand_at.contains(i)).collect();
     let squeezed = reshape_internal(ctx, x, &kept.iter().map(|&i| self_shape[i]).collect::<Vec<_>>());
     let mut expand_shape: Vec<SVal> = new_shape[..n_left].to_vec();
     expand_shape.extend(expand_at.iter().map(|&i| new_shape[n_left + i]));
     let expanded = mop_shape(ctx, Ops::Expand, squeezed, &expand_shape);
+    // expanded layout = [left dims] + [expand_at dims] + [kept dims]; build perm in
+    // ORIGINAL self-dim order so each self dim lands at its new_shape position.
     let perm: Vec<usize> = (0..n_left)
-        .chain(expand_at.iter().map(|&i| {
-            n_left
-                + expand_at
-                    .iter()
-                    .position(|&j| j == i)
-                    .unwrap()
+        .chain((0..self_shape.len()).map(|i| {
+            if let Some(p) = expand_at.iter().position(|&j| j == i) {
+                n_left + p
+            } else {
+                n_left + expand_at.len() + kept.iter().position(|&j| j == i).unwrap()
+            }
         }))
-        .chain(kept.iter().map(|&i| n_left + expand_at.len() + kept.iter().position(|&j| j == i).unwrap()))
         .collect();
     permute_internal(ctx, expanded, &perm)
 }

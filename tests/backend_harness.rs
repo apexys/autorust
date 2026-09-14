@@ -604,3 +604,47 @@ fn pad_fill_repro() {
     assert_eq!(shape2, vec![2, 5], "pad2d shape");
     assert_eq!(vals2, vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0, 4.0, 5.0, 6.0], "pad2d values");
 }
+
+#[test]
+fn expand_all_positions() {
+    // _broadcast_to must place a broadcast dim at its OWN position, not at index 0.
+    // Regression: middle/trailing size-1 dims used to land at dim 0.
+    let a = run_prog("exp_lead", None, |ctx, dev| {
+        Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev).reshape(ctx, [1usize, 3]).expand(ctx, [4usize, 3])
+    });
+    assert_eq!(a.1, vec![4, 3], "expand leading [1,3]->[4,3] shape");
+    assert_eq!(a.0, vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0], "expand leading vals");
+
+    let b = run_prog("exp_mid", None, |ctx, dev| {
+        Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev)
+            .reshape(ctx, [2usize, 3])
+            .unsqueeze(ctx, 1)
+            .expand(ctx, [2usize, 4, 3])
+    });
+    assert_eq!(b.1, vec![2, 4, 3], "expand middle [2,1,3]->[2,4,3] shape");
+    assert_eq!(
+        b.0,
+        vec![
+            1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0
+        ],
+        "expand middle vals"
+    );
+
+    let c = run_prog("exp_trail", None, |ctx, dev| {
+        Tensor::from_slice(ctx, &[1i32, 2, 3, 4], None, dev).reshape(ctx, [2usize, 2]).unsqueeze(ctx, 2).expand(ctx, [2usize, 2, 3])
+    });
+    assert_eq!(c.1, vec![2, 2, 3], "expand trailing [2,2,1]->[2,2,3] shape");
+    assert_eq!(c.0, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0], "expand trailing vals");
+
+    let d = run_prog("exp_multi", None, |ctx, dev| {
+        Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev).reshape(ctx, [1usize, 1, 3]).expand(ctx, [2usize, 4, 3])
+    });
+    assert_eq!(d.1, vec![2, 4, 3], "expand multi [1,1,3]->[2,4,3] shape");
+    assert_eq!(
+        d.0,
+        vec![
+            1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0
+        ],
+        "expand multi vals"
+    );
+}
