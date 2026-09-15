@@ -71,7 +71,7 @@ fn post_stages() -> Vec<Stage> {
         Stage { name: "cast float alu operands", pm: pm_cast_float_alu(), bottom_up: false },
         Stage { name: "early decompositions", pm: PatternMatcher::new(vec![]).add(&symbolic_simple()), bottom_up: false },
         Stage { name: "decomp dtypes", pm: PatternMatcher::new(vec![]).add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
-        Stage { name: "late decompositions", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "late decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
         Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },
         Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&pm_remove_invalid()), bottom_up: false },
         Stage { name: "casted consts", pm: pm_casted_consts(), bottom_up: false,  },

@@ -99,38 +99,16 @@ pub fn ones(ctx: &mut UOpCtx, shape: &[SVal], dtype: Option<DTypeId>, device: Op
     full(ctx, shape, ConstVal::Float(1.0), dtype, device, true)
 }
 
-/// `RandMixin.rand(*shape, **kwargs)` (rand.py:50): uniform [0, 1) via randperm + division.
-/// Simplified: uses a linear congruential generator seeded by shape hash.
+/// `RandMixin.rand(*shape, **kwargs)` (rand.py:50): uniform [0, 1) via the
+/// Threefry graph RNG (`tensor::rand`).
 pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
-    let dt = dtype.unwrap_or(dtype::default_float());
-    let size: i64 = shape.iter().map(|s| s.as_i64().unwrap_or(1)).product();
-    if size == 0 {
-        return zeros(ctx, shape, Some(dt), device);
-    }
-    // Generate random floats in [0, 1)
-    // For now, use a simple deterministic pattern for reproducibility
-    let mut data = vec![0.0f64; size as usize];
-    let mut state = 42u64; // Fixed seed for reproducibility
-    for i in 0..data.len() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        data[i] = ((state >> 11) as f64) / ((1u64 << 53) as f64);
-    }
-    let bytes: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 8)
-    }.to_vec();
-    from_bytes(ctx, &bytes, dt, device)
+    crate::tensor::rand::rand(ctx, shape, dtype, device)
 }
 
-/// `RandMixin.uniform(*shape, low=0.0, high=1.0, **kwargs)` (rand.py:158): `(high-low)*rand() + low`.
+/// `RandMixin.uniform(*shape, low=0.0, high=1.0, **kwargs)` (rand.py:158):
+/// `(high-low) * rand() + low`.
 pub fn uniform(ctx: &mut UOpCtx, shape: &[SVal], low: f64, high: f64, dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
-    let dt = dtype.unwrap_or(dtype::default_float());
-    if low >= high {
-        panic!("Tensor.uniform requires low < high, got low={}, high={}", low, high);
-    }
-    let rand_tensor = rand(ctx, shape, Some(dt), device);
-    let range = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(high - low), None);
-    let low_const = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(low), None);
-    rand_tensor.mul(ctx, TensorAddArg::T(range)).add(ctx, TensorAddArg::T(low_const))
+    crate::tensor::rand::uniform(ctx, shape, low, high, dtype, device)
 }
 
 /// `OpMixin.arange(start, stop=None, step=1, dtype=None)` (op.py:165-197).

@@ -17,6 +17,7 @@ pub mod elementwise;
 pub mod movement;
 pub mod nn;
 pub mod reduce;
+pub mod rand;
 
 use crate::dtype::{AddrSpace, ConstVal};
 
@@ -43,6 +44,11 @@ impl From<f64> for TensorAddArg {
 impl From<i64> for TensorAddArg {
     fn from(v: i64) -> Self {
         TensorAddArg::C(ConstVal::Int(v as i128))
+    }
+}
+impl From<ConstVal> for TensorAddArg {
+    fn from(v: ConstVal) -> Self {
+        TensorAddArg::C(v)
     }
 }
 use crate::uop::arg::{Arg, EnumClass, EnumVal};
@@ -341,6 +347,53 @@ impl Tensor {
         creation::uniform(ctx, &s, low, high, dtype, device)
     }
 
+    /// `Tensor.randn(*shape)`: random values from a standard normal distribution.
+    pub fn randn(ctx: &mut UOpCtx, shape: &[i64], dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
+        let s: Vec<SVal> = shape.iter().map(|&x| SVal::I(x as i128)).collect();
+        rand::randn(ctx, &s, dtype, device)
+    }
+
+    /// `Tensor.randint(*shape, low, high)`: random integers in `[low, high)`.
+    pub fn randint(ctx: &mut UOpCtx, shape: &[i64], low: i32, high: i32, dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
+        let s: Vec<SVal> = shape.iter().map(|&x| SVal::I(x as i128)).collect();
+        rand::randint(ctx, &s, low, high, dtype, device)
+    }
+
+    /// `Tensor.manual_seed(seed)` (tensor.py:624): reset the Threefry RNG state.
+    pub fn manual_seed(seed: i64) {
+        rand::manual_seed(seed)
+    }
+
+    fn prod_tail(shape: &[i64]) -> f64 {
+        shape[1..].iter().map(|&x| x as f64).product()
+    }
+
+    /// `Tensor.kaiming_uniform(*shape, a=0.01)` (rand.py:208):
+    /// `uniform(-bound, bound)` with `bound = sqrt(6/(1+a^2)/prod(shape[1:]))`.
+    pub fn kaiming_uniform(ctx: &mut UOpCtx, shape: &[i64], a: f64, device: Option<&str>) -> Tensor {
+        let bound = (6.0 / (1.0 + a * a) / Tensor::prod_tail(shape)).sqrt();
+        let s: Vec<SVal> = shape.iter().map(|&x| SVal::I(x as i128)).collect();
+        creation::uniform(ctx, &s, -bound, bound, None, device)
+    }
+
+    /// `Tensor.glorot_uniform(*shape)` (rand.py:192):
+    /// `bound = sqrt(6/(shape[0]+prod(shape[1:])))`.
+    pub fn glorot_uniform(ctx: &mut UOpCtx, shape: &[i64], device: Option<&str>) -> Tensor {
+        let head = shape[0] as f64;
+        let bound = (6.0 / (head + Tensor::prod_tail(shape))).sqrt();
+        let s: Vec<SVal> = shape.iter().map(|&x| SVal::I(x as i128)).collect();
+        creation::uniform(ctx, &s, -bound, bound, None, device)
+    }
+
+    /// `Tensor.scaled_uniform(*shape)` (rand.py:176):
+    /// `uniform(-1, 1) * prod(shape)**-0.5`.
+    pub fn scaled_uniform(ctx: &mut UOpCtx, shape: &[i64], device: Option<&str>) -> Tensor {
+        let s: Vec<SVal> = shape.iter().map(|&x| SVal::I(x as i128)).collect();
+        let t = creation::uniform(ctx, &s, -1.0, 1.0, None, device);
+        let prod: f64 = shape.iter().map(|&x| x as f64).product();
+        t.mul(ctx, prod.powf(-0.5))
+    }
+
     /// Tensor-level reduce sugar.
     pub fn sum(&self, ctx: &mut UOpCtx, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> Tensor {
         Tensor::from_uop(reduce::sum(ctx, self.uop, axis, keepdim, dtype))
@@ -635,5 +688,58 @@ impl Tensor {
     /// in `dtype_from_uop` during construction.
     pub fn alu(&self, ctx: &mut UOpCtx, op: Ops, srcs: &[Tensor]) -> Tensor {
         self.apply_uop(ctx, srcs, |c, u| c.alu(op, u))
+    }
+
+    /// `Tensor.bitcast(dtype)` (`mixin/dtype.py:35`) — reinterpret the bits.
+    pub fn bitcast(&self, ctx: &mut UOpCtx, dtype: DTypeId) -> Tensor {
+        Tensor::from_uop(ctx.bitcast(self.uop, dtype))
+    }
+
+    /// `bitwise_or` / `bitwise_and` / `bitwise_xor` — bare binops (`mixin/elementwise.py`).
+    pub fn bitwise_or(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        match other.into() {
+            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Or, self.uop, o.uop)),
+            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Or, self.uop, c)),
+        }
+    }
+    pub fn bitwise_and(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        match other.into() {
+            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::And, self.uop, o.uop)),
+            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::And, self.uop, c)),
+        }
+    }
+    pub fn bitwise_xor(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        match other.into() {
+            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Xor, self.uop, o.uop)),
+            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Xor, self.uop, c)),
+        }
+    }
+
+    /// `Tensor.shl(x)` / `Tensor.rshift(x)` — `self._binop(Ops.SHL/SHR, x)`.
+    pub fn shl(&self, ctx: &mut UOpCtx, bits: i64) -> Tensor {
+        let b = elementwise::ufix(ctx, ConstVal::Int(bits as i128));
+        Tensor::from_uop(ctx.shl(self.uop, b))
+    }
+    pub fn rshift(&self, ctx: &mut UOpCtx, bits: i64) -> Tensor {
+        let b = elementwise::ufix(ctx, ConstVal::Int(bits as i128));
+        Tensor::from_uop(ctx.shr(self.uop, b))
+    }
+
+    /// `Tensor.cat(*others, dim=0)` (`mixin/op.py:734`), equal-shape fast path:
+    /// `self.stack(*others, dim).flatten(dim, dim+1)`. The RNG path always
+    /// concatenates same-shape operands along dim 0, so this covers it.
+    pub fn cat(&self, ctx: &mut UOpCtx, others: &[Tensor]) -> Tensor {
+        let uops: Vec<UopId> = std::iter::once(self.uop).chain(others.iter().map(|t| t.uop)).collect();
+        let st = Tensor::from_uop(stack(ctx, uops));
+        st.flatten(ctx, 0, 2)
+    }
+
+    /// `Tensor.threefry(seed)` (`mixin/elementwise.py:454`): `self.alu(Ops.THREEFRY, seed)`.
+    pub fn threefry(&self, ctx: &mut UOpCtx, seed: &Tensor) -> Tensor {
+        Tensor {
+            uop: ctx.uop(Ops::Threefry, Some(crate::dtype::UINT64), vec![self.uop, seed.uop], Arg::None),
+            grad: None,
+            is_param: true,
+        }
     }
 }

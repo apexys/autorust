@@ -14,14 +14,14 @@ pub struct Linear {
 }
 
 impl Linear {
-    /// Create a new Linear layer with Kaiming uniform initialization.
-    /// in_features: input dimension, out_features: output dimension.
+    /// Create a new Linear layer with Kaiming uniform initialization (tinygrad
+    /// `nn.Linear.__init__`: `kaiming_uniform(out, in, a=sqrt(5))` for weight,
+    /// `uniform(in, -1/sqrt(in), 1/sqrt(in))` for bias).
     pub fn new(ctx: &mut UOpCtx, in_features: i64, out_features: i64, bias: bool) -> Self {
-        let bound = 1.0 / f64::sqrt(in_features as f64);
-        // weight: (out_features, in_features)
-        let weight = Tensor::uniform(ctx, &[out_features, in_features], Some(-bound), Some(bound), None, None);
+        let weight = Tensor::kaiming_uniform(ctx, &[out_features, in_features], 5.0f64.sqrt(), None);
         let bias = if bias {
-            Some(Tensor::uniform(ctx, &[out_features], Some(-bound), Some(bound), None, None))
+            let bound = 1.0 / f64::sqrt(in_features as f64);
+            Some(Tensor::uniform(ctx, &[in_features], Some(-bound), Some(bound), None, None))
         } else {
             None
         };
