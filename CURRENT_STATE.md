@@ -18,9 +18,11 @@ Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PL
   via `from_storage_scalar`). **The eval path exists** — it is how the golden harness runs.
 
 ### Tensor front-end (`src/tensor/`)
-- `Tensor { uop: UopId, grad: Option<Box<Tensor>>, is_param: bool }` (mod.rs:57). All wrapper
-  methods are now `&self` (idiomatic; `uop` is `Copy`). `TensorAddArg` with
-  `From<Tensor>` / `From<&Tensor>` / `From<f64>` / `From<i64>`.
+- `Tensor { uop: UopId }` — now a `Copy` handle (mod.rs:64). **Design pivot (see §3d):** `grad`
+  moved to `UOpCtx.grads` (`HashMap<UopId,UopId>`, `ctx.{set_grad,grad,clear_grads}` +
+  `Tensor::grad(&self, ctx)`), and `is_param` was **dropped** — trainability is a property of the
+  `Module` tree, not the tensor. `TensorAddArg` with `From<Tensor>` / `From<&Tensor>` / `From<f64>` /
+  `From<i64>`.
 - Movement (`movement.rs`): reshape, expand, unsqueeze, pad, permute, flip, transpose, squeeze,
   flatten, getitem, shrink/shrink_to, `pool`.
 - Elementwise (`elementwise.rs`): add/sub/mul/div(neg·mul)/neg, maximum/minimum, exp2/log2/sqrt/
@@ -36,6 +38,10 @@ Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PL
   No `f64` round-trip; cross-dtype reads insert a graph `cast`, weak dtypes panic.
 - NN layers (`nn.rs`): `Linear`, `BatchNorm`, `LayerNorm`, `GroupNorm`, `Conv2d` (**forward is a
   stub**), activations (relu/gelu/softmax/log_softmax/sigmoid/tanh/sin/cos/abs/sqrt/rsqrt).
+- **`Module` trait (new):** `named_params(&self) -> Box<dyn Iterator<Item=(String, Tensor)>>` + a
+  defaulted `params()` + a `scoped(prefix, iter)` helper for path-prefixing child modules
+  (safetensors-ready naming, e.g. `"l1.weight"`). `Linear` implements it (weight, optional bias).
+  Names live in the trait, never on `Tensor`. See §3d.
 
 ### Tests today
 - `tests/backend_harness.rs` + `tests/golden.rs` (~90 goldens): ALU battery, reductions, casts,
@@ -62,15 +68,18 @@ Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PL
 - Everything round-trips through `f64` (`tensor_values`); no typed decode.
 
 ### Autograd (absent)
-- No `backward`/`backward_to`/`gradient`, no `grad` population (the field exists, never set),
-  no `requires_grad`/`no_grad` context, no `detach`. tinygrad: `tensor.py:657` (`backward`).
+- No `backward`/`backward_to`/`gradient`, no `requires_grad`/`no_grad` context, no `detach`
+  (`Ops::Detach` exists; the `Tensor::detach` sugar does not). tinygrad: `tensor.py:657` (`backward`),
+  `mixin/gradient.py` (`compute_gradient`/`pm_gradient`/`reduce_gradient`). **The `grads` side-table
+  and `Tensor::grad` accessor are in place** (§3d) — only the rewrite engine + entry points remain.
 
 ### NN gaps
 - `Conv2d::forward` is a stub (`nn.rs`) — full conv2d (pad → pool → reshape/permute → mul →
   sum → bias) unported (`tinygrad/mixin/op.py` conv2d).
 - BatchNorm/LayerNorm/GroupNorm running-stat updates are stubbed/simplified.
-- No `nn/optim.py` (SGD, Adam) and no `nn/state.py` (param fetch/init, `nn_state`,
-  `init_weight`, visit).
+- No `nn/optim.py` (SGD, Adam). `nn/state.py` param fetch is superseded by the `nn::Module` trait
+  (§3d) — `named_params`/`params`/`scoped` replace reflection-style traversal; `init_weight`/`fetch`
+  (safetensors) still to do.
 
 ### Tests we should have but don't
 - Tensor-level op tests vs `test/backend/test_ops.py` (unary/binary/ternary/reduce/
@@ -158,6 +167,29 @@ ported`). The graph lowering (`codegen::decomp::threefry2x32`) is still wired in
   continuity, `uniform`, `kaiming_uniform`, `randn` (tol 1e-4 — Box–Muller transcendental), `randn`
   continuity, `rand→randn` stream continuity, `randint`.
 
+## 3d. Design pivot: `Tensor` is `Copy`, grads live in the ctx, params via a trait — DONE
+
+Rationale (agreed before coding): all mutation already funnels through `UOpCtx` (the arena), so a
+`Tensor` need not own mutable state. Storing `grad` on `Tensor` (`Option<Box<Tensor>>`) forced
+`&mut Tensor` to run `backward`, which fights the value-handle model. Resolution:
+
+- **`Tensor { uop }`, `Copy`.** Dropped `grad` and `is_param` fields, and `Tensor::is_param_`.
+  `UopId` is `Copy+Hash+Eq`, so `Tensor` derives `Clone, Copy, Debug, PartialEq, Eq, Hash`.
+  **Do not derive `Ord`/`PartialOrd`** — the by-value `Ord::max`/`min` shadow the reduce
+  `Tensor::{max,min}(&self, …)` and break method resolution (bit us during the port).
+- **Grad side-table on `UOpCtx`:** `grads: HashMap<UopId,UopId>` (a gradient is itself a `UopId`).
+  `ctx.set_grad(target, grad)` / `ctx.grad(target)` / `ctx.clear_grads()`, surfaced as
+  `Tensor::grad(&self, ctx) -> Option<Tensor>`. `backward` can now fill grads with no `&mut Tensor`.
+- **`is_param` dropped.** "Is trainable" is decided by the `Module` tree (what the optimizer walks),
+  not a per-tensor flag. Buffer-style state that must update in-place (BatchNorm running mean/var)
+  is handled by how the module *assigns* it, not by a flag.
+- **`nn::Module` trait** (`src/tensor/nn.rs`): `named_params(&self) -> Box<dyn Iterator<Item=(String,
+  Tensor)>>` (child-local names), defaulted `params()` (drops names), and `scoped(prefix, iter)`
+  (`"l1.weight"`). `Box<dyn Iterator>` chosen over `impl Iterator` on the required method so
+  `Module` stays object-safe and default `params()` can wrap it; a derive macro can emit
+  `named_params` later. Names are **not** stored on `Tensor` — they are assembled by the trait, which
+  is what safetensors load/save will key on.
+
 ## 4. Next milestones (in order)
 
 1. ~~**Data marshalling.**~~ **DONE** (`to_bytes`/`to_list<T>`/`item<T>`/`realize` + `ReadDtype`;
@@ -166,18 +198,30 @@ ported`). The graph lowering (`codegen::decomp::threefry2x32`) is still wired in
    families for binary/unary/reduce/cast/activation/movement/matmul). Movement/broadcast gaps found
    while fixing (`expand`/`broadcast_to` axis order) got regression coverage in
    `backend_harness.rs` (`pad_fill_repro`, `expand_all_positions`).
-3. **Backward** *(IN PROGRESS — NN precursor)*. Port `Tensor::backward` + `gradient`/`backward_slice`
-   (tinygrad `tensor.py:657`) and `grad` population on `Tensor`; `no_grad`/`detach`. Mirror the UOp
-   `backward_slice` machinery rather than inventing a new autograd.
-4. **Backward tests** *(NN precursor)*. Port `test/unit/test_gradient.py` (gradcheck) vs the same goldens.
-5. **NN tests.** Port `test/backend/test_nn.py` (Linear/Conv2d/BatchNorm/LayerNorm/GroupNorm
-   forward) — requires implementing full `Conv2d::forward`. Then `test/backend/test_optim.py`
-   (needs `nn/optim.py`: SGD, Adam) and `nn/state.py` (a `Parameter`/`Module` trait with an
-   explicit `named_parameters()` traversal — no reflection-style recursion).
-6. **XOR end-to-end golden.** Train a `2→2→1` MLP (sigmoid activations, SGD `lr=0.5`, 10000 epochs)
-   to the reference notebook's converged weights/loss. Requires items 3 (backward), 5 (Linear
-   forward + `nn::optim::SGD`), and the RNG init above. This is the integration target that ties
-   RNG → autograd → NN → optimizer together.
+3. **Autograd engine** *(IN PROGRESS — NN precursor)*. Faithful port of tinygrad `mixin/gradient.py`
+   onto the UOp graph (user chose the faithful UOp `compute_gradient` route, not Tensor-level
+   reverse-mode). Ordered sub-steps, each with a golden before moving on:
+   a. Port `reduce_gradient` + helpers already present (`broadcast_axes`, `sum_acc_dtype`); add the
+      missing `argsort` (tinygrad `helpers.py`) and the `_rop`/REDUCE grad glue. REDUCE args are
+      `Arg::Seq{tuple:[Enum(op), Int(n)]}` (see `tensor/reduce.rs`).
+   b. Port `pm_gradient` rewrite rules (`UPat`-driven) for every op an XOR forward touches:
+      ADD/SUB/MUL/DIV, CAST, RECIPROCAL/SQRT/EXP2/LOG2/SIN, NEG/POW, MAX/CMPLT/CMPNE (sigmoid),
+      REDUCE, RESHAPE/EXPAND/PERMUTE/FLIP/PAD/SHRINK/CONTIGUOUS, and the `TUPLE`/`GETTUPLE`/
+      `DETACH`/`NOOP` plumbing. `Ops::{Tuple,Gettuple,Detach,ContiguousBackward}` already exist.
+   c. Port `compute_gradient(root, root_grad, targets)` = topological (reverse) walk over the
+      forward graph via `ctx.toposort`/`backward_slice`, populating `ctx.grads`.
+   d. Wire `Tensor::{gradient, backward, detach}` entry points on top of (a–c) (tinygrad
+      `tensor.py:657`, `op.py:453`, `elementwise.py:39`), writing grads into `ctx.grads`.
+4. **Backward tests** *(NN precursor)*. Port `test/unit/test_gradient.py` gradchecks vs goldens,
+   starting from the XOR-forward op set (matmul, add/bias, sigmoid, MSE); expand toward the full
+   rewrite-rule coverage.
+5. **NN + optimizer.** `nn::optim` (`SGD` first — Adam later) that walks a `Module::named_params()`
+   tree, reads each param's `ctx.grad`, and applies `w -= lr * g` as an in-graph `assign`. Add a
+   small `XORNN` struct (two `Linear`s) implementing `Module` via `scoped("l1"/"l2", …)`. Full
+   `Conv2d::forward` + `test_nn.py` can follow independently (XOR needs only `Linear`).
+6. **XOR end-to-end golden.** Train a `2→2→1` MLP (sigmoid activations, SGD `lr=0.5`, 10000 epochs,
+   MSE loss) to the reference notebook's converged weights/loss. Ties RNG (§3c) → autograd (3/4) →
+   NN + `optim` (5) together.
 
 ### Done out of band
 - **RNG (Threefry)** — see §3c. `tests/rand.rs` 8/8 green; `nn::Linear` init now faithful.
