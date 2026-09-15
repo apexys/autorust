@@ -44,18 +44,37 @@ pub struct UOpCtx {
     /// id -> initial bytes. Engine `buffer_of` consumes this at first access
     /// (Tensor(data) -> Buffer(opaque=...)).
     pub initial_data: std::collections::HashMap<u32, std::rc::Rc<std::cell::RefCell<Vec<u8>>>>,
+    /// autograd side table: tensor uop id -> its gradient uop id, populated by
+    /// `compute_gradient`/`Tensor::backward`. Kept on the ctx (not on `Tensor`)
+    /// so a `Tensor` stays `Copy` and grads can be written without `&mut Tensor`.
+    pub grads: std::collections::HashMap<u32, u32>,
 }
 
 use std::rc::Rc;
 
 impl UOpCtx {
     pub fn new() -> Self {
-        UOpCtx { g: Graph::new(), shape_c: Vec::new(), mm_c: Vec::new(), range_c: Vec::new(), range_idx: 0, initial_data: std::collections::HashMap::new() }
+        UOpCtx { g: Graph::new(), shape_c: Vec::new(), mm_c: Vec::new(), range_c: Vec::new(), range_idx: 0, initial_data: std::collections::HashMap::new(), grads: std::collections::HashMap::new() }
     }
 
     /// Grow the property caches to cover externally-loaded graphs (oracle use).
     pub fn add_cache_slots(&mut self) {
         self.grow();
+    }
+
+    /// Attach (or overwrite) the autograd gradient for tensor uop `target`.
+    pub fn set_grad(&mut self, target: UopId, grad: UopId) {
+        self.grads.insert(target.0, grad.0);
+    }
+
+    /// Read the autograd gradient attached to tensor uop `target`, if any.
+    pub fn grad(&self, target: UopId) -> Option<UopId> {
+        self.grads.get(&target.0).map(|&g| UopId(g))
+    }
+
+    /// Drop every attached gradient (e.g. before a fresh `backward`).
+    pub fn clear_grads(&mut self) {
+        self.grads.clear();
     }
 
     /// Grow the property caches to cover a whole externally-loaded graph.

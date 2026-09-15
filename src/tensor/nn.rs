@@ -6,6 +6,43 @@ use crate::tensor::Tensor;
 use crate::uop::ctx::UOpCtx;
 use crate::dtype::ConstVal;
 
+/// A neural-network module: anything that owns trainable parameters.
+///
+/// Mirrors tinygrad's `nn.state` parameter collection, but expresses it as a
+/// recursive trait so a model can name its params for safetensors round-tripping
+/// (e.g. `"l1.weight"`). A `Module` returns its params as `(name, tensor)`
+/// pairs; nested modules are flattened by prefixing with the child path via
+/// [`scoped`]. `Tensor` itself carries no name — naming lives entirely here.
+pub trait Module {
+    /// This module's trainable params as `(relative_name, tensor)` pairs.
+    /// Implementations return names *local* to the module (e.g. `"weight"`);
+    /// parents prefix them with the child path using [`scoped`].
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_>;
+
+    /// Just the parameter tensors, dropping the names.
+    fn params(&self) -> impl Iterator<Item = Tensor> + '_ {
+        self.named_params().map(|(_name, p)| p)
+    }
+}
+
+/// Prefix every param name in `it` with `parent` + `"."`, for nesting a child
+/// module's [`Module::named_params`] under a path segment.
+///
+/// ```ignore
+/// scoped("l1", self.l1.named_params())
+/// ```
+pub fn scoped<'a>(parent: &'a str, it: impl Iterator<Item = (String, Tensor)> + 'a) -> impl Iterator<Item = (String, Tensor)> + 'a {
+    it.map(move |(n, t)| (format!("{parent}.{n}"), t))
+}
+
+impl Module for Linear {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        let w = std::iter::once(("weight".to_string(), self.weight));
+        let b = self.bias.map(|b| ("bias".to_string(), b));
+        Box::new(w.chain(b))
+    }
+}
+
 /// `nn::Linear`: `x.linear(weight.transpose(), bias)`.
 /// weight shape: (out_features, in_features), bias shape: (out_features,).
 pub struct Linear {

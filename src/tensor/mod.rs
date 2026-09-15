@@ -61,23 +61,31 @@ use crate::runtime::buffer::BufTable;
 use crate::engine::realize::ProgCache;
 use crate::uop::sint::{SInt, SVal};
 
-/// Python `Tensor.__slots__ = ("uop", "is_param", "grad")`.
-#[derive(Clone, Debug)]
+/// Python `Tensor.__slots__ = ("uop",)`. A `Tensor` is a plain `Copy` handle
+/// onto an interned `UopId`. `grad` is tracked in `UOpCtx` keyed by `UopId`
+/// (a gradient is itself just a `UopId`), so `backward` can populate grads
+/// without `&mut Tensor`. Whether a tensor is a *trainable parameter* is a
+/// property of the `Module` tree (see [`nn::Module`]), not of the tensor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Tensor {
     pub uop: UopId,
-    pub grad: Option<Box<Tensor>>,
-    pub is_param: bool,
 }
 
 impl Tensor {
     pub fn from_uop(uop: UopId) -> Tensor {
-        Tensor { uop, grad: None, is_param: true }
+        Tensor { uop }
     }
 
     /// `Tensor._apply_uop`: map a UOp-level fxn over `(self, *x).uop` and re-wrap.
     pub fn apply_uop(&self, ctx: &mut UOpCtx, srcs: &[Tensor], f: impl FnOnce(&mut UOpCtx, Vec<UopId>) -> UopId) -> Tensor {
         let uops: Vec<UopId> = std::iter::once(self.uop).chain(srcs.iter().map(|t| t.uop)).collect();
-        Tensor { uop: f(ctx, uops), grad: None, is_param: true }
+        Tensor::from_uop(f(ctx, uops))
+    }
+
+    /// The autograd gradient attached to this tensor's `uop` in `ctx` (see
+    /// [`UOpCtx::grad`]). `None` until `backward`/`gradient` populates it.
+    pub fn grad(&self, ctx: &UOpCtx) -> Option<Tensor> {
+        ctx.grad(self.uop).map(Tensor::from_uop)
     }
 
     /// `Tensor.const`: `Tensor(UOp.const(b, dtype))`.
@@ -201,11 +209,6 @@ impl Tensor {
     /// `Tensor[t1, t2, ...]` — the `s![...]` index spec.
     pub fn getitem(&self, ctx: &mut UOpCtx, ixs: &[Ix]) -> Tensor {
         Tensor::from_uop(movement::getitem(ctx, self.uop, ixs))
-    }
-
-    /// `Tensor.is_param_`: sets the flag in place.
-    pub fn is_param_(&mut self, is_param: bool) {
-        self.is_param = is_param;
     }
 }
 
@@ -736,10 +739,6 @@ impl Tensor {
 
     /// `Tensor.threefry(seed)` (`mixin/elementwise.py:454`): `self.alu(Ops.THREEFRY, seed)`.
     pub fn threefry(&self, ctx: &mut UOpCtx, seed: &Tensor) -> Tensor {
-        Tensor {
-            uop: ctx.uop(Ops::Threefry, Some(crate::dtype::UINT64), vec![self.uop, seed.uop], Arg::None),
-            grad: None,
-            is_param: true,
-        }
+        Tensor::from_uop(ctx.uop(Ops::Threefry, Some(crate::dtype::UINT64), vec![self.uop, seed.uop], Arg::None))
     }
 }
