@@ -29,7 +29,8 @@ Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PL
 - Creation (`creation.rs`): `from_slice<T: SliceElem>` (dtype now **inferred from the generic
   width**: `&[i16]→INT16`, `&[u32]→UINT32`, `&[f32]→FLOAT32`, …; explicit `Some(dtype)` overrides
   and inserts a graph cast; native-width packing is exact, no `f64`), `from_bytes`, `empty`,
-  `new_buffer`, `full_const`, `zeros/ones`, `arange`, `rand`, `uniform`.
+  `new_buffer`, `full_const`, `zeros/ones`, `arange`. `rand`/`uniform` now delegate to the faithful
+  Threefry RNG in `tensor::rand` (see §3c) — the old LCG stub is gone.
 - **Typed marshalling (DONE):** `Tensor::{realize, to_bytes, to_list::<T>, item::<T>}` + the
   `ReadDtype` trait (`dtype/mod.rs`); `engine::realize::tensor_bytes` returns native-dtype bytes.
   No `f64` round-trip; cross-dtype reads insert a graph `cast`, weak dtypes panic.
@@ -133,6 +134,30 @@ Formerly RED — now GREEN (resolved during M6/M8 hardening, not by further ops-
 - `matmul_ops` (`postrange` `axis - deleted_shape` underflow): resolved by the `dot` rewrite above;
   no postrange surgery needed.
 
+## 3c. Milestone — RNG: faithful Threefry (`tensor/rand.rs`) — DONE
+
+Reproduces tinygrad's `Tensor.manual_seed(...)` bit-for-bit. Ported as a **host evaluator**
+(`src/tensor/rand.rs`), not a UOp graph: the INTERP backend stores every value as `f64` and cannot
+`bitcast` nor carry a `uint64` bit pattern, so the graph route panics (`interp op Bitcast not
+ported`). The graph lowering (`codegen::decomp::threefry2x32`) is still wired into the pipeline's
+"late decompositions" stage for hardware backends.
+
+- State (thread-local, mirrors tinygrad class-level): `seed`, per-device `device_seeds`, counters.
+- `manual_seed`, `_next_counter` (device seed = `sha256(index as 4-byte BE)` low-32 + `seed`),
+  `threefry2x32` (5×4 rounds, rotations `[[13,15,26,6],[17,29,16,24]]`, `ks=[k1,kx,k0]`),
+  `random_bits` (counter-derived key, low-then-high concatenation), `bits_to_rand` (f32/f64).
+- API: `Tensor::{rand, uniform, randn, randint, manual_seed, kaiming_uniform, glorot_uniform,
+  scaled_uniform}`. `uniform` draws bits in the **default float** dtype then `.cast`s to the target
+  between scale and shift (matches `rand.py:158`); `randn` = polar Box–Muller over a single
+  `rand([2,*shape], float32)`; `randint` = `trunc((high-low)*rand)+low`.
+- SHA-256 (device seeding only) — bug fixed: `K[21]` was `0x4a748aa0`, correct is `0x4a7484aa`.
+  `sha_tests` assert `""`/`"abc"` vectors.
+- `nn::Linear::new` init corrected to tinygrad: `kaiming_uniform(a=sqrt(5))` weight `[out,in]`,
+  `uniform(in, ±1/sqrt(in))` bias.
+- Goldens: `tests/rand.rs` **8/8 green** (`manual_seed` 42/7/99/100): `rand` sequence + counter
+  continuity, `uniform`, `kaiming_uniform`, `randn` (tol 1e-4 — Box–Muller transcendental), `randn`
+  continuity, `rand→randn` stream continuity, `randint`.
+
 ## 4. Next milestones (in order)
 
 1. ~~**Data marshalling.**~~ **DONE** (`to_bytes`/`to_list<T>`/`item<T>`/`realize` + `ReadDtype`;
@@ -149,6 +174,13 @@ Formerly RED — now GREEN (resolved during M6/M8 hardening, not by further ops-
    forward) — requires implementing full `Conv2d::forward`. Then `test/backend/test_optim.py`
    (needs `nn/optim.py`: SGD, Adam) and `nn/state.py` (a `Parameter`/`Module` trait with an
    explicit `named_parameters()` traversal — no reflection-style recursion).
+6. **XOR end-to-end golden.** Train a `2→2→1` MLP (sigmoid activations, SGD `lr=0.5`, 10000 epochs)
+   to the reference notebook's converged weights/loss. Requires items 3 (backward), 5 (Linear
+   forward + `nn::optim::SGD`), and the RNG init above. This is the integration target that ties
+   RNG → autograd → NN → optimizer together.
+
+### Done out of band
+- **RNG (Threefry)** — see §3c. `tests/rand.rs` 8/8 green; `nn::Linear` init now faithful.
 
 ## 5. Open questions (resolved during milestone 1)
 - **Buffer handle:** kept call-scoped. The `to_bytes`/`to_list`/`item` conveniences allocate fresh
