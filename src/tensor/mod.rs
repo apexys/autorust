@@ -14,6 +14,7 @@ pub use shapearg::ShapeArg;
 pub mod creation;
 mod dtype;
 pub mod elementwise;
+pub mod grad;
 pub mod movement;
 pub mod nn;
 pub mod reduce;

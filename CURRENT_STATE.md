@@ -67,11 +67,11 @@ Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PL
   `SliceElem → DTypeId` per width.
 - Everything round-trips through `f64` (`tensor_values`); no typed decode.
 
-### Autograd (absent)
-- No `backward`/`backward_to`/`gradient`, no `requires_grad`/`no_grad` context, no `detach`
-  (`Ops::Detach` exists; the `Tensor::detach` sugar does not). tinygrad: `tensor.py:657` (`backward`),
-  `mixin/gradient.py` (`compute_gradient`/`pm_gradient`/`reduce_gradient`). **The `grads` side-table
-  and `Tensor::grad` accessor are in place** (§3d) — only the rewrite engine + entry points remain.
+### Autograd (engine DONE — see §3e)
+- `Tensor::{gradient, backward, detach}` + `compute_gradient`/`grad_of_op`/`reduce_gradient`/
+  `_deepwalk` are implemented (`src/tensor/grad.rs`) and gradchecked (`tests/grad.rs` 6/6).
+  No `requires_grad`/`no_grad` context (tinygrad decides trainability from the `Module` tree; grads
+  are opt-in by passing `targets`). `detach` is the `Ops::Detach` sugar.
 
 ### NN gaps
 - `Conv2d::forward` is a stub (`nn.rs`) — full conv2d (pad → pool → reshape/permute → mul →
@@ -190,6 +190,37 @@ Rationale (agreed before coding): all mutation already funnels through `UOpCtx` 
   `named_params` later. Names are **not** stored on `Tensor` — they are assembled by the trait, which
   is what safetensors load/save will key on.
 
+## 3e. Autograd engine: faithful `compute_gradient` (`src/tensor/grad.rs`) — DONE
+
+Ported tinygrad `mixin/gradient.py` (`compute_gradient`, `_deepwalk`, `reduce_gradient`, and the
+`pm_gradient` rules) onto the UOp graph. tinygrad expresses `pm_gradient` as a `PatternMatcher`, but
+each rule emits **one gradient per source** (a `Vec<Option<UopId>>`), and every rule is keyed on the
+node's `op`, so we dispatch with an explicit `match` (`grad_of_op`) instead — rule bodies are ported
+one-for-one. The `FUNCTION`/`CALL`/`GETTUPLE` machinery (`call_gradient`, `_compact_params`) is
+intentionally omitted: eager `Tensor` graphs never build those nodes.
+
+- `grad_of_op` covers: `CAST`, `RECIPROCAL`, `SIN`, `LOG2`, `EXP2`, `SQRT`, `TRUNC`, `CMPLT`, `CMPNE`,
+  `ADD`, `SUB`, `MUL`, `MAX`, `POW`, `WHERE`, `REDUCE`, `CONTIGUOUS`, `CONTIGUOUS_BACKWARD`,
+  `RESHAPE`, `EXPAND`, `PERMUTE`, `FLIP`, `BITCAST`. Unsupported ops (PAD/SHRINK/STACK/COPY/TUPLE)
+  return `None` → `compute_gradient` raises a `TGERR:` (XOR never reaches them).
+- `reduce_gradient` handles `ADD` (broadcast back to source shape), `MAX` (masked ratio), `MUL`
+  (`prod/x_j` with a zero-count guard) — matches `gradient.py:9-15`.
+- `compute_gradient` reverse-walks the deep-walked graph, and applies the **shape-sum glue**: when an
+  edge's gradient shape differs from its source (e.g. an `EXPAND`ed bias), it `cast→sum(broadcast_axes)
+  →reshape→cast` back to the source shape before accumulating into `grads` (`gradient.py` line for
+  `k.shape != v.shape`). This is what makes a broadcast bias/dot gradient correct.
+- `argsort` (tinygrad `helpers.py`) added locally for the PERMUTE grad (inverse permutation).
+- Entry points (`impl Tensor`): `gradient(targets, gradient)` (seed `root_grad` = `const_like(self,1)`),
+  `backward(targets, gradient)` (accumulates into `ctx.grads` via `set_grad`), `detach()` (`Ops::Detach`).
+
+**Op-graph reality (Rust ≠ tinygrad decomposition, so grad rules match the Rust builder):**
+`sub` = `ADD(x, Mul(b,-1))` (no `NEG` node); `neg` = `Mul(-1)`; but `tanh`/`elementwise::tanh` emit a
+real `Ops::Sub` → a `SUB` grad rule (`[g, -g]`) was needed. `sigmoid`/`exp` insert `CAST`s. `mean` =
+`Reduce(ADD)` + `Mul(reciprocal)`. `dot` = `reshape`/`permute`/`mul`/`sum`. All covered.
+
+Tests: `tests/grad.rs` **6/6 green** — `grad_sum_square`, `grad_linear_affine`, `grad_bias_broadcast`
+(broadcast-sum), `grad_sigmoid`, `grad_matmul` (dual grad wrt `a`/`w`), `grad_mse_like` (mean+sub+square).
+
 ## 4. Next milestones (in order)
 
 1. ~~**Data marshalling.**~~ **DONE** (`to_bytes`/`to_list<T>`/`item<T>`/`realize` + `ReadDtype`;
@@ -198,24 +229,12 @@ Rationale (agreed before coding): all mutation already funnels through `UOpCtx` 
    families for binary/unary/reduce/cast/activation/movement/matmul). Movement/broadcast gaps found
    while fixing (`expand`/`broadcast_to` axis order) got regression coverage in
    `backend_harness.rs` (`pad_fill_repro`, `expand_all_positions`).
-3. **Autograd engine** *(IN PROGRESS — NN precursor)*. Faithful port of tinygrad `mixin/gradient.py`
-   onto the UOp graph (user chose the faithful UOp `compute_gradient` route, not Tensor-level
-   reverse-mode). Ordered sub-steps, each with a golden before moving on:
-   a. Port `reduce_gradient` + helpers already present (`broadcast_axes`, `sum_acc_dtype`); add the
-      missing `argsort` (tinygrad `helpers.py`) and the `_rop`/REDUCE grad glue. REDUCE args are
-      `Arg::Seq{tuple:[Enum(op), Int(n)]}` (see `tensor/reduce.rs`).
-   b. Port `pm_gradient` rewrite rules (`UPat`-driven) for every op an XOR forward touches:
-      ADD/SUB/MUL/DIV, CAST, RECIPROCAL/SQRT/EXP2/LOG2/SIN, NEG/POW, MAX/CMPLT/CMPNE (sigmoid),
-      REDUCE, RESHAPE/EXPAND/PERMUTE/FLIP/PAD/SHRINK/CONTIGUOUS, and the `TUPLE`/`GETTUPLE`/
-      `DETACH`/`NOOP` plumbing. `Ops::{Tuple,Gettuple,Detach,ContiguousBackward}` already exist.
-   c. Port `compute_gradient(root, root_grad, targets)` = topological (reverse) walk over the
-      forward graph via `ctx.toposort`/`backward_slice`, populating `ctx.grads`.
-   d. Wire `Tensor::{gradient, backward, detach}` entry points on top of (a–c) (tinygrad
-      `tensor.py:657`, `op.py:453`, `elementwise.py:39`), writing grads into `ctx.grads`.
-4. **Backward tests** *(NN precursor)*. Port `test/unit/test_gradient.py` gradchecks vs goldens,
-   starting from the XOR-forward op set (matmul, add/bias, sigmoid, MSE); expand toward the full
-   rewrite-rule coverage.
-5. **NN + optimizer.** `nn::optim` (`SGD` first — Adam later) that walks a `Module::named_params()`
+3. ~~**Autograd engine.**~~ **DONE** (`src/tensor/grad.rs`; faithful `compute_gradient` + `match`-dispatch
+   `grad_of_op` + `reduce_gradient` + `_deepwalk`; shape-sum glue; `Tensor::{gradient,backward,detach}`).
+   See §3e. PAD/SHRINK/STACK/COPY grad rules intentionally deferred (unreachable for XOR).
+4. ~~**Backward gradchecks.**~~ **DONE** (`tests/grad.rs` 6/6: sum-square, affine, bias broadcast-sum,
+   sigmoid, matmul dual-grad, MSE). A fuller `test/unit/test_gradient.py` port can expand coverage.
+5. **NN + optimizer** *(NEXT)*. `nn::optim` (`SGD` first — Adam later) that walks a `Module::named_params()`
    tree, reads each param's `ctx.grad`, and applies `w -= lr * g` as an in-graph `assign`. Add a
    small `XORNN` struct (two `Linear`s) implementing `Module` via `scoped("l1"/"l2", …)`. Full
    `Conv2d::forward` + `test_nn.py` can follow independently (XOR needs only `Linear`).
