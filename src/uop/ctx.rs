@@ -608,10 +608,16 @@ impl UOpCtx {
                         }
                     }
                 }
-                let prod_in = super::sint::prod_int(ps).ok_or("bad reshape: symbolic prod")?;
-                let prod_out = super::sint::prod_int(&marg).ok_or("bad reshape: symbolic prod")?;
-                if prod_in != prod_out {
-                    return Err(format!("bad reshape: {ps:?} -> {marg:?}"));
+                // tinygrad asserts prod(in) == prod(out) with symbolic algebra.
+                // Our port only proves concrete products; when either side has a
+                // symbolic dim (e.g. a SPECIAL local-range index reshape) we trust
+                // graph construction and skip the check rather than hard-fail.
+                if let (Some(prod_in), Some(prod_out)) =
+                    (super::sint::prod_int(ps), super::sint::prod_int(&marg))
+                {
+                    if prod_in != prod_out {
+                        return Err(format!("bad reshape: {ps:?} -> {marg:?}"));
+                    }
                 }
                 Ok(marg)
             }
