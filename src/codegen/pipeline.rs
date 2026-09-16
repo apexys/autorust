@@ -266,8 +266,8 @@ fn devectorizer2() -> PatternMatcher {
                 let b = sget(st, "b");
                 let s = sget(st, "s");
                 let shape = ctx.shape(s).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
-                let new_idx = crate::tensor::movement::reshape(ctx, ctx.srcs(s)[0], &shape);
-                let idx = ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(ctx.srcs(s)[0])), vec![b, new_idx], Arg::None);
+                let inner = ctx.srcs(s)[0];
+                let idx = ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(b)), vec![b, inner], Arg::None);
                 Some(crate::tensor::movement::reshape(ctx, idx, &shape))
             }),
         ),
