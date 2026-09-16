@@ -59,7 +59,7 @@ fn post_stages() -> Vec<Stage> {
         Stage { name: "postopt symbolic", pm: sym().add(&pm_move_where_on_load()).add(&pm_flatten_range()).add(&pm_reduce_unparented()), bottom_up: false },
         Stage { name: "expander", pm: expander_pm(), bottom_up: false },
         Stage { name: "remove reduces", pm: PatternMatcher::new(vec![]).add(&pm_mop_cleanup()).add(&crate::codegen::simplify::pm_reduce_local()), bottom_up: false },
-        Stage { name: "add local buffers", pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()), bottom_up: true },
+        Stage { name: "add local buffers", pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_add_local_buffers()).add(&crate::schedule::rangeify::pm_mops()), bottom_up: true },
         Stage { name: "add gpudims", pm: crate::codegen::gpudims::pm_add_gpudims(), bottom_up: false },
         Stage { name: "*** expand broadcast / add loads", pm: symbolic_simple().add(&pm_expand_broadcast()).add(&pm_add_loads()), bottom_up: false },
         Stage { name: "devectorize2", pm: symbolic_simple().add(&devectorizer2()).add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
@@ -585,7 +585,7 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
             let (pm, _rm) = expander_pm_with(ctx, cur);
             graph_rewrite(ctx, cur, &pm, st.bottom_up, None, false, false, CtxVal::None)
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
-        } else if st.name == "remove reduces" {
+        } else if st.name == "remove reduces" || st.name == "add local buffers" {
             graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, CtxVal::Cnt(std::rc::Rc::new(std::cell::Cell::new(0i64))))
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "add images" {

@@ -36,7 +36,7 @@ fn mop_index(ctx: &mut UOpCtx, r: UopId, idx: UopId) -> Option<UopId> {
         let ret_srcs = ctx.srcs(ret).to_vec();
         return Some(ctx.uop_tag(Ops::Index, None, ret_srcs, idx_arg, Arg::None));
     }
-    if r_op == Ops::Reshape {
+    if r_op == Ops::Reshape && idxs.len() < r_shape.len() {
         let src_prefix = src0_shape.len() as i64 - r_shape[idxs.len()..].len() as i64;
         if src_prefix >= 0 && src0_shape[src_prefix as usize..] == r_shape[idxs.len()..] {
             if src_prefix == 0 {
@@ -916,6 +916,58 @@ fn bufferize_to_store(cnt: &std::cell::Cell<i64>, ctx: &mut UOpCtx, x: UopId, id
         return Some(ctx.cast(aft, x_dt));
     }
     None
+}
+
+/// `add_local_buffer` (codegen/__init__.py:245): turn a remaining (local)
+/// STAGE into a placeholder local BUFFER + `index/store/end`, wrapped in an
+/// AFTER. Runs at the codegen "add local buffers" stage (after scheduling), so
+/// GLOBAL STAGEs were already consumed by `bufferize_to_store`.
+fn add_local_buffer(cnt: &std::cell::Cell<i64>, ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
+    let x_dt = ctx.dt_of(x);
+    let dtype = crate::dtype::strong_dtype(x_dt);
+    let addrspace = match ctx.arg_of(x) {
+        Arg::Data(d) => match d.get("addrspace") {
+            Arg::Enum(e) => AddrSpace::from_u8(e.value as u8).unwrap_or(AddrSpace::Local),
+            _ => AddrSpace::Local,
+        },
+        _ => AddrSpace::Local,
+    };
+    let max_shape = ctx.max_shape(x);
+    let x_srcs = ctx.srcs(x).to_vec();
+    let idxs = x_srcs[1..].to_vec();
+    let mut rngs = ctx.ranges(x).to_vec();
+    rngs.sort_by_key(|&r| AxisType::range_axis_id(ctx, r));
+
+    let slot = cnt.get();
+    cnt.set(slot + 1);
+    let pa = ParamArg {
+        slot,
+        dtype,
+        vmin_vmax: None,
+        multiple_of: None,
+        name: None,
+        addrspace: Some(addrspace),
+        axis: None,
+        device: None,
+        volatile: false,
+    };
+    let sval_shape: Vec<SVal> = max_shape.iter().map(|&s| SVal::I(s as i128)).collect();
+    let shape_src = ctx.shape_arg(&sval_shape);
+    let buf = ctx.uop(Ops::Buffer, Some(dtype), vec![shape_src], Arg::Param(pa));
+    let indexed = ctx.index(buf, idxs);
+    let val = ctx.cast(x_srcs[0], dtype);
+    let st = crate::tensor::store(ctx, indexed, val, None);
+    let ended = ctx.end(st, rngs);
+    let aft = crate::tensor::after(ctx, buf, vec![ended]);
+    Some(ctx.cast(aft, x_dt))
+}
+
+/// `pm_add_local_buffers` (codegen/__init__.py:252).
+pub fn pm_add_local_buffers() -> PatternMatcher {
+    PatternMatcher::new(vec![(
+        UPat::ops1(Ops::Stage).allow_all_srcs().named("x"),
+        r_cnt(|cnt, ctx, st| add_local_buffer(cnt, ctx, sym::sget(st, "x"))),
+    )])
 }
 
 /// `flatten_bufferize` (rangeify.py:426).
