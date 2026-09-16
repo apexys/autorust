@@ -54,8 +54,8 @@ Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PL
 - `tests/m2_smoke.rs`: graph construction/shape/rewrite/getitem (symbolic only).
 
 ### Build status
-- `cargo build` and `cargo test` are green (7+2+7 tests pass, 0 errors). The `&self` refactor
-  landed cleanly.
+- `cargo build` and `cargo test` are green (**61 passed, 0 failed, 5 ignored**). The optimizer +
+  `add_local_buffer` STAGE lowering landed cleanly; the XOR end-to-end test is `#[ignore]`d WIP (§3f/§4-6).
 
 ## 2. What is missing
 
@@ -221,6 +221,25 @@ real `Ops::Sub` → a `SUB` grad rule (`[g, -g]`) was needed. `sigmoid`/`exp` in
 Tests: `tests/grad.rs` **6/6 green** — `grad_sum_square`, `grad_linear_affine`, `grad_bias_broadcast`
 (broadcast-sum), `grad_sigmoid`, `grad_matmul` (dual grad wrt `a`/`w`), `grad_mse_like` (mean+sub+square).
 
+## 3f. Realize memory + local-memory `STAGE` lowering — PARTIAL
+
+- **Exponential-realize fix (DONE, `c2b8d50`):** `Graph::to_flat` (`src/uop/flat.rs`) previously
+  serialized *every* arena node, so each compiled `Program`/`Binary` node (whose `Arg::Bytes(lib)`
+  embedded the *previous* arena JSON) got re-serialized on every realize → exponential
+  text/memory/time growth. Now it serializes only the toposort set reachable from `self.roots`
+  (index-remapped; falls back to all nodes when roots is empty). `micro_repeated_realize` confirms
+  per-iter realize is now ~5ms flat (was exponential). **Caveat:** this kills the *time/size blow-up*
+  but the arena node count still grows ~linearly across repeated realizes — no refcount/GC yet
+  (`Tensor` is `Copy`, so Drop-based liveness isn't available; an `Rc`/`Weak` arena is the open path).
+- **`add_local_buffer` (DONE, `11ab94a`):** implemented `add_local_buffer` + `pm_add_local_buffers`
+  in `src/schedule/rangeify.rs`, wired into the codegen `"add local buffers"` stage
+  (`src/codegen/pipeline.rs`), which now receives a slot counter (`CtxVal::Cnt`). Lowers remaining
+  local `STAGE`s into a placeholder `Buffer` + `index/store/end/after` so `STAGE` no longer reaches
+  the interp executor (was `TGERR: interp op Stage not ported`).
+- **Still pending (XOR WIP):** after `STAGE` lowering, a `Reshape` on the local-buffer *load* path
+  survives into interp (`TGERR: interp op Reshape not ported`). Next: fold movement/`Reshape` into
+  the coalesced index on that path (and audit any local-memory `BARRIER` handling). Tracked in §4/6.
+
 ## 4. Next milestones (in order)
 
 1. ~~**Data marshalling.**~~ **DONE** (`to_bytes`/`to_list<T>`/`item<T>`/`realize` + `ReadDtype`;
@@ -234,13 +253,14 @@ Tests: `tests/grad.rs` **6/6 green** — `grad_sum_square`, `grad_linear_affine`
    See §3e. PAD/SHRINK/STACK/COPY grad rules intentionally deferred (unreachable for XOR).
 4. ~~**Backward gradchecks.**~~ **DONE** (`tests/grad.rs` 6/6: sum-square, affine, bias broadcast-sum,
    sigmoid, matmul dual-grad, MSE). A fuller `test/unit/test_gradient.py` port can expand coverage.
-5. **NN + optimizer** *(NEXT)*. `nn::optim` (`SGD` first — Adam later) that walks a `Module::named_params()`
-   tree, reads each param's `ctx.grad`, and applies `w -= lr * g` as an in-graph `assign`. Add a
-   small `XORNN` struct (two `Linear`s) implementing `Module` via `scoped("l1"/"l2", …)`. Full
-   `Conv2d::forward` + `test_nn.py` can follow independently (XOR needs only `Linear`).
-6. **XOR end-to-end golden.** Train a `2→2→1` MLP (sigmoid activations, SGD `lr=0.5`, 10000 epochs,
-   MSE loss) to the reference notebook's converged weights/loss. Ties RNG (§3c) → autograd (3/4) →
-   NN + `optim` (5) together.
+ 5. ~~**NN + optimizer.**~~ **DONE** (`src/tensor/optim.rs`: `Optim` trait + `SGD::{step,zero_grad}`
+    walking `Module::named_params()` and applying `w -= lr * g` as an in-graph `assign`; module wired
+    into `tensor/mod`). `Linear::new` bias shape fixed (uniform over `out_features`). `Conv2d::forward`
+    + `test_nn.py` still deferred (XOR needs only `Linear`).
+ 6. **XOR end-to-end golden** *(WIP — `tests/nn_xor.rs::xor_trains_to_convergence`, `#[ignore]`d)*.
+    `2→2→1` MLP (sigmoid, MSE, SGD `lr=0.5`) is wired and runs forward+backward+step, but the
+    backward/local-memory **reduction kernels** still need codegen/interp work: `STAGE` lowering is
+    done (§3f) but movement/`Reshape` folding on the local-buffer load path is pending. See §3f.
 
 ### Done out of band
 - **RNG (Threefry)** — see §3c. `tests/rand.rs` 8/8 green; `nn::Linear` init now faithful.
