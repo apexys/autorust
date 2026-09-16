@@ -1,0 +1,118 @@
+//! End-to-end NN training: a 2->2->1 sigmoid MLP on XOR, trained with SGD.
+//! Functional golden — after training the outputs must classify XOR correctly
+//! (out>0.5 matches the truth table) and the loss must drop sharply.
+//!
+//! Notes on the graph discipline here:
+//! - Weights are carried between epochs as plain `Vec<f32>` and each epoch builds
+//!   a fresh `UOpCtx` (tinygrad realizes + mutates buffers; keeping the arena
+//!   bounded per step avoids O(n^2) graph growth). The math is unchanged.
+//! - Repeated realization is cheap now that `to_flat` serializes only the nodes
+//!   reachable from the current kernel's roots, so each param is read out
+//!   individually instead of `cat`-ing uneven shapes together.
+
+use autorust::tensor::nn::{self, Linear};
+use autorust::tensor::optim::{Optim, SGD};
+use autorust::tensor::Tensor;
+use autorust::uop::ctx::UOpCtx;
+
+/// Read all four params out (flat f32: w1, b1, w2, b2) as separate realizations.
+fn read_params(ctx: &mut UOpCtx, w1: Tensor, b1: Tensor, w2: Tensor, b2: Tensor) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    (
+        w1.to_list::<f32>(ctx),
+        b1.to_list::<f32>(ctx),
+        w2.to_list::<f32>(ctx),
+        b2.to_list::<f32>(ctx),
+    )
+}
+
+#[test]
+#[ignore = "WIP: backward/local-memory reduction kernels need codegen/interp work (STAGE lowering done; movement/Reshape folding on the local-buffer load path still pending)"]
+fn xor_trains_to_convergence() {
+    // Initialization RNG: draw the starting weights once (single realization).
+    let (mut w1, mut b1, mut w2, mut b2);
+    {
+        let mut ctx = UOpCtx::new();
+        Tensor::manual_seed(42);
+        let l1 = Linear::new(&mut ctx, 2, 2, true);
+        let l2 = Linear::new(&mut ctx, 2, 1, true);
+        (w1, b1, w2, b2) = read_params(&mut ctx, l1.weight, l1.bias.unwrap(), l2.weight, l2.bias.unwrap());
+    }
+
+    let sgd = SGD::new(0.5);
+    let mut last_loss = 0.0f32;
+    let mut pred: Vec<f32> = Vec::new();
+
+    let n: usize = std::env::var("EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+    for epoch in 0..n {
+        let mut ctx = UOpCtx::new();
+        let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
+            .reshape(&mut ctx, &[4, 2]);
+        let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, &[4, 1]);
+
+        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, &[2, 2]);
+        let b1t = Tensor::from_slice(&mut ctx, &b1, None, None);
+        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, &[1, 2]);
+        let b2t = Tensor::from_slice(&mut ctx, &b2, None, None);
+
+        let h = nn::sigmoid(&Linear { weight: w1t, bias: Some(b1t) }.forward(&x, &mut ctx), &mut ctx);
+        let out = Linear { weight: w2t, bias: Some(b2t) }.forward(&h, &mut ctx);
+        let diff = out.sub(&mut ctx, &t);
+        let sq = diff.mul(&mut ctx, &diff);
+        let loss = sq.mean(&mut ctx, None, false);
+
+        let params = vec![w1t, b1t, w2t, b2t];
+        loss.backward(&mut ctx, &params, None);
+        let np = sgd.step(&mut ctx, &params);
+        sgd.zero_grad(&mut ctx);
+
+        // Read the realized params + final out + loss out of the graph.
+        w1 = np[0].to_list::<f32>(&mut ctx);
+        b1 = np[1].to_list::<f32>(&mut ctx);
+        w2 = np[2].to_list::<f32>(&mut ctx);
+        b2 = np[3].to_list::<f32>(&mut ctx);
+        pred = out.reshape(&mut ctx, &[4]).to_list::<f32>(&mut ctx);
+        last_loss = loss.reshape(&mut ctx, &[1]).to_list::<f32>(&mut ctx)[0];
+
+        if epoch % (n / 10).max(1) == 0 || epoch == n - 1 {
+            println!("epoch {epoch}: loss = {last_loss}");
+        }
+    }
+
+    let truth = [false, true, true, false];
+    for (i, (p, tt)) in pred.iter().zip(truth).enumerate() {
+        let is_one = *p > 0.5;
+        assert_eq!(is_one, tt, "xor misclassified at {i}: out={p}");
+    }
+    assert!(last_loss < 0.05, "loss did not drop enough: {last_loss}");
+}
+
+#[test]
+fn micro_seq_kaiming_timed() {
+    use std::time::Instant;
+    let mut ctx = UOpCtx::new();
+    Tensor::manual_seed(1);
+    for i in 0..4 {
+        let t = Tensor::kaiming_uniform(&mut ctx, &[2,2], (5.0f64).sqrt(), None);
+        let n_before = ctx.g.nodes.len();
+        let t0 = Instant::now();
+        let v = t.to_list::<f32>(&mut ctx);
+        eprintln!("[t] i={i} before={n_before} dt={:?}", t0.elapsed());
+        let _ = v;
+    }
+    eprintln!("[t] final nodes={}", ctx.g.nodes.len());
+}
+
+#[test]
+fn micro_repeated_realize() {
+    use std::time::Instant;
+    let mut ctx = UOpCtx::new();
+    for i in 0..7 {
+        let a = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0], None, None);
+        let b = Tensor::from_slice(&mut ctx, &[4.0f32, 5.0, 6.0], None, None);
+        let c = a.add(&mut ctx, &b);
+        let before = ctx.g.nodes.len();
+        let t0 = Instant::now();
+        let v = c.to_list::<f32>(&mut ctx);
+        eprintln!("[r] i={i} before={before} after={} dt={:?} v={v:?}", ctx.g.nodes.len(), t0.elapsed());
+    }
+}
