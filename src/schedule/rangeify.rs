@@ -923,19 +923,15 @@ fn bufferize_to_store(cnt: &std::cell::Cell<i64>, ctx: &mut UOpCtx, x: UopId, id
 /// AFTER. Runs at the codegen "add local buffers" stage (after scheduling), so
 /// GLOBAL STAGEs were already consumed by `bufferize_to_store`.
 fn add_local_buffer(cnt: &std::cell::Cell<i64>, ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
+    let x_shape = ctx.shape(x).ok().flatten()?;
+    let size: i128 = x_shape.iter().map(|s| s.as_i128_or_panic()).product();
+    assert!(size > 0, "TGERR: no zero sized or symbolic sized buffers");
     let x_dt = ctx.dt_of(x);
     let dtype = crate::dtype::strong_dtype(x_dt);
-    let addrspace = match ctx.arg_of(x) {
-        Arg::Data(d) => match d.get("addrspace") {
-            Arg::Enum(e) => AddrSpace::from_u8(e.value as u8).unwrap_or(AddrSpace::Local),
-            _ => AddrSpace::Local,
-        },
-        _ => AddrSpace::Local,
-    };
-    let max_shape = ctx.max_shape(x);
     let x_srcs = ctx.srcs(x).to_vec();
     let idxs = x_srcs[1..].to_vec();
-    let mut rngs = ctx.ranges(x).to_vec();
+    let idx = idxs[0];
+    let mut rngs = ctx.ranges(idx).to_vec();
     rngs.sort_by_key(|&r| AxisType::range_axis_id(ctx, r));
 
     let slot = cnt.get();
@@ -946,15 +942,14 @@ fn add_local_buffer(cnt: &std::cell::Cell<i64>, ctx: &mut UOpCtx, x: UopId) -> O
         vmin_vmax: None,
         multiple_of: None,
         name: None,
-        addrspace: Some(addrspace),
+        addrspace: Some(AddrSpace::Local),
         axis: None,
         device: None,
         volatile: false,
     };
-    let sval_shape: Vec<SVal> = max_shape.iter().map(|&s| SVal::I(s as i128)).collect();
-    let shape_src = ctx.shape_arg(&sval_shape);
+    let shape_src = ctx.shape_arg(&[SVal::I(size)]);
     let buf = ctx.uop(Ops::Buffer, Some(dtype), vec![shape_src], Arg::Param(pa));
-    let indexed = ctx.index(buf, idxs);
+    let indexed = ctx.index(buf, vec![idx]);
     let val = ctx.cast(x_srcs[0], dtype);
     let st = crate::tensor::store(ctx, indexed, val, None);
     let ended = ctx.end(st, rngs);
