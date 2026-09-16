@@ -329,11 +329,23 @@ impl Graph {
     }
 
     pub fn to_flat(&self) -> FlatGraph {
-        // dtype table = ids referenced (in ascending order)
+        // Only serialize nodes reachable from the roots, in post-order. Compiled
+        // PROGRAM/BINARY nodes from earlier kernels are not reachable from the
+        // current kernel's roots, so they are dropped here instead of being
+        // re-embedded (each BINARY carries the prior arena's JSON, which would
+        // otherwise make every later kernel's lib grow exponentially).
+        let order: Vec<UopId> = if self.roots.is_empty() {
+            (0..self.nodes.len()).map(|i| UopId(i as u32)).collect()
+        } else {
+            self.toposort()
+        };
+        let mut remap = vec![u32::MAX; self.nodes.len()];
         let mut used: Vec<DTypeId> = Vec::new();
-        for n in &self.nodes {
-            if !used.contains(&n.dtype) {
-                used.push(n.dtype);
+        for (i, &id) in order.iter().enumerate() {
+            remap[id.0 as usize] = i as u32;
+            let d = self.nodes[id.0 as usize].dtype;
+            if !used.contains(&d) {
+                used.push(d);
             }
         }
         used.sort_by_key(|d| d.0);
@@ -342,18 +354,20 @@ impl Graph {
         for (i, d) in used.iter().enumerate() {
             dtidx[d.0 as usize] = i as u16;
         }
-        let nodes = self
-            .nodes
+        let nodes = order
             .iter()
-            .map(|n| FlatNode {
-                op: n.op as u16,
-                dtype: dtidx[n.dtype.0 as usize],
-                srcs: n.srcs.iter().map(|s| s.0).collect(),
-                arg: arg_to_flat_with(&n.arg, Some(&dtidx)),
-                tag: arg_to_flat_with(&n.tag, Some(&dtidx)),
+            .map(|&id| {
+                let n = &self.nodes[id.0 as usize];
+                FlatNode {
+                    op: n.op as u16,
+                    dtype: dtidx[n.dtype.0 as usize],
+                    srcs: n.srcs.iter().map(|s| remap[s.0 as usize]).collect(),
+                    arg: arg_to_flat_with(&n.arg, Some(&dtidx)),
+                    tag: arg_to_flat_with(&n.tag, Some(&dtidx)),
+                }
             })
             .collect();
-        let roots = self.roots.iter().map(|r| r.0).collect();
+        let roots = self.roots.iter().map(|r| remap[r.0 as usize]).collect();
         FlatGraph { dtypes, nodes, roots }
     }
 }
