@@ -121,4 +121,74 @@ impl Graph {
         }
         out
     }
+
+    /// JIT content key (tinygrad `ast.key`): a hash of the DAG reachable from
+    /// `root`, referencing each edge by the **toposort position** of the source
+    /// node rather than its arena id. Two structurally identical ASTs therefore
+    /// hash equal even across arena resets / graph rebuilds, so the JIT cache
+    /// survives node reclamation.
+    pub fn content_key(&self, root: UopId) -> u64 {
+        let mut order = Vec::new();
+        let mut seen = vec![false; self.nodes.len()];
+        self.toposort_from(root, &mut order, &mut seen);
+        let mut pos: HashMap<u32, u64> = HashMap::with_capacity(order.len());
+        for (i, &id) in order.iter().enumerate() {
+            pos.insert(id.0, i as u64);
+        }
+        let mut h = DefaultHasher::new();
+        (order.len() as u64).hash(&mut h);
+        for &id in &order {
+            let n = self.get(id);
+            (n.op as u16).hash(&mut h);
+            n.dtype.0.hash(&mut h);
+            n.arg.hash(&mut h);
+            for &s in &n.srcs {
+                pos.get(&s.0).copied().unwrap_or(u64::MAX).hash(&mut h);
+            }
+            0u16.hash(&mut h); // node separator
+        }
+        h.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::uop::arg::Arg;
+    use crate::uop::ctx::UOpCtx;
+    use crate::uop::graph::UopId;
+    use crate::uop::ops::Ops;
+
+    fn build_target(ctx: &mut UOpCtx) -> UopId {
+        let two = ctx.cint(2);
+        let three = ctx.cint(3);
+        let mul = ctx.uop(Ops::Mul, None, vec![two, three], Arg::None);
+        let one = ctx.cint(1);
+        ctx.uop(Ops::Add, None, vec![mul, one], Arg::None)
+    }
+
+    #[test]
+    fn content_key_is_arena_id_independent() {
+        let mut ca = UOpCtx::new();
+        let root_a = build_target(&mut ca);
+
+        let mut cb = UOpCtx::new();
+        // pollute the arena so the target nodes land at *different* absolute ids
+        let _j1 = cb.cint(900);
+        let j7 = cb.cint(7);
+        let j8 = cb.cint(8);
+        let _j2 = cb.uop(Ops::Mul, None, vec![j7, j8], Arg::None);
+        let root_b = build_target(&mut cb);
+
+        assert_ne!(root_a, root_b, "ids must differ for this to prove anything");
+        assert_eq!(ca.g.content_key(root_a), cb.g.content_key(root_b), "identical DAGs must share a JIT key");
+
+        // structurally different graph -> different key
+        let mut cc = UOpCtx::new();
+        let c2a = cc.cint(2);
+        let c3 = cc.cint(3);
+        let m = cc.uop(Ops::Mul, None, vec![c2a, c3], Arg::None);
+        let c2b = cc.cint(2);
+        let root_c = cc.uop(Ops::Add, None, vec![m, c2b], Arg::None);
+        assert_ne!(ca.g.content_key(root_a), cc.g.content_key(root_c), "different DAGs must not collide");
+    }
 }

@@ -199,19 +199,70 @@ pub struct CompiledProg {
     pub elf: Rc<TinyElf>,
 }
 
-/// `to_program_cache` — keyed by the AST uop (hash-consed identity ==
-/// python's ast.key within a run).
-#[derive(Default)]
+/// `to_program_cache` — the JIT cache. Keyed by a **content hash of the AST
+/// DAG** (`Graph::content_key`, mirroring tinygrad `ast.key`), so compiled
+/// programs are reused across arena resets / graph rebuilds (we rebuild the
+/// front-end graph every realize but skip re-lowering/re-rendering/re-compiling
+/// on a hit). Stores **compiled code only** (`Rc<CompiledProg>`: source text,
+/// `Rc<TinyElf>`, `ProgramInfo`), never device buffers, so it can't hold VRAM.
+/// Optionally LRU-capped so it can't grow unbounded on dynamic-shape workloads.
 pub struct ProgCache {
-    map: HashMap<u32, Rc<CompiledProg>>,
+    map: HashMap<u64, Rc<CompiledProg>>,
+    order: std::collections::VecDeque<u64>,
+    cap: usize,
+}
+
+impl Default for ProgCache {
+    fn default() -> Self {
+        ProgCache::new()
+    }
+}
+
+impl ProgCache {
+    /// Unbounded cache (no eviction).
+    pub fn new() -> Self {
+        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap: usize::MAX }
+    }
+    /// LRU-capped cache: once more than `cap` entries are live, the least-recently
+    /// used is dropped.
+    pub fn capped(cap: usize) -> Self {
+        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap }
+    }
+    fn touch(&mut self, key: u64) {
+        if let Some(pos) = self.order.iter().position(|&k| k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key);
+    }
+    pub fn get(&mut self, key: u64) -> Option<Rc<CompiledProg>> {
+        let p = self.map.get(&key).cloned()?;
+        self.touch(key);
+        Some(p)
+    }
+    pub fn insert(&mut self, key: u64, cp: Rc<CompiledProg>) {
+        if !self.map.contains_key(&key) {
+            self.order.push_back(key);
+        } else {
+            self.touch(key);
+        }
+        self.map.insert(key, cp);
+        while self.map.len() > self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 /// `to_program` (codegen/__init__.py:500) — cached do_to_program. The device
 /// supplies its renderer (facts + render) and compiler through the public
 /// backend seams.
 pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device::Compiled>, cache: &mut ProgCache) -> Rc<CompiledProg> {
-    if let Some(p) = cache.map.get(&ast.0) {
-        return p.clone();
+    let key = ctx.g.content_key(ast);
+    if let Some(p) = cache.get(key) {
+        return p;
     }
     // 1. full_rewrite_to_sink
     let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts());
@@ -261,7 +312,7 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
     }
     let elf = Rc::new(TinyElf { lib, name: to_function_name_pub(&pi.name), signature });
     let cp = Rc::new(CompiledProg { uop: prg, pi, elf });
-    cache.map.insert(ast.0, cp.clone());
+    cache.insert(key, cp.clone());
     cp
 }
 
