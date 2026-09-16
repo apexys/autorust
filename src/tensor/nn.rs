@@ -58,7 +58,7 @@ impl Linear {
         let weight = Tensor::kaiming_uniform(ctx, &[out_features, in_features], 5.0f64.sqrt(), None);
         let bias = if bias {
             let bound = 1.0 / f64::sqrt(in_features as f64);
-            Some(Tensor::uniform(ctx, &[in_features], Some(-bound), Some(bound), None, None))
+            Some(Tensor::uniform(ctx, &[out_features], Some(-bound), Some(bound), None, None))
         } else {
             None
         };

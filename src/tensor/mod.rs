@@ -17,6 +17,7 @@ pub mod elementwise;
 pub mod grad;
 pub mod movement;
 pub mod nn;
+pub mod optim;
 pub mod reduce;
 pub mod rand;
 
