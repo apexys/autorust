@@ -210,6 +210,10 @@ pub struct ProgCache {
     map: HashMap<u64, Rc<CompiledProg>>,
     order: std::collections::VecDeque<u64>,
     cap: usize,
+    /// Observability: number of `to_program` lookups that found a cached program.
+    pub hits: u64,
+    /// Observability: number of `to_program` lookups that had to lower+compile.
+    pub misses: u64,
 }
 
 impl Default for ProgCache {
@@ -221,12 +225,12 @@ impl Default for ProgCache {
 impl ProgCache {
     /// Unbounded cache (no eviction).
     pub fn new() -> Self {
-        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap: usize::MAX }
+        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap: usize::MAX, hits: 0, misses: 0 }
     }
     /// LRU-capped cache: once more than `cap` entries are live, the least-recently
     /// used is dropped.
     pub fn capped(cap: usize) -> Self {
-        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap }
+        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap, hits: 0, misses: 0 }
     }
     fn touch(&mut self, key: u64) {
         if let Some(pos) = self.order.iter().position(|&k| k == key) {
@@ -235,9 +239,21 @@ impl ProgCache {
         self.order.push_back(key);
     }
     pub fn get(&mut self, key: u64) -> Option<Rc<CompiledProg>> {
-        let p = self.map.get(&key).cloned()?;
-        self.touch(key);
-        Some(p)
+        let p = self.map.get(&key).cloned();
+        if p.is_some() {
+            self.hits += 1;
+            self.touch(key);
+        } else {
+            self.misses += 1;
+        }
+        p
+    }
+    /// Number of cached programs currently resident.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
     pub fn insert(&mut self, key: u64, cp: Rc<CompiledProg>) {
         if !self.map.contains_key(&key) {
@@ -262,7 +278,13 @@ impl ProgCache {
 pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device::Compiled>, cache: &mut ProgCache) -> Rc<CompiledProg> {
     let key = ctx.g.content_key(ast);
     if let Some(p) = cache.get(key) {
-        return p;
+        // The cached program may have been compiled in a different arena (the key
+        // is content-based by design), so its `uop` id is not valid here. The
+        // expensive artifacts (`elf`, `pi`) are arena-independent; re-intern a
+        // fresh PROGRAM node in this ctx and reuse them (no re-lower/re-render/
+        // re-compile).
+        let prg = ctx.uop(Ops::Program, Some(crate::dtype::VOID), vec![], p.pi.to_arg());
+        return Rc::new(CompiledProg { uop: prg, pi: p.pi.clone(), elf: p.elf.clone() });
     }
     // 1. full_rewrite_to_sink
     let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts());
@@ -456,9 +478,8 @@ pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cac
     buffer_of(ctx, t, final_uop)
 }
 
-/// Read a realized tensor's flat values (python `_buffer().as_memoryview()`).
-pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<f64> {
-    let b = realize_tensor(ctx, tensor_uop, t, cache);
+/// Read a realized buffer's flat values (python `_buffer().as_memoryview()`).
+pub fn buffer_values(b: &crate::runtime::buffer::Buffer) -> Vec<f64> {
     let dev = device(b.device());
     b.ensure_allocated(&dev);
     let o = b.get_buf(&dev);
@@ -469,13 +490,23 @@ pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cach
         .collect()
 }
 
-/// Read a realized tensor's raw storage bytes at its own dtype (python
-/// `_buffer()` copyout). `Tensor::to_bytes`/`to_list` build on this so typed
-/// read-out never round-trips through `f64`.
-pub fn tensor_bytes(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<u8> {
-    let b = realize_tensor(ctx, tensor_uop, t, cache);
+/// Read a realized buffer's raw storage bytes at its own dtype (python
+/// `_buffer()` copyout).
+pub fn buffer_bytes(b: &crate::runtime::buffer::Buffer) -> Vec<u8> {
     let dev = device(b.device());
     b.ensure_allocated(&dev);
     let o = b.get_buf(&dev);
     dev.copyout(&*o)
+}
+
+/// Read a realized tensor's flat values (python `_buffer().as_memoryview()`).
+pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<f64> {
+    buffer_values(&realize_tensor(ctx, tensor_uop, t, cache))
+}
+
+/// Read a realized tensor's raw storage bytes at its own dtype (python
+/// `_buffer()` copyout). `Tensor::to_bytes`/`to_list` build on this so typed
+/// read-out never round-trips through `f64`.
+pub fn tensor_bytes(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<u8> {
+    buffer_bytes(&realize_tensor(ctx, tensor_uop, t, cache))
 }

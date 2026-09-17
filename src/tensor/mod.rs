@@ -61,6 +61,7 @@ use crate::dtype::DTypeId;
 use crate::dtype::ReadDtype;
 use crate::runtime::buffer::BufTable;
 use crate::engine::realize::ProgCache;
+use crate::engine::session::Session;
 use crate::uop::sint::{SInt, SVal};
 
 /// Python `Tensor.__slots__ = ("uop",)`. A `Tensor` is a plain `Copy` handle
@@ -118,7 +119,7 @@ impl Tensor {
     /// bytes at its own dtype (python `_buffer()` copyout). For typed,
     /// cast-aware read-out use [`Tensor::to_list`] / [`Tensor::item`].
     pub fn to_bytes(&self, ctx: &mut UOpCtx) -> Vec<u8> {
-        self.to_bytes_with(ctx, &mut BufTable::default(), &mut ProgCache::default())
+        self.to_bytes_in(ctx, &mut Session::new())
     }
 
     /// [`Tensor::to_bytes`] with a caller-owned buffer/program cache, so realized
@@ -127,39 +128,72 @@ impl Tensor {
         crate::engine::realize::tensor_bytes(ctx, self.uop, t, cache)
     }
 
+    /// [`Tensor::to_bytes`] reusing a persistent [`Session`] (no recompile, no
+    /// reallocation on a second realize).
+    pub fn to_bytes_in(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<u8> {
+        sess.tensor_bytes(ctx, self.uop)
+    }
+
     /// `Tensor.realize`: trigger the computation needed to materialize this tensor
-    /// and return `&self`. Buffers are not persisted across calls in this revision
-    /// (see CURRENT_STATE.md §9.1), so a later read recomputes.
+    /// and return `&self`. The default allocates a throwaway [`Session`]; use
+    /// [`Tensor::realize_in`] to persist buffers/programs across calls.
     pub fn realize(&self, ctx: &mut UOpCtx) -> &Tensor {
         let _ = self.to_bytes(ctx);
         self
+    }
+
+    /// [`Tensor::realize`] against a persistent [`Session`].
+    pub fn realize_in(&self, ctx: &mut UOpCtx, sess: &mut Session) -> &Tensor {
+        let _ = self.to_bytes_in(ctx, sess);
+        self
+    }
+
+    /// Reserve the graph cast that reads this tensor as `T::DTYPE`, asserting
+    /// weak dtypes are realized first.
+    fn read_target<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> UopId {
+        let target = <T as ReadDtype>::DTYPE;
+        let src = self.dtype(ctx);
+        assert!(!crate::dtype::is_weak(src), "TGERR: cannot read a weak-dtype tensor ({src:?}) into {target:?}; realize it first");
+        assert!(!crate::dtype::is_weak(target), "TGERR: cannot read tensor into weak dtype {target:?}");
+        ctx.cast(self.uop, target)
+    }
+
+    /// Reinterpret little-endian bytes as `[T]` (no `f64` round-trip).
+    fn decode<T: ReadDtype>(bytes: Vec<u8>) -> Vec<T> {
+        let isz = <T as ReadDtype>::DTYPE.itemsize();
+        assert_eq!(bytes.len() % isz, 0, "TGERR: byte length {} not a multiple of itemsize {isz}", bytes.len());
+        bytes.chunks_exact(isz).map(T::from_bytes_le).collect()
     }
 
     /// Read the tensor out as `Vec<T>`: cast to `T::DTYPE` in the graph (a no-op
     /// when already that dtype), realize, and reinterpret the little-endian bytes
     /// — no `f64` round-trip. Panics if the tensor cannot be cast to `T::DTYPE`.
     pub fn to_list<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> Vec<T> {
-        self.to_list_with(ctx, &mut BufTable::default(), &mut ProgCache::default())
+        self.to_list_in(ctx, &mut Session::new())
     }
 
     /// [`Tensor::to_list`] with a caller-owned buffer/program cache.
     pub fn to_list_with<T: ReadDtype>(&self, ctx: &mut UOpCtx, t: &mut BufTable, cache: &mut ProgCache) -> Vec<T> {
-        let target = <T as ReadDtype>::DTYPE;
-        let src = self.dtype(ctx);
-        assert!(!crate::dtype::is_weak(src), "TGERR: cannot read a weak-dtype tensor ({src:?}) into {target:?}; realize it first");
-        assert!(!crate::dtype::is_weak(target), "TGERR: cannot read tensor into weak dtype {target:?}");
-        let uop = ctx.cast(self.uop, target);
-        let bytes = crate::engine::realize::tensor_bytes(ctx, uop, t, cache);
-        let isz = target.itemsize();
-        assert_eq!(bytes.len() % isz, 0, "TGERR: byte length {} not a multiple of itemsize {isz} ({target:?})", bytes.len());
-        bytes.chunks_exact(isz).map(T::from_bytes_le).collect()
+        let uop = self.read_target::<T>(ctx);
+        Self::decode::<T>(crate::engine::realize::tensor_bytes(ctx, uop, t, cache))
+    }
+
+    /// [`Tensor::to_list`] against a persistent [`Session`].
+    pub fn to_list_in<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<T> {
+        let uop = self.read_target::<T>(ctx);
+        Self::decode::<T>(sess.tensor_bytes(ctx, uop))
     }
 
     /// Read a single-element tensor out as `T` (python `item()`); asserts `numel()==1`.
     pub fn item<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> T {
+        self.item_in(ctx, &mut Session::new())
+    }
+
+    /// [`Tensor::item`] against a persistent [`Session`].
+    pub fn item_in<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> T {
         let n = self.shape(ctx).numel_int().unwrap_or(0);
         assert_eq!(n, 1, "TGERR: item() requires exactly one element, tensor has {n}");
-        self.to_list::<T>(ctx).into_iter().next().expect("TGERR: item() on empty tensor")
+        self.to_list_in::<T>(ctx, sess).into_iter().next().expect("TGERR: item() on empty tensor")
     }
 
     /// `Tensor.reshape`: public wrapper taking any `ShapeArg`.

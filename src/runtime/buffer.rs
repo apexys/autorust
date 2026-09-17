@@ -211,6 +211,18 @@ pub struct BufTable {
     views: HashMap<u32, Buffer>,
 }
 
+impl BufTable {
+    /// Number of distinct base allocations currently tracked (leak observability:
+    /// a repeated realize that reuses storage must not grow this).
+    pub fn n_bases(&self) -> usize {
+        self.bases.len()
+    }
+    /// Number of cached view entries (uop id → `Buffer`).
+    pub fn n_views(&self) -> usize {
+        self.views.len()
+    }
+}
+
 /// `UOp.buffer` (ops.py:922): resolve a (post-schedule) buffer-ish uop to its
 /// engine Buffer. Base BUFFER uops create the Buffer (picking up
 /// `ctx.initial_data` for opaque-constructed storage); movement/bitcast views
