@@ -17,7 +17,7 @@ use super::Tensor;
 /// Register the initial host bytes for a buffer-backed tensor (python
 /// `Buffer(opaque=memoryview(bytearray(initial_value)))` at Tensor(data) time):
 /// walk to the base BUFFER uop and record the bytes for the engine.
-fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
+pub(crate) fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
     while ctx.op_of(&u) != Ops::Buffer {
         u = ctx.srcs(&u)[0].clone();
     }

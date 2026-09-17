@@ -191,6 +191,44 @@ impl Tensor {
         bytes
     }
 
+    /// `Tensor.assign` (tensor.py:436): realize `value` and copy its bytes into
+    /// *this* tensor's storage in place, leaving `self.uop` unchanged.
+    ///
+    /// This is what keeps a persistent parameter a stable leaf across optimizer
+    /// steps: `w - lr*grad` is built as a fresh subgraph, written back into `w`'s
+    /// buffer, then dropped. Without it, rebinding `w = w - lr*grad` chains each
+    /// step into the previous one and the graph grows without bound.
+    pub fn assign(&self, ctx: &mut UOpCtx, t: &mut BufTable, cache: &mut ProgCache, value: &Tensor) {
+        assert_eq!(self.dtype(ctx), value.dtype(ctx), "TGERR: assign dtype mismatch");
+        // Realize the value first: its graph reads the parameter's current bytes.
+        let src = crate::engine::realize::realize_tensor(ctx, value.uop.clone(), t, cache);
+        let bytes = crate::engine::realize::buffer_bytes(&src);
+        // Destination is this tensor's storage *by buffer identity* — the same
+        // base the forward pass resolves through `buffer_of`, so the write is
+        // visible to subsequent realizes.
+        let dst = crate::runtime::buffer::buffer_of(ctx, t, self.uop.clone());
+        crate::engine::realize::buffer_copyin(&dst, &bytes);
+        self.set_realized_buffer(dst);
+    }
+
+    /// Turn a computed tensor (e.g. a random-initialized parameter) into a
+    /// buffer-backed leaf with the same shape/dtype, realizing the current value
+    /// into its storage (`Node.initial_data`). tinygrad parameters are realized
+    /// buffers, which is what lets [`Tensor::assign`] update them in place;
+    /// a raw init *expression* would be recomputed (and the update lost) on every
+    /// realize.
+    pub fn to_param(&self, ctx: &mut UOpCtx) -> Tensor {
+        let shape = self.shape(ctx);
+        let dt = self.dtype(ctx);
+        // Realize the init in a throwaway engine table (it may be on a different
+        // device than the training buffers) and stage the bytes on the leaf.
+        let bytes = self.to_bytes_with(ctx, &mut BufTable::default(), &mut ProgCache::default());
+        let dev = self.realized_buffer().map(|b| b.device().to_string()).unwrap_or_else(|| "PYTHON".to_string());
+        let u = crate::tensor::creation::empty(ctx, &shape, dt, &dev);
+        crate::tensor::creation::register_initial(ctx, u.clone(), bytes);
+        Tensor::from_uop(ctx, u)
+    }
+
     /// `Tensor.realize`: trigger the computation needed to materialize this tensor
     /// and return `&self`. The default allocates a throwaway [`Session`]; use
     /// [`Tensor::realize_in`] to persist buffers/programs across calls.

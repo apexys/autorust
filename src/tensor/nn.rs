@@ -70,6 +70,15 @@ impl Linear {
         let w = self.weight.transpose(ctx, 0, 1);
         x.linear(ctx, &w, self.bias.as_ref())
     }
+
+    /// Materialize the random-init parameters into buffer-backed leaves (see
+    /// [`Tensor::to_param`]) so the optimizer can update them in place with
+    /// [`Tensor::assign`]. Do this once before training.
+    pub fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        self.weight = self.weight.to_param(ctx);
+        self.bias = self.bias.map(|b| b.to_param(ctx));
+        self
+    }
 }
 
 /// `nn::Conv2d`: 2D convolution.

@@ -422,7 +422,8 @@ those nodes).
   `Box<dyn Iterator>` keeps `Module` object-safe; names live in the trait, never on
   `Tensor`.
 - `src/tensor/optim.rs`: `Optim` trait + `SGD { lr }` (`w -= lr*grad`, missing grad leaves
-  the param untouched) + `zero_grad`. **No Adam/momentum/weight-decay.**
+  the param untouched) + `zero_grad`. `step` returns updated tensors; `step_inplace` assigns
+  them back into the parameter buffers (see §8.10). **No Adam/momentum/weight-decay.**
 - No `nn/state.py` equivalent (`state_dict`/`load_state_dict`/safetensors), no
   `fetch`/`from_url`, no Embedding/LSTM/InstanceNorm/RMSNorm.
 - Tensor helpers added for nn: `dot`, `linear`, `batchnorm`, `layernorm`, `pool`, `uniform`,
@@ -470,6 +471,33 @@ those nodes).
 ### 8.9 Backends
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
   kernel-count parity on the RTX 3060. `tests/backend_harness.rs` 12 passed / 1 ignored.
+
+### 8.10 In-place parameter updates: `Tensor::assign` (DONE)
+tinygrad's optimizers assign the update into the parameter's existing buffer
+(`Optimizer.step` → `Tensor.assign`, optim.py:35-56 / tensor.py:436), so parameters keep a
+stable identity and the training graph does not chain across steps. The port previously had
+a **pure-graph** optimizer (`step` returns new tensors), which forced callers to either
+rebind (`w = w - lr*grad`, making each weight's subgraph contain the previous one → O(N)
+graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights through host
+`Vec<f32>` every step (what `nn_xor`/`mem_probe` used to do).
+- `Tensor::assign(ctx, &mut BufTable, &mut ProgCache, value)` realizes `value` and copies its
+  bytes into this tensor's storage **by buffer identity** (`buffer_of(self.uop)` — the same
+  base the forward pass resolves), leaving `self.uop` unchanged. The copy half is
+  `realize::buffer_copyin` (device `_copyin`).
+- `Tensor::to_param` / `nn::Linear::into_params`: random-init parameters are *expressions*
+  (`uniform` = `rand*range + low`), which would be recomputed — discarding the update — on
+  every realize. `to_param` realizes the init once and stages it on a buffer-backed leaf
+  (`Node.initial_data`), i.e. tinygrad's "parameters are realized buffers". Do it once
+  before training.
+- `Optim::step_inplace` = `step` + `assign` each update back into its parameter (tinygrad
+  `Optimizer.step`); `step` (return-new-tensors) is kept for the parity tests.
+- Result: `tests/nn_xor.rs`, `examples/xor.rs` and the rewritten `tests/mem_probe.rs` hold
+  the `Linear` layers and loop `forward → backward → step_inplace → zero_grad`. The per-step
+  graph is identical, so every step after the first is a program-cache hit and the live graph
+  is flat (the last XOR run: 10 misses / 3290 hits, loss 0.021).
+- Caveat: `assign` mutates a param buffer in place, so a *derived* uop realized in an earlier
+  step must not be reused (training loops build fresh derived nodes each step). The faithful
+  STORE+AFTER buffer-identity/view-assign path (tinygrad tensor.py:455-463) is not ported.
 
 ---
 

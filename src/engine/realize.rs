@@ -501,6 +501,17 @@ pub fn buffer_bytes(b: &crate::runtime::buffer::Buffer) -> Vec<u8> {
     dev.copyout(&*o)
 }
 
+/// Write raw bytes into a realized buffer's storage in place (the copy half of
+/// `Tensor.assign`, device.py `_copyin`). `data` must match the buffer's byte
+/// length.
+pub fn buffer_copyin(b: &crate::runtime::buffer::Buffer, data: &[u8]) {
+    assert_eq!(data.len(), b.nbytes(), "TGERR: assign size mismatch");
+    let dev = device(b.device());
+    b.ensure_allocated(&dev);
+    let o = b.get_buf(&dev);
+    dev.copyin_to(&*o, data);
+}
+
 /// Read a realized tensor's flat values (python `_buffer().as_memoryview()`).
 pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<f64> {
     buffer_values(&realize_tensor(ctx, tensor_uop, t, cache))

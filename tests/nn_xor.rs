@@ -3,12 +3,13 @@
 //! (out>0.5 matches the truth table) and the loss must drop sharply.
 //!
 //! Notes on the graph discipline here:
-//! - Weights are carried between epochs as plain `Vec<f32>` and each epoch builds
-//!   a fresh `UOpCtx` (tinygrad realizes + mutates buffers; keeping the arena
-//!   bounded per step avoids O(n^2) graph growth). The math is unchanged.
-//! - Repeated realization is cheap now that `to_flat` serializes only the nodes
-//!   reachable from the current kernel's roots, so each param is read out
-//!   individually instead of `cat`-ing uneven shapes together.
+//! - The `Linear` layers are created once and their parameters are turned into
+//!   buffer-backed leaves (`into_params`); the optimizer updates those buffers
+//!   in place with `Tensor::assign` (tinygrad `Optimizer.step`). So each step's
+//!   graph references the *same* parameter leaves and is structurally identical
+//!   — the graph does not chain into previous steps. See CURRENT_STATE §9.
+//! - Because the graph is identical each step, every step after the first is a
+//!   program-cache hit: kernels are not re-lowered/re-rendered/re-compiled.
 //! - Config matches the tinygrad reference sweep that converges reliably
 //!   (`2->4` ReLU hidden, linear output, MSE, `lr=0.1`, seed 42, ~300 epochs).
 
@@ -20,68 +21,49 @@ use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::Tensor;
 use autorust::uop::ctx::UOpCtx;
 
-/// Read all four params out (flat f32: w1, b1, w2, b2) as separate realizations.
-fn read_params(ctx: &mut UOpCtx, bufs: &mut BufTable, cache: &mut ProgCache, w1: Tensor, b1: Tensor, w2: Tensor, b2: Tensor) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
-    (
-        w1.to_list_with::<f32>(ctx, bufs, cache),
-        b1.to_list_with::<f32>(ctx, bufs, cache),
-        w2.to_list_with::<f32>(ctx, bufs, cache),
-        b2.to_list_with::<f32>(ctx, bufs, cache),
-    )
-}
-
 #[test]
 fn xor_trains_to_convergence() {
-    // Initialization RNG: draw the starting weights once (single realization).
-    let (mut w1, mut b1, mut w2, mut b2);
+    let mut ctx = UOpCtx::new();
+    let mut bufs = BufTable::default();
     let mut cache = ProgCache::default();
-    {
-        let mut ctx = UOpCtx::new();
-        let mut bufs = BufTable::default();
-        Tensor::manual_seed(42);
-        let l1 = Linear::new(&mut ctx, 2, 4, true);
-        let l2 = Linear::new(&mut ctx, 4, 1, true);
-        (w1, b1, w2, b2) = read_params(&mut ctx, &mut bufs, &mut cache, l1.weight, l1.bias.unwrap(), l2.weight, l2.bias.unwrap());
-    }
+
+    // Draw the initial weights once and turn them into buffer-backed leaves so
+    // the optimizer can assign into them in place.
+    Tensor::manual_seed(42);
+    let l1 = Linear::new(&mut ctx, 2, 4, true).into_params(&mut ctx);
+    let l2 = Linear::new(&mut ctx, 4, 1, true).into_params(&mut ctx);
 
     let lr: f32 = std::env::var("LR").ok().and_then(|s| s.parse().ok()).unwrap_or(0.1);
     let sgd = SGD::new(lr);
-    let mut last_loss = 0.0f32;
-    let mut pred: Vec<f32> = Vec::new();
+
+    // The inputs are constant; the graph is reused every step.
+    let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
+        .reshape(&mut ctx, [4, 2]);
+    let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, [4, 1]);
 
     let n: usize = std::env::var("EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
     let mut first_epoch_misses: Option<u64> = None;
+    let mut last_loss = 0.0f32;
+    let mut pred: Vec<f32> = Vec::new();
+
     for epoch in 0..n {
-        let mut ctx = UOpCtx::new();
-        // Buffers are arena-local (fresh per step, see CURRENT_STATE.md §9.1/§9.2),
-        // but the compiled-program cache is content-keyed, so every epoch after the
-        // first is a cache hit: the kernels are not re-lowered/re-rendered/re-compiled.
-        let mut bufs = BufTable::default();
-        let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
-            .reshape(&mut ctx, [4, 2]);
-        let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, [4, 1]);
-
-        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, [4, 2]);
-        let b1t = Tensor::from_slice(&mut ctx, &b1, None, None);
-        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, [1, 4]);
-        let b2t = Tensor::from_slice(&mut ctx, &b2, None, None);
-
-        let h = nn::relu(&Linear { weight: w1t.clone(), bias: Some(b1t.clone()) }.forward(&x, &mut ctx), &mut ctx);
-        let out = Linear { weight: w2t.clone(), bias: Some(b2t.clone()) }.forward(&h, &mut ctx);
+        let h = nn::relu(&l1.forward(&x, &mut ctx), &mut ctx);
+        let out = l2.forward(&h, &mut ctx);
         let diff = out.sub(&mut ctx, &t);
-        let sq = diff.mul(&mut ctx, &diff);
-        let loss = sq.mean(&mut ctx, None, false);
+        let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
 
-        let params = vec![w1t, b1t, w2t, b2t];
+        let params = vec![
+            l1.weight.clone(),
+            l1.bias.clone().unwrap(),
+            l2.weight.clone(),
+            l2.bias.clone().unwrap(),
+        ];
         loss.backward(&mut ctx, &params, None);
-        let np = sgd.step(&mut ctx, &params);
+        // `step_inplace` assigns into the parameter buffers; the leaves are
+        // unchanged, so the next step's graph is identical.
+        sgd.step_inplace(&mut ctx, &mut bufs, &mut cache, &params);
         sgd.zero_grad(&ctx, &params);
 
-        // Read the realized params + final out + loss out of the graph.
-        w1 = np[0].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
-        b1 = np[1].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
-        w2 = np[2].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
-        b2 = np[3].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
         pred = out.reshape(&mut ctx, [4]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
         last_loss = loss.reshape(&mut ctx, [1]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache)[0];
 

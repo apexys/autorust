@@ -5,15 +5,30 @@
 //! the caller carries into the next iteration.
 
 use crate::dtype::ConstVal;
+use crate::engine::realize::ProgCache;
+use crate::runtime::buffer::BufTable;
 use crate::tensor::Tensor;
 use crate::uop::ctx::UOpCtx;
 
 /// Common surface for an optimizer step. `step` reads the gradients currently
 /// attached to `params` and returns the updated tensors (in the same order).
-/// `zero_grad` clears each parameter's attached gradient so the next `backward`
-/// starts from an empty accumulator (tinygrad `Optimizer.zero_grad`).
+/// `step_inplace` instead writes those updates back into the parameters'
+/// existing buffers (`Tensor.assign`, tinygrad `Optimizer.step`/optim.py:35),
+/// which keeps parameters a stable leaf across steps. `zero_grad` clears each
+/// parameter's attached gradient so the next `backward` starts from an empty
+/// accumulator (tinygrad `Optimizer.zero_grad`).
 pub trait Optim {
     fn step(&self, ctx: &mut UOpCtx, params: &[Tensor]) -> Vec<Tensor>;
+
+    /// `Optimizer.step` (optim.py:35-56): realize the updates and `assign` each
+    /// back into its parameter's buffer, leaving the parameter `uop` unchanged.
+    fn step_inplace(&self, ctx: &mut UOpCtx, bufs: &mut BufTable, cache: &mut ProgCache, params: &[Tensor]) {
+        let updates = self.step(ctx, params);
+        for (p, u) in params.iter().zip(updates.iter()) {
+            p.assign(ctx, bufs, cache, u);
+        }
+    }
+
     fn zero_grad(&self, ctx: &UOpCtx, params: &[Tensor]) {
         for p in params {
             ctx.clear_grad(&p.uop);
