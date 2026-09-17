@@ -54,8 +54,9 @@ Status of the tinygrad → Rust port. See also `NNImpl.md` (nn-specific) and `PL
 - `tests/m2_smoke.rs`: graph construction/shape/rewrite/getitem (symbolic only).
 
 ### Build status
-- `cargo build` and `cargo test` are green (**61 passed, 0 failed, 5 ignored**). The optimizer +
-  `add_local_buffer` STAGE lowering landed cleanly; the XOR end-to-end test is `#[ignore]`d WIP (§3f/§4-6).
+- `cargo build` and `cargo test` are green (**65 passed, 0 failed, 5 ignored**). The optimizer +
+  `add_local_buffer` STAGE lowering landed cleanly; the XOR end-to-end training test is green
+  (`tests/nn_xor.rs::xor_trains_to_convergence`, 2→4→1 ReLU) (§3f/§4-6).
 
 ## 2. What is missing
 

@@ -23,7 +23,7 @@ use crate::uop::ctx::UOpCtx;
 use crate::uop::sint::SVal;
 use crate::uop::ops::group;
 use crate::uop::{arg::Arg, ctx::UOpCtx as Ctx2, UopId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Truncation for stage-by-stage differentials (default: run everything).
 fn stage_limit() -> usize {
@@ -75,7 +75,7 @@ fn post_stages() -> Vec<Stage> {
         Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },
         Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&pm_remove_invalid()), bottom_up: false },
         Stage { name: "casted consts", pm: pm_casted_consts(), bottom_up: false,  },
-        Stage { name: "add implicit barriers", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage { name: "add implicit barriers", pm: pm_implicit_barriers(), bottom_up: false },
         Stage { name: "add control flow", pm: PatternMatcher::new(vec![]), bottom_up: true },
         Stage { name: "number params with -1", pm: PatternMatcher::new(vec![]), bottom_up: false },
     ]
@@ -117,6 +117,89 @@ fn pm_split_ends() -> PatternMatcher {
             }
         }),
     )])
+}
+
+/// `_is_local_store` (codegen/__init__.py:259).
+fn is_local_store(ctx: &UOpCtx, x: UopId) -> bool {
+    ctx.op_of(x) == crate::uop::Ops::Store && ctx.addrspace_derived(x) == Some(dtype::AddrSpace::Local)
+}
+
+/// `add_raw_barrier` (codegen/__init__.py:261): a load from a LOCAL buffer that
+/// depends (via AFTER) on LOCAL stores needs a workgroup barrier.
+fn add_raw_barrier(ctx: &mut UOpCtx, after: UopId) -> Option<UopId> {
+    if ctx.addrspace_derived(after) != Some(dtype::AddrSpace::Local) {
+        return None;
+    }
+    let srcs = ctx.srcs(after).to_vec();
+    let deps = crate::tensor::sink(ctx, srcs[1..].to_vec());
+    let topo = ctx.toposort_gated(deps, Some(&|x| ctx.op_of(x) != crate::uop::Ops::Barrier), true);
+    if !topo.iter().any(|&x| is_local_store(ctx, x)) {
+        return None;
+    }
+    let barrier = ctx.uop(crate::uop::Ops::Barrier, None, srcs[1..].to_vec(), Arg::None);
+    Some(crate::tensor::after(ctx, srcs[0], vec![barrier]))
+}
+
+/// `add_war_barrier` (codegen/__init__.py:269): a LOCAL buffer stored and loaded
+/// in the same loop needs a barrier at the end of the loop body.
+fn add_war_barrier(ctx: &mut UOpCtx, end: UopId) -> Option<UopId> {
+    let srcs = ctx.srcs(end).to_vec();
+    let rngs: Vec<UopId> = srcs[1..]
+        .iter()
+        .copied()
+        .filter(|&r| {
+            if ctx.op_of(r) != crate::uop::Ops::Range {
+                return false;
+            }
+            let at = AxisType::range_axis_type(ctx, r);
+            (at == AxisType::Reduce || at == AxisType::Weak || at == AxisType::Loop)
+                && matches!(ctx.vmax(r), Ok(v) if v.as_i128_or_panic() > 0)
+        })
+        .collect();
+    if rngs.is_empty() || ctx.op_of(srcs[0]) == crate::uop::Ops::Barrier {
+        return None;
+    }
+    let sl = ctx.backward_slice_with_self(srcs[0]);
+    let mut store_bufs: HashSet<UopId> = HashSet::new();
+    for &x in &sl {
+        if is_local_store(ctx, x) {
+            let xr = ctx.ranges(x);
+            if rngs.iter().any(|r| xr.contains(r)) {
+                store_bufs.insert(ctx.buf_uop(x));
+            }
+        }
+    }
+    let loads: Vec<UopId> = sl
+        .iter()
+        .copied()
+        .filter(|&x| {
+            ctx.op_of(x) == crate::uop::Ops::Load && store_bufs.contains(&ctx.buf_uop(ctx.srcs(x)[0]))
+        })
+        .collect();
+    if loads.is_empty() {
+        return None;
+    }
+    let mut barrier_srcs = vec![srcs[0]];
+    barrier_srcs.extend(loads);
+    let barrier = ctx.uop(crate::uop::Ops::Barrier, None, barrier_srcs, Arg::None);
+    let mut new_srcs = vec![barrier];
+    new_srcs.extend(srcs[1..].iter().copied());
+    let (op, dt, _, arg, tag) = ctx.snapshot(end);
+    Some(ctx.replace(end, op, dt, new_srcs, arg, tag))
+}
+
+/// `pm_implicit_barriers` (codegen/__init__.py:280).
+pub fn pm_implicit_barriers() -> PatternMatcher {
+    PatternMatcher::new(vec![
+        (
+            UPat::ops1(crate::uop::Ops::After).allow_all_srcs().named("after"),
+            r(|ctx, st, _| add_raw_barrier(ctx, sget(st, "after"))),
+        ),
+        (
+            UPat::ops1(crate::uop::Ops::End).allow_all_srcs().named("end"),
+            r(|ctx, st, _| add_war_barrier(ctx, sget(st, "end"))),
+        ),
+    ])
 }
 
 /// `pm_casted_consts` (codegen/__init__.py:280) — spell literals as
@@ -815,6 +898,7 @@ pub fn pm_inventory() -> Vec<(&'static str, Vec<String>)> {
     add!("pm_cast_weak", crate::uop::weak::pm_cast_weak());
     add!("pm_lower_index_dtype", crate::uop::weak::pm_lower_index_dtype());
     add!("pm_casted_consts", pm_casted_consts());
+    add!("pm_implicit_barriers", pm_implicit_barriers());
     add!("pm_split_ends", pm_split_ends());
     add!("pm_move_where_on_load", pm_move_where_on_load());
     add!("pm_flatten_range", pm_flatten_range());

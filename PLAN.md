@@ -580,7 +580,7 @@ rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on co
 | 7 | postopt symbolic `sym`+`pm_move_where_on_load`+`pm_flatten_range`+`pm_reduce_unparented` | ✅ | `where_on_load` ported |
 | 8 | expander `expander2` | ✅ | |
 | 9 | remove reduces `mop_cleanup`+`pm_reduce_local` | ✅ | |
-| 10 | add local buffers `pm_add_local_buffers` | ⬜ | **TODO**: STAGE→LOCAL buffer (local reductions / gemm); placeholder today |
+| 10 | add local buffers `pm_add_local_buffers` | ✅ | |
 | 11 | add gpudims `pm_add_gpudims` | ✅ | |
 | 12 | expand broadcast / add loads `symbolic_simple`+`pm_expand_broadcast`+`pm_add_loads` | ✅ | |
 | 13 | devectorize2 `symbolic_simple`+`devectorizer2`+`indexing_simplify` | ✅ | `indexing_simplify` ported |
@@ -597,16 +597,17 @@ rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on co
 | 24 | move gates from index `pm_move_gates_from_index` | ✅ | `gater.rs` (4 non-image rules) |
 | 25 | final rewrite `pm_final_rewrite`+`pm_remove_invalid` | ✅ | |
 | 26 | casted consts `pm_casted_consts` | ✅ | walk |
-| 27 | add implicit barriers `pm_implicit_barriers` | ⬜ | **TODO**: LOCAL load/store WAR/WAR barriers (needed with #10) |
-| 28 | add control flow `pm_add_control_flow` | ⬜ | **TODO**: IF/ENDIF for non-unrolled local reduces |
+| 27 | add implicit barriers `pm_implicit_barriers` | ✅ | `pipeline::pm_implicit_barriers` (raw + WAR) |
+| 28 | add control flow `pm_add_control_flow` | ✅ | `pipeline::add_control_flow` (CFGContext) |
 | 29 | number params `pm_number_params` | ⬜ | **TODO**: param renumbering (corpus params already distinct) |
 
-Highest-value remaining gaps, ordered: (A) `pm_add_local_buffers`+`pm_implicit_barriers`+
-`pm_add_control_flow` (the local-memory triad — unblocks shared-memory reductions/gemm);
-(B) `pm_split_ranges` (unlocks finer upcast/local splitting); (C)
-`get_simplifying_rewrite_patterns` floordiv/mod decomp + `pm_dtype_decomps` (needed for
-int-index-heavy + non-native-float kernels). Each is currently a no-op on the fp32 corpus,
-so no gate regressed; port each with a targeted differential kernel.
+Highest-value remaining gaps, ordered: (A) ~~`pm_add_local_buffers`+`pm_implicit_barriers`+
+`pm_add_control_flow` (the local-memory triad)~~ **DONE**; (B) `pm_split_ranges` (unlocks finer
+upcast/local splitting); (C) `get_simplifying_rewrite_patterns` floordiv/mod decomp +
+`pm_dtype_decomps` (needed for int-index-heavy + non-native-float kernels). Each is currently
+a no-op on the fp32 corpus, so no gate regressed; port each with a targeted differential kernel.
+Also still empty/partial: `pm_load_collapse` (#3), `pm_number_params` (#29), images (#16, descoped),
+`multi_pm` (#1, descoped).
 
 
 ### M2 deferred (finish alongside M5/M6 consumers)
