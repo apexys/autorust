@@ -99,6 +99,19 @@ fn buffer_copy_into_same_and_cross_device() {
     assert_eq!(buffer_bytes(&dst), vec![5u8, 6, 7, 8], "cross-device copy");
 }
 
+/// Offset views work on the host backend (`_offset` slices the host window), so
+/// a copy between offset views is a window-to-window copy. The CL backend has no
+/// `_offset` and panics instead — see `tests/cl_offset.rs`.
+#[test]
+fn buffer_offset_view_copy_works_on_host() {
+    let base = Buffer::new_base("INTERP", 2, autorust::dtype::FLOAT32); // 8 bytes
+    buffer_copyin(&base, &[1u8, 2, 3, 4, 5, 6, 7, 8]);
+    let src = base.view(1, autorust::dtype::FLOAT32, 4); // window [4,8) = [5,6,7,8]
+    let dst = Buffer::new_base("INTERP", 1, autorust::dtype::FLOAT32);
+    buffer_copy_into(&dst, &src);
+    assert_eq!(buffer_bytes(&dst), vec![5u8, 6, 7, 8]);
+}
+
 /// 9.2 residual — the staged `initial_data` bytes and the attached autograd
 /// `grad` live on the graph node, so both are freed with the tensor's subgraph
 /// instead of leaking in a ctx-wide side table.

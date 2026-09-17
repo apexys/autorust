@@ -137,10 +137,12 @@ fn floormod_to_mod(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     ctx.add(r, w)
 }
 
-/// `get_simplifying_rewrite_patterns` (decomp/op.py:76) for the interp/renderer
-/// op set: `SHR`/`AND` present, `THREEFRY`/`MAX` absent (MAX is supported so its
-/// rewrite is omitted).
-pub fn get_simplifying_rewrite_patterns() -> PatternMatcher {
+/// `get_simplifying_rewrite_patterns` (decomp/op.py:76) for this port's renderer
+/// op sets. `SHR`/`AND`/`CMPLT` are always present; `THREEFRY` is absent from
+/// every ported renderer so it always decomposes. `MAX` is present only in the
+/// interpreter set (`python_alu`), so `supports_max` selects its rewrite
+/// (decomp/op.py:89: cstyle/PTX omit MAX from `code_for_op`).
+pub fn get_simplifying_rewrite_patterns(supports_max: bool) -> PatternMatcher {
     let mut rules: Vec<(UPat, RuleFn)> = vec![];
     // FLOORDIV by 2**y -> x >> y (arithmetic shift is floor division for any sign)
     rules.push((
@@ -187,10 +189,26 @@ pub fn get_simplifying_rewrite_patterns() -> PatternMatcher {
             Some(threefry2x32(ctx, x, key))
         }),
     ));
+    // MAX(a, b) -> (a < b).where(b, a) (decomp/op.py:89): only when the renderer
+    // does not support MAX (cstyle/PTX omit it; the interpreter's python_alu has it).
+    if !supports_max {
+        rules.push((
+            UPat::op_var(vec![Ops::Max]).named("m"),
+            r(|ctx, st, _| {
+                let m = sget(st, "m");
+                let a = ctx.srcs(&m)[0].clone();
+                let b = ctx.srcs(&m)[1].clone();
+                let cond = ctx.lt(a.clone(), b.clone());
+                Some(ctx.where_(cond, b, a))
+            }),
+        ));
+    }
     PatternMatcher::new(rules)
 }
 
 /// `pm_decomp` (codegen/__init__.py:365) = `symbolic_simple + get_simplifying_rewrite_patterns`.
-pub fn pm_decomp() -> PatternMatcher {
-    crate::uop::sym::symbolic_simple().add(&get_simplifying_rewrite_patterns())
+/// `supports_max` is the renderer's (`code_for_op` contains `Ops::MAX`); the
+/// interpreter has it, the C-style/OpenCL renderers do not.
+pub fn pm_decomp(supports_max: bool) -> PatternMatcher {
+    crate::uop::sym::symbolic_simple().add(&get_simplifying_rewrite_patterns(supports_max))
 }

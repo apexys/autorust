@@ -266,7 +266,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 | 18 | lower all index dtypes `symbolic_simple`+`pm_lower_index_dtype`+`indexing_simplify` | ✅ | weak lowering wired; `_lower_weak_ops` must exclude COMPARISON |
 | 19 | final symbolic `symbolic` | ✅ | |
 | 20 | cast float alu `pm_cast_float_alu` | ✅ | |
-| 21 | early decompositions `symbolic_simple`+`get_simplifying_rewrite_patterns` | ✅ | floordiv/floormod→idiv/mod + pow2 shr/and + threefry (`decomp.rs`) |
+| 21 | early decompositions `symbolic_simple`+`get_simplifying_rewrite_patterns` | ✅ | floordiv/floormod→idiv/mod + pow2 shr/and + threefry + MAX→CMPLT/WHERE (`decomp.rs`; MAX gated on the renderer's `code_for_op`) |
 | 22 | decomp dtypes `pm_dtype_decomps`+`pm_commit_weak` | ✅ | long-as-2xint32 + fp8/bf16/fp16 float emulation (`decomp_dtype.rs`) |
 | 23 | late decompositions `pm_decomp` | ⬜ | has `symbolic_simple`+`get_simplifying_rewrite_patterns`; still missing `get_late_rewrite_patterns`/`get_transcendental_patterns` |
 | 24 | move gates from index `pm_move_gates_from_index` | ✅ | `gater.rs` (4 non-image rules) |
@@ -487,6 +487,13 @@ those nodes).
   tinygrad's default here is `NV` (its `ops_nv` backend opens). The harnesses
   (`test_tensor_diff`/`test_schedule_diff`/`test_codegen_diff`) pin the oracle's
   `DEFAULT_DEVICE` to tinygrad's `Device.DEFAULT` so both sides use the same label.
+- **MAX is renderer-gated**: `python_alu` has it, cstyle/PTX/OpenCL do not, so
+  `pm_decomp(supports_max)` rewrites `MAX(a,b) → (a<b).where(b,a)` only for the C-style
+  renderers (decomp/op.py:89). This unblocks `relu` on CL; the next CL blocker is the local
+  buffer declaration in the OpenCL renderer (`__local float* buf[N]` is emitted as an array of
+  pointers). `tests/cl_offset.rs` pins the other CL gap: `CLAllocator` has no `_offset`, so an
+  offset view (`SHRINK`/`BITCAST` reaching `buffer_of`) panics — matching tinygrad, which
+  carries `Buffer.offset` in the kernel arg instead.
 
 ### 8.10 In-place parameter updates: `Tensor::assign` (DONE)
 tinygrad's optimizers assign the update into the parameter's existing buffer

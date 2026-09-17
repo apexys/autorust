@@ -57,8 +57,11 @@ fn stages() -> Vec<Stage> {
     ]
 }
 
-/// The stages after apply_opts.
-fn post_stages() -> Vec<Stage> {
+/// The stages after apply_opts. `ren` selects the decomposition op set (e.g.
+/// the interpreter supports MAX, the C-style/OpenCL renderers do not).
+fn post_stages(ren: &Renderer) -> Vec<Stage> {
+    // `supported_ops = tuple(ren.code_for_op.keys())` (codegen/__init__.py:364).
+    let decomp = crate::codegen::decomp::pm_decomp(ren.code_for_op.contains(&crate::uop::Ops::Max));
     vec![
         Stage { name: "postopt symbolic", pm: sym().add(&pm_move_where_on_load()).add(&pm_flatten_range()).add(&pm_reduce_unparented()), bottom_up: false },
         Stage { name: "expander", pm: expander_pm(), bottom_up: false },
@@ -73,9 +76,9 @@ fn post_stages() -> Vec<Stage> {
         Stage { name: "lower all index dtypes", pm: symbolic_simple().add(&crate::uop::weak::pm_lower_index_dtype()).add(crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
         Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(symbolic()), bottom_up: false },
         Stage { name: "cast float alu operands", pm: pm_cast_float_alu(), bottom_up: false },
-        Stage { name: "early decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
+        Stage { name: "early decompositions", pm: decomp.clone(), bottom_up: false },
         Stage { name: "decomp dtypes", pm: crate::codegen::decomp_dtype::pm_dtype_decomps().add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
-        Stage { name: "late decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
+        Stage { name: "late decompositions", pm: decomp, bottom_up: false },
         Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },
         Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&pm_remove_invalid()), bottom_up: false },
         Stage { name: "casted consts", pm: pm_casted_consts(), bottom_up: false,  },
@@ -838,7 +841,7 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         eprintln!("=== after stage {} (apply_opts) ===", i);
         eprintln!("{}", dump_ast(ctx, cur.clone()));
     }
-    for st in post_stages() {
+    for st in post_stages(ren) {
         if i + 1 > limit {
             return cur;
         }
@@ -908,7 +911,8 @@ pub fn pm_inventory() -> Vec<(&'static str, Vec<String>)> {
     add!("pm_add_gpudims", crate::codegen::gpudims::pm_add_gpudims());
     add!("indexing_simplify", crate::codegen::coalesce::indexing_simplify());
     add!("pm_simplify_add_image", pm_simplify_add_image());
-    add!("pm_decomp", crate::codegen::decomp::pm_decomp());
+    // the bridge differentials use the interpreter op set (python_alu contains MAX)
+    add!("pm_decomp", crate::codegen::decomp::pm_decomp(true));
     add!("pm_dtype_decomps", crate::codegen::decomp_dtype::pm_dtype_decomps());
     add!("pm_move_gates_from_index", crate::codegen::gater::pm_move_gates_from_index());
     add!("pm_cast_float_alu", pm_cast_float_alu());
