@@ -214,6 +214,88 @@ pub fn range_gates(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     crate::uop::upat::simplify(ctx, ret)
 }
 
+/// `mark_range_mod` (simplify.py:62).
+fn mark_range_mod(ctx: &UOpCtx, r: UopId, c: UopId, g: &mut HashMap<UopId, UopId>) {
+    if g.contains_key(&r) {
+        return;
+    }
+    // ranges that aren't looped over can't be split
+    let at = AxisType::range_axis_type(ctx, r);
+    if at == AxisType::Warp || at == AxisType::Device {
+        return;
+    }
+    let s0 = ctx.srcs(r)[0];
+    if ctx.op_of(s0) != Ops::Const {
+        return;
+    }
+    let (n, cv) = match (ctx.val(s0), ctx.val(c)) {
+        (ConstVal::Int(n), ConstVal::Int(v)) => (n, v),
+        _ => return,
+    };
+    // `r.src[0].divides(c.val) is not None`
+    if cv != 0 && n % cv == 0 {
+        g.insert(r, c);
+    }
+}
+
+/// `pm_split_ranges` split fn (simplify.py:75): replace a marked range `k` with
+/// `range(len//v, axis, 0, ty)*v + range(v, axis, 1, ty)`.
+fn split_range(ctx: &mut UOpCtx, r: UopId, c: UopId) -> UopId {
+    let arg = ctx.arg_of(r).clone();
+    let Arg::Seq { tuple: true, items } = arg else { panic!("TGERR: bad range arg") };
+    let head = items[..items.len() - 1].to_vec();
+    let tail = items.last().unwrap().clone();
+    let n = ctx.srcs(r)[0];
+    let dt = ctx.dt_of(r);
+    let mk = |ctx: &mut UOpCtx, end: UopId, split: i64| {
+        let mut it = head.clone();
+        it.push(Arg::Int(split));
+        it.push(tail.clone());
+        ctx.uop(Ops::Range, Some(dt), vec![end], Arg::Seq { tuple: true, items: it })
+    };
+    let outer_end = ctx.div_floor(n, c);
+    let outer = mk(ctx, outer_end, 0);
+    let inner = mk(ctx, c, 1);
+    let oc = ctx.mul(outer, c);
+    ctx.add(oc, inner)
+}
+
+/// `do_substitute` (simplify.py:67) for `pm_split_ranges`.
+fn do_split_substitute(ctx: &mut UOpCtx, sink: UopId, g: &mut HashMap<UopId, UopId>) -> Option<UopId> {
+    if g.is_empty() {
+        return None;
+    }
+    let entries: Vec<(UopId, UopId)> = g.iter().map(|(&k, &v)| (k, v)).collect();
+    g.clear();
+    let mut map: HashMap<UopId, UopId> = HashMap::new();
+    for (r, c) in entries {
+        map.insert(r, split_range(ctx, r, c));
+    }
+    let ret = substitute(ctx, sink, map, false, false);
+    if ret == sink {
+        return None;
+    }
+    Some(crate::uop::upat::simplify(ctx, ret))
+}
+
+/// `pm_split_ranges` (simplify.py:72) — split a range that is used modulo a
+/// constant whose multiple it is (`range % c` with `len % c == 0`).
+pub fn pm_split_ranges() -> PatternMatcher {
+    PatternMatcher::new(vec![
+        (
+            UPat::ops1(Ops::Range).named("r").mod_(UPat::cvar(Some("c"), None, None)),
+            crate::uop::upat::r_dict(|g, ctx, st| {
+                mark_range_mod(ctx, sget(st, "r"), sget(st, "c"), g);
+                None
+            }),
+        ),
+        (
+            UPat::ops1(Ops::Sink).named("x"),
+            crate::uop::upat::r_dict(|g, ctx, st| do_split_substitute(ctx, sget(st, "x"), g)),
+        ),
+    ])
+}
+
 /// `reduce_unparented` (simplify.py:118).
 pub fn reduce_unparented(ctx: &mut UOpCtx, red: UopId) -> Option<UopId> {
     let (op, dt, srcs, arg, _tag) = ctx.snapshot(red);
@@ -812,7 +894,9 @@ pub fn merge_reduce_ends(ctx: &mut UOpCtx, sink: UopId) -> Option<UopId> {
                     .map(|(j, &rr)| {
                         let (_op, dt, srcs, arg, _tag) = ctx.snapshot(rr);
                         let Arg::Seq { tuple: true, items } = &arg else { panic!("TGERR: bad range") };
-                        let items2 = vec![Arg::Int(next_axis + j as i64), items[1].clone()];
+                        // `rr.replace(arg=(next_axis + j, *rr.arg[1:]))`
+                        let mut items2 = vec![Arg::Int(next_axis + j as i64)];
+                        items2.extend(items[1..].iter().cloned());
                         ctx.uop(Ops::Range, Some(dt), srcs.to_vec(), Arg::Seq { tuple: true, items: items2 })
                     })
                     .collect();

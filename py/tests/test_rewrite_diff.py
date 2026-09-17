@@ -188,6 +188,31 @@ def rand_index_graph(rng):
     raise AssertionError("index generator failed 20x")
 
 
+def rand_split_graph(rng):
+    """Graphs exercising `pm_split_ranges` (a range used modulo a divisor of its length)."""
+    for _ in range(20):
+        try:
+            n = rng.choice([4, 6, 8, 9, 12, 16])
+            c = rng.choice([d for d in range(2, n + 1) if n % d == 0])
+            r = UOp.range(n, rng.randint(0, 3))
+            parts = [r % uconst(c)]
+            if rng.random() < 0.6:
+                parts.append(r)
+            if rng.random() < 0.5:
+                parts.append(uconst(rng.randint(-5, 5)))
+            if rng.random() < 0.4:
+                parts.append(Variable("w", -3, 5))
+            expr = parts[0]
+            for p in parts[1:]:
+                expr = expr + p
+            if rng.random() < 0.4:
+                expr = expr * uconst(rng.choice([2, 3]))
+            return UOp.sink(expr)
+        except Exception:
+            continue
+    raise AssertionError("split generator failed 20x")
+
+
 class TestRewriteDifferential(unittest.TestCase):
     ORACLE = None
 
@@ -197,13 +222,13 @@ class TestRewriteDifferential(unittest.TestCase):
             raise unittest.SkipTest("oracle_rewrite not built")
         cls.ORACLE = Oracle()
 
-    def _diff(self, pm_name, pm_py, graphs):
+    def _diff(self, pm_name, pm_py, graphs, ctx=None):
         n_ok, n_skip, n_fail = 0, 0, 0
         for gi, g in enumerate(graphs):
             py_err = None
             py_out = None
             try:
-                py_out = graph_rewrite(g, pm_py)
+                py_out = graph_rewrite(g, pm_py, ctx=ctx)
             except Exception as e:
                 py_err = f"{type(e).__name__}: {e}"
             rust_err = None
@@ -264,6 +289,12 @@ class TestRewriteDifferential(unittest.TestCase):
         rng = random.Random(48)
         graphs = [rand_index_graph(rng) for _ in range(300)]
         self._diff("pm_reduce_load_collapse", pm_reduce_load_collapse, graphs)
+
+    def test_pm_split_ranges(self):
+        from tinygrad.codegen.simplify import pm_split_ranges
+        rng = random.Random(49)
+        graphs = [rand_split_graph(rng) for _ in range(300)]
+        self._diff("pm_split_ranges", pm_split_ranges, graphs, ctx={})
 
 
 if __name__ == "__main__":

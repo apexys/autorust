@@ -58,10 +58,11 @@ impl AxisType {
         }
     }
 
-    /// RANGE arg tuple item at position 1.
+    /// RANGE arg axis type: the last tuple item (`arg[-1]` in python; a split
+    /// range `pm_split_ranges` inserts an extra field before it).
     pub fn range_axis_type(ctx: &UOpCtx, r: UopId) -> AxisType {
         match ctx.arg_of(r) {
-            Arg::Seq { tuple: true, items } => AxisType::from_arg(&items[1]),
+            Arg::Seq { tuple: true, items } => AxisType::from_arg(items.last().expect("TGERR: empty RANGE arg")),
             other => panic!("TGERR: bad RANGE arg {other:?}"),
         }
     }

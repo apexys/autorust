@@ -74,6 +74,7 @@ def tg_inventory():
         ("pm_number_params", C.pm_number_params), ("pm_implicit_barriers", C.pm_implicit_barriers),
         ("pm_split_ends", LN.pm_split_ends), ("pm_move_where_on_load", SY.pm_move_where_on_load),
         ("pm_flatten_range", SI.pm_flatten_range), ("pm_reduce_unparented", SI.pm_reduce_unparented),
+        ("pm_split_ranges", SI.pm_split_ranges),
         ("pm_reduce_load_collapse", SI.pm_reduce_load_collapse), ("pm_load_collapse", SI.pm_load_collapse),
         ("pm_mops", RF.pm_mops),
     ]

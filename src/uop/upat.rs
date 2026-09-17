@@ -673,6 +673,8 @@ pub enum CtxVal {
     Al(std::rc::Rc<std::cell::RefCell<crate::tensor::callify::AllocCtx>>),
     /// (cache, args) for pm_post_sched_cache.
     Ca(std::rc::Rc<std::cell::RefCell<crate::schedule::sched::CallCtx>>),
+    /// Mutable mark dict context (e.g. `pm_split_ranges`).
+    Dict(std::rc::Rc<std::cell::RefCell<HashMap<UopId, UopId>>>),
 }
 
 /// `LocalAddBufferContext` (rangeify.py:469).
@@ -767,6 +769,17 @@ where
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Dev(d) => f(d, ctx, st),
         _ => panic!("TGERR: rule requires device ctx"),
+    })
+}
+
+/// rule helper: closure over (mutable mark dict, UOpCtx, store)
+pub fn r_dict<F>(f: F) -> RuleFn
+where
+    F: Fn(&mut HashMap<UopId, UopId>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::Dict(d) => f(&mut d.borrow_mut(), ctx, st),
+        _ => panic!("TGERR: rule requires dict ctx"),
     })
 }
 

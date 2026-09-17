@@ -573,7 +573,7 @@ rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on co
 | 1 | `multi_pm` | ❌ | in-kernel UNSHARD resolve; multi-device descoped |
 | 2 | early movement ops `pm_mops`+`mop_cleanup` | ✅ | |
 | 3 | load collapse `pm_load_collapse` | ✅ | indexing-by-tensor; `pm_load_collapse`/`pm_reduce_load_collapse` + `test_rewrite_diff.py` differential |
-| 4 | split ranges `pm_split_ranges`+`pm_flatten_range` | ❌ | **TODO**: split ranges for upcast/local; `optimize`-gated |
+| 4 | split ranges `pm_split_ranges`+`pm_flatten_range` | ✅ | `mark_range_mod` + split substitute (dict ctx); `test_rewrite_diff.py` differential |
 | 5 | initial symbolic `sym`+`pm_flatten_range` | ✅ | |
 | 6 | simplify ranges `pm_flatten_range`+`pm_simplify_ranges` | ✅ | ported (merge_adjacent + range_gates) |
 | — | `apply_opts` | ✅ | between the two stage lists |
@@ -602,11 +602,11 @@ rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on co
 | 29 | number params `pm_number_params` | ⬜ | **TODO**: param renumbering (corpus params already distinct) |
 
 Highest-value remaining gaps, ordered: (A) ~~`pm_add_local_buffers`+`pm_implicit_barriers`+
-`pm_add_control_flow` (the local-memory triad)~~ **DONE**; (B) `pm_split_ranges` (unlocks finer
-upcast/local splitting); (C) `get_simplifying_rewrite_patterns` floordiv/mod decomp +
+`pm_add_control_flow` (the local-memory triad)~~ **DONE**; (B) ~~`pm_split_ranges`~~ **DONE**;
+(C) `get_simplifying_rewrite_patterns` floordiv/mod decomp +
 `pm_dtype_decomps` (needed for int-index-heavy + non-native-float kernels). Each is currently
 a no-op on the fp32 corpus, so no gate regressed; port each with a targeted differential kernel.
-Also still empty/partial: `pm_split_ranges` (#4), `pm_number_params` (#29), images (#16, descoped),
+Also still empty/partial: `pm_number_params` (#29), images (#16, descoped),
 `multi_pm` (#1, descoped).
 
 

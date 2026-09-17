@@ -249,7 +249,8 @@ impl<'a> Scheduler<'a> {
                 let (op, dt, srcs, arg, tag) = ctx.snapshot(r);
                 let Arg::Seq { tuple: true, items } = &arg else { panic!("TGERR: bad range arg") };
                 let mut new_items = items.clone();
-                new_items[1] = Arg::Enum(AxisType::Global.to_enum_val());
+                // `x.arg[0:-1]+(AxisType.GLOBAL,)` — replace the last (axis type) item
+                *new_items.last_mut().unwrap() = Arg::Enum(AxisType::Global.to_enum_val());
                 let nr = ctx.uop_tag(op, Some(dt), srcs, Arg::Seq { tuple: true, items: new_items }, tag);
                 map.insert(r, nr);
             }
