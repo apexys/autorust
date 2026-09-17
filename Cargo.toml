@@ -11,6 +11,9 @@ name = "ocl_smoke"
 required-features = ["backend_cl"]
 
 [features]
+default = ["capi"]
+# C ABI loaded by the Python ctypes bridge (py/bridge.py).
+capi = []
 backend_cl = ["dep:opencl3"]
 
 [dependencies]

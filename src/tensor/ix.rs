@@ -4,6 +4,11 @@
 //! `s!` macro (ndarray-style) accepts `..`, `a..`, `..b`, `a..b` with an optional
 //! `;step`, plain int indices, and the Python specials `NewAxis` (None) and
 //! `Ellipsis` (`...` also works).
+//!
+//! `s_parse!`/`p_parse!` fill the accumulator with one `push` per element, which
+//! trips `vec_init_then_push` (the count isn't a literal); allow it here where
+//! the macro bodies live.
+#![allow(clippy::vec_init_then_push)]
 
 /// One element of an index expression — Python's `int | slice | None | Ellipsis`.
 /// (Tensor indices — advanced indexing — are added when that lands.)
