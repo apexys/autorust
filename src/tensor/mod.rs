@@ -129,7 +129,7 @@ impl Tensor {
 
     /// `Tensor.realize`: trigger the computation needed to materialize this tensor
     /// and return `&self`. Buffers are not persisted across calls in this revision
-    /// (see CURRENT_STATE.md open question #1), so a later read recomputes.
+    /// (see CURRENT_STATE.md §9.1), so a later read recomputes.
     pub fn realize(&self, ctx: &mut UOpCtx) -> &Tensor {
         let _ = self.to_bytes(ctx);
         self

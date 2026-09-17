@@ -134,7 +134,7 @@ macro: `let i = ix_of_dim; t.getitem(&[Ix::All, Ix::Index(i)])`.
 
 Advanced indexing (`t[Tensor([0,2]), :]`) is **not implemented yet** — `Ix`
 will gain a tensor variant when it lands (see the M3 deferred list in
-`PLAN.md`). Same for `__setitem__` (assign/store machinery, M4+).
+`CURRENT_STATE.md`). Same for `__setitem__` (assign/store machinery, M4+).
 
 ## 3. Deliberate differences from Python
 

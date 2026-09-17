@@ -4,7 +4,7 @@
 //! program SINK the renderer/interpreter consumes. This file implements the
 //! first block of stages; the remaining python stages (postrange opts,
 //! expander, reduce-local accs, gpudims, devectorize, decomps, control flow)
-//! are listed in PLAN.md §M5 and append to `stages()` as they land.
+//! are listed in CURRENT_STATE.md §5 and append to `stages()` as they land.
 //!
 //! Differential loop: `py/dump_codegen_stages.py` emits per-stage UOp key
 //! multisets from python; `TG_M5_STAGES` truncates this pipeline so the test

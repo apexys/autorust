@@ -129,9 +129,10 @@ impl Conv2d {
 
     /// Forward pass: `x.conv2d(self.weight, self.bias, ...)`.
     /// Input: (batch, channels, height, width) or (channels, height, width).
-    /// NOTE: Simplified implementation — full conv2d logic is complex and TODO'd in NNImpl.md.
+    /// NOTE: Simplified implementation — full conv2d logic is TODO'd in
+    /// CURRENT_STATE.md §9.3.
     pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        // TODO: Implement full conv2d logic (see NNImpl.md)
+        // TODO: Implement full conv2d logic (see CURRENT_STATE.md §9.3)
         // For now, return a zero tensor with the expected output shape
         let w_shape = self.weight.clone().shape(ctx);
         let _x_shape = x.shape(ctx);

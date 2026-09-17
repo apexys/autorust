@@ -4,7 +4,7 @@ pipeline vs python's full_rewrite_to_sink.
 Compares the Rust pipeline output (via the bridge) against python's
 "postopt symbolic" stage keys for corpus kernel ASTs (the pipeline covers
 early movement ops .. apply_opts .. postopt symbolic). Later python stages
-append as the Rust pipeline grows (see PLAN.md §M5).
+append as the Rust pipeline grows (see CURRENT_STATE.md §5).
 """
 import sys, json, itertools, subprocess, unittest
 sys.path.insert(0, "py"); sys.path.insert(0, "py/tests"); sys.path.insert(0, "../tinygrad")
