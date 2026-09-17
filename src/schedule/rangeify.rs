@@ -1486,7 +1486,7 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         .unwrap_or_else(|e| panic!("TGERR: convert copy to store: {e}"));
 
     // convert movement ops to ranges
-    let tsink = super::indexing::run_rangeify(ctx, tsink, false);
+    let tsink = super::indexing::run_rangeify(ctx, tsink, std::env::var("TG_DEBUG_RANGEIFY").is_ok());
 
     // cleanups for speed and runability
     let pm = symbolic()

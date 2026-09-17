@@ -43,6 +43,19 @@ def run_oracle(prog: list[dict], planned: bool = False) -> UOp | None:
     return json_to_uop(json.dumps(json.loads(p.stdout)["graph"]))[0]
 
 
+def run_oracle_last(prog: list[dict]) -> UOp | None:
+    """Schedule only the final tensor (what `Tensor.realize` does), so intermediate
+    graph nodes can be fused/materialized by the scheduler."""
+    env = dict(**{k: v for k, v in __import__("os").environ.items()})
+    env["DEFAULT_DEVICE"] = Device.DEFAULT
+    p = subprocess.run(["./target/debug/oracle_tensor"], input=json.dumps({"prog": prog, "mode": "schedule_last"}),
+                       capture_output=True, text=True, env=env)
+    if p.returncode != 0:
+        print(f"  ORACLE rc={p.returncode} stderr={p.stderr!r:.400} stdout={p.stdout!r:.200}")
+        return None
+    return json_to_uop(json.dumps(json.loads(p.stdout)["graph"]))[0]
+
+
 def py_schedule(tensors: list[Tensor]) -> UOp:
     big_sink = UOp.sink(*[t.uop for t in tensors])
     call, _ = transform_to_call(big_sink)
@@ -101,6 +114,24 @@ class TestScheduleDiff(unittest.TestCase):
             pb, rb = kernel_bodies(py_plan), kernel_bodies(rust_plan)
             self.assertEqual(len(pb), len(rb), f"kernel count {len(pb)} != {len(rb)}")
             self.assertEqual(collections.Counter(pb), collections.Counter(rb), "planned kernel AST keys differ")
+
+    def schedule_last_key_equality(self, name: str, prog: list[dict]):
+        """Realize only the last tensor (as `Tensor.realize` does) and compare the
+        resulting schedules. The all-outputs schedule can hide fusions of internal
+        nodes, e.g. a reduce that feeds a broadcast then another reduce."""
+        with self.subTest(name=name + " last"):
+            UOp.unique_num = itertools.count(0)
+            py_tensors = py_build(prog)
+            py_lin = py_schedule([py_tensors[-1]])
+            rust_lin = run_oracle_last(prog)
+            if rust_lin is None:
+                self.fail("oracle failed")
+            pb, rb = kernel_bodies(py_lin), kernel_bodies(rust_lin)
+            if len(pb) != len(rb) or collections.Counter(pb) != collections.Counter(rb):
+                print(f"  PY {len(pb)} kernels: {[b.hex()[:12] for b in pb]}")
+                print(f"  RS {len(rb)} kernels: {[b.hex()[:12] for b in rb]}")
+            self.assertEqual(len(pb), len(rb), f"kernel count {len(pb)} != {len(rb)}")
+            self.assertEqual(collections.Counter(pb), collections.Counter(rb), "last kernel AST keys differ")
 
 
 def py_build(prog: list[dict]) -> list[Tensor]:
@@ -184,6 +215,21 @@ class TestSchedule(TestScheduleDiff):
             {"op": "mulc", "x": 1, "val": 2.0},
             {"op": "sum", "x": 2, "axis": [1], "keepdim": False},
         ])
+
+    def test_reduce_broadcast_reduce(self):
+        prog = [
+            {"op": "from_slice", "data": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "kind": "f32", "dtype": None},
+            {"op": "reshape", "x": 0, "shape": [2, 1, 3]},
+            {"op": "from_slice", "data": [1.0, 0.5, -1.0, 2.0, 1.0, 0.5, -0.5, 3.0, 1.5, 0.25, -2.0, 1.0], "kind": "f32", "dtype": None},
+            {"op": "reshape", "x": 2, "shape": [1, 4, 3]},
+            {"op": "mul", "x": 1, "y": 3},
+            {"op": "sum", "x": 4, "axis": [2], "keepdim": False},
+            {"op": "reshape", "x": 5, "shape": [2, 4, 1]},
+            {"op": "mul", "x": 4, "y": 6},
+            {"op": "sum", "x": 7, "axis": [1], "keepdim": False},
+        ]
+        self.schedule_key_equality("reduce broadcast reduce", prog)
+        self.schedule_last_key_equality("reduce broadcast reduce", prog)
 
     def test_contiguous_realize(self):
         self.schedule_key_equality("contiguous realize", [

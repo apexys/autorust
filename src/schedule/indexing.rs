@@ -694,9 +694,15 @@ fn maybe_realize_axes(
         if ra.contains(&(i as i64)) {
             continue;
         }
-        // PCONTIG=0: always check that r's ranges precede all ending ranges
+        // `if not (PCONTIG > 1) or any(rr.arg > e.arg ...)` (indexing.py:274).
+        // PCONTIG defaults to 0, so the `not (PCONTIG > 1)` arm is **always true**:
+        // with ending ranges present, *every* axis is realized. The per-axis
+        // comparison is dead under the default context.
+        let pcontig_gt_1 = false;
         let rranges = ctx.ranges(&r.clone()).to_vec();
-        if rranges.iter().any(|rr| er.iter().any(|e| AxisType::range_axis_id(ctx, rr.clone()) > AxisType::range_axis_id(ctx, e.clone()))) {
+        if !pcontig_gt_1
+            || rranges.iter().any(|rr| er.iter().any(|e| AxisType::range_axis_id(ctx, rr.clone()) > AxisType::range_axis_id(ctx, e.clone())))
+        {
             ra.push(i as i64);
         }
     }

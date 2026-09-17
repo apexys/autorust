@@ -231,8 +231,8 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   scalar, unary/ternary ALU, store-at-dest-dtype, LOCAL-window shrink shape, cstyle
   `code_for_op` completion. ✅
 - M8.2 open gaps: (a) weak-const commit / `pm_lower_weak`; (b) non-native-float decomp
-  (done in M5, superceded); (c) arange realize — FIXED; (c') reduce-over-reduce — mostly
-  fixed (`red_sum_2d_all` remains); (d) sub-dword vectorized coalescing bitcasts;
+  (done in M5, superceded); (c) arange realize — FIXED; (c') reduce-over-reduce — FIXED
+  (rangeify `PCONTIG` realize arm; see §8.11); (d) sub-dword vectorized coalescing bitcasts;
   (e) XOR training gate — now ✅ (see §8.7).
 
 ---
@@ -533,6 +533,26 @@ graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights thro
 - Caveat: `assign` mutates a param buffer in place, so a *derived* uop realized in an earlier
   step must not be reused (training loops build fresh derived nodes each step). The faithful
   STORE+AFTER buffer-identity/view-assign path (tinygrad tensor.py:455-463) is not ported.
+
+### 8.11 Rangeify realize: `PCONTIG` arm in `maybe_realize_axes` (DONE)
+`schedule/indexing.py:274` gates per-axis realization on
+`if not (PCONTIG > 1) or any(rr.arg > e.arg ...)`. `PCONTIG` defaults to **0**
+(`helpers.py:274`), so `not (PCONTIG > 1)` is **always true**: whenever a node has ending
+ranges, **all** its axes are realized. The port had dropped the `PCONTIG` arm and evaluated
+only the per-axis comparison, so an intermediate `REDUCE` with ending ranges was realized on
+one axis instead of all. Concretely, for `r = a*b; s = r.sum(2); y = r * s.reshape(2,4,1);
+o = y.sum(1)` the scheduler fused both reductions into one 5-axis kernel instead of
+materializing `s` as its own kernel; the fused kernel's local reduction produced wrong values
+(tinygrad materializes the intermediate, so it stayed correct). This is what made first-layer
+gradients wrong on every backend (`a.dot(w.T)` is exactly this reduce→broadcast→reduce shape).
+- Fix: `src/schedule/indexing.rs` `maybe_realize_axes` — restore the `PCONTIG` arm (default
+  context realizes every axis).
+- New gates: `tests/reduce_broadcast.rs` (forward + `p.grad` vs tinygrad),
+  `test_schedule_diff.py::test_reduce_broadcast_reduce` now also compares the **single-output**
+  schedule via the new `oracle_tensor` mode `schedule_last` (what `Tensor.realize` actually
+  schedules; the all-outputs schedule can hide internal-node fusions). With the fix the CL and
+  INTERP XOR runs agree exactly (loss 0.030414 at 100 epochs, all 4 cases correct), and
+  `tests/nn_xor_relu.rs::xor_relu_converges` passes on CL.
 
 ---
 

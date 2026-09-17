@@ -167,9 +167,13 @@ fn main() {
             );
             return;
         }
-    if prog.mode.as_deref() == Some("schedule") {
+    if prog.mode.as_deref() == Some("schedule") || prog.mode.as_deref() == Some("schedule_last") {
         // full scheduler pipeline: sink all tensors, callify, schedule, resolve
-        let sink_srcs: Vec<autorust::uop::UopId> = tensors.iter().map(|t| t.uop.clone()).collect();
+        let sink_srcs: Vec<autorust::uop::UopId> = if prog.mode.as_deref() == Some("schedule_last") {
+            vec![tensors.last().expect("TGERR: empty program").uop.clone()]
+        } else {
+            tensors.iter().map(|t| t.uop.clone()).collect()
+        };
         let big_sink = autorust::tensor::sink(&mut ctx, sink_srcs);
         let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
         let (linear, planned, _held) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
