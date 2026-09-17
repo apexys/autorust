@@ -72,15 +72,24 @@ pub fn marg_args(ctx: &mut UOpCtx, x: UopId) -> Vec<Arg> {
     }
 }
 
+fn shape_arg_to_arg(v: ConstVal) -> Arg {
+    match v {
+        ConstVal::Int(i) => Arg::Int(if i >= i64::MIN as i128 && i <= i64::MAX as i128 { i as i64 } else { panic!("TGERR: shape const out of i64") }),
+        other => panic!("TGERR: bad shape src const {other:?}"),
+    }
+}
+
 fn shape_src_args(ctx: &mut UOpCtx, stack: UopId) -> Vec<Arg> {
     // the shape STACK srcs: each a CONST (int) — symbolic shapes panic (concrete corpus)
-    ctx.srcs(stack)
-        .iter()
-        .map(|&c| match ctx.val(c) {
-            ConstVal::Int(i) => Arg::Int(if i >= i64::MIN as i128 && i <= i64::MAX as i128 { i as i64 } else { panic!("TGERR: shape const out of i64") }),
-            other => panic!("TGERR: bad shape src const {other:?}"),
-        })
-        .collect()
+    // NOTE: `shape_arg` collapses a single-element shape STACK to the bare const, so a 1-D
+    // shape arrives here as a CONST (no srcs) rather than a STACK. tinygrad's `u.arg` is
+    // always a tuple (e.g. EXPAND arg `(2,)` has len 1), so a bare const must still report
+    // one shape dim — omitting it made `apply_movement_op(EXPAND)` drop 0 ranges instead of 1.
+    let srcs = ctx.srcs(stack).to_vec();
+    if srcs.is_empty() && ctx.op_of(stack) == Ops::Const {
+        return vec![shape_arg_to_arg(ctx.val(stack))];
+    }
+    srcs.iter().map(|&c| shape_arg_to_arg(ctx.val(c))).collect()
 }
 
 /// SVal shape list -> Arg list (for apply_movement_op RESHAPE).

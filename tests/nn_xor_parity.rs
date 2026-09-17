@@ -72,10 +72,18 @@ fn dot_probe() {
     let b = Tensor::from_slice(&mut ctx, &[0.4453694522380829f32], None, None);
     let wt = w.transpose(&mut ctx, 0, 1);
     let o = h.linear(&mut ctx, &wt, Some(&b));
-    println!("dot_probe {:?}", o.reshape(&mut ctx, &[4]).to_list::<f32>(&mut ctx));
+    let ov = o.reshape(&mut ctx, &[4]).to_list::<f32>(&mut ctx);
+    println!("dot_probe {ov:?}");
     let hv = h.reshape(&mut ctx, &[4, 2]).to_list::<f32>(&mut ctx);
     let h2 = Tensor::from_slice(&mut ctx, &hv, None, None).reshape(&mut ctx, &[4, 2]);
     let o2 = h2.linear(&mut ctx, &wt, Some(&b));
-    println!("dot_probe_copy {:?}", o2.reshape(&mut ctx, &[4]).to_list::<f32>(&mut ctx));
-    println!("expected [0.41180462, 0.41831934, 0.39708504, 0.40397506]");
+    let o2v = o2.reshape(&mut ctx, &[4]).to_list::<f32>(&mut ctx);
+    println!("dot_probe_copy {o2v:?}");
+
+    let expected = [0.41180462f32, 0.41831934, 0.39708504, 0.40397506];
+    println!("expected {expected:?}");
+    for (i, want) in expected.iter().enumerate() {
+        assert!((ov[i] - want).abs() < 1e-6, "dot_probe[{i}]: {} != {want}", ov[i]);
+        assert!((o2v[i] - want).abs() < 1e-6, "dot_probe_copy[{i}]: {} != {want}", o2v[i]);
+    }
 }
