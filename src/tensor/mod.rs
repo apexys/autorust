@@ -190,12 +190,13 @@ impl Tensor {
         assert_eq!(self.dtype(ctx), value.dtype(ctx), "TGERR: assign dtype mismatch");
         // Realize the value first: its graph reads the parameter's current bytes.
         let src = sess.realize_tensor(ctx, value.uop.clone());
-        let bytes = crate::engine::realize::buffer_bytes(&src);
         // Destination is this tensor's storage *by buffer identity* — the same
         // base the forward pass resolves through `buffer_of`, so the write is
         // visible to subsequent realizes.
         let dst = crate::runtime::buffer::buffer_of(ctx, &mut sess.buffers, self.uop.clone());
-        crate::engine::realize::buffer_copyin(&dst, &bytes);
+        // Same device: direct buffer-to-buffer copy (no host round-trip).
+        // Different devices: host round-trip inside `buffer_copy_into`.
+        crate::engine::realize::buffer_copy_into(&dst, &src);
         self.set_realized_buffer(dst);
     }
 

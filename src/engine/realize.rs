@@ -512,6 +512,25 @@ pub fn buffer_copyin(b: &crate::runtime::buffer::Buffer, data: &[u8]) {
     dev.copyin_to(&*o, data);
 }
 
+/// Copy `src`'s bytes into `dst`'s storage (the copy half of `Tensor.assign`).
+/// On the same device this is a **direct buffer-to-buffer copy** (OpenCL
+/// `clEnqueueCopyBuffer`; host memory copied window-to-window) — no host
+/// round-trip. Across devices it falls back to `buffer_bytes` + `buffer_copyin`
+/// (copyout on `src`'s device, copyin on `dst`'s), since the two opaques live on
+/// different allocators. `dst` and `src` must have the same byte length.
+pub fn buffer_copy_into(dst: &crate::runtime::buffer::Buffer, src: &crate::runtime::buffer::Buffer) {
+    use crate::runtime::device::canonicalize_device_name;
+    assert_eq!(dst.nbytes(), src.nbytes(), "TGERR: assign size mismatch");
+    if canonicalize_device_name(dst.device()) == canonicalize_device_name(src.device()) {
+        let dev = device(dst.device());
+        let d = dst.get_buf(&dev);
+        let s = src.get_buf(&dev);
+        dev.copy_into(&*d, &*s);
+    } else {
+        buffer_copyin(dst, &buffer_bytes(src));
+    }
+}
+
 /// Read a realized tensor's flat values (python `_buffer().as_memoryview()`).
 pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<f64> {
     buffer_values(&realize_tensor(ctx, tensor_uop, t, cache))

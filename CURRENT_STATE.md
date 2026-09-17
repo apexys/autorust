@@ -489,8 +489,11 @@ graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights thro
 `Vec<f32>` every step (what `nn_xor`/`mem_probe` used to do).
 - `Tensor::assign(ctx, sess, value)` realizes `value` and copies its
   bytes into this tensor's storage **by buffer identity** (`buffer_of(self.uop)` — the same
-  base the forward pass resolves), leaving `self.uop` unchanged. The copy half is
-  `realize::buffer_copyin` (device `_copyin`).
+  base the forward pass resolves), leaving `self.uop` unchanged. The copy is
+  `realize::buffer_copy_into`: on the **same device** a direct buffer-to-buffer copy
+  (`BackendAllocator::_copy_into` — OpenCL `clEnqueueCopyBuffer`; host backends copy the
+  windows directly, no host round-trip), and only **across devices** a host round-trip
+  (`buffer_bytes` + `buffer_copyin`).
 - `Tensor::to_param` / `nn::Linear::into_params`: random-init parameters are *expressions*
   (`uniform` = `rand*range + low`), which would be recomputed — discarding the update — on
   every realize. `to_param` realizes the init once and stages it on a buffer-backed leaf

@@ -1,8 +1,9 @@
 //! 9.1 — persistent realize state (`Session`): buffers + compiled-program cache
 //! are reused across realizes instead of rebuilt per `to_list`/`to_bytes`.
 
+use autorust::engine::realize::{buffer_bytes, buffer_copy_into, buffer_copyin};
 use autorust::engine::session::Session;
-use autorust::runtime::buffer::BufTable;
+use autorust::runtime::buffer::{BufTable, Buffer};
 use autorust::tensor::Tensor;
 use autorust::uop::ctx::UOpCtx;
 use autorust::uop::ops::Ops;
@@ -76,6 +77,26 @@ fn prog_cache_reuses_across_arenas() {
     assert_eq!(sess.cache.misses, 1, "identical ASTs across arenas must compile once");
     assert_eq!(sess.cache.hits, 2, "the 2nd and 3rd arena must hit the cache");
     assert_eq!(sess.cache.len(), 1);
+}
+
+/// `buffer_copy_into` copies correctly whether the two buffers are on the same
+/// device (direct device-to-device path) or on different devices (host
+/// round-trip fallback). The interp backend backs every device name here.
+#[test]
+fn buffer_copy_into_same_and_cross_device() {
+    let one = [1u8, 2, 3, 4];
+
+    let a = Buffer::new_base("CPU", 1, autorust::dtype::FLOAT32);
+    let b = Buffer::new_base("CPU", 1, autorust::dtype::FLOAT32);
+    buffer_copyin(&a, &one);
+    buffer_copy_into(&b, &a);
+    assert_eq!(buffer_bytes(&b), one, "same-device copy");
+
+    let src = Buffer::new_base("NV", 1, autorust::dtype::FLOAT32);
+    let dst = Buffer::new_base("CPU", 1, autorust::dtype::FLOAT32);
+    buffer_copyin(&src, &[5u8, 6, 7, 8]);
+    buffer_copy_into(&dst, &src);
+    assert_eq!(buffer_bytes(&dst), vec![5u8, 6, 7, 8], "cross-device copy");
 }
 
 /// 9.2 residual — the staged `initial_data` bytes and the attached autograd

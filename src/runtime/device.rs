@@ -27,6 +27,14 @@ pub trait BackendAllocator {
     fn _copyout(&self, dest: &mut [u8], src: &dyn OpaqueT);
     /// `Allocator._offset` — slice the window (memoryview semantics).
     fn _offset(&self, buf: &dyn OpaqueT, size: usize, offset: usize) -> Rc<dyn OpaqueT>;
+    /// Direct device-to-device copy `src` → `dest` (same device; python
+    /// `clEnqueueCopyBuffer`). The default falls back to a host round-trip
+    /// (`_copyout` + `_copyin`), so a backend need not implement it.
+    fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
+        let mut tmp = vec![0u8; src.size()];
+        self._copyout(&mut tmp, src);
+        self._copyin(dest, &tmp);
+    }
 }
 
 /// `PythonAllocator` / the interp allocator: plain host memory.
@@ -46,6 +54,14 @@ impl BackendAllocator for MemAllocator {
         let b = super::buffer::host_of(buf);
         assert!(offset + size <= b.size, "TGERR: offset out of range");
         Rc::new(super::buffer::HostOpaque { mem: b.mem.clone(), offset: b.offset + offset, size })
+    }
+    /// Host memory is already the "device" memory: copy the windows directly.
+    fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
+        let d = super::buffer::host_of(dest);
+        let s = super::buffer::host_of(src);
+        assert_eq!(d.size, s.size, "TGERR: copy size mismatch");
+        let bytes = s.mem.borrow()[s.offset..s.offset + s.size].to_vec();
+        d.mem.borrow_mut()[d.offset..d.offset + d.size].copy_from_slice(&bytes);
     }
 }
 
@@ -100,6 +116,9 @@ impl LruAllocator {
     }
     pub fn _offset(&self, buf: &dyn OpaqueT, size: usize, offset: usize) -> Rc<dyn OpaqueT> {
         self.inner._offset(buf, size, offset)
+    }
+    pub fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
+        self.inner._copy_into(dest, src)
     }
 }
 
@@ -220,6 +239,12 @@ impl Compiled {
     /// `_copyin`: write bytes into a buffer window.
     pub fn copyin_to(&self, o: &dyn OpaqueT, data: &[u8]) {
         self.allocator._copyin(o, data);
+    }
+
+    /// Direct device-to-device copy between two opaque windows on *this* device
+    /// (`clEnqueueCopyBuffer`; host backends copy the windows directly).
+    pub fn copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
+        self.allocator._copy_into(dest, src);
     }
 
     /// The opaque window for kernel args (`Buffer._buf` with `_offset` views).

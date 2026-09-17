@@ -125,6 +125,22 @@ impl BackendAllocator for ClAllocator {
         check(unsafe { self.inner.queue.enqueue_read_buffer(s, 1, 0, dest, &[]) }, "clEnqueueReadBuffer");
         self.inner.synchronize();
     }
+    fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
+        // Direct device-to-device copy (`clEnqueueCopyBuffer`); no host transfer.
+        // The enqueue API wants `&mut Buffer`; wrap both cl_mems in temporaries we
+        // leak so the owning ClOpaque stays the single release point.
+        assert_eq!(dest.size(), src.size(), "TGERR: copy size mismatch");
+        let mut dst_tmp: Buffer<u8> = Buffer::new(cl_of(dest).buf.get());
+        let src_tmp: Buffer<u8> = Buffer::new(cl_of(src).buf.get());
+        check(
+            unsafe { self.inner.queue.enqueue_copy_buffer(&src_tmp, &mut dst_tmp, 0, 0, src.size(), &[]) },
+            "clEnqueueCopyBuffer",
+        );
+        std::mem::forget(dst_tmp);
+        std::mem::forget(src_tmp);
+        // `_copyout` is blocking; keep the same visibility guarantee.
+        self.inner.synchronize();
+    }
     fn _offset(&self, _buf: &dyn OpaqueT, _size: usize, _offset: usize) -> Rc<dyn OpaqueT> {
         panic!("TGERR: need offset"); // python's CLAllocator has no _offset either
     }
