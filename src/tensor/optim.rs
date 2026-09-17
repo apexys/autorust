@@ -1,21 +1,23 @@
-//! `nn/optim.py` — optimizers. They read each parameter's gradient out of the
-//! `UOpCtx` side-table (written by [`Tensor::backward`]) and produce *new*
-//! parameter tensors. This is a pure-graph optimizer: like the rest of the port
-//! it never mutates a buffer in place, so `step` returns the updated weight
-//! handles which the caller carries into the next iteration.
+//! `nn/optim.py` — optimizers. They read each parameter's gradient off its
+//! graph node (written by [`Tensor::backward`]) and produce *new* parameter
+//! tensors. This is a pure-graph optimizer: like the rest of the port it never
+//! mutates a buffer in place, so `step` returns the updated weight handles which
+//! the caller carries into the next iteration.
 
 use crate::dtype::ConstVal;
 use crate::tensor::Tensor;
 use crate::uop::ctx::UOpCtx;
 
-/// Common surface for an optimizer step. `step` consumes the gradients currently
-/// sitting in `ctx.grads` for `params` and returns the updated tensors (in the
-/// same order). `zero_grad` wipes the side-table so the next `backward` starts
-/// from an empty accumulator (tinygrad `Optimizer.zero_grad`).
+/// Common surface for an optimizer step. `step` reads the gradients currently
+/// attached to `params` and returns the updated tensors (in the same order).
+/// `zero_grad` clears each parameter's attached gradient so the next `backward`
+/// starts from an empty accumulator (tinygrad `Optimizer.zero_grad`).
 pub trait Optim {
     fn step(&self, ctx: &mut UOpCtx, params: &[Tensor]) -> Vec<Tensor>;
-    fn zero_grad(&self, ctx: &mut UOpCtx) {
-        ctx.clear_grads();
+    fn zero_grad(&self, ctx: &UOpCtx, params: &[Tensor]) {
+        for p in params {
+            ctx.clear_grad(&p.uop);
+        }
     }
 }
 

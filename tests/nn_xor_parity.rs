@@ -46,7 +46,7 @@ fn xor_parity_tinygrad_seed42() {
         let params = vec![w1t, b1t, w2t, b2t];
         loss.backward(&mut ctx, &params, None);
         let np = sgd.step(&mut ctx, &params);
-        sgd.zero_grad(&mut ctx);
+        sgd.zero_grad(&ctx, &params);
 
         w1 = np[0].to_list::<f32>(&mut ctx);
         b1 = np[1].to_list::<f32>(&mut ctx);

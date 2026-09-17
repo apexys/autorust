@@ -188,7 +188,7 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
 
 ### M6 — native realize + device traits — DONE
 - `src/runtime/buffer.rs`: `Buffer` (base + byte-offset views, `get_buf` windows,
-  opaque-ctor path), `BufTable` = the engine `buffers` dict; `UOpCtx.initial_data` carries
+  opaque-ctor path), `BufTable` = the engine `buffers` dict; `Node.initial_data` carries
   `Tensor(data)`'s fake-realize bytes.
 - `src/runtime/device.rs`: `BackendAllocator` (`_alloc/_copyin/_copyout/_offset`) +
   `LruAllocator`, empty `Compiler`, `TinyElf`, `Prog` trait, `InterpProgram`, `Compiled`,
@@ -452,9 +452,11 @@ those nodes).
   epochs**, ~47s → ~22s. `tests/session.rs` (3 tests) pins it.
 - **`add_local_buffer` (DONE, `11ab94a`)** + `pm_add_local_buffers` wired into the
   `"add local buffers"` stage (receives a slot counter `CtxVal::Cnt`).
-- **Residual**: `UOpCtx.initial_data` is still keyed by `u32` and not pruned when a buffer
-  node dies (small: staged input bytes only). Move it onto the node or prune it when the
-  arena drops nodes.
+- **Per-node side tables (DONE)**: the staged `initial_data` bytes and the autograd `grad`
+  now live on the node (`Node::{initial_data,grad}`, interior-mutable), so both are freed
+  with the tensor's subgraph instead of leaking in ctx-wide `HashMap<u32, _>` tables.
+  `zero_grad` clears each param's node (`UOpCtx::clear_grad`); pinned by
+  `tests/session.rs::node_side_data_dies_with_the_node`.
 
 ### 8.9 Backends
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
@@ -473,7 +475,7 @@ by clones, reused on repeat reads); `BufTable` stores views as `Weak` and prunes
 live caller references at the start of each realize; `Session` bundles `BufTable` +
 `ProgCache` (+ `var_vals` + `realized` memo) and is reusable across steps. The
 content-keyed `ProgCache` makes compiled kernels survive a fresh `UOpCtx` per step.
-Residual: `UOpCtx.initial_data` is not yet pruned (small, staged input bytes only).
+Residual (DONE): staged bytes and grads now live on the node — see §8.8/§9.2.
 
 ### 9.2 `Tensor` / UOp management via `Rc` — DONE
 `UopId` is a strong handle (`Rc<Node>`); `Node.srcs` holds strong child handles; the
@@ -484,10 +486,10 @@ safe-point, no id reuse. The engine's `UopId` currency changed from a `Copy` ind
 `&`-borrow fixes, driven by compiler suggestions). `Tensor`'s buffer/drop semantics are the
 only behavioural change; the rewrite differentials (see §8.0) are unchanged.
 
-**Residual.** `UOpCtx.initial_data` (buffer id → staged bytes) and `grads` (tensor id →
-grad) are still `u32`-keyed side tables that grow with the arena rather than dying with
-their node; both are small and cleared/consumed in the training path, but should be moved
-onto the node (or pruned) for full parity with tinygrad's per-`UOp` side tables.
+**Residual — DONE.** The staged `initial_data` bytes and per-tensor autograd `grad` are now
+per-node (`Node::{initial_data,grad}`), so they die with the tensor's subgraph rather than
+growing ctx-wide `u32`-keyed maps. `Tensor`'s buffer/drop semantics remain the only
+behavioural change; the rewrite differentials (see §8.0) are unchanged.
 
 ### 9.3 Completing nn
 1. **`Conv2d::forward`** — port tinygrad `mixin/op.py` conv2d verbatim: `_pad_constant` →

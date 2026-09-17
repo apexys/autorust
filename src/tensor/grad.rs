@@ -370,7 +370,7 @@ impl Tensor {
     }
 
     /// `Tensor.backward(gradient)` (`tensor.py:657`): run `compute_gradient` and
-    /// write each target's gradient into [`UOpCtx::grads`] (accumulating).
+    /// attach each target's gradient to its graph node (accumulating).
     pub fn backward(&self, ctx: &mut UOpCtx, targets: &[Tensor], gradient: Option<Tensor>) {
         let gs = self.gradient(ctx, targets, gradient);
         for (t, g) in targets.iter().zip(gs) {

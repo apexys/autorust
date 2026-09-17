@@ -34,15 +34,6 @@ pub struct UOpCtx {
     pub g: Graph,
     /// IndexingContext-style range counter (used by new_range)
     pub range_idx: i64,
-    /// python `buffers` side table (the opaque-constructed slice): BUFFER uop
-    /// id -> initial bytes. Engine `buffer_of` consumes this at first access
-    /// (Tensor(data) -> Buffer(opaque=...)).
-    pub initial_data: std::collections::HashMap<u32, std::rc::Rc<std::cell::RefCell<Vec<u8>>>>,
-    /// autograd side table: tensor uop id -> its gradient handle, populated by
-    /// `compute_gradient`/`Tensor::backward`. Keyed by id (not `UopId`) so the
-    /// table does not pin the target tensor; the value is a strong handle so the
-    /// gradient subgraph stays alive while attached.
-    pub grads: std::collections::HashMap<u32, UopId>,
 }
 
 use std::rc::Rc;
@@ -55,7 +46,7 @@ impl Default for UOpCtx {
 
 impl UOpCtx {
     pub fn new() -> Self {
-        UOpCtx { g: Graph::new(), range_idx: 0, initial_data: std::collections::HashMap::new(), grads: std::collections::HashMap::new() }
+        UOpCtx { g: Graph::new(), range_idx: 0 }
     }
 
     /// No-op retained for the oracle/bridge API (property caches now live on
@@ -65,19 +56,20 @@ impl UOpCtx {
     /// No-op retained for the oracle/bridge API.
     pub fn grow_to(&mut self, _n: usize) {}
 
-    /// Attach (or overwrite) the autograd gradient for tensor uop `target`.
-    pub fn set_grad(&mut self, target: &UopId, grad: UopId) {
-        self.grads.insert(target.id(), grad);
+    /// Attach (or overwrite) the autograd gradient for tensor uop `target`
+    /// (stored on the node, so it is freed with the tensor's subgraph).
+    pub fn set_grad(&self, target: &UopId, grad: UopId) {
+        target.node.grad.replace(Some(grad));
     }
 
     /// Read the autograd gradient attached to tensor uop `target`, if any.
     pub fn grad(&self, target: &UopId) -> Option<UopId> {
-        self.grads.get(&target.id()).cloned()
+        target.node.grad.borrow().clone()
     }
 
-    /// Drop every attached gradient (e.g. before a fresh `backward`).
-    pub fn clear_grads(&mut self) {
-        self.grads.clear();
+    /// Drop the gradient attached to tensor uop `target` (tinygrad `Optimizer.zero_grad`).
+    pub fn clear_grad(&self, target: &UopId) {
+        target.node.grad.replace(None);
     }
 
     /// `UOp.const(bool)` in python's bool dtype.

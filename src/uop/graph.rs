@@ -53,8 +53,6 @@ pub type MinMax = (SVal, SVal);
 /// alive. Property caches are interior-mutable so they can be filled through a
 /// shared handle and are freed with the node.
 #[derive(Debug)]
-#[derive(Eq)]
-#[derive(PartialEq)]
 pub struct Node {
     pub id: u32,
     pub op: Ops,
@@ -66,7 +64,26 @@ pub struct Node {
     pub shape_c: RefCell<Option<Option<Rc<Shape>>>>,
     pub mm_c: RefCell<Option<Option<MinMax>>>,
     pub range_c: RefCell<Option<Option<Rc<Vec<UopId>>>>>,
+    /// `Tensor(data)` staged host bytes for a base BUFFER node (python
+    /// `Buffer(opaque=...)`). Lives with the node, so it is freed when the
+    /// buffer is, instead of leaking in a ctx-wide side table.
+    pub initial_data: RefCell<Option<Rc<RefCell<Vec<u8>>>>>,
+    /// Autograd gradient attached to this node (tinygrad `Tensor.grad`). Stored
+    /// on the node (interior-mutable) so it dies with the graph rather than
+    /// growing a ctx-wide map; the value is a strong handle so the gradient
+    /// subgraph stays alive while attached.
+    pub grad: RefCell<Option<UopId>>,
 }
+
+// Node identity is its process-unique id (two handles to the same node are the
+// same node). Implemented manually so the interior-mutable side tables are not
+// compared (and `grad` cannot recurse through itself).
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for Node {}
 
 /// A strong handle to a node. `Clone` bumps the reference count; the last drop
 /// frees the node (and any child it uniquely owns). Identity/order/hash are the
@@ -181,6 +198,8 @@ impl Graph {
             shape_c: RefCell::new(None),
             mm_c: RefCell::new(None),
             range_c: RefCell::new(None),
+            initial_data: RefCell::new(None),
+            grad: RefCell::new(None),
         });
         self.interner.insert(k, Rc::downgrade(&node));
         UopId { node }

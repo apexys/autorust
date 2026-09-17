@@ -43,7 +43,7 @@ fn single_ctx_training_is_memory_bounded() {
         let params = vec![w1t, b1t, w2t, b2t];
         loss.backward(&mut ctx, &params, None);
         let np = sgd.step(&mut ctx, &params);
-        sgd.zero_grad(&mut ctx);
+        sgd.zero_grad(&ctx, &params);
         w[0] = np[0].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
         w[1] = np[1].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
         w[2] = np[2].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);

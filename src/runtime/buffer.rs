@@ -4,11 +4,11 @@
 //! sharing it with a byte offset. `OpaqueT` is the backend-owned opaque
 //! handle (python's untyped `Any`): each backend defines its own concrete
 //! type and the core only sees `Rc<dyn OpaqueT>`. `HostOpaque` is the
-//! built-in byte storage. The `initial_data` side table on UOpCtx plays the
-//! role of python's `buffers` WeakKeyDictionary for opaquely-constructed
-//! buffers (Tensor(data) → `Buffer(opaque=...)`); initial bytes are staged
-//! in the base and copied in through the backend allocator on allocation,
-//! so Tensor(data) works on any device.
+//! built-in byte storage. Staged host bytes for opaquely-constructed buffers
+//! (Tensor(data) → `Buffer(opaque=...)`) live on the buffer's node
+//! (`Node.initial_data`, python's `buffers` WeakKeyDictionary analogue); they
+//! are staged in the base and copied in through the backend allocator on
+//! allocation, so Tensor(data) works on any device.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -103,7 +103,7 @@ impl BufferBase {
         assert!(!self.is_allocated(), "TGERR: can't allocate already allocated buffer");
         if let Some(bytes) = self.pending_copyin.borrow_mut().take() {
             assert_eq!(bytes.len(), o.size(), "TGERR: initial data size mismatch");
-            // host fast path keeps byte storage shared with ctx.initial_data
+            // host fast path keeps byte storage shared with Node.initial_data
             if let Some(h) = o.as_any().downcast_ref::<HostOpaque>() {
                 if h.offset == 0 && h.size == bytes.len() {
                     *h.mem.borrow_mut() = bytes;
@@ -254,7 +254,7 @@ impl BufTable {
 
 /// `UOp.buffer` (ops.py:922): resolve a (post-schedule) buffer-ish uop to its
 /// engine Buffer. Base BUFFER uops create the Buffer (picking up
-/// `ctx.initial_data` for opaque-constructed storage); movement/bitcast views
+/// `Node.initial_data` for opaque-constructed storage); movement/bitcast views
 /// resolve to `base.view(size, dtype, byte_offset)`.
 pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
     match ctx.op_of(&u) {
@@ -299,7 +299,7 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
             });
             // Tensor(data) path: initial bytes staged, copied in on allocation
             // (through the backend allocator, so any device works).
-            if let Some(bytes) = ctx.initial_data.get(&u.id()) {
+            if let Some(bytes) = u.node.initial_data.borrow().as_ref() {
                 let nb = size * dt.itemsize();
                 assert!(bytes.borrow().len() == nb, "TGERR: initial data size mismatch");
                 *base.pending_copyin.borrow_mut() = Some(bytes.borrow().clone());

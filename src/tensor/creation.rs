@@ -21,7 +21,7 @@ fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
     while ctx.op_of(&u) != Ops::Buffer {
         u = ctx.srcs(&u)[0].clone();
     }
-    ctx.initial_data.insert(u.id(), std::rc::Rc::new(std::cell::RefCell::new(bytes)));
+    u.node.initial_data.replace(Some(std::rc::Rc::new(std::cell::RefCell::new(bytes))));
 }
 
 /// `UOp.unique_num` — the global BUFFER slot counter (ops.py:814).

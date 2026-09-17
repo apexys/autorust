@@ -75,7 +75,7 @@ fn xor_trains_to_convergence() {
         let params = vec![w1t, b1t, w2t, b2t];
         loss.backward(&mut ctx, &params, None);
         let np = sgd.step(&mut ctx, &params);
-        sgd.zero_grad(&mut ctx);
+        sgd.zero_grad(&ctx, &params);
 
         // Read the realized params + final out + loss out of the graph.
         w1 = np[0].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);

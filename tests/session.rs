@@ -6,6 +6,8 @@ use autorust::engine::session::Session;
 use autorust::runtime::buffer::BufTable;
 use autorust::tensor::Tensor;
 use autorust::uop::ctx::UOpCtx;
+use autorust::uop::ops::Ops;
+use std::rc::Rc;
 
 /// A second realize of the same tensor through one `Session` must not recompile
 /// or allocate new base buffers.
@@ -74,4 +76,33 @@ fn prog_cache_reuses_across_arenas() {
     assert_eq!(cache.misses, 1, "identical ASTs across arenas must compile once");
     assert_eq!(cache.hits, 2, "the 2nd and 3rd arena must hit the cache");
     assert_eq!(cache.len(), 1);
+}
+
+/// 9.2 residual — the staged `initial_data` bytes and the attached autograd
+/// `grad` live on the graph node, so both are freed with the tensor's subgraph
+/// instead of leaking in a ctx-wide side table.
+#[test]
+fn node_side_data_dies_with_the_node() {
+    let mut ctx = UOpCtx::new();
+    let t = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
+    let bytes = {
+        let mut u = t.uop.clone();
+        while u.op != Ops::Buffer {
+            u = u.srcs[0].clone();
+        }
+        Rc::downgrade(u.initial_data.borrow().as_ref().expect("staged bytes on the buffer node"))
+    };
+
+    {
+        let g = ctx.cint(7);
+        ctx.set_grad(&t.uop, g);
+    }
+    let grad_weak = {
+        let b = t.uop.node.grad.borrow();
+        Rc::downgrade(&b.as_ref().expect("grad attached to the node").node)
+    };
+
+    drop(t);
+    assert!(bytes.upgrade().is_none(), "initial_data must be freed with its node");
+    assert!(grad_weak.upgrade().is_none(), "grad must be freed with its node");
 }
