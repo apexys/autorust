@@ -851,7 +851,7 @@ where
 #[derive(Default)]
 pub struct PatternMatcher {
     pdict: HashMap<Ops, Vec<usize>>,
-    pub rules: Vec<Rule>,
+    pub rules: Vec<Arc<Rule>>,
 }
 
 impl PatternMatcher {
@@ -860,7 +860,7 @@ impl PatternMatcher {
         for (pat, f) in patterns {
             let ops = pat.op.clone().expect("every UPat must have ops");
             let idx = pm.rules.len();
-            pm.rules.push(Rule { early_reject: pat.early_reject.clone(), pat, f });
+            pm.rules.push(Arc::new(Rule { early_reject: pat.early_reject.clone(), pat, f }));
             for op in ops {
                 pm.pdict.entry(op).or_default().push(idx);
             }
@@ -868,10 +868,22 @@ impl PatternMatcher {
         pm
     }
 
+    /// `pm1 + pm2` — concatenate rule sets. Rules are shared (`Arc<Rule>`), so
+    /// this copies pointers, not the `UPat` trees. Mirrors tinygrad's
+    /// `PatternMatcher.__add__` (ops.py:1471), minus its `functools.cache`.
     pub fn add(&self, more: &PatternMatcher) -> PatternMatcher {
-        let mut patterns: Vec<(UPat, RuleFn)> = self.rules.iter().map(|r| (r.pat.clone(), r.f.clone())).collect();
-        patterns.extend(more.rules.iter().map(|r| (r.pat.clone(), r.f.clone())));
-        PatternMatcher::new(patterns)
+        let mut pm = PatternMatcher::default();
+        pm.rules.extend(self.rules.iter().cloned());
+        pm.rules.extend(more.rules.iter().cloned());
+        let PatternMatcher { pdict, rules } = &mut pm;
+        for (idx, rule) in rules.iter().enumerate() {
+            if let Some(ops) = &rule.pat.op {
+                for op in ops {
+                    pdict.entry(*op).or_default().push(idx);
+                }
+            }
+        }
+        pm
     }
 
     /// `pm.rewrite(uop, ctx)` — first rule match wins.
@@ -1263,9 +1275,7 @@ pub fn substitute_extra(
         return root;
     }
     let extra = extra.expect("TGERR: substitute_extra requires extra pm");
-    let mut patterns: Vec<(UPat, RuleFn)> = extra.rules.iter().map(|r| (r.pat.clone(), r.f.clone())).collect();
-    patterns.extend(substitute_pm().rules.iter().map(|r| (r.pat.clone(), r.f.clone())));
-    let pm = PatternMatcher::new(patterns);
+    let pm = extra.add(substitute_pm());
     graph_rewrite(ctx, root, &pm, true, None, walk, enter_calls, CtxVal::Subst(dvars))
         .unwrap_or_else(|e| panic!("TGERR: substitute_extra failed: {e}"))
 }
