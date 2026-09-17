@@ -123,8 +123,19 @@ impl UOpCtx {
         self.uop(Ops::Const, Some(BOOL), vec![], Arg::Const(ConstVal::Invalid))
     }
 
-    /// `u.index(*srcs)` (the plain INDEX ctor; int srcs become CONSTs).
+    /// `u.index(*srcs)` (ops.py:559): plain INDEX ctor, but fold
+    /// `STACK.index(single_const)` to the indexed child (ops.py:561). tinygrad
+    /// relies on this shortcut (e.g. `do_devectorize`'s `x.index(*idx_c)`);
+    /// without it a `STACK` can leak into `LOAD`/`SHRINK`.
     pub fn index(&mut self, id: UopId, srcs: Vec<UopId>) -> UopId {
+        // ops.py:561 — `len(srcs) == 1 and src[0].op is CONST and self.op is STACK`
+        if srcs.len() == 1 && self.op_of(srcs[0]) == Ops::Const && self.op_of(id) == Ops::Stack {
+            let i = match self.val(srcs[0]) {
+                ConstVal::Int(v) => v as usize,
+                other => panic!("TGERR: non-int STACK index {other:?}"),
+            };
+            return self.srcs(id)[i];
+        }
         let mut all = vec![id];
         all.extend(srcs);
         self.uop(Ops::Index, None, all, Arg::None)

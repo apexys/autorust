@@ -478,6 +478,10 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
         (
             UPat::ops1(Ops::Index)
                 .with_src_tup(vec![UPat::ops1(Ops::Stack).named("a"), cvar("i")])
+                // python: `allow_any_len=True` — the index may carry extra args
+                // (`INDEX(STACK, i, *rest)`), which must not fall through to the
+                // "INDEX on shaped INDEX" rule (that creates `INDEX(STACK, ..)`)
+                .with_src_any_len(true)
                 .named("idx"),
             r(|ctx, st, _| {
                 let (a, i, idx) = (sget(st, "a"), sget(st, "i"), sget(st, "idx"));
@@ -489,9 +493,7 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
                     // a.src[i].index(*idx.src[2:])
                     let base = *srcs.get(iv)?;
                     let extra = ctx.srcs(idx)[2..].to_vec();
-                    let mut ns = vec![base];
-                    ns.extend(extra);
-                    Some(ctx.uop(Ops::Index, None, ns, Arg::None))
+                    Some(ctx.index(base, extra))
                 }
             }),
         ),
@@ -509,10 +511,10 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
                 if !scalar_ok {
                     return None;
                 }
-                let mut ns = vec![s1[0]];
-                ns.extend(s1[1..].iter().copied());
+                // python: `idx1.src[0].index(*idx1.src[1:], *idx2.src[1:])`
+                let mut ns: Vec<UopId> = s1[1..].to_vec();
                 ns.extend(s2[1..].iter().copied());
-                Some(ctx.uop(Ops::Index, None, ns, Arg::None))
+                Some(ctx.index(s1[0], ns))
             }),
         ),
         // INDEX on shaped INDEX
@@ -526,9 +528,9 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
                 let s2 = ctx.srcs(idx2).to_vec();
                 let arg_shape = ctx.shape_of(idx1_arg).ok()?;
                 if arg_shape.len() == s2.len() - 1 {
-                    let mut ns = vec![idx1_arg];
-                    ns.extend(s2[1..].iter().copied());
-                    let inner = ctx.uop(Ops::Index, None, ns, Arg::None);
+                    // python: `buf.index(idx1_arg.index(*idx2.src[1:]))` — the
+                    // inner `.index()` goes through the UOp.index fold
+                    let inner = ctx.index(idx1_arg, s2[1..].to_vec());
                     Some(ctx.uop(Ops::Index, None, vec![buf, inner], Arg::None))
                 } else {
                     None
@@ -2146,7 +2148,7 @@ fn reduce_mul_chain(ctx: &mut UOpCtx, r: UopId) -> Option<UopId> {
 }
 
 /// The extra rules of python `sym` (symbolic.py:441-466).
-fn pm_sym_extra() -> PatternMatcher {
+pub fn pm_sym_extra() -> PatternMatcher {
     let idx_pat = || UPat::op_var(vec![Ops::Index]).allow_all_srcs().named("index");
     let recip1p = || {
         UPat::op_var(vec![Ops::Add])
@@ -2326,5 +2328,11 @@ fn pm_sym_extra() -> PatternMatcher {
 /// python `sym` (symbolic.py:441) = symbolic + pm_simplify_valid + extra.
 pub fn sym() -> &'static PatternMatcher {
     static SYM: OnceLock<PatternMatcher> = OnceLock::new();
-    SYM.get_or_init(|| symbolic().add(&pm_simplify_valid()).add(&pm_sym_extra()))
+    SYM.get_or_init(|| {
+        symbolic()
+            .add(&pm_simplify_valid())
+            .add(&pm_sym_extra())
+            // python: `sym = symbolic+pm_simplify_valid+PatternMatcher([...])+pm_clean_up_group_sink`
+            .add(&pm_clean_up_group_sink())
+    })
 }

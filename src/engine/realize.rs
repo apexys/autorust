@@ -283,6 +283,8 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
     // 4. do_render: SOURCE through the device's renderer seam
     let src_text = dev.renderer.render(ctx, &lst);
     if std::env::var("TG_DUMP_LST").is_ok() {
+        let pname = crate::codegen::postrange::kernel_name(ctx, &lst);
+        eprintln!("LST### BEGIN name={}", pname);
         for &o in &lst {
             let (op, _dt, so, arg, tag) = ctx.snapshot(o);
             let tag_s = match &tag {
@@ -292,6 +294,7 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
             let srcs: Vec<String> = so.iter().map(|s| s.0.to_string()).collect();
             eprintln!("LST {} {:?}({}){} arg={:?}", o.0, op, srcs.join(","), tag_s, arg);
         }
+        eprintln!("LST### END name={}", pname);
     }
     // 5. do_compile: through the device's compiler seam
     let lib = dev.compiler.compile_cached(&src_text);

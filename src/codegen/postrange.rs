@@ -688,6 +688,7 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
         Some(_) => panic!("TGERR: opts_to_apply path not ported for corpus"),
         None => hand_coded_optimizations(&mut k, ctx),
     }
+
     if std::env::var("TG_DUMP_IDX").is_ok() {
         dump_index_exprs(ctx, k.ast, "POST");
     }
@@ -701,6 +702,37 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
     let out = k.get_optimized_ast(ctx, name_override.as_deref());
     if std::env::var("TG_DUMP_IDX").is_ok() {
         dump_index_exprs(ctx, out, "RESULT");
+    }
+    out
+}
+
+/// Extract the KernelInfo `name` (ANSI-stripped) from the Sink in a uop list.
+pub fn kernel_name(ctx: &mut crate::uop::ctx::UOpCtx, lst: &[crate::uop::UopId]) -> String {
+    for &u in lst {
+        if ctx.op_of(u) == Ops::Sink {
+            if let Arg::Data(d) = ctx.arg_of(u) {
+                if let Arg::Str(s) = d.get("name") {
+                    return strip_ansi(s);
+                }
+            }
+        }
+    }
+    "<unnamed>".to_string()
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' {
+            for d in it.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
     }
     out
 }

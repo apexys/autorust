@@ -1,4 +1,4 @@
-//! End-to-end NN training: a 2->2->1 sigmoid MLP on XOR, trained with SGD.
+//! End-to-end NN training: a 2->4->1 ReLU MLP on XOR, trained with SGD.
 //! Functional golden — after training the outputs must classify XOR correctly
 //! (out>0.5 matches the truth table) and the loss must drop sharply.
 //!
@@ -9,6 +9,8 @@
 //! - Repeated realization is cheap now that `to_flat` serializes only the nodes
 //!   reachable from the current kernel's roots, so each param is read out
 //!   individually instead of `cat`-ing uneven shapes together.
+//! - Config matches the tinygrad reference sweep that converges reliably
+//!   (`2->4` ReLU hidden, linear output, MSE, `lr=0.1`, seed 42, ~300 epochs).
 
 use autorust::tensor::nn::{self, Linear};
 use autorust::tensor::optim::{Optim, SGD};
@@ -26,35 +28,35 @@ fn read_params(ctx: &mut UOpCtx, w1: Tensor, b1: Tensor, w2: Tensor, b2: Tensor)
 }
 
 #[test]
-#[ignore = "WIP: backward/local-memory reduction kernels need codegen/interp work (STAGE lowering done; movement/Reshape folding on the local-buffer load path still pending)"]
 fn xor_trains_to_convergence() {
     // Initialization RNG: draw the starting weights once (single realization).
     let (mut w1, mut b1, mut w2, mut b2);
     {
         let mut ctx = UOpCtx::new();
         Tensor::manual_seed(42);
-        let l1 = Linear::new(&mut ctx, 2, 2, true);
-        let l2 = Linear::new(&mut ctx, 2, 1, true);
+        let l1 = Linear::new(&mut ctx, 2, 4, true);
+        let l2 = Linear::new(&mut ctx, 4, 1, true);
         (w1, b1, w2, b2) = read_params(&mut ctx, l1.weight, l1.bias.unwrap(), l2.weight, l2.bias.unwrap());
     }
 
-    let sgd = SGD::new(0.5);
+    let lr: f32 = std::env::var("LR").ok().and_then(|s| s.parse().ok()).unwrap_or(0.1);
+    let sgd = SGD::new(lr);
     let mut last_loss = 0.0f32;
     let mut pred: Vec<f32> = Vec::new();
 
-    let n: usize = std::env::var("EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+    let n: usize = std::env::var("EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
     for epoch in 0..n {
         let mut ctx = UOpCtx::new();
         let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
             .reshape(&mut ctx, &[4, 2]);
         let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, &[4, 1]);
 
-        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, &[2, 2]);
+        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, &[4, 2]);
         let b1t = Tensor::from_slice(&mut ctx, &b1, None, None);
-        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, &[1, 2]);
+        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, &[1, 4]);
         let b2t = Tensor::from_slice(&mut ctx, &b2, None, None);
 
-        let h = nn::sigmoid(&Linear { weight: w1t, bias: Some(b1t) }.forward(&x, &mut ctx), &mut ctx);
+        let h = nn::relu(&Linear { weight: w1t, bias: Some(b1t) }.forward(&x, &mut ctx), &mut ctx);
         let out = Linear { weight: w2t, bias: Some(b2t) }.forward(&h, &mut ctx);
         let diff = out.sub(&mut ctx, &t);
         let sq = diff.mul(&mut ctx, &diff);

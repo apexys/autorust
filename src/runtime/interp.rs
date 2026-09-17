@@ -414,7 +414,11 @@ fn exec_launch(
             }
             Ops::Index | Ops::Shrink => {
                 // (view, element offset) pairs
-                if ctx.addrspace_derived(srcs[0]) == Some(AddrSpace::Alu) || matches!(src_vals[0], Val::V(_)) {
+                // ALU storage, a devectorized multi-lane load, or a scalar value
+                // (indexing a scalar is identity — `INDEX(scalar, i) -> scalar`)
+                if ctx.addrspace_derived(srcs[0]) == Some(AddrSpace::Alu)
+                    || matches!(src_vals[0], Val::V(_) | Val::S(_))
+                {
                     // index over a vector value: [lane][thread] pick (ALU
                     // storage or a devectorized multi-lane load)
                     // python: ret = [src_values[0][i][t] for t, i in enumerate(src_values[1])]
@@ -448,7 +452,16 @@ fn exec_launch(
                         };
                         for (t, m) in ms.iter().enumerate() { ret.push((m.clone(), os[t.min(os.len() - 1)])); }
                     }
-                    _ => panic!("TGERR: interp index srcs"),
+                    _ => panic!(
+                        "TGERR: interp index srcs u={} op={:?} src0_op={:?} src0={} v0={} v1={} nsrc={}",
+                        u.0,
+                        ctx.op_of(u),
+                        ctx.op_of(srcs[0]),
+                        srcs[0].0,
+                        match &src_vals[0] { Val::S(_) => "S", Val::V(_) => "V", Val::M(_) => "M", Val::P(_) => "P" },
+                        match &src_vals[1] { Val::S(_) => "S", Val::V(_) => "V", Val::M(_) => "M", Val::P(_) => "P" },
+                        srcs.len(),
+                    ),
                 }
                 values.insert(u, Val::P(ret));
             }
@@ -456,7 +469,16 @@ fn exec_launch(
                 let load_sz = numels.get(&u).copied().unwrap_or(1);
                 let pairs: Vec<(MemView, usize)> = match &src_vals[0] {
                     Val::P(p) => p.clone(),
-                    _ => panic!("TGERR: interp load src"),
+                    other => panic!(
+                        "TGERR: interp load src u={} src0={} op={:?} dt={:?} addrspace={:?} variant_tag={} nsrc={}",
+                        u.0,
+                        srcs[0].0,
+                        ctx.op_of(srcs[0]),
+                        ctx.dt_of(srcs[0]),
+                        ctx.addrspace_of(srcs[0]),
+                        match other { Val::S(_) => "S", Val::V(_) => "V", Val::M(_) => "M", Val::P(_) => "P" },
+                        srcs.len(),
+                    ),
                 };
                 // gated load: srcs = [index, alt(fill), gate(valid)].
                 // python eval: buf[i] if valid else alt — the gate combines with
@@ -640,6 +662,15 @@ pub fn exec_kernel_with_dims(
     local: Option<[usize; 3]>,
 ) {
     let local = local.unwrap_or([1usize; 3]);
+    if std::env::var("TG_DUMP_INTERP").is_ok() {
+        let pname = crate::codegen::postrange::kernel_name(ctx, uops);
+        eprintln!("INT### BEGIN name={}", pname);
+        for &u in uops {
+            let srcs: Vec<String> = ctx.srcs(u).iter().map(|s| s.0.to_string()).collect();
+            eprintln!("INT {} {:?}({}) as={:?}", u.0, ctx.op_of(u), srcs.join(","), ctx.addrspace_of(u));
+        }
+        eprintln!("INT### END name={}", pname);
+    }
     let mut numels: std::collections::HashMap<UopId, usize> = std::collections::HashMap::new();
     for &u in uops {
         match ctx.op_of(u) {

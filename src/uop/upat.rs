@@ -1286,3 +1286,38 @@ pub fn resolve(ctx: &mut UOpCtx, x: UopId, default: bool) -> bool {
         default
     }
 }
+
+/// Canonical, order-sensitive signature of a `UPat`, used by the rule-parity
+/// inventory (`pm_inventory`) to diff this port against tinygrad rule-by-rule.
+pub fn pat_sig(p: &UPat) -> String {
+    let ops = match &p.op {
+        None => "ANY".to_string(),
+        Some(v) => {
+            let mut ns: Vec<&str> = v.iter().map(|o| o.pyname()).collect();
+            ns.sort_unstable();
+            ns.join(",")
+        }
+    };
+    let name = p.name.unwrap_or("");
+    let mut s = format!("{}|{}|req={}|strict={}", ops, name, p.required_len, p.strict_length);
+    let kids: Vec<String> = match &p.src {
+        SrcPat::None => Vec::new(),
+        SrcPat::Tup(v) => v.iter().map(pat_sig).collect(),
+        SrcPat::List(ps) => ps.first().map(|x| x.iter().map(pat_sig).collect()).unwrap_or_default(),
+        SrcPat::Repeat(x) => vec![format!("{}*", pat_sig(x))],
+        SrcPat::Any(v) => v.iter().map(pat_sig).collect(),
+    };
+    if !kids.is_empty() {
+        s.push('<');
+        s.push_str(&kids.join(","));
+        s.push('>');
+    }
+    s
+}
+
+impl PatternMatcher {
+    /// One canonical signature per rule, in rule order.
+    pub fn rule_sigs(&self) -> Vec<String> {
+        self.rules.iter().map(|r| pat_sig(&r.pat)).collect()
+    }
+}
