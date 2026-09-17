@@ -184,7 +184,7 @@ fn main() {
         }
         if std::env::var("TG_M5_EXEC").is_ok() {
             let steps: Vec<ExecStep> = prog.prog.iter().map(|st| ExecStep {
-                op: st.op.clone(), data: st.data.clone(), dtype: st.dtype.clone(),
+                op: st.op.clone(), data: st.data.clone(),
             }).collect();
             exec_linear(&mut ctx, planned, &steps);
             return;
@@ -301,7 +301,6 @@ outs.push(j);
 struct ExecStep {
     op: String,
     data: Option<Vec<f64>>,
-    dtype: Option<String>,
 }
 
 fn exec_linear(ctx: &mut UOpCtx, linear: UopId, prog: &[ExecStep]) {

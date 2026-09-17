@@ -29,7 +29,6 @@ fn bit_length(x: i64) -> u32 {
 
 /// Two-Level Segregated Fit allocator (pure logic port).
 pub struct TlsfAllocator {
-    size: i64,
     base: i64,
     block_size: i64,
     l2_cnt: u32,
@@ -45,7 +44,6 @@ impl TlsfAllocator {
         let l2_cnt = bit_length(lv2_cnt);
         let n = bit_length(size) as usize + 1;
         let mut a = TlsfAllocator {
-            size,
             base,
             block_size,
             l2_cnt,

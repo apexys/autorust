@@ -78,9 +78,8 @@ pub struct Scheduler<'a> {
     pub ast: UopId,
     pub ren: &'a Renderer,
     pub dont_use_locals: bool,
-    pub applied_opts: Vec<Arg>,
+    pub     applied_opts: Vec<Arg>,
     opt_range: i64,
-    base_axis: i64,
 }
 
 impl<'a> Scheduler<'a> {
@@ -105,7 +104,7 @@ impl<'a> Scheduler<'a> {
                 base_axis = base_axis.max(AxisType::range_axis_id(ctx, u.clone()));
             }
         }
-        Scheduler { ast, ren, dont_use_locals, applied_opts, opt_range: base_axis + 1, base_axis }
+        Scheduler { ast, ren, dont_use_locals, applied_opts, opt_range: base_axis + 1 }
     }
 
     /// `rngs` — opt axes in order.

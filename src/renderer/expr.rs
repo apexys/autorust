@@ -35,14 +35,6 @@ fn const_str(val: &ConstVal) -> String {
     }
 }
 
-fn bool_str(b: bool) -> &'static str {
-    if b {
-        "True"
-    } else {
-        "False"
-    }
-}
-
 /// `precedence` (render.py:25).
 fn prec(op: Option<Ops>) -> i32 {
     match op {

@@ -447,7 +447,7 @@ pub fn pm_reduce_collapse() -> PatternMatcher {
                 return None;
             }
             let cy = ctx.add(c.clone(), y.clone());
-            let one = ctx.const_like(c, CV_num(1));
+            let one = ctx.const_like(c, cv_num(1));
             let cy1 = ctx.add(cy, one);
             let div = ctx.alu2(Ops::Floordiv, cy1, y);
             Some(ctx.lt(x, div))
@@ -478,13 +478,13 @@ pub fn pm_reduce_collapse() -> PatternMatcher {
             };
             let lo = match lower {
                 Some(l) => {
-                    let zero = ctx.const_like(l.clone(), CV_num(0));
+                    let zero = ctx.const_like(l.clone(), cv_num(0));
                     ctx.maximum(l, zero)
                 }
-                None => ctx.const_like(rend.clone(), CV_num(0)),
+                None => ctx.const_like(rend.clone(), cv_num(0)),
             };
             let width = ctx.sub(hi, lo.clone());
-            let zero = ctx.const_like(lo, CV_num(0));
+            let zero = ctx.const_like(lo, cv_num(0));
             let wmax = ctx.maximum(width, zero);
             let clamped = ctx.minimum(wmax, rend.clone());
             Some(ctx.mul(clamped, val))
@@ -535,7 +535,7 @@ pub fn pm_reduce_collapse() -> PatternMatcher {
         r(|ctx, st, _| {
             let (x, y, c, rr) = (sget(st, "x"), sget(st, "y"), sget(st, "c"), sget(st, "r"));
             let rngs = ctx.srcs(&rr)[1..].to_vec();
-            let zero = ctx.const_like(y.clone(), CV_num(0));
+            let zero = ctx.const_like(y.clone(), cv_num(0));
             // python: y.where(c, 0).reduce(*r.src[1:], arg=Ops.ADD)*x
             let yw = ctx.where_(y, c, zero);
             let mut v2 = vec![yw];
@@ -550,7 +550,7 @@ pub fn pm_reduce_collapse() -> PatternMatcher {
         var("x").mul(UPatOrConst::Pat(crate::uop::sym::var_dt("gate", vec![dtype::BOOL]).cast(None))),
         r(|ctx, st, _| {
             let (x, gate) = (sget(st, "x"), sget(st, "gate"));
-            let zero = ctx.const_like(x.clone(), CV_num(0));
+            let zero = ctx.const_like(x.clone(), cv_num(0));
             Some(ctx.where_(gate, x, zero))
         }),
     ));
@@ -558,7 +558,7 @@ pub fn pm_reduce_collapse() -> PatternMatcher {
     pm_reduce_unparented().add(&base).add(crate::uop::sym::symbolic())
 }
 
-fn CV_num(v: i64) -> ConstVal {
+fn cv_num(v: i64) -> ConstVal {
     ConstVal::Int(v as i128)
 }
 
@@ -624,7 +624,7 @@ pub fn pm_reduce_load_collapse() -> PatternMatcher {
             let (rr, idx, expr) = (sget(st, "r"), sget(st, "idx"), sget(st, "expr"));
             let rdt = ctx.dt_of(&rr);
             let icast = ctx.cast(idx, rdt);
-            let zero = ctx.const_like(icast.clone(), CV_num(0));
+            let zero = ctx.const_like(icast.clone(), cv_num(0));
             // python's `>=` is `(a < b).logical_not()`
             let lt0 = ctx.lt(icast.clone(), zero.clone());
             let ge = ctx.logical_not(lt0);

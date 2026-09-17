@@ -134,23 +134,6 @@ impl Index<RangeFull> for Shape {
     }
 }
 
-macro_rules! impl_index_range {
-    ($idx:ty, $($t:ty),*) => {$(
-        impl Index<$idx<$t>> for Shape {
-            type Output = [SVal];
-
-            fn index(&self, r: $idx<$t>) -> &[SVal] {
-                let n = self.0.len() as isize;
-                let conv = |v: $t| v as isize;
-                $(
-                    let lo = r.start as isize; let hi = r.end as isize;
-                    let (lo, hi) = (if lo < 0 { lo + n } else { lo }, if hi < 0 { hi + n } else { hi });
-                    return self.0.index(lo.max(0) as usize..hi.clamp(0, n) as usize);
-                )?
-            }
-        }
-    )*};
-}
 // ranges: `s[1..]`, `s[..2]`, `s[1..3]`, with pythonic negatives
 impl Index<RangeFrom<i32>> for Shape { type Output = [SVal]; fn index(&self, r: RangeFrom<i32>) -> &[SVal] { let n = self.0.len() as isize; let lo = if r.start < 0 { r.start as isize + n } else { r.start as isize }; self.0.index(lo.max(0) as usize..) } }
 impl Index<RangeFrom<usize>> for Shape { type Output = [SVal]; fn index(&self, r: RangeFrom<usize>) -> &[SVal] { self.0.index(r.start..) } }

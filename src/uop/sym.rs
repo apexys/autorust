@@ -1715,11 +1715,6 @@ fn parse_valid(ctx: &mut UOpCtx, v: UopId) -> Option<(UopId, bool, i64)> {
     None
 }
 
-fn substitute_and_simplify(ctx: &mut UOpCtx, uop: UopId, dict: &HashMap<UopId, UopId>) -> UopId {
-    let s = crate::uop::upat::substitute(ctx, uop, dict.clone(), true, true);
-    crate::uop::upat::simplify(ctx, s)
-}
-
 /// `uop_given_valid` (symbolic.py:335), including the python loop-variable
 /// leak (`expr`/`v0` from the last bounds iteration feeding try_simplex).
 pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simplex: bool) -> UopId {
@@ -1780,9 +1775,9 @@ pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simpl
                     let cand: Vec<(UopId, UopId)> = parts
                         .iter()
                         .enumerate()
-                        .map(|(j, Xi)| {
-                            let (_, vmx) = ctx.min_max(Xi).unwrap_or((SVal::I(0), SVal::I(0)));
-                            (Xi.clone(), ctx.variable(&format!("fake{j}"), ConstVal::Int(1), sval_cv(vmx), ctx.dt_of(Xi), true))
+                        .map(|(j, xi)| {
+                            let (_, vmx) = ctx.min_max(xi).unwrap_or((SVal::I(0), SVal::I(0)));
+                            (xi.clone(), ctx.variable(&format!("fake{j}"), ConstVal::Int(1), sval_cv(vmx), ctx.dt_of(xi), true))
                         })
                         .collect();
                     candidates.push(cand);

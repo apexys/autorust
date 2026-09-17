@@ -1,3 +1,8 @@
+// `UopId`/`Node` carry interior-mutable property caches (`RefCell`), which trips
+// `mutable_key_type`; but `Hash`/`Eq` are defined solely by the immutable node
+// `id`, so using them as `HashMap` keys is sound.
+#![allow(clippy::mutable_key_type)]
+
 pub mod codegen;
 pub mod engine;
 pub mod renderer;
@@ -13,11 +18,12 @@ pub mod uop;
 
 use std::alloc::{alloc, dealloc, Layout};
 
-/// SAFETY: `in_ptr` must point to `in_len` bytes of JSON; `out_len` must be
-/// writable. Returns a malloc'd buffer the caller must free via `autorust_free`,
-/// or null on parse failure.
+/// # Safety
+/// `in_ptr` must point to `in_len` bytes of JSON; `out_len` must be writable.
+/// Returns a malloc'd buffer the caller must free via `autorust_free`, or null
+/// on parse failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn autorust_rebuild(in_ptr: *const u8, in_len: usize, out_len: *mut usize) -> *mut u8 {
+pub unsafe extern "C" fn autorust_rebuild(in_ptr: *const u8, in_len: usize, out_len: *mut usize) -> *mut u8 {
     let json = unsafe { std::slice::from_raw_parts(in_ptr, in_len) };
     match std::str::from_utf8(json).ok().and_then(|s| rebuild(s).ok()) {
         Some(out) => {
@@ -34,9 +40,10 @@ pub extern "C" fn autorust_rebuild(in_ptr: *const u8, in_len: usize, out_len: *m
     }
 }
 
-/// SAFETY: `ptr` must have come from `autorust_rebuild` with the same `len`.
+/// # Safety
+/// `ptr` must have come from `autorust_rebuild` with the same `len`.
 #[unsafe(no_mangle)]
-pub extern "C" fn autorust_free(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn autorust_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
     }
@@ -45,9 +52,10 @@ pub extern "C" fn autorust_free(ptr: *mut u8, len: usize) {
 
 /// Smoke kernel (M0): elementwise add. Real interpreter lands in M5.
 ///
-/// SAFETY: `a`/`b` point to `n` f32s; `out` points to `n` writable f32s.
+/// # Safety
+/// `a`/`b` point to `n` f32s; `out` points to `n` writable f32s.
 #[unsafe(no_mangle)]
-pub extern "C" fn autorust_exec_add(a: *const f32, b: *const f32, out: *mut f32, n: usize) {
+pub unsafe extern "C" fn autorust_exec_add(a: *const f32, b: *const f32, out: *mut f32, n: usize) {
     unsafe {
         for i in 0..n {
             *out.add(i) = *a.add(i) + *b.add(i);

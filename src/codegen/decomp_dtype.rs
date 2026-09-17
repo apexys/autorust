@@ -15,7 +15,6 @@ use crate::uop::upat::{graph_rewrite, r_l2i, r_pair, CtxVal, PatternMatcher, Rul
 use crate::uop::UopId;
 
 type L2iMemo = Rc<std::cell::RefCell<HashMap<(Ops, DTypeId, Vec<UopId>), Vec<UopId>>>>;
-type L2iMap = HashMap<(Ops, DTypeId, Vec<UopId>), Vec<UopId>>;
 
 fn new_l2i() -> L2iMemo {
     Rc::new(std::cell::RefCell::new(HashMap::new()))

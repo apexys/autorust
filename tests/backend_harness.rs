@@ -288,6 +288,7 @@ fn assert_golden(backend: &str, g: &golden::Golden, got: &[f64], shape: &[usize]
     }
 }
 
+#[allow(clippy::approx_constant)] // cast_f64_f32 uses a PI-like literal as generic float64 test data
 fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>, names: &[&str]) {
     let dev = staging_dev(backend);
     for name in names {

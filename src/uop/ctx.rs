@@ -2100,13 +2100,6 @@ fn is_weak_dt(d: DTypeId) -> bool {
     d == WEAKINT || d == WEAKFLOAT
 }
 
-fn num_add(a: ConstVal, b: ConstVal) -> ConstVal {
-    match (a, b) {
-        (ConstVal::Int(x), ConstVal::Int(y)) => ConstVal::Int(x.wrapping_add(y)),
-        (x, y) => ConstVal::Float(x.as_f64() + y.as_f64()),
-    }
-}
-
 fn gcd_i128(a: i128, b: i128) -> i128 {
     let (mut a, mut b) = (a.abs(), b.abs());
     while b != 0 {

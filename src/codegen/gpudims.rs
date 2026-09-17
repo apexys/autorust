@@ -12,13 +12,6 @@ use crate::uop::upat::{substitute, PatternMatcher};
 use crate::uop::UopId;
 use std::collections::HashMap;
 
-fn dim_max(_ctx: &mut UOpCtx, s: SVal) -> i64 {
-    match s {
-        SVal::I(v) => v as i64,
-        SVal::U(_) => panic!("TGERR: symbolic gpudims unsupported"),
-    }
-}
-
 /// `_group_dims` — merge dims while any exceeds max.
 fn group_dims(dims: &[i64], max_sizes: &[i64]) -> Option<Vec<i64>> {
     let mut dims = dims.to_vec();

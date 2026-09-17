@@ -156,14 +156,6 @@ impl CStyleLang {
     }
 }
 
-fn base_type_name(dt: DTypeId) -> String {
-    match dt {
-        d if d == dtype::BOOL => "_Bool".to_string(),
-        d if d == dtype::FLOAT16 => "__fp16".to_string(),
-        d => d.name().replace(' ', "_"),
-    }
-}
-
 /// `strip_parens` — drop one balanced outer paren pair.
 fn strip_parens(s: &str) -> &str {
     if s.starts_with('(') && s.ends_with(')') {

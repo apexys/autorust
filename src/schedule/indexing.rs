@@ -505,10 +505,6 @@ fn apply_reshape(ctx: &mut UOpCtx, in_shape: &[SVal], out_shape: &[SVal], urngs:
     ctx.srcs(&out).to_vec()
 }
 
-fn comb_dt(ctx: &UOpCtx, u: UopId) -> crate::dtype::DTypeId {
-    ctx.dt_of(&u)
-}
-
 /// `apply_movement_op` (indexing.py:168) — rngs in, rngs out. Recomputed
 /// (python's functools.cache is an identity/interning hack; structural
 /// interning in the Rust graph makes recomputation produce identical nodes).
@@ -965,7 +961,6 @@ pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool) -> UopId {
                 .map(|s| match s {
                     crate::uop::sint::SVal::I(i) => i.to_string(),
                     crate::uop::sint::SVal::U(u) => format!("#{}", u.id()),
-                    _ => "?".into(),
                 })
                 .collect();
             eprintln!(

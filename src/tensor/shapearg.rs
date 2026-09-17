@@ -78,9 +78,6 @@ macro_rules! impl_shape_arg_scalar {
 }
 impl_shape_arg_scalar!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, usize);
 
-macro_rules! impl_shape_arg_tuples {
-    ($($t:ident),+; $len:literal) => {};
-}
 impl<A: SvalLike> ShapeArg for (A,) {
     fn into_shape_vec(self) -> Vec<SVal> {
         vec![self.0.into_sval()]

@@ -341,7 +341,7 @@ installed): 10 tests, all green — `commutative` 192/8, `div_and_mod_symbolic` 
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **70 passed, 6 ignored, 0 failed**. The 6 ignored = 1 `backend_harness`
+- `cargo test` → **71 passed, 6 ignored, 0 failed**. The 6 ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 4 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
@@ -349,10 +349,13 @@ installed): 10 tests, all green — `commutative` 192/8, `div_and_mod_symbolic` 
   `test_exec_diff`, `test_native_exec`.
 - Suites: `tests/{golden,backend_harness,marshal,ops,grad,rand,m2_smoke,flat_codec,nn_xor,
   nn_xor_relu,nn_xor_parity,session,mem_probe}.rs`.
+- `cargo build` is warning-free; `cargo clippy --all-targets` has 0 errors (the
+  `mutable_key_type` false positive — `UopId` hashes by immutable `id` — is allowed at the
+  crate root). A few dozen minor style lints remain (see below), left as-is.
 
 ### 8.1 Core graph engine (mature)
-`src/uop/`: interned UOps, `UopId(u32)` (Copy), shapes, dtypes, `Ops`, `Arg`, `SVal`/`SInt`,
-const folding, `graph_rewrite`/`UPat`/`PatternMatcher`, min/max range analysis, `substitute`.
+`src/uop/`: interned UOps, `UopId` (a strong `Rc<Node>` handle, `Clone` not `Copy`), shapes, dtypes, `Ops`, `Arg`, `SVal`/`SInt`,
+const folding, `graph_rewrite`/`UPat`/`PatternMatcher` (`Send + Sync`, `OnceLock`-cached), min/max range analysis, `substitute`.
 `src/codegen/`: simplify, postrange, coalesce, gater, linearize, pipeline
 `full_rewrite_to_sink`. `src/schedule/`: rangeify, sched, indexing, memory.
 `src/runtime/`, `src/renderer/`: INTERP always on; CL behind `backend_cl`.
