@@ -15,6 +15,12 @@ default = ["capi"]
 # C ABI loaded by the Python ctypes bridge (py/bridge.py).
 capi = []
 backend_cl = ["dep:opencl3"]
+# Debug knobs, compiled out by default so hot paths never call getenv.
+# `trace`: TG_TRACE rule-firing trace.
+# `dump`:  TG_DUMP_PRE_EXPAND/TG_DUMP_IDX/TG_DUMP_LST/TG_DUMP_INTERP/TG_DEBUG_LOAD
+#          and the TG_M5_STAGES pipeline truncation.
+trace = []
+dump = []
 
 [dependencies]
 nanoserde = "0.2.1"

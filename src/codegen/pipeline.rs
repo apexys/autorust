@@ -27,10 +27,12 @@ use std::collections::{HashMap, HashSet};
 
 /// Truncation for stage-by-stage differentials (default: run everything).
 fn stage_limit() -> usize {
-    std::env::var("TG_M5_STAGES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(usize::MAX)
+    #[cfg(feature = "dump")]
+    if let Ok(v) = std::env::var("TG_M5_STAGES")
+        && let Ok(n) = v.parse::<usize>() {
+            return n;
+        }
+    usize::MAX
 }
 
 /// One named graph_rewrite stage (name matches python for the key diff).
@@ -777,6 +779,7 @@ pub fn full_rewrite_to_sink(ctx: &mut UOpCtx, ast: UopId) -> UopId {
 }
 
 /// temporary: readable one-line-per-node dump of the graph below `sink`.
+#[cfg(feature = "dump")]
 fn dump_ast(ctx: &mut UOpCtx, sink: UopId) -> String {
     let order = ctx.toposort(&sink);
     let mut out = String::new();
@@ -818,6 +821,7 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         }
         i += 1;
         // temporary: dump the pre-expander AST (TG_DUMP_PRE_EXPAND=1)
+        #[cfg(feature = "dump")]
         if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
             eprintln!("=== after stage {} ({}) ===", i, st.name);
             eprintln!("{}", dump_ast(ctx, cur.clone()));
@@ -829,6 +833,7 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
     // do postrange optimization, BEAM or hand_coded_optimizations
     cur = apply_opts(ctx, cur, ren);
     i += 1;
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
         eprintln!("=== after stage {} (apply_opts) ===", i);
         eprintln!("{}", dump_ast(ctx, cur.clone()));
@@ -862,9 +867,11 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         };
         i += 1;
+        #[cfg(feature = "dump")]
         if std::env::var("TG_DUMP_IDX").is_ok() {
             crate::codegen::postrange::dump_index_exprs(ctx, cur.clone(), st.name);
         }
+        #[cfg(feature = "dump")]
         if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
             eprintln!("=== after stage {} ({}) ===", i, st.name);
             eprintln!("{}", dump_ast(ctx, cur.clone()));

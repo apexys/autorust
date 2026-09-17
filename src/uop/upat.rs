@@ -951,10 +951,12 @@ impl PatternMatcher {
             let mut stores = Vec::new();
             rule.pat.match_uop(ctx, uop.clone(), Store::new(), &mut stores);
             for store in &stores {
+                #[cfg(feature = "trace")]
                 if std::env::var("TG_TRACE").is_ok() {
                     eprintln!("RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}", i, self.0.rules.len(), rule.pat.name, rule.pat.op, uop.id(), ctx.op_of(&uop));
                 }
                 let _r = (rule.f)(ctx, store, ctxval);
+                #[cfg(feature = "trace")]
                 if std::env::var("TG_TRACE").is_ok() {
                     eprintln!("  -> u{} op {:?}", _r.clone().map(|x| x.id()).unwrap_or(0), _r.as_ref().map(|x| ctx.op_of(x)));
                 }

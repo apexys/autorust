@@ -286,6 +286,7 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
     }
     // 1. full_rewrite_to_sink
     let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts());
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_IDX").is_ok() {
         crate::codegen::postrange::dump_index_exprs(ctx, sunk.clone(), "SUNK");
     }
@@ -293,15 +294,18 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
     let pi = program_info_from_sink(ctx, sunk.clone());
     // 3. do_linearize: linearize + pm_linearize_cleanups
     let lst = linearize(ctx, sunk.clone());
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_IDX").is_ok() {
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "LINEAR");
     }
     let lst = pm_linearize_cleanups(ctx, lst);
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_IDX").is_ok() {
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "CLEAN");
     }
     // 4. do_render: SOURCE through the device's renderer seam
     let src_text = dev.renderer.render(ctx, &lst);
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_LST").is_ok() {
         let pname = crate::codegen::postrange::kernel_name(ctx, &lst);
         eprintln!("LST### BEGIN name={}", pname);

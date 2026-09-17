@@ -681,6 +681,7 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
         },
         _ => None,
     };
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_IDX").is_ok() {
         dump_index_exprs(ctx, k.ast.clone(), "PRE");
     }
@@ -689,6 +690,7 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
         None => hand_coded_optimizations(&mut k, ctx),
     }
 
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_IDX").is_ok() {
         dump_index_exprs(ctx, k.ast.clone(), "POST");
     }
@@ -700,6 +702,7 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
         _ => None,
     };
     let out = k.get_optimized_ast(ctx, name_override.as_deref());
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_IDX").is_ok() {
         dump_index_exprs(ctx, out.clone(), "RESULT");
     }
