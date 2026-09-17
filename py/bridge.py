@@ -63,7 +63,7 @@ def _arg_json(x, dtable, didx):
         return {"Bool": [x]}
     if isinstance(x, (Ops, AxisType, AddrSpace)):
         cls = ("Ops" if isinstance(x, Ops) else "AxisType" if isinstance(x, AxisType) else "AddrSpace")
-        return {"Enum": [{"class": cls, "value": int(x)}]}
+        return {"Enum": [{"class": cls, "value": int(x.value)}]}
     if isinstance(x, DType):
         key = INVERSE_DTYPES_DICT[x.name]
         if key not in didx:

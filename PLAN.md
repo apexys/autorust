@@ -572,7 +572,7 @@ rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on co
 |---|-------------------|------|------|
 | 1 | `multi_pm` | ❌ | in-kernel UNSHARD resolve; multi-device descoped |
 | 2 | early movement ops `pm_mops`+`mop_cleanup` | ✅ | |
-| 3 | load collapse `pm_load_collapse` | ❌ | **TODO**: gated-load collapse (indexing-by-tensor); reuse `reduce_collapse` toposort infra. `optimize`-gated |
+| 3 | load collapse `pm_load_collapse` | ✅ | indexing-by-tensor; `pm_load_collapse`/`pm_reduce_load_collapse` + `test_rewrite_diff.py` differential |
 | 4 | split ranges `pm_split_ranges`+`pm_flatten_range` | ❌ | **TODO**: split ranges for upcast/local; `optimize`-gated |
 | 5 | initial symbolic `sym`+`pm_flatten_range` | ✅ | |
 | 6 | simplify ranges `pm_flatten_range`+`pm_simplify_ranges` | ✅ | ported (merge_adjacent + range_gates) |
@@ -606,7 +606,7 @@ Highest-value remaining gaps, ordered: (A) ~~`pm_add_local_buffers`+`pm_implicit
 upcast/local splitting); (C) `get_simplifying_rewrite_patterns` floordiv/mod decomp +
 `pm_dtype_decomps` (needed for int-index-heavy + non-native-float kernels). Each is currently
 a no-op on the fp32 corpus, so no gate regressed; port each with a targeted differential kernel.
-Also still empty/partial: `pm_load_collapse` (#3), `pm_number_params` (#29), images (#16, descoped),
+Also still empty/partial: `pm_split_ranges` (#4), `pm_number_params` (#29), images (#16, descoped),
 `multi_pm` (#1, descoped).
 
 

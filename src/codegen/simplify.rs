@@ -504,6 +504,92 @@ pub fn pm_reduce_simplify() -> PatternMatcher {
     pm_reduce_unparented().add(&PatternMatcher::new(vec![reduce_collapse_rule]))
 }
 
+/// `no_load(u)` (simplify.py:154) — no INDEX in the backward slice (with self).
+fn no_load(ctx: &UOpCtx, u: UopId) -> bool {
+    !ctx.op_in_backward_slice_with_self(u, &[Ops::Index])
+}
+
+/// `reduce_load_collapse` (simplify.py:147).
+pub fn reduce_load_collapse(ctx: &mut UOpCtx, red: UopId) -> Option<UopId> {
+    let pm = pm_reduce_load_collapse();
+    reduce_collapse(ctx, red, &pm)
+}
+
+/// `pm_reduce_load_collapse` (simplify.py:124) = `pm_reduce_collapse` + the two
+/// load-collapse lift rules (ne-lift + gated-load gather).
+pub fn pm_reduce_load_collapse() -> PatternMatcher {
+    let mut rules: Vec<(UPat, RuleFn)> = vec![];
+    // lift x+y out of reduce on ne: (x+y).or_casted() != c  ->  x != (c.cast(y.dtype)-y)
+    rules.push((
+        var("x").add(UPatOrConst::Pat(var("y"))).or_casted(None).ne(var("c")),
+        r(|ctx, st, _| {
+            let (x, y, c) = (sget(st, "x"), sget(st, "y"), sget(st, "c"));
+            if !no_range(ctx, y) || !no_range(ctx, c) {
+                return None;
+            }
+            let ccast = ctx.cast(c, ctx.dt_of(y));
+            let cmy = ctx.sub(ccast, y);
+            Some(ctx.ne(x, cmy))
+        }),
+    ));
+    // reduce on a gated load becomes a valid-gated gather (substitute the range):
+    //   (idx != r.or_casted()).where(0, expr).reduce(r, ADD)
+    //     -> ((idx.cast(r.dtype) >= 0) & (idx.cast(r.dtype) < r.src[0]))
+    //          .where(expr.substitute({r: idx.cast(r.dtype).valid(v)}), 0)
+    let r_rng = UPat::op_var(vec![Ops::Range]).named("r");
+    rules.push((
+        var("idx")
+            .ne(r_rng.or_casted(Some("r")))
+            .where_(UPatOrConst::Val(ConstVal::Int(0)), UPatOrConst::Pat(var("expr")))
+            .reduce(vec![var("r")], Some(red_add_arg()), false),
+        r(|ctx, st, _| {
+            let (rr, idx, expr) = (sget(st, "r"), sget(st, "idx"), sget(st, "expr"));
+            let rdt = ctx.dt_of(rr);
+            let icast = ctx.cast(idx, rdt);
+            let zero = ctx.const_like(icast, CV_num(0));
+            // python's `>=` is `(a < b).logical_not()`
+            let lt0 = ctx.lt(icast, zero);
+            let ge = ctx.logical_not(lt0);
+            let rend = ctx.srcs(rr)[0];
+            let lt_end = ctx.lt(icast, rend);
+            let v = ctx.and_(ge, lt_end);
+            let valid = ctx.valid(icast, v);
+            let mut m: HashMap<UopId, UopId> = HashMap::new();
+            m.insert(rr, valid);
+            let subbed = substitute(ctx, expr, m, true, true);
+            Some(ctx.where_(v, subbed, zero))
+        }),
+    ));
+    pm_reduce_collapse().add(&PatternMatcher::new(rules))
+}
+
+/// `pm_load_collapse` (simplify.py:155) — remove REDUCE on a load (indexing a
+/// tensor with another tensor); also undoes the weak-index arithmetic that the
+/// collapse enables so we don't do math on a loaded index (overflow).
+pub fn pm_load_collapse() -> PatternMatcher {
+    let mut rules: Vec<(UPat, RuleFn)> = vec![];
+    rules.push((
+        var("u").reduce(vec![UPat::var(None, None)], Some(red_add_arg()), false).named("red"),
+        r(|ctx, st, _| reduce_load_collapse(ctx, sget(st, "red"))),
+    ));
+    // (weakint x + y) < c  ->  x < c - y  when y,c have no load and x does
+    rules.push((
+        crate::uop::sym::var_dt("x", vec![dtype::WEAKINT])
+            .add(UPatOrConst::Pat(var("y")))
+            .lt(UPatOrConst::Pat(var("c"))),
+        r(|ctx, st, _| {
+            let (x, y, c) = (sget(st, "x"), sget(st, "y"), sget(st, "c"));
+            if no_load(ctx, y) && no_load(ctx, c) && !no_load(ctx, x) {
+                let cmy = ctx.sub(c, y);
+                Some(ctx.lt(x, cmy))
+            } else {
+                None
+            }
+        }),
+    ));
+    PatternMatcher::new(rules)
+}
+
 
 fn sval_to_constval(s: &SVal) -> ConstVal {
     match s {

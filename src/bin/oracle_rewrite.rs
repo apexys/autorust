@@ -4,12 +4,16 @@
 //!   {"ok": true, "graph": <FlatGraph>}
 //! or {"ok": false, "error": "..."}  (panics caught, like Python exceptions).
 use std::io::{BufRead, Write};
+use std::sync::OnceLock;
 
 use autorust::uop::ctx::UOpCtx;
 use autorust::uop::flat::{parse_flat, to_string_flat};
 use autorust::uop::graph::Graph;
 use autorust::uop::sym::{pm_commutative, pm_mop_cleanup, symbolic, symbolic_simple};
 use autorust::uop::upat::{graph_rewrite, CtxVal};
+
+static PM_LOAD_COLLAPSE: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
+static PM_REDUCE_LOAD_COLLAPSE: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
 
 fn pm_by_name(name: &str) -> Option<&'static autorust::uop::upat::PatternMatcher> {
     match name {
@@ -18,6 +22,8 @@ fn pm_by_name(name: &str) -> Option<&'static autorust::uop::upat::PatternMatcher
         "mop_cleanup" => Some(&pm_mop_cleanup()),
         "div_and_mod_symbolic" => Some(autorust::uop::divandmod::div_and_mod_symbolic()),
         "symbolic" => Some(symbolic()),
+        "pm_load_collapse" => Some(PM_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_load_collapse)),
+        "pm_reduce_load_collapse" => Some(PM_REDUCE_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_reduce_load_collapse)),
         _ => None,
     }
 }

@@ -12,7 +12,7 @@
 
 use crate::codegen::postrange::apply_opts;
 use crate::renderer::Renderer;
-use crate::codegen::simplify::{pm_flatten_range, pm_reduce_unparented};
+use crate::codegen::simplify::{pm_flatten_range, pm_load_collapse, pm_reduce_unparented};
 use crate::uop::sym::{pm_cast_float_alu, pm_clean_up_group_sink, pm_mop_cleanup, pm_move_where_on_load, pm_remove_invalid, sym, symbolic, symbolic_simple, sget};
 use crate::schedule::rangeify::pm_mops;
 use crate::dtype;
@@ -48,6 +48,7 @@ fn stages() -> Vec<Stage> {
             pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()).add(&pm_mop_cleanup()),
             bottom_up: true,
         },
+        Stage { name: "load collapse", pm: pm_load_collapse(), bottom_up: false },
         Stage { name: "initial symbolic", pm: sym().add(&pm_flatten_range()), bottom_up: false },
         Stage { name: "simplify ranges", pm: pm_flatten_range().add(&crate::codegen::simplify::pm_simplify_ranges()), bottom_up: false },
     ]
@@ -903,6 +904,8 @@ pub fn pm_inventory() -> Vec<(&'static str, Vec<String>)> {
     add!("pm_move_where_on_load", pm_move_where_on_load());
     add!("pm_flatten_range", pm_flatten_range());
     add!("pm_reduce_unparented", pm_reduce_unparented());
+    add!("pm_reduce_load_collapse", crate::codegen::simplify::pm_reduce_load_collapse());
+    add!("pm_load_collapse", pm_load_collapse());
     add!("pm_mops", pm_mops());
     v
 }

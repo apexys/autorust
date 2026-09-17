@@ -162,6 +162,32 @@ def _rand_movement_graph_inner(rng):
     return u
 
 
+def rand_index_graph(rng):
+    """Graphs exercising `pm_load_collapse` (indexing a tensor with a tensor)."""
+    for _ in range(20):
+        try:
+            n = rng.randint(2, 6)
+            base = UOp.stack(*[uconst(rng.randint(-5, 5)) for _ in range(n)])
+            r = UOp.range(n, rng.randint(0, 3))
+            idx = Variable("idx", -2, n + 2)
+            expr = base.index(idx.cast(dtypes.weakint))
+            style = rng.random()
+            if style < 0.45:
+                # the gather pattern: (idx != r).where(0, load(base, idx)).reduce(r, ADD)
+                return (idx.cast(dtypes.weakint) != r).where(uconst(0), expr).reduce(r, arg=Ops.ADD)
+            if style < 0.75:
+                # (weakint x + y) < c with x containing an INDEX (needs no-load y,c)
+                x = base.index(r)
+                y = Variable("y", 0, n + 3)
+                c = uconst(rng.randint(-4, 10))
+                return (x + y) < c
+            # bare reduce over an index expression
+            return expr.reduce(r, arg=Ops.ADD)
+        except Exception:
+            continue
+    raise AssertionError("index generator failed 20x")
+
+
 class TestRewriteDifferential(unittest.TestCase):
     ORACLE = None
 
@@ -226,6 +252,18 @@ class TestRewriteDifferential(unittest.TestCase):
         rng = random.Random(46)
         graphs = [rand_symbolic_graph(rng) for _ in range(300)]
         self._diff("symbolic", symbolic, graphs)
+
+    def test_pm_load_collapse(self):
+        from tinygrad.codegen.simplify import pm_load_collapse
+        rng = random.Random(47)
+        graphs = [rand_index_graph(rng) for _ in range(300)]
+        self._diff("pm_load_collapse", pm_load_collapse, graphs)
+
+    def test_pm_reduce_load_collapse(self):
+        from tinygrad.codegen.simplify import pm_reduce_load_collapse
+        rng = random.Random(48)
+        graphs = [rand_index_graph(rng) for _ in range(300)]
+        self._diff("pm_reduce_load_collapse", pm_reduce_load_collapse, graphs)
 
 
 if __name__ == "__main__":
