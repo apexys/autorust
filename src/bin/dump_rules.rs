@@ -1,6 +1,6 @@
 fn main() {
     for (name, pm) in [
-        ("symbolic", autorust::uop::sym::symbolic().rules.iter().enumerate()),
+        ("symbolic", autorust::uop::sym::symbolic().rules().iter().enumerate()),
     ] {
         let _ = name;
         for (i, r) in pm {

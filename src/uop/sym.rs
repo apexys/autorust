@@ -1931,6 +1931,11 @@ fn drop_and_clauses(ctx: &mut UOpCtx, cond: UopId, x: UopId, i: UopId) -> Option
 
 /// `pm_drop_and_clauses` (symbolic.py:395).
 pub fn pm_drop_and_clauses() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_drop_and_clauses).clone()
+}
+
+fn build_pm_drop_and_clauses() -> PatternMatcher {
     PatternMatcher::new(vec![(
         invalid_gate(),
         r(|ctx, st, _| {
@@ -1942,6 +1947,11 @@ pub fn pm_drop_and_clauses() -> PatternMatcher {
 
 /// `pm_simplify_valid` (symbolic.py:425).
 pub fn pm_simplify_valid() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_simplify_valid).clone()
+}
+
+fn build_pm_simplify_valid() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             UPat::op_var(vec![Ops::And]).named("valid"),
@@ -2002,6 +2012,11 @@ pub fn where_on_load(ctx: &mut UOpCtx, cond: UopId, buf: UopId, idx: UopId, or_c
 
 /// `pm_move_where_on_load` (symbolic.py:412).
 pub fn pm_move_where_on_load() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_move_where_on_load).clone()
+}
+
+fn build_pm_move_where_on_load() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             var("cond").where_(
@@ -2031,6 +2046,11 @@ pub fn pm_move_where_on_load() -> PatternMatcher {
 
 /// `pm_remove_invalid` (symbolic.py:98).
 pub fn pm_remove_invalid() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_remove_invalid).clone()
+}
+
+fn build_pm_remove_invalid() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             invalid_gate().named("w"),
@@ -2065,6 +2085,11 @@ pub fn pm_remove_invalid() -> PatternMatcher {
 
 /// `pm_cast_float_alu` (codegen/__init__.py:254).
 pub fn pm_cast_float_alu() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_cast_float_alu).clone()
+}
+
+fn build_pm_cast_float_alu() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::op_var(vec![Ops::Sin, Ops::Log2, Ops::Exp2, Ops::Sqrt, Ops::Reciprocal])
             .with_src_tup(vec![UPat::var(None, None)])
@@ -2141,6 +2166,11 @@ fn reduce_mul_chain(ctx: &mut UOpCtx, r: UopId) -> Option<UopId> {
 
 /// The extra rules of python `sym` (symbolic.py:441-466).
 pub fn pm_sym_extra() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_sym_extra).clone()
+}
+
+fn build_pm_sym_extra() -> PatternMatcher {
     let idx_pat = || UPat::op_var(vec![Ops::Index]).allow_all_srcs().named("index");
     let recip1p = || {
         UPat::op_var(vec![Ops::Add])

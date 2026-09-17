@@ -666,7 +666,7 @@ impl PmSlot {
         PmSlot(std::sync::OnceLock::new())
     }
     pub fn get_or_init(&'static self, build: impl FnOnce() -> PatternMatcher) -> &'static PatternMatcher {
-        self.0.get_or_init(build)
+        self.0.get_or_init(|| build().interned())
     }
 }
 
@@ -849,49 +849,102 @@ where
     })
 }
 #[derive(Default)]
-pub struct PatternMatcher {
+struct PmInner {
     pdict: HashMap<Ops, Vec<usize>>,
-    pub rules: Vec<Arc<Rule>>,
+    rules: Vec<Arc<Rule>>,
+    /// Whether this matcher has a stable process-wide identity (built once by a
+    /// [`PmSlot`] or an `add` whose operands were stable). Only stable operands
+    /// are eligible for `add` memoization, so freshly built temporaries cannot
+    /// grow the cache without bound.
+    stable: bool,
+}
+
+/// A compiled, immutable rule set. Cheap to `clone`: internally an `Arc`, so
+/// clones share the same identity (used by `add`'s memo).
+#[derive(Clone)]
+pub struct PatternMatcher(Arc<PmInner>);
+
+impl Default for PatternMatcher {
+    fn default() -> Self {
+        PatternMatcher(Arc::new(PmInner::default()))
+    }
+}
+
+/// Memo for `add`, keyed by the identity (inner `Arc` address) of the two
+/// operands. Mirrors tinygrad's `@functools.cache` on `PatternMatcher.__add__`
+/// (ops.py:1470). Entries hold strong refs, so operand addresses stay valid; the
+/// set is bounded by the number of distinct *stable* compositions.
+type AddCache = std::sync::Mutex<HashMap<(usize, usize), PatternMatcher>>;
+
+fn add_cache() -> &'static AddCache {
+    static CACHE: std::sync::OnceLock<AddCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 impl PatternMatcher {
     pub fn new(patterns: Vec<(UPat, RuleFn)>) -> PatternMatcher {
-        let mut pm = PatternMatcher::default();
+        let mut inner = PmInner::default();
         for (pat, f) in patterns {
             let ops = pat.op.clone().expect("every UPat must have ops");
-            let idx = pm.rules.len();
-            pm.rules.push(Arc::new(Rule { early_reject: pat.early_reject.clone(), pat, f }));
+            let idx = inner.rules.len();
+            inner.rules.push(Arc::new(Rule { early_reject: pat.early_reject.clone(), pat, f }));
             for op in ops {
-                pm.pdict.entry(op).or_default().push(idx);
+                inner.pdict.entry(op).or_default().push(idx);
             }
         }
-        pm
+        PatternMatcher(Arc::new(inner))
+    }
+
+    /// Mark this matcher as having a stable identity (see `PmInner::stable`).
+    /// No-op if the inner `Arc` is already shared.
+    pub fn interned(mut self) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.0) {
+            inner.stable = true;
+        }
+        self
+    }
+
+    pub fn rules(&self) -> &[Arc<Rule>] {
+        &self.0.rules
     }
 
     /// `pm1 + pm2` — concatenate rule sets. Rules are shared (`Arc<Rule>`), so
-    /// this copies pointers, not the `UPat` trees. Mirrors tinygrad's
-    /// `PatternMatcher.__add__` (ops.py:1471), minus its `functools.cache`.
+    /// this copies pointers, not the `UPat` trees. When both operands have a
+    /// stable identity the result is memoized, so the same composition is built
+    /// only once (tinygrad's `functools.cache` on `__add__`, ops.py:1470).
     pub fn add(&self, more: &PatternMatcher) -> PatternMatcher {
-        let mut pm = PatternMatcher::default();
-        pm.rules.extend(self.rules.iter().cloned());
-        pm.rules.extend(more.rules.iter().cloned());
-        let PatternMatcher { pdict, rules } = &mut pm;
-        for (idx, rule) in rules.iter().enumerate() {
-            if let Some(ops) = &rule.pat.op {
-                for op in ops {
-                    pdict.entry(*op).or_default().push(idx);
+        let memo = self.0.stable && more.0.stable;
+        let key = (Arc::as_ptr(&self.0) as usize, Arc::as_ptr(&more.0) as usize);
+        if memo
+            && let Some(hit) = add_cache().lock().unwrap().get(&key) {
+                return hit.clone();
+            }
+        let mut inner = PmInner { stable: memo, ..Default::default() };
+        inner.rules.extend(self.0.rules.iter().cloned());
+        inner.rules.extend(more.0.rules.iter().cloned());
+        {
+            let PmInner { pdict, rules, .. } = &mut inner;
+            for (idx, rule) in rules.iter().enumerate() {
+                if let Some(ops) = &rule.pat.op {
+                    for op in ops {
+                        pdict.entry(*op).or_default().push(idx);
+                    }
                 }
             }
+        }
+        let pm = PatternMatcher(Arc::new(inner));
+        if memo {
+            add_cache().lock().unwrap().insert(key, pm.clone());
         }
         pm
     }
 
     /// `pm.rewrite(uop, ctx)` — first rule match wins.
     pub fn rewrite(&self, ctx: &mut UOpCtx, uop: UopId, ctxval: &CtxVal) -> Option<UopId> {
-        let idxs = self.pdict.get(&ctx.op_of(&uop))?;
+        let idxs = self.0.pdict.get(&ctx.op_of(&uop))?;
         let ler: HashSet<Ops> = ctx.srcs(&uop).iter().map(|s| ctx.op_of(s)).collect();
         for &i in idxs {
-            let rule = &self.rules[i];
+            let rule = &self.0.rules[i];
             if !rule.early_reject.iter().all(|o| ler.contains(o)) {
                 continue;
             }
@@ -899,7 +952,7 @@ impl PatternMatcher {
             rule.pat.match_uop(ctx, uop.clone(), Store::new(), &mut stores);
             for store in &stores {
                 if std::env::var("TG_TRACE").is_ok() {
-                    eprintln!("RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}", i, self.rules.len(), rule.pat.name, rule.pat.op, uop.id(), ctx.op_of(&uop));
+                    eprintln!("RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}", i, self.0.rules.len(), rule.pat.name, rule.pat.op, uop.id(), ctx.op_of(&uop));
                 }
                 let _r = (rule.f)(ctx, store, ctxval);
                 if std::env::var("TG_TRACE").is_ok() {
@@ -1405,6 +1458,6 @@ pub fn pat_sig(p: &UPat) -> String {
 impl PatternMatcher {
     /// One canonical signature per rule, in rule order.
     pub fn rule_sigs(&self) -> Vec<String> {
-        self.rules.iter().map(|r| pat_sig(&r.pat)).collect()
+        self.rules().iter().map(|r| pat_sig(&r.pat)).collect()
     }
 }

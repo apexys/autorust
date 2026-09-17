@@ -194,6 +194,11 @@ fn realize_store_after_src(ictx: &mut IndexingContext, ctx: &mut UOpCtx, dest: U
 
 /// `pm_generate_realize_map` — populates realize_map over the whole graph.
 pub fn pm_generate_realize_map() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_generate_realize_map).clone()
+}
+
+fn build_pm_generate_realize_map() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         // realize the inputs of custom kernel calls
         (
@@ -419,6 +424,11 @@ fn remove_movement_op_after_rangeify(ictx: &mut IndexingContext, ctx: &mut UOpCt
 
 /// `pm_apply_rangeify` (indexing.py:134).
 pub fn pm_apply_rangeify() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_apply_rangeify).clone()
+}
+
+fn build_pm_apply_rangeify() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         // REDUCE(op, axis) -> REDUCE(op) with ranges
         (UPat::ops1(Ops::Reduce).named("x"), r_idx(|ictx, ctx, st| convert_reduce_to_ranges(ictx, ctx, crate::uop::sym::sget(st, "x")))),
@@ -442,6 +452,11 @@ pub fn pm_apply_rangeify() -> PatternMatcher {
 
 /// `pm_fix_deviceless` (indexing.py:147).
 pub fn pm_fix_deviceless() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_fix_deviceless).clone()
+}
+
+fn build_pm_fix_deviceless() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::ops1(Ops::Stage).named("b"),
         r_dev(|dev, ctx, st| {

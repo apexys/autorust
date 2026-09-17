@@ -104,6 +104,11 @@ pub fn svals_to_args(sv: &[SVal]) -> Vec<Arg> {
 
 /// `pm_mops` (rangeify.py:50).
 pub fn pm_mops() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_mops).clone()
+}
+
+fn build_pm_mops() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         // handle movement ops on INDEX: INDEX(MOVEMENT(v, marg), idxs...)
         // (python: `UPat(GroupOp.Movement, name="r").f(Ops.INDEX, allow_any_len=True, name="idx")`)
@@ -281,6 +286,11 @@ fn fix_store_hazard(ctx: &mut UOpCtx, target: UopId, src: UopId) -> Option<UopId
 
 /// `earliest_rewrites` (rangeify.py:127).
 pub fn earliest_rewrites() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_earliest_rewrites).clone()
+}
+
+fn build_earliest_rewrites() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         // split_reduceop
         (
@@ -404,6 +414,11 @@ pub fn earliest_rewrites() -> PatternMatcher {
 
 /// `pm_copy_to_store` (rangeify.py:579).
 pub fn pm_copy_to_store() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_copy_to_store).clone()
+}
+
+fn build_pm_copy_to_store() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         // existing buffer stores a copy
         (
@@ -609,6 +624,11 @@ fn after_all_invalid(ctx: &mut UOpCtx, after: UopId) -> bool {
 
 /// `pm_const_buffer_folding` (rangeify.py:301).
 pub fn pm_const_buffer_folding() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_const_buffer_folding).clone()
+}
+
+fn build_pm_const_buffer_folding() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         (UPat::ops1(Ops::Stage).allow_all_srcs().named("b"), r_ctx(|ctx, st| cleanup_dead_axes(ctx, sym::sget(st, "b")))),
         // remove noop buffers (INDEX of STAGE with same rngs)
@@ -683,6 +703,11 @@ pub fn pm_const_buffer_folding() -> PatternMatcher {
 
 /// `pm_remove_bufferize` (rangeify.py:321).
 pub fn pm_remove_bufferize() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_remove_bufferize).clone()
+}
+
+fn build_pm_remove_bufferize() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         // remove reindexing with cost function
         (
@@ -964,6 +989,11 @@ fn add_local_buffer(cnt: &std::cell::Cell<i64>, ctx: &mut UOpCtx, x: UopId) -> O
 
 /// `pm_add_local_buffers` (codegen/__init__.py:252).
 pub fn pm_add_local_buffers() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_add_local_buffers).clone()
+}
+
+fn build_pm_add_local_buffers() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::ops1(Ops::Stage).allow_all_srcs().named("x"),
         r_cnt(|cnt, ctx, st| add_local_buffer(cnt, ctx, sym::sget(st, "x"))),
@@ -1023,6 +1053,11 @@ fn remove_noop_afters(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
 
 /// `pm_add_buffers` (rangeify.py:445).
 pub fn pm_add_buffers() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_add_buffers).clone()
+}
+
+fn build_pm_add_buffers() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         (
             UPat::ops1(Ops::Stage)
@@ -1103,6 +1138,11 @@ pub fn pm_add_buffers() -> PatternMatcher {
 
 /// `pm_add_param_range_tags` (rangeify.py:543).
 pub fn pm_add_param_range_tags() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_add_param_range_tags).clone()
+}
+
+fn build_pm_add_param_range_tags() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::op_var(vec![Ops::Param, Ops::Range]).named("x"),
         r_ctx(|ctx, st| {
@@ -1118,6 +1158,11 @@ pub fn pm_add_param_range_tags() -> PatternMatcher {
 
 /// `pm_no_indexing_calls` (rangeify.py:350).
 pub fn pm_no_indexing_calls() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_no_indexing_calls).clone()
+}
+
+fn build_pm_no_indexing_calls() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::ops1(Ops::Call).allow_all_srcs().named("u"),
         r_ctx(|ctx, st| {
@@ -1415,6 +1460,11 @@ fn split_store(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
 
 /// `split_kernels` (rangeify.py:561).
 pub fn split_kernels() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_split_kernels).clone()
+}
+
+fn build_split_kernels() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::op_var(vec![Ops::Store, Ops::End]).named("x"),
         r_ctx(|ctx, st| split_store(ctx, sym::sget(st, "x"))),

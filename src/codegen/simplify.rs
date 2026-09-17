@@ -52,6 +52,11 @@ pub fn flatten_range(ctx: &mut UOpCtx, rr: UopId) -> Option<UopId> {
 
 /// `pm_flatten_range` — real ranges only.
 pub fn pm_flatten_range() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_flatten_range).clone()
+}
+
+fn build_pm_flatten_range() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::op_var(vec![Ops::Reduce, Ops::End]).named("r"),
         r(|ctx, st, _| flatten_range(ctx, sget(st, "r"))),
@@ -133,6 +138,11 @@ pub fn simplify_merge_adjacent(ctx: &mut UOpCtx, u0: UopId) -> Option<UopId> {
 
 /// `pm_simplify_ranges` merge rule (simplify.py:54; gating done by `range_gates`).
 pub fn pm_simplify_ranges() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_simplify_ranges).clone()
+}
+
+fn build_pm_simplify_ranges() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::op_var(vec![Ops::End, Ops::Reduce]).named("u"),
         r(|ctx, st, _| simplify_merge_adjacent(ctx, sget(st, "u"))),
@@ -281,6 +291,11 @@ fn do_split_substitute(ctx: &mut UOpCtx, sink: UopId, g: &mut HashMap<UopId, Uop
 /// `pm_split_ranges` (simplify.py:72) — split a range that is used modulo a
 /// constant whose multiple it is (`range % c` with `len % c == 0`).
 pub fn pm_split_ranges() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_split_ranges).clone()
+}
+
+fn build_pm_split_ranges() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             UPat::ops1(Ops::Range).named("r").mod_(UPat::cvar(Some("c"), None, None)),
@@ -352,6 +367,11 @@ pub fn reduce_unparented(ctx: &mut UOpCtx, red: UopId) -> Option<UopId> {
 
 /// `pm_reduce_unparented`.
 pub fn pm_reduce_unparented() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_reduce_unparented).clone()
+}
+
+fn build_pm_reduce_unparented() -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::op_var(vec![Ops::Reduce]).named("red"),
         r(|ctx, st, _| reduce_unparented(ctx, sget(st, "red"))),
@@ -417,6 +437,11 @@ pub fn reduce_collapse(ctx: &mut UOpCtx, red: UopId, pm: &PatternMatcher) -> Opt
 
 /// `pm_reduce_collapse` = unparented + the lift rules (+symbolic).
 pub fn pm_reduce_collapse() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_reduce_collapse).clone()
+}
+
+fn build_pm_reduce_collapse() -> PatternMatcher {
     let mut rules: Vec<(UPat, RuleFn)> = vec![];
     // lift x+y out of reduce on lt: (x+y).or_casted() < c  ->  x < (c-y)
     rules.push((
@@ -564,6 +589,11 @@ fn cv_num(v: i64) -> ConstVal {
 
 /// `pm_reduce_simplify` (simplify.py:170) — remove REDUCE without loads.
 pub fn pm_reduce_simplify() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_reduce_simplify).clone()
+}
+
+fn build_pm_reduce_simplify() -> PatternMatcher {
     let reduce_collapse_rule: (UPat, RuleFn) = (
         UPat::ops1(Ops::Reduce)
             .with_arg(Some(red_add_arg()))
@@ -596,6 +626,11 @@ pub fn reduce_load_collapse(ctx: &mut UOpCtx, red: UopId) -> Option<UopId> {
 /// `pm_reduce_load_collapse` (simplify.py:124) = `pm_reduce_collapse` + the two
 /// load-collapse lift rules (ne-lift + gated-load gather).
 pub fn pm_reduce_load_collapse() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_reduce_load_collapse).clone()
+}
+
+fn build_pm_reduce_load_collapse() -> PatternMatcher {
     let mut rules: Vec<(UPat, RuleFn)> = vec![];
     // lift x+y out of reduce on ne: (x+y).or_casted() != c  ->  x != (c.cast(y.dtype)-y)
     rules.push((
@@ -645,6 +680,11 @@ pub fn pm_reduce_load_collapse() -> PatternMatcher {
 /// tensor with another tensor); also undoes the weak-index arithmetic that the
 /// collapse enables so we don't do math on a loaded index (overflow).
 pub fn pm_load_collapse() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_load_collapse).clone()
+}
+
+fn build_pm_load_collapse() -> PatternMatcher {
     let mut rules: Vec<(UPat, RuleFn)> = vec![];
     rules.push((
         var("u").reduce(vec![UPat::var(None, None)], Some(red_add_arg()), false).named("red"),
@@ -930,6 +970,11 @@ pub fn merge_reduce_ends(ctx: &mut UOpCtx, sink: UopId) -> Option<UopId> {
 /// `pm_reduce_local` (codegen/__init__.py:227-234): fix groups, build acc
 /// patterns for parented reduces, expand horizontal reduces, merge ENDs.
 pub fn pm_reduce_local() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_pm_reduce_local).clone()
+}
+
+fn build_pm_reduce_local() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             UPat::ops1(Ops::Reduce).named("x"),
