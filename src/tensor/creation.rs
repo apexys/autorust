@@ -28,7 +28,7 @@ pub(crate) fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
 pub static UNIQUE_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// `UOp.new_buffer(device, size, dtype, num=None)` (ops.py:815-820).
-/// `device` here is the Python-side canonical string (e.g. "PYTHON" — tinygrad's DEFAULT staging name —, "NV").
+/// `device` here is the Python-side canonical string (e.g. "PYTHON" — tinygrad's DEFAULT staging name —, "CL").
 pub fn new_buffer(ctx: &mut UOpCtx, device: &str, size: SVal, dt: DTypeId, num: Option<i64>) -> UopId {
     assert!(!dtype::is_weak(dt), "TGERR: cannot create storage for weak dtype {dt:?}");
     let slot = num.unwrap_or_else(|| UNIQUE_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
@@ -238,12 +238,24 @@ pub fn shape_from(args: impl super::ShapeArg) -> Shape {
 
 // **** constructors from host data (`Tensor.__init__` list/bytes paths -> `UOp._frompy`) ****
 
-/// Python `Device.DEFAULT` (device.py): env-configurable, "NV" here.
+/// Python `Device.DEFAULT` (device.py): env-configurable, else the best backend
+/// actually available. There is no "NV" backend ported, so the fallback is the
+/// interpreter (always present) — or the OpenCL backend when it is compiled in
+/// (`backend_cl`) and a device is present.
 pub static DEFAULT_DEVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub fn default_device() -> String {
     DEFAULT_DEVICE
-        .get_or_init(|| std::env::var("DEFAULT_DEVICE").unwrap_or_else(|_| "NV".to_string()))
+        .get_or_init(|| {
+            if let Ok(dev) = std::env::var("DEFAULT_DEVICE") {
+                return dev;
+            }
+            #[cfg(feature = "backend_cl")]
+            if crate::runtime::ops_cl::available() {
+                return "CL".to_string();
+            }
+            "INTERP".to_string()
+        })
         .clone()
 }
 

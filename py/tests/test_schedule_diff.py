@@ -21,7 +21,7 @@ sys.path.insert(0, "../tinygrad")
 
 from bridge import json_to_uop  # noqa: E402
 
-from tinygrad import Tensor  # noqa: E402
+from tinygrad import Tensor, Device  # noqa: E402
 from tinygrad.dtype import dtypes  # noqa: E402
 from tinygrad.tensor import transform_to_call  # noqa: E402
 from tinygrad.schedule import pm_schedule, pm_resolve_linear_call, pm_copy_from_store  # noqa: E402
@@ -30,6 +30,9 @@ from tinygrad.uop.ops import UOp, graph_rewrite  # noqa: E402
 
 def run_oracle(prog: list[dict], planned: bool = False) -> UOp | None:
     env = dict(**{k: v for k, v in __import__("os").environ.items()})
+    # Pin the oracle to tinygrad's device label: AST keys embed the device string,
+    # and tinygrad defaults to e.g. "NV" (not the port's INTERP/CL default).
+    env["DEFAULT_DEVICE"] = Device.DEFAULT
     if planned:
         env["TG_SCHED_PLANNED"] = "1"
     p = subprocess.run(["./target/debug/oracle_tensor"], input=json.dumps({"prog": prog, "mode": "schedule"}),

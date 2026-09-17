@@ -114,8 +114,8 @@ impl Prog for InterpProgram {
 
 /// The `PythonDevice` composition + `Device._DeviceMap` assignment ("CPU"
 /// and "INTERP" both run the interp backend). Unknown device names fall back
-/// to an interp device under that name (the M6 stub: no concrete GPU runtime
-/// is ported, so staging devices like "NV" execute on the interpreter).
+/// to an interp device under that name (e.g. a staging name like "PYTHON"):
+/// only the interpreter and the optional OpenCL backend are ported.
 pub fn register() {
     fn make(device: &str) -> Rc<Compiled> {
         let renderer: Box<dyn UopRenderer> = Box::new(InterpUopRenderer::new());

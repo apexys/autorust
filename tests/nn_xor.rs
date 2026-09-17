@@ -30,6 +30,17 @@ fn xor_trains_to_convergence() {
     let l1 = Linear::new(&mut ctx, 2, 4, true).into_params(&mut ctx);
     let l2 = Linear::new(&mut ctx, 4, 1, true).into_params(&mut ctx);
 
+    // Confirm which backend actually holds the parameters (env DEFAULT_DEVICE >
+    // CL when compiled+present > INTERP). `to_param` stages each leaf on the
+    // device its init was realized on.
+    eprintln!(
+        "[xor] default device = {}, l1.weight = {:?}, l1.bias = {:?}, l2.weight = {:?}",
+        autorust::tensor::creation::default_device(),
+        l1.weight.device(&ctx),
+        l1.bias.as_ref().and_then(|b| b.device(&ctx)),
+        l2.weight.device(&ctx),
+    );
+
     let lr: f32 = std::env::var("LR").ok().and_then(|s| s.parse().ok()).unwrap_or(0.1);
     let params = vec![
         l1.weight.clone(),

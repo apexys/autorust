@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(_here))
 sys.path.insert(0, os.path.join(_here, "..", "..", "..", "tinygrad"))
 
 from bridge import json_to_uop  # noqa: E402
-from tinygrad import Tensor, dtypes  # noqa: E402
+from tinygrad import Tensor, dtypes, Device  # noqa: E402
 
 ORACLE = os.path.join(os.path.dirname(__file__), "..", "..", "target", "debug", "oracle_tensor")
 
@@ -28,7 +28,8 @@ def ix_spec(i=None, newaxis=False, ellipsis=False, slice=None):
     return d
 
 def run_rust(prog):
-    p = subprocess.run([ORACLE], input=json.dumps({"prog": prog}), capture_output=True, text=True, timeout=60)
+    env = {**os.environ, "DEFAULT_DEVICE": Device.DEFAULT}
+    p = subprocess.run([ORACLE], input=json.dumps({"prog": prog}), capture_output=True, text=True, timeout=60, env=env)
     if p.returncode != 0:
         raise RuntimeError(f"oracle_tensor failed: {p.stderr[-400:]}")
     out = json.loads(p.stdout)

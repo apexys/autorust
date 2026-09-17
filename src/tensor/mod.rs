@@ -53,7 +53,7 @@ impl From<ConstVal> for TensorAddArg {
         TensorAddArg::C(v)
     }
 }
-use crate::uop::arg::{Arg, EnumClass, EnumVal};
+use crate::uop::arg::{Arg, DeviceSpec, EnumClass, EnumVal};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
@@ -152,6 +152,14 @@ impl Tensor {
 
     pub fn dtype(&self, ctx: &UOpCtx) -> DTypeId {
         ctx.dt_of(&self.uop)
+    }
+
+    /// `Tensor.device` / `UOp.device` (tensor.py / ops.py:847): the device string
+    /// backing this tensor's storage, or `None` when it has no placement yet
+    /// (e.g. a computed expression). Walks movement/COPY/multi-device ops like
+    /// the Python property.
+    pub fn device(&self, ctx: &UOpCtx) -> Option<String> {
+        uop_device(ctx, &self.uop)
     }
 
     /// `Tensor.cast(dtype)`: in-graph cast to another dtype (a no-op when equal).
@@ -856,5 +864,33 @@ impl Tensor {
     /// `Tensor.threefry(seed)` (`mixin/elementwise.py:454`): `self.alu(Ops.THREEFRY, seed)`.
     pub fn threefry(&self, ctx: &mut UOpCtx, seed: &Tensor) -> Tensor {
         { let __u = ctx.uop(Ops::Threefry, Some(crate::dtype::UINT64), vec![self.uop.clone(), seed.uop.clone()], Arg::None); Tensor::from_uop(ctx, __u) }
+    }
+}
+
+fn device_spec(spec: Option<&DeviceSpec>) -> Option<String> {
+    match spec {
+        Some(DeviceSpec::Single(s)) => Some(s.clone()),
+        Some(DeviceSpec::Multi(v)) => v.first().cloned(),
+        None => None,
+    }
+}
+
+/// `UOp.device` (ops.py:847): placement of a node, walking movement/COPY and
+/// falling through to the first src that has one. Multi-device ops (`MSELECT`/
+/// `MSTACK`) collapse to their first device on this single-device port.
+fn uop_device(ctx: &UOpCtx, u: &UopId) -> Option<String> {
+    use Ops::*;
+    match ctx.op_of(u) {
+        Param | Buffer => match ctx.arg_of(u) {
+            Arg::Param(p) => device_spec(p.device.as_ref()),
+            _ => None,
+        },
+        After => ctx.srcs(u).first().and_then(|s| uop_device(ctx, s)),
+        Copy => match ctx.arg_of(u) {
+            Arg::Str(s) => Some(s.clone()),
+            _ => ctx.srcs(u).first().and_then(|s| uop_device(ctx, s)),
+        },
+        Mselect | Mstack | Allreduce => ctx.srcs(u).first().and_then(|s| uop_device(ctx, s)),
+        _ => ctx.srcs(u).iter().find_map(|s| uop_device(ctx, s)),
     }
 }

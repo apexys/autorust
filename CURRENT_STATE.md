@@ -478,6 +478,15 @@ those nodes).
 ### 8.9 Backends
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
   kernel-count parity on the RTX 3060. `tests/backend_harness.rs` 12 passed / 1 ignored.
+- **Default device** (`Tensor::creation::default_device`): env `DEFAULT_DEVICE` if set, else
+  `CL` when `backend_cl` is compiled in and an OpenCL device is present
+  (`ops_cl::available`, a non-panicking probe), else `INTERP`. There is **no "NV"**: it was a
+  leftover name for a backend that was never ported (it silently ran on the interpreter), so
+  `Tensor::device(ctx)` now reports the real one (`UOp.device`, ops.py:847).
+- The Python differential gates compare graph/`key()` hashes that embed the device string, so
+  tinygrad's default here is `NV` (its `ops_nv` backend opens). The harnesses
+  (`test_tensor_diff`/`test_schedule_diff`/`test_codegen_diff`) pin the oracle's
+  `DEFAULT_DEVICE` to tinygrad's `Device.DEFAULT` so both sides use the same label.
 
 ### 8.10 In-place parameter updates: `Tensor::assign` (DONE)
 tinygrad's optimizers assign the update into the parameter's existing buffer

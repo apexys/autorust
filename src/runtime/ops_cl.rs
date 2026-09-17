@@ -281,6 +281,16 @@ impl UopRenderer for OclUopRenderer {
 
 // ---------------- device + registration ----------------
 
+/// Whether an OpenCL device is present, without opening a context/queue and
+/// without panicking (the default-device probe). Matches `ClInner::open`'s
+/// GPU-else-DEFAULT selection.
+pub fn available() -> bool {
+    match get_all_devices(CL_DEVICE_TYPE_GPU) {
+        Ok(ids) if !ids.is_empty() => true,
+        _ => get_all_devices(CL_DEVICE_TYPE_DEFAULT).map(|ids| !ids.is_empty()).unwrap_or(false),
+    }
+}
+
 /// The `CLDevice` composition + `Device._DeviceMap["CL"]` assignment.
 pub fn register() {
     let factory: crate::runtime::device::DeviceFactory = Rc::new(|| {

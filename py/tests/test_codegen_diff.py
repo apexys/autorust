@@ -10,6 +10,7 @@ import sys, json, itertools, subprocess, unittest
 sys.path.insert(0, "py"); sys.path.insert(0, "py/tests"); sys.path.insert(0, "../tinygrad")
 from bridge import json_to_uop
 from test_schedule_diff import py_build
+from tinygrad import Device
 from tinygrad.uop.ops import UOp, Ops, graph_rewrite
 from tinygrad.tensor import transform_to_call
 from tinygrad.schedule import pm_schedule, pm_resolve_linear_call, pm_copy_from_store
@@ -20,7 +21,7 @@ ORACLE = "./target/debug/oracle_tensor"
 def rs_codegen(prog):
     p = subprocess.run([ORACLE], input=json.dumps({"prog": prog, "mode": "schedule"}),
                        capture_output=True, text=True,
-                       env={"PATH": "/usr/bin:/bin", "TG_M5_CODEGEN": "1"})
+                       env={"PATH": "/usr/bin:/bin", "TG_M5_CODEGEN": "1", "DEFAULT_DEVICE": Device.DEFAULT})
     if p.returncode != 0:
         return None
     return json_to_uop(json.dumps(json.loads(p.stdout)["graph"]))[0]

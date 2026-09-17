@@ -92,7 +92,7 @@ fn buffer_copy_into_same_and_cross_device() {
     buffer_copy_into(&b, &a);
     assert_eq!(buffer_bytes(&b), one, "same-device copy");
 
-    let src = Buffer::new_base("NV", 1, autorust::dtype::FLOAT32);
+    let src = Buffer::new_base("INTERP", 1, autorust::dtype::FLOAT32);
     let dst = Buffer::new_base("CPU", 1, autorust::dtype::FLOAT32);
     buffer_copyin(&src, &[5u8, 6, 7, 8]);
     buffer_copy_into(&dst, &src);
