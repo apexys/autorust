@@ -489,11 +489,19 @@ those nodes).
   `DEFAULT_DEVICE` to tinygrad's `Device.DEFAULT` so both sides use the same label.
 - **MAX is renderer-gated**: `python_alu` has it, cstyle/PTX/OpenCL do not, so
   `pm_decomp(supports_max)` rewrites `MAX(a,b) → (a<b).where(b,a)` only for the C-style
-  renderers (decomp/op.py:89). This unblocks `relu` on CL; the next CL blocker is the local
-  buffer declaration in the OpenCL renderer (`__local float* buf[N]` is emitted as an array of
-  pointers). `tests/cl_offset.rs` pins the other CL gap: `CLAllocator` has no `_offset`, so an
-  offset view (`SHRINK`/`BITCAST` reaching `buffer_of`) panics — matching tinygrad, which
-  carries `Buffer.offset` in the kernel arg instead.
+  renderers (decomp/op.py:89).
+- **`render_buffer` local declaration** (cstyle.py:169): a local `BUFFER` renders as
+  `__attribute__ ((aligned (16))) __local float buf[N];` — the element type uses the default
+  ALU addrspace (`_render_dtype(dtype, sz=1)`), and the only `__local ` is the one in
+  `smem_prefix`. The port was passing the buffer's LOCAL addrspace to `render_dtype`, which
+  appended a second `__local ` *and* a `*`, emitting `__local float* buf[N];` (an array of
+  pointers). That made every reduction lowered through workgroup memory fail with
+  `CL_BUILD_PROGRAM_FAILURE`. `tests/cl_reduce.rs` pins it (fails to build without the fix).
+- **CL offset views**: `CLAllocator` has no `_offset` (only python/cuda/hip/metal/disk/dsp/
+  npy/hcq implement it upstream), so an offset view (`SHRINK`/`BITCAST` reaching `buffer_of`)
+  panics. Our forward/backward XOR graph never produces one, so CL training works. tinygrad
+  avoids it unconditionally by carrying `Buffer.offset` into the kernel's buffer arg (the
+  real fix if a future graph needs it); `tests/cl_offset.rs` pins the current panic.
 
 ### 8.10 In-place parameter updates: `Tensor::assign` (DONE)
 tinygrad's optimizers assign the update into the parameter's existing buffer

@@ -483,13 +483,15 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 format!("__{}({}, {}, {})", nm, g(&r, &i.srcs[0]), g(&r, &i.srcs[1]), g(&r, &i.srcs[2]))
             }
             Ops::Buffer => {
-                // render_buffer: the (local) storage declaration
+                // render_buffer (cstyle.py:169): the (local) storage declaration.
+                // `_render_dtype(dtype, sz=1)` uses the default ALU addrspace, so the
+                // only `__local ` is the one in `smem_prefix` (not a pointer).
                 let prefix = if i.addrspace == Some(AddrSpace::Local) {
                     format!("{}{}", lang.smem_align, lang.smem_prefix)
                 } else {
                     String::new()
                 };
-                format!("{prefix}{} {}[{}];", lang.render_dtype(i.dt, 1, i.addrspace, false), r[u], i.numel)
+                format!("{prefix}{} {}[{}];", lang.render_dtype(i.dt, 1, None, false), r[u], i.numel)
             }
             _ if group::in_(group::ALU, i.op) => {
                 let args: Vec<String> = i
