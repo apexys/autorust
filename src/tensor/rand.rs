@@ -112,7 +112,7 @@ fn random_bits(key: (u32, u32), counter: (u32, u32), num: u32) -> Vec<u32> {
     let nk1 = (out >> 32) as u32; // high
     let key2 = ((nk1 as u64) << 32) | (nk0 as u64);
 
-    let half = ((num + 1) / 2) as u32;
+    let half = num.div_ceil(2);
     let mut bits: Vec<u32> = Vec::with_capacity(2 * half as usize);
     let mut highs: Vec<u32> = Vec::with_capacity(half as usize);
     for j in 0..half {
@@ -153,7 +153,7 @@ fn bits_to_rand_f64(bits: &[u32], numel: usize) -> Vec<f64> {
 }
 
 fn numel_int(shape: &[SVal]) -> i64 {
-    shape.iter().map(|s| s.as_i64().unwrap_or(1)).product()
+    shape.iter().map(|s| s.clone().as_i64().unwrap_or(1)).product()
 }
 
 /// `RandMixin.rand(*shape, dtype, device)` (rand.py:50).
@@ -172,7 +172,7 @@ pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device
         let vals = bits_to_rand_f32(&bits, numel as usize);
         Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
     };
-    if shape.len() == 1 && shape[0].as_i64().unwrap_or(1) == numel {
+    if shape.len() == 1 && shape[0].clone().as_i64().unwrap_or(1) == numel {
         out
     } else {
         out.reshape(ctx, shape)
@@ -234,7 +234,7 @@ pub fn randn(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, devic
     } else {
         Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
     };
-    if shape.len() == 1 && shape[0].as_i64().unwrap_or(1) == n as i64 {
+    if shape.len() == 1 && shape[0].clone().as_i64().unwrap_or(1) == n as i64 {
         out
     } else {
         out.reshape(ctx, shape)
@@ -263,7 +263,7 @@ pub fn randint(
     let range = (high - low) as f32;
     let vals: Vec<i32> = r.iter().map(|&v| ((range * v) as i32) + low).collect();
     let out = Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev));
-    if shape.len() == 1 && shape[0].as_i64().unwrap_or(1) == numel {
+    if shape.len() == 1 && shape[0].clone().as_i64().unwrap_or(1) == numel {
         out
     } else {
         out.reshape(ctx, shape)

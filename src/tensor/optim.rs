@@ -36,14 +36,14 @@ impl Optim for SGD {
     fn step(&self, ctx: &mut UOpCtx, params: &[Tensor]) -> Vec<Tensor> {
         params
             .iter()
-            .map(|p| match ctx.grad(p.uop) {
+            .map(|p| match ctx.grad(&p.uop) {
                 Some(g) => {
-                    let lr_c = ctx.const_like(p.uop, ConstVal::Float(self.lr as f64));
+                    let lr_c = ctx.const_like(p.uop.clone(), ConstVal::Float(self.lr as f64));
                     let g_lr = ctx.mul(g, lr_c);
-                    let w_new = ctx.sub(p.uop, g_lr);
-                    Tensor::from_uop(w_new)
+                    let w_new = ctx.sub(p.uop.clone(), g_lr);
+                    { let __u = w_new; Tensor::from_uop(ctx, __u) }
                 }
-                None => *p,
+                None => p.clone(),
             })
             .collect()
     }

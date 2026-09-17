@@ -101,7 +101,7 @@ pub fn prod_checked(vals: &[i128]) -> Option<i128> {
 
 /// Python `math.gcd(*xs)`.
 pub fn gcd_all(vals: &[i128]) -> i128 {
-    vals.iter().copied().fold(0, gcd_i128)
+    vals.iter().cloned().fold(0, gcd_i128)
 }
 
 // ---- numeric tower: Python semantics over ConstVal ----
@@ -329,7 +329,7 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
         Ops::Shr => {
             let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
             match (x, y) {
-                (Some(x), Some(y)) if y >= 0 && y < 512 => ConstVal::Int(x >> y),
+                (Some(x), Some(y)) if (0..512).contains(&y) => ConstVal::Int(x >> y),
                 (Some(x), Some(y)) if y >= 512 => ConstVal::Int(if x < 0 { -1 } else { 0 }),
                 _ => return Err("python_alu SHR".into()),
             }
@@ -337,7 +337,7 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
         Ops::Shl => {
             let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
             match (x, y) {
-                (Some(x), Some(y)) if y >= 0 && y < 512 => match x.checked_shl(y.min(126) as u32) {
+                (Some(x), Some(y)) if (0..512).contains(&y) => match x.checked_shl(y.min(126) as u32) {
                     Some(v) if y <= 126 => ConstVal::Int(v),
                     _ => {
                         // saturate like huge Python ints would (documented)

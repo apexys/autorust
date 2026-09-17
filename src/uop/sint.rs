@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 
 use super::graph::UopId;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SInt {
     I(i128),
     U(UopId),

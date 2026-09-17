@@ -341,12 +341,14 @@ installed): 10 tests, all green — `commutative` 192/8, `div_and_mod_symbolic` 
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **68 passed, 6 ignored, 0 failed**. The 6 ignored = 1 `backend_harness`
+- `cargo test` → **70 passed, 6 ignored, 0 failed**. The 6 ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 4 doc-tests.
-- Rewrite-diff gate → all 10 tests green (see §5).
+- Python differential gates all green: `test_rewrite_diff.py` (10 tests),
+  `test_roundtrip`, `test_tensor_diff`, `test_schedule_diff`, `test_codegen_diff`,
+  `test_exec_diff`, `test_native_exec`.
 - Suites: `tests/{golden,backend_harness,marshal,ops,grad,rand,m2_smoke,flat_codec,nn_xor,
-  nn_xor_relu,nn_xor_parity,session}.rs`.
+  nn_xor_relu,nn_xor_parity,session,mem_probe}.rs`.
 
 ### 8.1 Core graph engine (mature)
 `src/uop/`: interned UOps, `UopId(u32)` (Copy), shapes, dtypes, `Ops`, `Arg`, `SVal`/`SInt`,
@@ -426,28 +428,33 @@ those nodes).
   `nn_xor_relu.rs` 1/1; `nn_xor_parity.rs::xor_parity_tinygrad_seed42` `#[ignore]`d;
   `backend_harness` XOR-training `#[ignore]` placeholder.
 
-### 8.8 Realize memory + local-memory `STAGE` lowering
-- **Exponential-realize fix (DONE, `c2b8d50`)**: `Graph::to_flat` now serializes only the
-  toposort reachable from `self.roots` (index-remapped; falls back to all nodes). Per-iter
-  realize is ~5ms flat (was exponential).
-- **Persistent realize state / 9.1 (DONE, this revision)**: `engine::session::Session`
-  (`src/engine/session.rs`) bundles a `BufTable` + `ProgCache` + `var_vals` + a
-  `realized` memo. `ProgCache` is content-keyed (`Graph::content_key`, arena-independent),
-  so compiled kernels survive a fresh `UOpCtx` per step. New `Tensor::{to_bytes_in,
-  to_list_in, item_in, realize_in}` reuse a session; `to_list`/`to_bytes` create a
-  throwaway session (the defaults now go through the same path). The XOR training loop
-  shares one `ProgCache` across epochs: **21 kernels compiled total, 3291 cache hits over
-  300 epochs**, runtime ~47s → ~22s. `tests/session.rs` (3 tests) pins the behavior.
-  `prog_cache_reuses_across_arenas` required fixing `to_program`'s cache-hit path to
-  re-intern the PROGRAM uop in the current arena (the cached `uop` id is arena-local; the
-  `elf`/`pi` are not).
+### 8.8 Realize memory: `Rc` arena + tensor-owned buffers (9.1/9.2 — DONE)
+- **Exponential-realize fix (DONE, `c2b8d50`)**: `Graph::to_flat` serializes only the
+  toposort reachable from `self.roots`. Per-iter realize is ~5ms flat (was exponential).
+- **`Rc<Node>` arena (9.2, DONE)**: `UopId` is now a strong handle to an immutable
+  `Rc<Node>`; `Node.srcs` holds strong child handles and the interner is
+  `HashMap<u64, Weak<Node>>` (Python's `ucache` semantics). A node is freed the moment its
+  last handle drops — no GC pass, no safe-point, no slot reuse. Property caches
+  (`shape_c`/`mm_c`/`range_c`) moved onto the node (interior mutability) and die with it.
+  `Tensor` is `Clone` (not `Copy`) and holds the handle plus an `Rc` realized-buffer cell.
+- **Tensor-owned buffers (9.1, DONE)**: `Tensor::{to_bytes,to_list,realize}` cache the
+  realized `Buffer` on the tensor (shared by clones) and reuse it; `BufTable` keeps bases
+  alive only for the duration of a realize and stores views as `Weak`, pruning any base no
+  live caller references at the start of each realize.
+- **Result**: the single-ctx 120-step training loop holds **flat at 898 live nodes and 0
+  retained bases** (was ~133k nodes / ~5.4k bases, RSS 240MB → 15MB). Regression test
+  `tests/mem_probe.rs::single_ctx_training_is_memory_bounded`.
+- **Persistent realize state (`Session`)**: `engine::session::Session` bundles a `BufTable` +
+  `ProgCache` + `var_vals` + a `realized` memo. `ProgCache` is content-keyed
+  (`Graph::content_key`), so compiled kernels survive a fresh `UOpCtx` per step; its hit path
+  re-interns the PROGRAM uop in the current arena (the cached `uop` id is arena-local).
+  The XOR training loop shares one `ProgCache`: **21 kernels compiled, 3291 hits / 300
+  epochs**, ~47s → ~22s. `tests/session.rs` (3 tests) pins it.
 - **`add_local_buffer` (DONE, `11ab94a`)** + `pm_add_local_buffers` wired into the
   `"add local buffers"` stage (receives a slot counter `CtxVal::Cnt`).
-- **Still open (9.1b / 9.2)**: `BufTable.bases`/`views` are keyed by uop id and never
-  evict, so a growing arena (new buffer uops per step) grows the table too; the fix is
-  `Weak<BufferBase>` entries tied to node collection, which needs 9.2's arena refcounting.
-  `micro_repeated_realize` shows this: time flat at ~2.3ms, but `bases` grows 5/iter while
-  the graph is rebuilt.
+- **Residual**: `UOpCtx.initial_data` is still keyed by `u32` and not pruned when a buffer
+  node dies (small: staged input bytes only). Move it onto the node or prune it when the
+  arena drops nodes.
 
 ### 8.9 Backends
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
@@ -460,76 +467,27 @@ those nodes).
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same
 problem (persistent, collectible state) and should be designed together.
 
-### 9.1 Buffer management via `Rc` — PARTIAL (9.1a DONE)
-**Problem.** `to_bytes`/`to_list`/`item` used to allocate a **fresh `BufTable` +
-`ProgCache` per call** (only the `*_with` variants let a caller reuse them). Every training
-step therefore recomputed/reallocated kernel outputs and intermediate buffers. There was no
-session object, so nothing owned buffers across realizes.
+### 9.1 Buffer management via `Rc` — DONE
+See §8.8 for the full write-up. Summary: `Tensor` owns its realized `Buffer` (`Rc`, shared
+by clones, reused on repeat reads); `BufTable` stores views as `Weak` and prunes any base no
+live caller references at the start of each realize; `Session` bundles `BufTable` +
+`ProgCache` (+ `var_vals` + `realized` memo) and is reusable across steps. The
+content-keyed `ProgCache` makes compiled kernels survive a fresh `UOpCtx` per step.
+Residual: `UOpCtx.initial_data` is not yet pruned (small, staged input bytes only).
 
-**Today's code.** `BufTable { bases: HashMap<u32, Rc<BufferBase>>, views: HashMap<u32, Buffer> }`
-(`src/runtime/buffer.rs:208`); `Buffer { base: Rc<BufferBase>, size, dtype, offset }`;
-`BufferBase` already tracks `uop_refcount: Cell<i64>` (`:92`) and holds the opaque as
-`Rc<dyn OpaqueT>`.
+### 9.2 `Tensor` / UOp management via `Rc` — DONE
+`UopId` is a strong handle (`Rc<Node>`); `Node.srcs` holds strong child handles; the
+interner is `HashMap<u64, Weak<Node>>`; property caches live on the node. `Tensor` is
+`Clone` (not `Copy`). Nodes free automatically when the last handle drops — no GC pass, no
+safe-point, no id reuse. The engine's `UopId` currency changed from a `Copy` index to a
+`Clone` handle, which rippled through ~2k call sites (mostly mechanical `.clone()` /
+`&`-borrow fixes, driven by compiler suggestions). `Tensor`'s buffer/drop semantics are the
+only behavioural change; the rewrite differentials (see §8.0) are unchanged.
 
-**9.1a — DONE (this revision).**
-1. `engine::session::Session` owns `BufTable` + `ProgCache` + `var_vals` + a `realized`
-   memo, and survives across steps. `Tensor::{to_bytes_in, to_list_in, item_in, realize_in}`
-   reuse it; the session-less defaults create a throwaway session.
-2. `ProgCache` is content-keyed (`Graph::content_key`, arena-independent) and its hit path
-   re-interns the PROGRAM uop in the current arena, so compiled kernels survive a fresh
-   `UOpCtx` per step. Observability: `ProgCache::{hits,misses,len}`, `BufTable::{n_bases,n_views}`.
-3. The XOR training loop shares one `ProgCache` across epochs: **21 kernels compiled,
-   3291 hits / 300 epochs**, ~47s → ~22s, and asserts `misses` is flat after epoch 0.
-4. `tests/session.rs` — `session_realize_reuses_compile_and_buffers` (2nd realize:
-   no recompile, no new bases, memoized), `prog_cache_reuses_across_arenas` (identical ASTs
-   in separate arenas compile once), `session_memo_survives_later_realizes` (no
-   cross-schedule aliasing).
-
-**9.1b — remaining (depends on 9.2).** `BufTable.bases`/`views` are keyed by uop id and
-never evict, and re-scheduling can mint fresh BUFFER uops, so a growing arena grows the
-table (`micro_repeated_realize`: time flat ~2.3ms, `bases` +5/iter).
-1. Store bases as `Weak<BufferBase>` and resolve-on-access (recreate if dead), so a base
-   drops when the graph node referencing it is collected. Mirror tinygrad's
-   `WeakKeyDictionary` + `uop_refcount`; release through the `LRUAllocator` (`free_cache`)
-   at refcount 0.
-2. Ensure `UOpCtx.initial_data` entries are pruned on the same schedule.
-3. Revisit the `realized` memo once arena collection exists: currently valid because each
-   scheduled buffer uop owns its base (no cross-schedule aliasing — pinned by
-   `session_memo_survives_later_realizes`); with a shared workspace arena, invalidation or
-   per-generation keys may be needed.
-
-**Acceptance (9.1b).** `micro_repeated_realize` shows **flat `bases` count** as well as flat
-time across N iterations.
-
-### 9.2 `Tensor` / UOp management via `Rc`
-**Problem.** `Tensor { uop: UopId }` is `Copy`, and `UopId(u32)` indexes an **append-only**
-`Graph.nodes: Vec<Node>` (`src/uop/graph.rs:40`) with `interner: HashMap<u64,u32>`. Nothing
-is ever removed, so repeated graph construction leaks nodes linearly. The `Copy` handle is
-why Drop-based liveness is unavailable (documented §8.8).
-
-**Plan (phased).**
-1. **Arena refcount.** Store `nodes: Vec<Rc<Node>>`; represent child edges as
-   `Weak<Node>` (the DAG is acyclic, so back-edges are safe and cycles are impossible). A
-   root handle keeps its subgraph alive; dropping the last root cascades frees.
-2. **Interner with weak entries.** `interner: HashMap<u64, Weak<Node>>`; prune dead entries
-   on lookup/insert. Re-interning a resurrected identical node is fine (hash-consing is
-   value-based). Mirror tinygrad's `ucache` + weakref semantics.
-3. **Flip `Tensor` from `Copy` to `Clone`.** Make the handle hold the refcount that keeps
-   the subgraph alive (`Tensor { uop: Rc<Node> }` or `Tensor { uop: UopId }` + an
-   `Rc`-based arena handle on the ctx). Remove `Copy`; audit the numerous by-value `*p` /
-   method-by-value call sites. Keep `UopId` as the *internal* index (bridge/`to_flat`
-   depend on stable indices) and wrap it in the published handle type.
-4. **Prune side tables in lockstep**: `UOpCtx.{shape_c,mm_c,range_c}` (currently
-   `Vec<Option<..>>` indexed by id), `initial_data`, `grads`, and the session `BufTable` —
-   all currently grow monotonically. Decide on an epoch/arena-generation scheme or move
-   them behind the same `Rc`/`Weak` discipline.
-5. **Two-phase migration to keep the suite green.** (a) Add the `Rc`-backed handle and
-   collection without changing `Tensor`'s public API; (b) flip `Copy`→`Clone` in one
-   mechanical sweep, fixing borrow/move fallout under the `cargo test` gate.
-
-**Risk.** Removing `Copy` ripples widely; the `Ord`-shadowing pitfall (`Tensor::{max,min}`
-vs `Ord::max/min`) already bit us once — do not add `Ord`/`PartialOrd`. `Graph::to_flat`
-and `bridge.py` must keep working with index-based serialization.
+**Residual.** `UOpCtx.initial_data` (buffer id → staged bytes) and `grads` (tensor id →
+grad) are still `u32`-keyed side tables that grow with the arena rather than dying with
+their node; both are small and cleared/consumed in the training path, but should be moved
+onto the node (or pruned) for full parity with tinygrad's per-`UOp` side tables.
 
 ### 9.3 Completing nn
 1. **`Conv2d::forward`** — port tinygrad `mixin/op.py` conv2d verbatim: `_pad_constant` →

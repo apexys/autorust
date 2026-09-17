@@ -31,7 +31,7 @@ impl BigInt {
 
     /// low 64 bits as an unsigned value (v mod 2^64 in two's complement)
     pub fn low64(&self) -> u64 {
-        self.mag.first().copied().unwrap_or(0)
+        self.mag.first().cloned().unwrap_or(0)
     }
 
     pub fn limbs(&self) -> &[u64] {

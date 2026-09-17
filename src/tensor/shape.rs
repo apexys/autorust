@@ -37,7 +37,7 @@ impl Shape {
     /// Python-style `shape[i]`: negative indices count from the end,
     /// out-of-range panics like `IndexError`.
     pub fn at(&self, i: isize) -> SVal {
-        self.get(i).copied().unwrap_or_else(|| panic!("TGERR: IndexError shape index {i} out of range for len {}", self.0.len()))
+        self.get(i).cloned().unwrap_or_else(|| panic!("TGERR: IndexError shape index {i} out of range for len {}", self.0.len()))
     }
 
     pub fn get(&self, i: isize) -> Option<&SVal> {
@@ -52,12 +52,12 @@ impl Shape {
 
     /// The all-`int` view; `None` if any dim is a `Variable`.
     pub fn ints(&self) -> Option<Vec<i64>> {
-        self.0.iter().map(|s| s.as_i64()).collect()
+        self.0.iter().map(|s| s.clone().as_i64()).collect()
     }
 
     /// `prod(shape)` as int when fully static.
     pub fn numel_int(&self) -> Option<i128> {
-        self.0.iter().try_fold(1i128, |a, s| s.as_i64().map(|v| a * v as i128))
+        self.0.iter().try_fold(1i128, |a, s| s.clone().as_i64().map(|v| a * v as i128))
     }
 
     pub fn is_static(&self) -> bool {

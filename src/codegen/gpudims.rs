@@ -12,7 +12,7 @@ use crate::uop::upat::{substitute, PatternMatcher};
 use crate::uop::UopId;
 use std::collections::HashMap;
 
-fn dim_max(ctx: &mut UOpCtx, s: SVal) -> i64 {
+fn dim_max(_ctx: &mut UOpCtx, s: SVal) -> i64 {
     match s {
         SVal::I(v) => v as i64,
         SVal::U(_) => panic!("TGERR: symbolic gpudims unsupported"),
@@ -105,17 +105,17 @@ fn get_grouped_dims(ctx: &mut UOpCtx, prefix: &str, dims: &[i64], max_sizes: Opt
     for i in 0..dims.len() {
         // flat = sum(idx * prod(limited[i+1:])); out[i] = flat // prod(dims[i+1:]) (mod dims[i] for i>0)
         let mut flat: Option<UopId> = None;
-        for (j, &idx) in raw_idxs.iter().enumerate() {
+        for (j, idx) in raw_idxs.iter().enumerate() {
             let mult: i64 = limited[j + 1..].iter().product();
             let term = if mult == 1 {
                 idx
             } else {
                 let m = ctx.const_py(crate::dtype::ConstVal::Int(mult as i128), Some(crate::dtype::WEAKINT));
-                ctx.mul(idx, m)
+                &ctx.mul(idx.clone(), m)
             };
             flat = Some(match flat {
-                None => term,
-                Some(f) => ctx.add(f, term),
+                None => term.clone(),
+                Some(f) => ctx.add(f, term.clone()),
             });
         }
         let flat = flat.unwrap();
@@ -139,42 +139,38 @@ fn get_grouped_dims(ctx: &mut UOpCtx, prefix: &str, dims: &[i64], max_sizes: Opt
 
 /// `add_gpudims` (gpudims.py:44).
 pub fn add_gpudims(ctx: &mut UOpCtx, s: UopId) -> Option<UopId> {
-    if matches!(ctx.arg_of(s), Arg::None) {
+    if matches!(ctx.arg_of(&s), Arg::None) {
         return None;
     }
-    let s_topo = ctx.toposort(s);
-    if s_topo.iter().any(|&x| ctx.op_of(x) == Ops::Special) {
+    let s_topo = ctx.toposort(&s);
+    if s_topo.iter().any(|x| ctx.op_of(x) == Ops::Special) {
         return None;
     }
 
     // gather ranges keyed by (axis_id,) — corpus has unique axis ids
-    let mut all_ranges: Vec<UopId> = s_topo.iter().copied().filter(|&x| ctx.op_of(x) == Ops::Range).collect();
-    all_ranges.sort_by_key(|&x| crate::uop::range::AxisType::range_axis_id(ctx, x));
+    let mut all_ranges: Vec<UopId> = s_topo.iter().filter(|&x| ctx.op_of(x) == Ops::Range).cloned().collect();
+    all_ranges.sort_by_key(|x| crate::uop::range::AxisType::range_axis_id(ctx, x.clone()));
     let global_dims: Vec<UopId> = all_ranges
-        .iter()
-        .copied()
-        .filter(|&x| matches!(AxisType::range_axis_type(ctx, x), AxisType::Global | AxisType::Thread))
+        .iter().filter(|&x| matches!(AxisType::range_axis_type(ctx, x.clone()), AxisType::Global | AxisType::Thread)).cloned()
         .collect();
     let local_dims: Vec<UopId> = all_ranges
-        .iter()
-        .copied()
-        .filter(|&x| matches!(AxisType::range_axis_type(ctx, x), AxisType::Warp | AxisType::Local | AxisType::GroupReduce))
+        .iter().filter(|&x| matches!(AxisType::range_axis_type(ctx, x.clone()), AxisType::Warp | AxisType::Local | AxisType::GroupReduce)).cloned()
         .collect();
     if global_dims.is_empty() && local_dims.is_empty() {
         return None;
     }
 
     let dim_key = |ctx: &mut UOpCtx, r: UopId| -> (i64, AxisType) {
-        (AxisType::range_axis_id(ctx, r), AxisType::range_axis_type(ctx, r))
+        (AxisType::range_axis_id(ctx, r.clone()), AxisType::range_axis_type(ctx, r))
     };
     let extent = |ctx: &mut UOpCtx, r: UopId| -> i64 {
-        match ctx.ssimplify(ctx.srcs(r)[0]) {
+        match ctx.ssimplify(ctx.srcs(&r)[0].clone()) {
             Ok(SVal::I(v)) => v as i64,
             _ => panic!("TGERR: symbolic gpudims extent"),
         }
     };
-    let global_shape: Vec<i64> = global_dims.iter().map(|&r| extent(ctx, r)).collect();
-    let local_shape: Vec<i64> = local_dims.iter().map(|&r| extent(ctx, r)).collect();
+    let global_shape: Vec<i64> = global_dims.iter().map(|r| extent(ctx, r.clone())).collect();
+    let local_shape: Vec<i64> = local_dims.iter().map(|r| extent(ctx, r.clone())).collect();
 
     // gpu-like execution: local then global idxs (has_threads=false, dont_use_locals=false)
     let local_idxs = get_grouped_dims(ctx, "lidx", &local_shape, Some(&[32768, 32768, 32768]), false);
@@ -183,20 +179,20 @@ pub fn add_gpudims(ctx: &mut UOpCtx, s: UopId) -> Option<UopId> {
     idxs.extend(local_idxs);
 
     // ordered dims like python: (global_dims+local_dims) in sorted-key order
-    let mut ordered: Vec<(i64, AxisType)> = global_dims.iter().map(|&r| dim_key(ctx, r)).collect();
-    ordered.extend(local_dims.iter().map(|&r| dim_key(ctx, r)));
+    let mut ordered: Vec<(i64, AxisType)> = global_dims.iter().map(|r| dim_key(ctx, r.clone())).collect();
+    ordered.extend(local_dims.iter().map(|r| dim_key(ctx, r.clone())));
 
     let mut subs: HashMap<UopId, UopId> = HashMap::new();
-    for &r in s_topo.iter() {
+    for r in s_topo.iter() {
         if ctx.op_of(r) != Ops::Range {
             continue;
         }
-        let key = dim_key(ctx, r);
-        if AxisType::range_axis_type(ctx, r) == AxisType::Reduce {
+        let key = dim_key(ctx, r.clone());
+        if AxisType::range_axis_type(ctx, r.clone()) == AxisType::Reduce {
             continue;
         }
         if let Some(ii) = ordered.iter().position(|&k| k == key) {
-            subs.insert(r, idxs[ii]);
+            subs.insert(r.clone(), (idxs[ii]).clone());
         }
     }
     if subs.is_empty() {

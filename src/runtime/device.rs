@@ -12,9 +12,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::renderer::{Renderer, UopRenderer};
+use crate::renderer::UopRenderer;
 
-use super::buffer::{OpaqueT, OpaqueView};
+use super::buffer::OpaqueT;
 // ---------------- Allocator ----------------
 
 /// The runtime-implemented allocator methods (python `Allocator._alloc` etc).

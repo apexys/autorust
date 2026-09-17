@@ -61,7 +61,7 @@ impl AxisType {
     /// RANGE arg axis type: the last tuple item (`arg[-1]` in python; a split
     /// range `pm_split_ranges` inserts an extra field before it).
     pub fn range_axis_type(ctx: &UOpCtx, r: UopId) -> AxisType {
-        match ctx.arg_of(r) {
+        match ctx.arg_of(&r) {
             Arg::Seq { tuple: true, items } => AxisType::from_arg(items.last().expect("TGERR: empty RANGE arg")),
             other => panic!("TGERR: bad RANGE arg {other:?}"),
         }
@@ -69,7 +69,7 @@ impl AxisType {
 
     /// RANGE arg axis id (position 0).
     pub fn range_axis_id(ctx: &UOpCtx, r: UopId) -> i64 {
-        match ctx.arg_of(r) {
+        match ctx.arg_of(&r) {
             Arg::Seq { tuple: true, items } => match &items[0] {
                 Arg::Int(i) => *i,
                 other => panic!("TGERR: bad RANGE axis id {other:?}"),
@@ -130,12 +130,12 @@ impl UOpCtx {
     /// without it a `STACK` can leak into `LOAD`/`SHRINK`.
     pub fn index(&mut self, id: UopId, srcs: Vec<UopId>) -> UopId {
         // ops.py:561 — `len(srcs) == 1 and src[0].op is CONST and self.op is STACK`
-        if srcs.len() == 1 && self.op_of(srcs[0]) == Ops::Const && self.op_of(id) == Ops::Stack {
-            let i = match self.val(srcs[0]) {
+        if srcs.len() == 1 && self.op_of(&srcs[0]) == Ops::Const && self.op_of(&id) == Ops::Stack {
+            let i = match self.val(&srcs[0]) {
                 ConstVal::Int(v) => v as usize,
                 other => panic!("TGERR: non-int STACK index {other:?}"),
             };
-            return self.srcs(id)[i];
+            return self.srcs(&id)[i].clone();
         }
         let mut all = vec![id];
         all.extend(srcs);
@@ -144,15 +144,15 @@ impl UOpCtx {
 
     /// `u.get_idx()` — the idx part of a WHERE-wrapped range.
     pub fn get_idx(&mut self, id: UopId) -> UopId {
-        if self.op_of(id) == Ops::Stack {
-            let srcs = self.srcs(id).to_vec();
-            let idxs: Vec<UopId> = srcs.iter().map(|&s| self.get_idx(s)).collect();
+        if self.op_of(&id) == Ops::Stack {
+            let srcs = self.srcs(&id).to_vec();
+            let idxs: Vec<UopId> = srcs.iter().map(|s| self.get_idx(s.clone())).collect();
             return crate::tensor::stack(self, idxs);
         }
-        if self.op_of(id) == Ops::Where {
-            let srcs = self.srcs(id);
-            if srcs.len() >= 3 && self.is_invalid(srcs[2]) {
-                return srcs[1];
+        if self.op_of(&id) == Ops::Where {
+            let srcs = self.srcs(&id);
+            if srcs.len() >= 3 && self.is_invalid(&srcs[2]) {
+                return srcs[1].clone();
             }
         }
         id
@@ -160,22 +160,22 @@ impl UOpCtx {
 
     /// `u.get_valid()` — the valid part of a WHERE-wrapped range.
     pub fn get_valid(&mut self, id: UopId) -> UopId {
-        if self.op_of(id) == Ops::Stack {
-            let srcs = self.srcs(id).to_vec();
-            let vs: Vec<UopId> = srcs.iter().map(|&s| self.get_valid(s)).collect();
+        if self.op_of(&id) == Ops::Stack {
+            let srcs = self.srcs(&id).to_vec();
+            let vs: Vec<UopId> = srcs.iter().map(|s| self.get_valid(s.clone())).collect();
             return crate::tensor::stack(self, vs);
         }
-        if self.op_of(id) == Ops::Where {
-            let srcs = self.srcs(id);
-            if srcs.len() >= 3 && self.is_invalid(srcs[2]) {
-                return srcs[0];
+        if self.op_of(&id) == Ops::Where {
+            let srcs = self.srcs(&id);
+            if srcs.len() >= 3 && self.is_invalid(&srcs[2]) {
+                return srcs[0].clone();
             }
         }
-        self.const_bool(!self.is_invalid(id))
+        self.const_bool(!self.is_invalid(&id))
     }
 
     /// `ended_ranges` property (ops.py:480).
-    pub fn ended_ranges(&mut self, id: UopId) -> Vec<UopId> {
+    pub fn ended_ranges(&mut self, id: &UopId) -> Vec<UopId> {
         let (op, _dt, srcs, _arg, _tag) = self.snapshot(id);
         match op {
             Ops::End | Ops::Call | Ops::Function => {
@@ -187,7 +187,7 @@ impl UOpCtx {
             Ops::Unshard => srcs[1..].to_vec(),
             Ops::After => {
                 let mut ret = vec![];
-                for &s in &srcs[1..] {
+                for s in &srcs[1..] {
                     ret.extend(self.ended_ranges(s));
                 }
                 ret
@@ -198,78 +198,77 @@ impl UOpCtx {
         }
     }
 
-    /// `_ranges`+`ranges` recursive property (ops.py:489/504), memoized in
-    /// `range_c`. Insertion-ordered like the Python dict.
-    pub fn ranges(&mut self, id: UopId) -> Rc<Vec<UopId>> {
-        if let Some(Some(cached)) = self.range_c[id.0 as usize].clone() {
+    /// `_ranges`+`ranges` recursive property (ops.py:489/504), memoized on the
+    /// node (`Node.range_c`). Insertion-ordered like the Python dict.
+    pub fn ranges(&mut self, id: &UopId) -> Rc<Vec<UopId>> {
+        if let Some(Some(cached)) = id.range_c.borrow().clone() {
             return cached;
         }
         thread_local! {
-            static IN_PROGRESS: std::cell::RefCell<Vec<UopId>> = const { std::cell::RefCell::new(Vec::new()) };
+            static IN_PROGRESS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
         }
         IN_PROGRESS.with(|ip| {
             let mut ip = ip.borrow_mut();
-            if ip.contains(&id) {
-                panic!("TGERR: range cycle detected: node ids {:?} -> {} (op {:?}) — chain ops: {:?}", ip.iter().map(|u| u.0).collect::<Vec<_>>(), id.0, self.op_of(id), ip.iter().map(|u| (u.0, format!("{:?}", self.op_of(*u)))).collect::<Vec<_>>());
+            if ip.contains(&id.id()) {
+                panic!("TGERR: range cycle detected: node {} (op {:?})", id.id(), id.op);
             }
-            ip.push(id);
+            ip.push(id.id());
         });
         let out = self.ranges_inner(id);
         IN_PROGRESS.with(|ip| {
             let mut ip = ip.borrow_mut();
-            ip.retain(|&x| x != id);
+            ip.retain(|&x| x != id.id());
         });
         out
     }
 
-    fn ranges_inner(&mut self, id: UopId) -> Rc<Vec<UopId>> {
+    fn ranges_inner(&mut self, id: &UopId) -> Rc<Vec<UopId>> {
         // compute over the toposort bottom-up, then cache each node
         let ts = self.toposort(id);
-        for &n in ts.iter().rev() {
-            if self.range_c[n.0 as usize].is_none() {
+        for n in ts.iter().rev() {
+            if n.range_c.borrow().is_none() {
                 let r = Rc::new(self.ranges_uncached(n));
-                self.range_c[n.0 as usize] = Some(Some(r));
+                *n.range_c.borrow_mut() = Some(Some(r));
             }
         }
-        match &self.range_c[id.0 as usize] {
-            Some(Some(r)) => r.clone(),
+        match id.range_c.borrow().clone() {
+            Some(Some(r)) => r,
             _ => {
                 let r = Rc::new(self.ranges_uncached(id));
-                self.range_c[id.0 as usize] = Some(Some(r.clone()));
+                *id.range_c.borrow_mut() = Some(Some(r.clone()));
                 r
             }
         }
     }
 
-    fn ranges_uncached(&mut self, id: UopId) -> Vec<UopId> {
+    fn ranges_uncached(&mut self, id: &UopId) -> Vec<UopId> {
         let mut ret: Vec<UopId> = vec![];
-        let srcs = self.srcs(id).to_vec();
-        for s in srcs {
-            for &u in self.ranges(s).iter() {
-                if !ret.contains(&u) {
-                    ret.push(u);
+        let srcs = id.srcs.clone();
+        for s in &srcs {
+            for u in self.ranges(s).iter() {
+                if !ret.contains(u) {
+                    ret.push(u.clone());
                 }
             }
         }
         for er in self.ended_ranges(id) {
-            if self.op_of(er) == Ops::Range {
-                ret.retain(|&u| u != er);
+            if er.op == Ops::Range {
+                ret.retain(|u| u != &er);
             } else {
-                let er_ranges = self.ranges(er);
+                let er_ranges = self.ranges(&er);
                 ret.retain(|u| !er_ranges.contains(u));
             }
         }
-        if self.op_of(id) == Ops::Range {
-            if !ret.contains(&id) {
-                ret.insert(0, id);
+        if id.op == Ops::Range
+            && !ret.contains(id) {
+                ret.insert(0, id.clone());
             }
-        }
         ret
     }
 
     /// `u.bufferize(*rngs, arg=opts)` — STAGE node.
     pub fn stage(&mut self, id: UopId, rngs: Vec<UopId>, arg: Arg) -> UopId {
-        let dt = self.dt_of(id);
+        let dt = self.dt_of(&id);
         let mut srcs = vec![id];
         srcs.extend(rngs);
         self.uop(Ops::Stage, Some(dt), srcs, arg)
@@ -279,14 +278,13 @@ impl UOpCtx {
 /// `new_range(s, axistype)` from IndexingContext: 1-sized ranges become CONST 0
 /// (python `resolve(s != 1)` — raises on symbolic ambiguity).
 pub fn new_range(ctx: &mut UOpCtx, s: SVal, axistype: AxisType) -> UopId {
-    if let SVal::U(u) = s {
-        if ctx.op_of(u) == Ops::Range {
-            return u;
+    if let SVal::U(ref u) = s
+        && ctx.op_of(u) == Ops::Range {
+            return u.clone();
         }
-    }
     // lenient like resolve_ord's other callers: ambiguous symbolic sizes make a
     // range (the CONST-0 path only matters for concrete 1-sized axes)
-    if ctx.resolve_ord(s, super::ctx::CmpOrd::Ne, SVal::I(1), true) {
+    if ctx.resolve_ord(s.clone(), super::ctx::CmpOrd::Ne, SVal::I(1), true) {
         ctx.range(s, ctx.range_idx, axistype)
     } else {
         ctx.const_py(ConstVal::Int(0), Some(dtype::WEAKINT))

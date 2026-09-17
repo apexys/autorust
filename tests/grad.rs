@@ -41,8 +41,8 @@ fn grad_linear_affine() {
 #[test]
 fn grad_bias_broadcast() {
     let mut ctx = UOpCtx::new();
-    let x = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).reshape(&mut ctx, &[3, 4]);
-    let b = f32s(&mut ctx, &[10.0, 20.0, 30.0, 40.0]).reshape(&mut ctx, &[1, 4]);
+    let x = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).reshape(&mut ctx, [3, 4]);
+    let b = f32s(&mut ctx, &[10.0, 20.0, 30.0, 40.0]).reshape(&mut ctx, [1, 4]);
     let out = x.add(&mut ctx, &b);
     let loss = out.sum(&mut ctx, None, false, None);
     let gs = loss.gradient(&mut ctx, &[x, b], None);
@@ -65,8 +65,8 @@ fn grad_sigmoid() {
 #[test]
 fn grad_matmul() {
     let mut ctx = UOpCtx::new();
-    let a = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).reshape(&mut ctx, &[2, 3]);
-    let w = f32s(&mut ctx, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]).reshape(&mut ctx, &[3, 4]);
+    let a = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).reshape(&mut ctx, [2, 3]);
+    let w = f32s(&mut ctx, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]).reshape(&mut ctx, [3, 4]);
     let y = a.dot(&mut ctx, &w);
     let loss = y.sum(&mut ctx, None, false, None);
     let gs = loss.gradient(&mut ctx, &[a, w], None);

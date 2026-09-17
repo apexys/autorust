@@ -59,7 +59,7 @@ impl Session {
         if let Some(b) = self.realized.get(&tensor_uop) {
             return b.clone();
         }
-        let b = realize::realize_tensor(ctx, tensor_uop, &mut self.buffers, &mut self.cache);
+        let b = realize::realize_tensor(ctx, tensor_uop.clone(), &mut self.buffers, &mut self.cache);
         self.realized.insert(tensor_uop, b.clone());
         b
     }

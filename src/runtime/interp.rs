@@ -136,7 +136,7 @@ fn exec_alu(op: Ops, a: f64, b: f64) -> f64 {
         Ops::Xor => ((a as i64) ^ (b as i64)) as f64,
         Ops::Or => ((a as i64) | (b as i64)) as f64,
         Ops::And => ((a as i64) & (b as i64)) as f64,
-        Ops::Shr => (((a as i64) >> (b as i64)) as i64) as f64,
+        Ops::Shr => ((a as i64) >> (b as i64)) as f64,
         Ops::Shl => ((a as i64) << (b as i64)) as f64,
         Ops::Cdiv => {
             // helpers.py:71 — abs(x)//abs(y)*sign, 0 on y==0
@@ -249,29 +249,29 @@ fn exec_launch(
     }
     let wsize = warp.len().max(1);
     let mut values: std::collections::HashMap<UopId, Val> = std::collections::HashMap::new();
-    let mut pbufs: std::collections::VecDeque<MemView> = std::collections::VecDeque::new();
-    let mut pvals: std::collections::VecDeque<f64> = vals.iter().copied().collect();
+    let _pbufs: std::collections::VecDeque<MemView> = std::collections::VecDeque::new();
+    let mut pvals: std::collections::VecDeque<f64> = vals.iter().cloned().collect();
     let mut exec_masks: Vec<Vec<bool>> = vec![vec![true; wsize]];
 
     let sv = |values: &std::collections::HashMap<UopId, Val>, u: &UopId| -> Vec<f64> {
         match &values[u] {
             Val::S(v) => v.clone(),
-            Val::V(l) => l.iter().map(|t| t.first().copied().unwrap_or(0.0)).collect(),
+            Val::V(l) => l.iter().map(|t| t.first().cloned().unwrap_or(0.0)).collect(),
             _ => panic!("TGERR: interp src not scalar"),
         }
     };
 
     let mut i = 0usize;
     while i < uops.len() {
-        let u = uops[i];
+        let u = &uops[i].clone();
         let op = ctx.op_of(u);
         let srcs: Vec<UopId> = ctx.srcs(u).to_vec();
-        let src_vals: Vec<Val> = srcs.iter().filter(|s| ctx.dt_of(**s) != dtype::VOID).map(|s| values.get(s).cloned().unwrap_or_else(|| panic!("TGERR: interp missing value: src {} op {:?} of u {} op {:?}", s.0, ctx.op_of(*s), u.0, op))).collect();
+        let src_vals: Vec<Val> = srcs.iter().filter(|s| ctx.dt_of(s) != dtype::VOID).map(|s| values.get(s).cloned().unwrap_or_else(|| panic!("TGERR: interp missing value: src {} op {:?} of u {} op {:?}", s.id(), ctx.op_of(s), u.id(), op))).collect();
         match op {
             Ops::End => {
                 if srcs.len() == 3 {
                     let cond = sv(&values, &srcs[2]);
-                    if cond.first().copied().unwrap_or(0.0) != 0.0 {
+                    if cond.first().cloned().unwrap_or(0.0) != 0.0 {
                         // conditional backedge: jump back to the loop (python: uop_to_index[u.src[1]])
                         i = loop_start_index(uops, &srcs[1]);
                         continue;
@@ -283,14 +283,14 @@ fn exec_launch(
             }
             Ops::Range => {
                 if ctx.dt_of(u) == dtype::VOID { i += 1; continue; }
-                let ext = numels.get(&u).copied().unwrap_or(1);
-                match values.get_mut(&u) {
-                    None => { values.insert(u, Val::S(vec![0.0; wsize])); }
+                let ext = numels.get(u).cloned().unwrap_or(1);
+                match values.get_mut(u) {
+                    None => { values.insert(u.clone(), Val::S(vec![0.0; wsize])); }
                     Some(Val::S(vs)) => {
                         for v in vs.iter_mut() { *v += 1.0; }
                         if vs[0] == ext as f64 {
-                            values.remove(&u);
-                            i = loop_end_index(ctx, uops, &u) + 1;
+                            values.remove(u);
+                            i = loop_end_index(ctx, uops, u) + 1;
                             continue;
                         }
                     }
@@ -310,16 +310,16 @@ fn exec_launch(
                 // its first (non-void) src's value forward
                 let v = srcs
                     .iter()
-                    .find(|s| ctx.dt_of(**s) != dtype::VOID)
+                    .find(|s| ctx.dt_of(s) != dtype::VOID)
                     .and_then(|s| values.get(s).cloned());                match v {
-                    Some(v) => { values.insert(u, v); }
+                    Some(v) => { values.insert(u.clone(), v); }
                     None => panic!("TGERR: interp AFTER src missing value"),
                 }
             }
             Ops::Barrier | Ops::Sink | Ops::Noop | Ops::Group => {}
             Ops::Store => {
                 let gate = exec_masks.last().unwrap().clone();
-                let store_n = numels.get(&u).copied().unwrap_or(1);
+                let store_n = numels.get(u).cloned().unwrap_or(1);
                 let vals_lane: Vec<Vec<f64>> = match &src_vals[1] {
                     Val::S(vs) if store_n == 1 => vec![vs.clone()],
                     Val::V(lanes) => lanes.clone(),
@@ -334,18 +334,18 @@ fn exec_launch(
                         pairs_owned = Vec::new();
                         &pairs_owned
                     }
-                    _ => panic!("TGERR: interp store src node {} val={:?}", u.0, ctx.op_of(srcs[0])),
+                    _ => panic!("TGERR: interp store src node {} val={:?}", u.id(), ctx.op_of(&srcs[0])),
                 };
                 // the store writes the DEST buffer's dtype (python's kernel
                 // invariant: value dtype == buffer dtype; the codegen may
                 // widen ALU to f32 for sub-dword types — cast back here)
-                let store_dt = ctx.dt_of(ctx.srcs(srcs[0])[0]);
-                if ctx.op_of(srcs[0]) == Ops::Stack && matches!(src_vals[0], Val::S(_)) {
+                let store_dt = ctx.dt_of(&ctx.srcs(&srcs[0])[0]);
+                if ctx.op_of(&srcs[0]) == Ops::Stack && matches!(src_vals[0], Val::S(_)) {
                     // devectorized store: Stack(dest view per lane) — each
                     // lane writes through its own view at its own offset
-                    let dest_srcs = ctx.srcs(srcs[0]).to_vec();
+                    let dest_srcs = ctx.srcs(&srcs[0]).to_vec();
                     for (j, val) in vals_lane.iter().enumerate() {
-                        let dj = dest_srcs.get(j).copied().unwrap_or(dest_srcs[0]);
+                        let dj = dest_srcs.get(j).cloned().unwrap_or((dest_srcs[0]).clone());
                         let dpairs = match values.get(&dj) {
                             Some(Val::P(p)) => p.clone(),
                             _ => continue,
@@ -364,26 +364,26 @@ fn exec_launch(
                 }
             }
             Ops::Param | Ops::Buffer => {
-                if ctx.addrspace_of(u) == Some(AddrSpace::Alu) && op == Ops::Param {
+                if ctx.addrspace_of(u.clone()) == Some(AddrSpace::Alu) && op == Ops::Param {
                     let v = pvals.pop_front().unwrap_or(0.0);
-                    values.insert(u, Val::S(vec![v; wsize]));
+                    values.insert(u.clone(), Val::S(vec![v; wsize]));
                 } else if op == Ops::Param {
                     let slot = match ctx.arg_of(u) {
                         Arg::Param(p) => p.slot,
                         _ => panic!("TGERR: interp PARAM arg"),
                     };
                     let mv = views.get(&slot).unwrap_or_else(|| panic!("TGERR: interp missing view for slot {slot}")).clone();
-                    values.insert(u, Val::M(vec![mv; wsize]));
-                } else if ctx.addrspace_of(u) == Some(AddrSpace::Reg) {
+                    values.insert(u.clone(), Val::M(vec![mv; wsize]));
+                } else if ctx.addrspace_of(u.clone()) == Some(AddrSpace::Reg) {
                     // REGs are per thread
-                    let nel = numels.get(&u).copied().unwrap_or(1);
+                    let nel = numels.get(u).cloned().unwrap_or(1);
                     let isz = ctx.dt_of(u).itemsize();
-                    values.insert(u, Val::M((0..wsize).map(|_| MemView(Rc::new(RefCell::new(vec![0u8; nel * isz])), 0, isz, nel)).collect()));
+                    values.insert(u.clone(), Val::M((0..wsize).map(|_| MemView(Rc::new(RefCell::new(vec![0u8; nel * isz])), 0, isz, nel)).collect()));
                 } else {
-                    let nel = numels.get(&u).copied().unwrap_or(1);
+                    let nel = numels.get(u).cloned().unwrap_or(1);
                     let isz = ctx.dt_of(u).itemsize();
                     let mv = MemView(Rc::new(RefCell::new(vec![0u8; nel * isz])), 0, isz, nel);
-                    values.insert(u, Val::M(vec![mv; wsize]));
+                    values.insert(u.clone(), Val::M(vec![mv; wsize]));
                 }
             }
             Ops::Special => {
@@ -393,14 +393,14 @@ fn exec_launch(
                 };
                 if name.starts_with('g') {
                     let dim: usize = name[name.len() - 1..].parse().unwrap();
-                    values.insert(u, Val::S(vec![gidx[2 - dim] as f64; wsize]));
+                    values.insert(u.clone(), Val::S(vec![gidx[2 - dim] as f64; wsize]));
                 } else {
                     let dim: usize = name[name.len() - 1..].parse().unwrap();
                     let vv: Vec<f64> = warp.iter().map(|w| w[2 - dim] as f64).collect();
                     if std::env::var("TG_DEBUG_LOAD").is_ok() {
                         eprintln!("TGDBG lidx name={} dim={} vals={:?} warp={:?}", name, dim, vv, warp);
                     }
-                    values.insert(u, Val::S(vv));
+                    values.insert(u.clone(), Val::S(vv));
                 }
             }
             Ops::Const => {
@@ -410,13 +410,13 @@ fn exec_launch(
                     ConstVal::Bool(b) => b as i64 as f64,
                     other => panic!("TGERR: interp const {other:?}"),
                 };
-                values.insert(u, Val::S(vec![v; wsize]));
+                values.insert(u.clone(), Val::S(vec![v; wsize]));
             }
             Ops::Index | Ops::Shrink => {
                 // (view, element offset) pairs
                 // ALU storage, a devectorized multi-lane load, or a scalar value
                 // (indexing a scalar is identity — `INDEX(scalar, i) -> scalar`)
-                if ctx.addrspace_derived(srcs[0]) == Some(AddrSpace::Alu)
+                if ctx.addrspace_derived((srcs[0]).clone()) == Some(AddrSpace::Alu)
                     || matches!(src_vals[0], Val::V(_) | Val::S(_))
                 {
                     // index over a vector value: [lane][thread] pick (ALU
@@ -428,7 +428,7 @@ fn exec_launch(
                         (Val::S(a), _) => a.clone(),
                         _ => panic!("TGERR: interp ALU index srcs"),
                     };
-                    values.insert(u, Val::S(ret));
+                    values.insert(u.clone(), Val::S(ret));
                     i += 1;
                     continue;
                 }
@@ -442,7 +442,7 @@ fn exec_launch(
                     }
                     (Val::M(_), Val::V(_)) | (Val::P(_), Val::V(_)) => {
                         let os = match &src_vals[1] {
-                            Val::V(l) => l.iter().map(|t| t.first().copied().unwrap_or(0.0) as usize).collect::<Vec<usize>>(),
+                            Val::V(l) => l.iter().map(|t| t.first().cloned().unwrap_or(0.0) as usize).collect::<Vec<usize>>(),
                             _ => unreachable!(),
                         };
                         let ms: Vec<MemView> = match &src_vals[0] {
@@ -454,28 +454,28 @@ fn exec_launch(
                     }
                     _ => panic!(
                         "TGERR: interp index srcs u={} op={:?} src0_op={:?} src0={} v0={} v1={} nsrc={}",
-                        u.0,
+                        u.id(),
                         ctx.op_of(u),
-                        ctx.op_of(srcs[0]),
-                        srcs[0].0,
+                        ctx.op_of(&srcs[0]),
+                        srcs[0].id(),
                         match &src_vals[0] { Val::S(_) => "S", Val::V(_) => "V", Val::M(_) => "M", Val::P(_) => "P" },
                         match &src_vals[1] { Val::S(_) => "S", Val::V(_) => "V", Val::M(_) => "M", Val::P(_) => "P" },
                         srcs.len(),
                     ),
                 }
-                values.insert(u, Val::P(ret));
+                values.insert(u.clone(), Val::P(ret));
             }
             Ops::Load => {
-                let load_sz = numels.get(&u).copied().unwrap_or(1);
+                let load_sz = numels.get(u).cloned().unwrap_or(1);
                 let pairs: Vec<(MemView, usize)> = match &src_vals[0] {
                     Val::P(p) => p.clone(),
                     other => panic!(
                         "TGERR: interp load src u={} src0={} op={:?} dt={:?} addrspace={:?} variant_tag={} nsrc={}",
-                        u.0,
-                        srcs[0].0,
-                        ctx.op_of(srcs[0]),
-                        ctx.dt_of(srcs[0]),
-                        ctx.addrspace_of(srcs[0]),
+                        u.id(),
+                        srcs[0].id(),
+                        ctx.op_of(&srcs[0]),
+                        ctx.dt_of(&srcs[0]),
+                        ctx.addrspace_of((srcs[0]).clone()),
                         match other { Val::S(_) => "S", Val::V(_) => "V", Val::M(_) => "M", Val::P(_) => "P" },
                         srcs.len(),
                     ),
@@ -503,27 +503,27 @@ fn exec_launch(
                     let lanes: Vec<Vec<f64>> = (0..load_sz)
                         .map(|j| pairs.iter().enumerate().map(|(t, (m, o))| if mask_at(t) { _load(m, o + j, ctx.dt_of(u)) } else { alt_at(t) }).collect())
                         .collect();
-                    values.insert(u, Val::V(lanes));
+                    values.insert(u.clone(), Val::V(lanes));
                 } else {
                     if std::env::var("TG_DEBUG_LOAD").is_ok() {
                         let offs: Vec<usize> = pairs.iter().map(|(_, o)| *o).collect();
-                        eprintln!("TGDBG load uop={} size={} offs={:?}", u.0, pairs[0].0.3, offs);
+                        eprintln!("TGDBG load uop={} size={} offs={:?}", u.id(), pairs[0].0.3, offs);
                     }
                     let tv: Vec<f64> = pairs.iter().enumerate().map(|(t, (m, o))| {
                         if mask_at(t) { _load(m, *o, ctx.dt_of(u)) } else { alt_at(t) }
                     }).collect();
-                    values.insert(u, Val::S(tv));
+                    values.insert(u.clone(), Val::S(tv));
                 }
             }
             Ops::Cast => {
                 match &src_vals[0] {
                     Val::S(vs) => {
                         let r: Vec<f64> = vs.iter().map(|&v| truncate(v, ctx.dt_of(u))).collect();
-                        values.insert(u, Val::S(r));
+                        values.insert(u.clone(), Val::S(r));
                     }
                     Val::V(ls) => {
                         let r: Vec<Vec<f64>> = ls.iter().map(|tv| tv.iter().map(|&v| truncate(v, ctx.dt_of(u))).collect()).collect();
-                        values.insert(u, Val::V(r));
+                        values.insert(u.clone(), Val::V(r));
                     }
                     _ => panic!("TGERR: interp cast src"),
                 };
@@ -539,30 +539,30 @@ fn exec_launch(
                             // per-thread lane list flattened at the same width
                             let width = l.first().map(|t| t.len()).unwrap_or(1);
                             for j in 0..width {
-                                lanes.push(l.iter().map(|t| t.get(j).copied().unwrap_or(0.0)).collect());
+                                lanes.push(l.iter().map(|t| t.get(j).cloned().unwrap_or(0.0)).collect());
                             }
                         }
                         // a stacked VIEW (coalesce folds the load into its
                         // index): the lanes are the memory values it addresses
                         Val::P(ps) => {
-                            let dt = ctx.dt_of(srcs[k]);
+                            let dt = ctx.dt_of(&srcs[k]);
                             lanes.push(ps.iter().map(|(m, o)| _load(m, *o, dt)).collect());
                         }
-                        _ => panic!("TGERR: interp STACK src node {} src_ops={:?}", u.0, srcs.iter().map(|x| (x.0, ctx.op_of(*x), ctx.dt_of(*x).attr())).collect::<Vec<_>>()),
+                        _ => panic!("TGERR: interp STACK src node {} src_ops={:?}", u.id(), srcs.iter().map(|x| (x.id(), ctx.op_of(x), ctx.dt_of(x).attr())).collect::<Vec<_>>()),
                     }
                 }
-                values.insert(u, Val::V(lanes));
+                values.insert(u.clone(), Val::V(lanes));
             }
             _ if group::in_(group::ALU, op) => {
                 if src_vals.len() == 1 {
                     match &src_vals[0] {
                         Val::S(a) => {
                             let r: Vec<f64> = a.iter().map(|&x| truncate(exec_alu(op, x, 0.0), ctx.dt_of(u))).collect();
-                            values.insert(u, Val::S(r));
+                            values.insert(u.clone(), Val::S(r));
                         }
                         Val::V(a) => {
                             let r: Vec<Vec<f64>> = a.iter().map(|tv| tv.iter().map(|&x| truncate(exec_alu(op, x, 0.0), ctx.dt_of(u))).collect()).collect();
-                            values.insert(u, Val::V(r));
+                            values.insert(u.clone(), Val::V(r));
                         }
                         _ => panic!("TGERR: interp unary alu src"),
                     }
@@ -572,7 +572,7 @@ fn exec_launch(
                 if src_vals.len() == 3 {
                     let sv = |v: &Val| match v {
                         Val::S(vs) => vs.clone(),
-                        Val::V(l) => l.iter().map(|t| t.first().copied().unwrap_or(0.0)).collect(),
+                        Val::V(l) => l.iter().map(|t| t.first().cloned().unwrap_or(0.0)).collect(),
                         _ => panic!("TGERR: interp ternary alu src"),
                     };
                     let (a, b, c) = (sv(&src_vals[0]), sv(&src_vals[1]), sv(&src_vals[2]));
@@ -580,22 +580,22 @@ fn exec_launch(
                     let r: Vec<f64> = (0..n)
                         .map(|k| truncate(exec_alu_ternary(op, a[k.min(a.len() - 1)], b[k.min(b.len() - 1)], c[k.min(c.len() - 1)]), ctx.dt_of(u)))
                         .collect();
-                    values.insert(u, Val::S(r));
+                    values.insert(u.clone(), Val::S(r));
                     i += 1;
                     continue;
                 }
                 match (&src_vals[0], &src_vals[1]) {
                     (Val::S(a), Val::S(b)) => {
                         let r: Vec<f64> = a.iter().zip(b.iter()).map(|(&x, &y)| truncate(exec_alu(op, x, y), ctx.dt_of(u))).collect();
-                        values.insert(u, Val::S(r));
+                        values.insert(u.clone(), Val::S(r));
                     }
                     (Val::V(a), Val::S(b)) | (Val::S(b), Val::V(a)) => {
                         let r: Vec<Vec<f64>> = a.iter().map(|tv| tv.iter().map(|&x| truncate(exec_alu(op, x, b[0]), ctx.dt_of(u))).collect()).collect();
-                        values.insert(u, Val::V(r));
+                        values.insert(u.clone(), Val::V(r));
                     }
                     (Val::V(a), Val::V(b)) => {
                         let r: Vec<Vec<f64>> = a.iter().zip(b.iter()).map(|(ta, tb)| ta.iter().zip(tb.iter()).map(|(&x, &y)| truncate(exec_alu(op, x, y), ctx.dt_of(u))).collect()).collect();
-                        values.insert(u, Val::V(r));
+                        values.insert(u.clone(), Val::V(r));
                     }
                     _ => panic!("TGERR: interp alu srcs"),
                 };
@@ -608,7 +608,7 @@ fn exec_launch(
 
 fn loop_end_index(ctx: &UOpCtx, uops: &[UopId], range: &UopId) -> usize {
     uops.iter()
-        .position(|u| ctx.op_of(*u) == Ops::End && ctx.srcs(*u).len() >= 2 && ctx.srcs(*u)[1] == *range)
+        .position(|u| ctx.op_of(u) == Ops::End && ctx.srcs(u).len() >= 2 && ctx.srcs(u)[1] == *range)
         .unwrap_or_else(|| panic!("TGERR: interp missing END for RANGE"))
 }
 
@@ -620,13 +620,13 @@ fn loop_start_index(uops: &[UopId], range: &UopId) -> usize {
 pub fn derive_dims(ctx: &mut UOpCtx, uops: &[UopId]) -> ([usize; 3], [usize; 3]) {
     let mut global = [1usize; 3];
     let mut local = [1usize; 3];
-    for &u in uops {
+    for u in uops {
         if ctx.op_of(u) == Ops::Special {
             let name = match ctx.arg_of(u) {
                 Arg::Str(s) => s.clone(),
                 _ => continue,
             };
-            let ext = match ctx.ssimplify(ctx.srcs(u)[0]) {
+            let ext = match ctx.ssimplify(ctx.srcs(u)[0].clone()) {
                 Ok(crate::uop::sint::SVal::I(v)) => v as usize,
                 _ => panic!("TGERR: interp SPECIAL extent"),
             };
@@ -665,29 +665,29 @@ pub fn exec_kernel_with_dims(
     if std::env::var("TG_DUMP_INTERP").is_ok() {
         let pname = crate::codegen::postrange::kernel_name(ctx, uops);
         eprintln!("INT### BEGIN name={}", pname);
-        for &u in uops {
-            let srcs: Vec<String> = ctx.srcs(u).iter().map(|s| s.0.to_string()).collect();
-            eprintln!("INT {} {:?}({}) as={:?}", u.0, ctx.op_of(u), srcs.join(","), ctx.addrspace_of(u));
+        for u in uops {
+            let srcs: Vec<String> = ctx.srcs(u).iter().map(|s| s.id().to_string()).collect();
+            eprintln!("INT {} {:?}({}) as={:?}", u.id(), ctx.op_of(u), srcs.join(","), ctx.addrspace_of(u.clone()));
         }
         eprintln!("INT### END name={}", pname);
     }
     let mut numels: std::collections::HashMap<UopId, usize> = std::collections::HashMap::new();
-    for &u in uops {
+    for u in uops {
         match ctx.op_of(u) {
-            Ops::Load | Ops::Store | Ops::Buffer | Ops::Param => { numels.insert(u, ctx.max_numel(u) as usize); }
+            Ops::Load | Ops::Store | Ops::Buffer | Ops::Param => { numels.insert(u.clone(), ctx.max_numel(u.clone()) as usize); }
             Ops::Range => {
-                let ext = match ctx.ssimplify(ctx.srcs(u)[0]) {
+                let ext = match ctx.ssimplify(ctx.srcs(u)[0].clone()) {
                     Ok(crate::uop::sint::SVal::I(v)) => v.max(1) as usize,
                     _ => panic!("TGERR: interp RANGE extent"),
                 };
-                numels.insert(u, ext);
+                numels.insert(u.clone(), ext);
             }
             Ops::Special => {
-                let ext = match ctx.ssimplify(ctx.srcs(u)[0]) {
+                let ext = match ctx.ssimplify(ctx.srcs(u)[0].clone()) {
                     Ok(crate::uop::sint::SVal::I(v)) => v.max(1) as usize,
                     _ => 1,
                 };
-                numels.insert(u, ext);
+                numels.insert(u.clone(), ext);
             }
             _ => {}
         }

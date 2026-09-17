@@ -9,20 +9,19 @@ use crate::tensor::Shape;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
-use crate::uop::sint::SVal;
+use crate::uop::sint::{SInt, SVal};
 
 use super::movement;
 use super::Tensor;
-use super::TensorAddArg;
 
 /// Register the initial host bytes for a buffer-backed tensor (python
 /// `Buffer(opaque=memoryview(bytearray(initial_value)))` at Tensor(data) time):
 /// walk to the base BUFFER uop and record the bytes for the engine.
 fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
-    while ctx.op_of(u) != Ops::Buffer {
-        u = ctx.srcs(u)[0];
+    while ctx.op_of(&u) != Ops::Buffer {
+        u = ctx.srcs(&u)[0].clone();
     }
-    ctx.initial_data.insert(u.0, std::rc::Rc::new(std::cell::RefCell::new(bytes)));
+    ctx.initial_data.insert(u.id(), std::rc::Rc::new(std::cell::RefCell::new(bytes)));
 }
 
 /// `UOp.unique_num` — the global BUFFER slot counter (ops.py:814).
@@ -67,7 +66,7 @@ pub fn to_max_shape(shape: &[SVal]) -> Vec<SVal> {
 /// returns the broadcast const (no store).
 pub fn full(ctx: &mut UOpCtx, shape: &[SVal], fill_value: ConstVal, dtype: Option<DTypeId>, device: Option<&str>, buffer: bool) -> Tensor {
     let new_shape = shape.to_vec();
-    let dt = dtype.unwrap_or_else(|| match &fill_value {
+    let dt = dtype.unwrap_or(match &fill_value {
         ConstVal::Bool(_) => dtype::BOOL,
         ConstVal::Int(_) | ConstVal::Big(_) => dtype::WEAKINT,
         ConstVal::Float(_) => dtype::WEAKFLOAT,
@@ -75,7 +74,7 @@ pub fn full(ctx: &mut UOpCtx, shape: &[SVal], fill_value: ConstVal, dtype: Optio
     });
     let val = Tensor::const_(ctx, fill_value, Some(dt));
     let ones_shape: Vec<SVal> = vec![SVal::I(1); new_shape.len()];
-    let val = Tensor::from_uop(movement::reshape(ctx, val.uop, &ones_shape));
+    let val = { let __u = movement::reshape(ctx, val.uop, &ones_shape); Tensor::from_uop(ctx, __u) };
     let val = val.expand(ctx, new_shape.clone());
     if !buffer {
         return val;
@@ -84,8 +83,8 @@ pub fn full(ctx: &mut UOpCtx, shape: &[SVal], fill_value: ConstVal, dtype: Optio
     // (None)) -> the default device; dtype = strong_dtype(val.dtype)
     let dev = canonicalize_device(device);
     let ret = empty(ctx, &new_shape, dtype::strong_dtype(dt), &dev);
-    let store = super::store(ctx, ret, val.uop, None);
-    Tensor::from_uop(super::after(ctx, ret, vec![store]))
+    let store = super::store(ctx, ret.clone(), val.uop, None);
+    { let __u = super::after(ctx, ret, vec![store]); Tensor::from_uop(ctx, __u) }
 }
 
 /// `CreationMixin.zeros(*shape, **kwargs)` (creation.py:106) — `full(shape, 0.0, dtype)`.
@@ -157,7 +156,7 @@ pub fn arange(ctx: &mut UOpCtx, start: f64, stop: Option<f64>, step: f64, dtype:
     let cum = super::reduce::cumalu(ctx, t.uop, 0, Ops::Add);
     let start_step = const_f64(start - step, dt);
     let added = super::elementwise::binop_c(ctx, Ops::Add, cum, start_step);
-    Tensor::from_uop(ctx.cast(added, dt))
+    { let __u = ctx.cast(added, dt); Tensor::from_uop(ctx, __u) }
 }
 
 /// `OpMixin.eye(n, m=None, dtype=None)` (op.py:215-232):
@@ -169,7 +168,7 @@ pub fn eye(ctx: &mut UOpCtx, n: i64, m: Option<i64>, dtype: Option<DTypeId>) -> 
     let a = arange(ctx, n as f64, None, 1.0, None).unsqueeze(ctx, -1);
     let b = arange(ctx, m_ as f64, None, 1.0, None);
     let eq = super::elementwise::eq(ctx, a.uop, b.uop);
-    Tensor::from_uop(ctx.cast(eq, out_dtype))
+    { let __u = ctx.cast(eq, out_dtype); Tensor::from_uop(ctx, __u) }
 }
 
 /// `OpMixin._tri(r, c, diagonal=0)` (op.py:233-235):
@@ -182,7 +181,7 @@ pub fn _tri(ctx: &mut UOpCtx, r: SVal, c: SVal, diagonal: i64) -> Tensor {
     let diag_val = ConstVal::Int(diagonal as i128);
     let added = super::elementwise::binop_c(ctx, Ops::Add, a.uop, diag_val);
     let le = super::elementwise::le(ctx, added, b.uop); // a+diag <= arange(c)
-    Tensor::from_uop(le)
+    { let __u = le; Tensor::from_uop(ctx, __u) }
 }
 
 /// `OpMixin.linspace(start, stop, steps, dtype=None)` (op.py:198-214).
@@ -198,27 +197,27 @@ pub fn linspace(ctx: &mut UOpCtx, start: f64, stop: f64, steps: i64, dtype: Opti
     let scale = (stop - start) / (steps - 1) as f64;
     let scaled = super::elementwise::binop_c(ctx, Ops::Mul, idx.uop, const_f64(scale, dtype::default_float()));
     let biased = super::elementwise::binop_c(ctx, Ops::Add, scaled, const_f64(start, dtype::default_float()));
-    Tensor::from_uop(ctx.cast(biased, dt))
+    { let __u = ctx.cast(biased, dt); Tensor::from_uop(ctx, __u) }
 }
 
 /// `OpMixin.triu(diagonal=0)` (op.py:236-258):
 /// `_tri(shape[-2], shape[-1], diagonal).where(self, 0)`.
 pub fn triu(ctx: &mut UOpCtx, x: UopId, diagonal: i64) -> Tensor {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
-    let (r, c) = (shape[shape.len() - 2], shape[shape.len() - 1]);
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
+    let (r, c) = (<SInt as Clone>::clone(&shape[shape.len() - 2]), <SInt as Clone>::clone(&shape[shape.len() - 1]));
     let tri = _tri(ctx, r, c, diagonal);
-    let zero = ctx.const_like_dt(x, ConstVal::Int(0), None);
-    Tensor::from_uop(ctx.where_(tri.uop, x, zero))
+    let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), None);
+    { let __u = ctx.where_(tri.uop, x, zero); Tensor::from_uop(ctx, __u) }
 }
 
 /// `OpMixin.tril(diagonal=0)` (op.py:259-281):
 /// `_tri(shape[-2], shape[-1], diagonal+1).where(0, self)`.
 pub fn tril(ctx: &mut UOpCtx, x: UopId, diagonal: i64) -> Tensor {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
-    let (r, c) = (shape[shape.len() - 2], shape[shape.len() - 1]);
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
+    let (r, c) = (<SInt as Clone>::clone(&shape[shape.len() - 2]), <SInt as Clone>::clone(&shape[shape.len() - 1]));
     let tri = _tri(ctx, r, c, diagonal + 1);
-    let zero = ctx.const_like_dt(x, ConstVal::Int(0), None);
-    Tensor::from_uop(ctx.where_(tri.uop, zero, x))
+    let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), None);
+    { let __u = ctx.where_(tri.uop, zero, x); Tensor::from_uop(ctx, __u) }
 }
 
 /// ConstVal of the right kind for `dt` from an f64 step/start value
@@ -300,8 +299,8 @@ impl_slice_elem!(
 /// `copy_to_device` (ops.py:745-750): `COPY(pad_to(max_shape), arg=device)
 /// .shrink_to(shape)` — both noops for static shapes.
 pub fn copy_to_device(ctx: &mut UOpCtx, x: UopId, device: &str) -> UopId {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
-    assert!(!dtype::is_weak(ctx.dt_of(x)), "TGERR: cannot create storage for weak dtype (node {} op {:?})", x.0, ctx.op_of(x));
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
+    assert!(!dtype::is_weak(ctx.dt_of(&x)), "TGERR: cannot create storage for weak dtype (node {} op {:?})", x.id(), ctx.op_of(&x));
     let padded = movement::pad_to(ctx, x, &shape);
     let copy = ctx.uop(Ops::Copy, None, vec![padded], Arg::Str(device.to_string()));
     movement::shrink_to(ctx, copy, &shape)
@@ -334,11 +333,11 @@ pub fn from_slice<T: SliceElem>(ctx: &mut UOpCtx, data: &[T], dtype: Option<DTyp
     } else {
         data.iter().flat_map(|v| crate::runtime::interp::to_storage_scalar(v.to_f64(), bdtype)).collect()
     };
-    register_initial(ctx, ret, packed);
+    register_initial(ctx, ret.clone(), packed);
     let ret = if bdtype != target { ctx.cast(ret, target) } else { ret };
     let dev = canonicalize_device(device);
     let ret = if dev == "PYTHON" { ret } else { copy_to_device(ctx, ret, &dev) };
-    Tensor::from_uop(ret)
+    { let __u = ret; Tensor::from_uop(ctx, __u) }
 }
 
 /// `Tensor(data=bytes, dtype=?, device=?)` -> the bytes arm of `_frompy`:
@@ -349,8 +348,8 @@ pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<
     let size = SVal::I((data.len() / dtype.itemsize()) as i128);
     let _ = &size;
     let ret = new_buffer(ctx, "PYTHON", size, dtype, None);
-    register_initial(ctx, ret, data.to_vec());
+    register_initial(ctx, ret.clone(), data.to_vec());
     let dev = canonicalize_device(device);
     let ret = if dev == "PYTHON" { ret } else { copy_to_device(ctx, ret, &dev) };
-    Tensor::from_uop(ret)
+    { let __u = ret; Tensor::from_uop(ctx, __u) }
 }

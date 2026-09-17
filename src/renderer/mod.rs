@@ -83,7 +83,7 @@ impl Renderer {
             shared_max: 32768,
             code_for_op: cstyle_alu_keys_clang(),
             // cstyle.py:300 — fp8s excluded everywhere; bf16 only on x86/arm arch.
-            supported_dtypes: crate::dtype::ALL.iter().copied().filter(|&d| !in_fp8s(d)).collect(),
+            supported_dtypes: crate::dtype::ALL.iter().cloned().filter(|&d| !in_fp8s(d)).collect(),
         }
     }
 
@@ -119,7 +119,7 @@ fn in_fp8s(d: crate::dtype::DTypeId) -> bool {
 fn opencl_supported_dtypes(arch: &str) -> Vec<crate::dtype::DTypeId> {
     crate::dtype::ALL
         .iter()
-        .copied()
+        .cloned()
         .filter(|&d| {
             let fp8 = in_fp8s(d);
             let half = d == crate::dtype::FLOAT16;

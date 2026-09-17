@@ -256,15 +256,15 @@ pub fn render_opencl(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
 fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     // snapshot facts
     let mut info: HashMap<UopId, Info> = HashMap::new();
-    for &u in lst {
+    for u in lst {
         let op = ctx.op_of(u);
         let srcs = ctx.srcs(u).to_vec();
-        let addrspace = ctx.addrspace_of(u);
-        let derived = ctx.addrspace_derived(u);
+        let addrspace = ctx.addrspace_of(u.clone());
+        let derived = ctx.addrspace_derived(u.clone());
         let (numel, shape) = match ctx.shape(u) {
             Ok(Some(s)) if !s.is_empty() => {
-                let prods: i64 = s.iter().map(|x| x.as_i64_or_panic()).product();
-                (prods, s.iter().map(|x| x.as_i64_or_panic()).collect())
+                let prods: i64 = s.iter().map(|x| x.clone().as_i64_or_panic()).product();
+                (prods, s.iter().map(|x| x.clone().as_i64_or_panic()).collect())
             }
             _ => (1, vec![]),
         };
@@ -272,28 +272,28 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             Arg::Param(p) => p.volatile,
             _ => false,
         };
-        info.insert(u, Info { op, dt: ctx.dt_of(u), srcs, addrspace, derived, numel, shape, volatile });
+        info.insert(u.clone(), Info { op, dt: ctx.dt_of(u), srcs, addrspace, derived, numel, shape, volatile });
     }
     let mut child_count: HashMap<UopId, usize> = HashMap::new();
-    for &u in lst {
-        for s in &info[&u].srcs {
-            *child_count.entry(*s).or_insert(0) += 1;
+    for u in lst {
+        for s in &info[u].srcs {
+            *child_count.entry(s.clone()).or_insert(0) += 1;
         }
     }
     // writable params: toposort of STORE src[0]s, gated below END (unused in output)
     let mut writable: std::collections::HashSet<UopId> = std::collections::HashSet::new();
     {
-        let mut stack: Vec<UopId> = lst.iter().copied().filter(|&u| info[&u].op == Ops::Store).map(|u| info[&u].srcs[0]).collect();
+        let mut stack: Vec<UopId> = lst.iter().filter(|&u| info[u].op == Ops::Store).cloned().map(|u| (info[&u].srcs[0]).clone()).collect();
         let mut seen = std::collections::HashSet::new();
         while let Some(u) = stack.pop() {
-            if !seen.insert(u.0) {
+            if !seen.insert(u.id()) {
                 continue;
             }
             if info[&u].op == Ops::Param {
-                writable.insert(u);
+                writable.insert(u.clone());
             }
             if info[&u].op != Ops::End {
-                stack.extend(info[&u].srcs.iter().copied());
+                stack.extend(info[&u].srcs.iter().cloned());
             }
         }
     }
@@ -306,8 +306,8 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     let mut counters: HashMap<&'static str, usize> = HashMap::new();
     let mut name = "test".to_string();
 
-    for &u in lst {
-        let i = info[&u].clone();
+    for u in lst {
+        let i = info[u].clone();
         if matches!(i.op, Ops::Noop | Ops::Group | Ops::Const) {
             continue;
         }
@@ -315,17 +315,15 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             continue;
         }
         if i.op == Ops::After {
-            r.insert(u, r[&i.srcs[0]].clone());
+            r.insert(u.clone(), r[&i.srcs[0]].clone());
             continue;
         }
         if i.op == Ops::Sink {
-            if let Arg::Data(d) = ctx.arg_of(u) {
-                if d.tag == "KernelInfo" {
-                    if let Some(Arg::Str(n)) = d.fields.iter().find_map(|(k, v)| if k == "name" { Some(v) } else { None }) {
+            if let Arg::Data(d) = ctx.arg_of(u)
+                && d.tag == "KernelInfo"
+                    && let Some(Arg::Str(n)) = d.fields.iter().find_map(|(k, v)| if k == "name" { Some(v) } else { None }) {
                         name = to_function_name(n);
                     }
-                }
-            }
             continue;
         }
         if i.op == Ops::Param {
@@ -335,8 +333,8 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             };
             let shape: Vec<String> = i.shape.iter().map(|x| x.to_string()).collect();
             let nm = format!("data{slot}_{}", shape.join("_"));
-            bufs.push((nm.clone(), i.clone(), writable.contains(&u)));
-            r.insert(u, nm);
+            bufs.push((nm.clone(), i.clone(), writable.contains(u)));
+            r.insert(u.clone(), nm);
             continue;
         }
 
@@ -349,11 +347,11 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     Arg::Str(s) => s.clone(),
                     other => panic!("TGERR: cstyle SPECIAL arg {other:?}"),
                 };
-                r.insert(u, nm);
+                r.insert(u.clone(), nm);
                 prefix = None;
             }
             Ops::Range => {
-                let letter = match AxisType::range_axis_type(ctx, u) {
+                let letter = match AxisType::range_axis_type(ctx, u.clone()) {
                     AxisType::Device => "d",
                     AxisType::Global => "g",
                     AxisType::Thread => "t",
@@ -367,7 +365,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     AxisType::Unroll => "r",
                     _ => "L",
                 };
-                r.insert(u, format!("{letter}idx{}", range_str(ctx.arg_of(u))));
+                r.insert(u.clone(), format!("{letter}idx{}", range_str(ctx.arg_of(u))));
                 prefix = None;
             }
             _ => {
@@ -380,7 +378,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     _ => "alu",
                 };
                 let c0 = counters.entry(p).or_insert(0);
-                r.insert(u, format!("{p}{c0}"));
+                r.insert(u.clone(), format!("{p}{c0}"));
                 prefix = Some(p);
             }
         }
@@ -392,7 +390,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 if i.dt == dtype::VOID {
                     "for (;;) {".to_string()
                 } else {
-                    let nm = &r[&u];
+                    let nm = &r[u];
                     format!("for ({} {nm} = 0; {nm} < {}; {nm}++) {{", lang.render_dtype(i.dt, 1, None, false), g(&r, &i.srcs[0]))
                 }
             }
@@ -411,7 +409,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 if i.numel > 1 && i.addrspace == Some(AddrSpace::Reg) {
                     format!("__builtin_convertvector({}, {})", g(&r, &i.srcs[0]), lang.render_type(&i))
                 } else if src0.op == Ops::Const {
-                    const_text(ctx, i.dt, i.srcs[0], lang)
+                    const_text(ctx, i.dt, (i.srcs[0]).clone(), lang)
                 } else {
                     format!("({})({})", lang.render_type(&i), g(&r, &i.srcs[0]))
                 }
@@ -437,7 +435,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     _ => ifn,
                 };
                 // the extent comment: src[0].render() (expr, simplified)
-                let ext = crate::renderer::expr::expr_render(ctx, i.srcs[0]);
+                let ext = crate::renderer::expr::expr_render(ctx, (i.srcs[0]).clone());
                 format!("{f}({dim}); /* {ext} */")
             }
             Ops::Index | Ops::Shrink => {
@@ -451,7 +449,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     if !idx_is_const_lane {
                         format!("({buf_s})[{idx_s}]")
                     } else {
-                        let lane = idx.srcs.first().and_then(|&c| const_int(ctx, c)).unwrap_or(0);
+                        let lane = idx.srcs.first().and_then(|c| const_int(ctx, c.clone())).unwrap_or(0);
                         if buf.numel > lang.gep_arr_threshold {
                             format!("{buf_s}[{lane}]")
                         } else {
@@ -477,19 +475,19 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     format!(
                         "({}?{}:{})",
                         g(&r, &i.srcs[2]),
-                        lang.render_access(&info, i.srcs[0], &g(&r, &i.srcs[0])),
+                        lang.render_access(&info, (i.srcs[0]).clone(), &g(&r, &i.srcs[0])),
                         g(&r, &i.srcs[1])
                     )
                 } else {
-                    format!("({})", lang.render_access(&info, i.srcs[0], &g(&r, &i.srcs[0])))
+                    format!("({})", lang.render_access(&info, (i.srcs[0]).clone(), &g(&r, &i.srcs[0])))
                 }
             }
             Ops::Store => {
-                let bidx = lang.render_access(&info, i.srcs[0], &g(&r, &i.srcs[0]));
+                let bidx = lang.render_access(&info, (i.srcs[0]).clone(), &g(&r, &i.srcs[0]));
                 format!("{bidx} = {};", g(&r, &i.srcs[1]))
             }
             Ops::Wmma => {
-                let nm = wmma_name(ctx, u);
+                let nm = wmma_name(ctx, u.clone());
                 format!("__{}({}, {}, {})", nm, g(&r, &i.srcs[0]), g(&r, &i.srcs[1]), g(&r, &i.srcs[2]))
             }
             Ops::Buffer => {
@@ -499,7 +497,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 } else {
                     String::new()
                 };
-                format!("{prefix}{} {}[{}];", lang.render_dtype(i.dt, 1, i.addrspace, false), r[&u], i.numel)
+                format!("{prefix}{} {}[{}];", lang.render_dtype(i.dt, 1, i.addrspace, false), r[u], i.numel)
             }
             _ if group::in_(group::ALU, i.op) => {
                 let args: Vec<String> = i
@@ -522,7 +520,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             depth = depth.saturating_sub(1);
         }
         let is_const_cast = i.op == Ops::Cast && info[&i.srcs[0]].op == Ops::Const;
-        let reg_load = i.op == Ops::Load && info[&i.srcs[0]].derived == Some(AddrSpace::Reg) && child_count[&u] == 1;
+        let reg_load = i.op == Ops::Load && info[&i.srcs[0]].derived == Some(AddrSpace::Reg) && child_count[u] == 1;
         let ptr_cast = matches!(i.op, Ops::Cast | Ops::Bitcast) && matches!(i.addrspace, Some(AddrSpace::Global) | Some(AddrSpace::Local));
         let single_use_inline = matches!(i.op, Ops::Stack | Ops::Cast | Ops::Bitcast)
             || (group::in_(group::ALU, i.op) && i.op != Ops::Where);
@@ -531,13 +529,13 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 || matches!(i.op, Ops::Index | Ops::Shrink | Ops::Customi)
                 || reg_load
                 || ptr_cast
-                || (single_use_inline && child_count[&u] == 1));
+                || (single_use_inline && child_count[u] == 1));
         if inline {
-            r.insert(u, l);
+            r.insert(u.clone(), l);
         } else {
             let full = if !matches!(i.op, Ops::Range | Ops::Store | Ops::Buffer) && i.dt != dtype::VOID {
                 let semi = if i.op == Ops::Special { "" } else { ";" };
-                format!("{} {} = {}{semi}", lang.render_type(&i), r[&u], l)
+                format!("{} {} = {}{semi}", lang.render_type(&i), r[u], l)
             } else {
                 l
             };
@@ -555,8 +553,8 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     // defines: vector typedefs for (dtype, numel>1) uops with raw addrspace ALU/None
     let mut seen_dts: Vec<(DTypeId, i64)> = Vec::new();
     if lang.vector_defines {
-        for &u in lst {
-            let i = &info[&u];
+        for u in lst {
+            let i = &info[u];
             if matches!(i.addrspace, None | Some(AddrSpace::Alu)) && i.dt != dtype::VOID && !i.shape.is_empty() {
                 let key = (i.dt, i.numel);
                 if !seen_dts.contains(&key) {
@@ -607,7 +605,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     } else {
         // OpenCLRenderer.render_kernel: optional fp16 pragma prefix, no defines,
         // and no trailing newline (python joins prefix + prg)
-        let pragma = if lst.iter().any(|&u| info[&u].dt == dtype::FLOAT16) {
+        let pragma = if lst.iter().any(|u| info[u].dt == dtype::FLOAT16) {
             "#pragma OPENCL EXTENSION cl_khr_fp16 : enable\n"
         } else {
             ""
@@ -617,7 +615,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
 }
 
 fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
-    match ctx.val(u) {
+    match ctx.val(&u) {
         ConstVal::Int(v) => Some(v),
         _ => None,
     }
@@ -625,11 +623,11 @@ fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
 
 /// The base_rewrite const rules (in python match order) — cast dtype decides.
 fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId, lang: &CStyleLang) -> String {
-    let val = ctx.val(c);
+    let val = ctx.val(&c);
     let vint = match val {
         ConstVal::Int(v) => Some(v),
         ConstVal::Bool(b) => Some(b as i128),
-        ConstVal::Float(f) => None,
+        ConstVal::Float(_f) => None,
         other => panic!("TGERR: cstyle const {other:?}"),
     };
     let vfloat = match val {
@@ -700,7 +698,7 @@ fn trunc_int(v: i128, dt: DTypeId) -> i128 {
 
 /// `_wmma_name`.
 fn wmma_name(ctx: &mut UOpCtx, u: UopId) -> String {
-    let arg = ctx.arg_of(u).clone();
+    let arg = ctx.arg_of(&u).clone();
     match arg {
         Arg::Seq { tuple: _, items } => {
             let dims: Vec<String> = items

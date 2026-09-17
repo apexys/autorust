@@ -4,7 +4,6 @@
 //!   {"ok": true, "graph": <FlatGraph>}
 //! or {"ok": false, "error": "..."}  (panics caught, like Python exceptions).
 use std::io::{BufRead, Write};
-use std::sync::OnceLock;
 
 use autorust::uop::ctx::UOpCtx;
 use autorust::uop::flat::{parse_flat, to_string_flat};
@@ -12,17 +11,17 @@ use autorust::uop::graph::Graph;
 use autorust::uop::sym::{pm_commutative, pm_mop_cleanup, symbolic, symbolic_simple};
 use autorust::uop::upat::{graph_rewrite, CtxVal};
 
-static PM_LOAD_COLLAPSE: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
-static PM_REDUCE_LOAD_COLLAPSE: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
-static PM_SPLIT_RANGES: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
-static PM_DECOMP: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
-static PM_DTYPE_DECOMP: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
+static PM_LOAD_COLLAPSE: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
+static PM_REDUCE_LOAD_COLLAPSE: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
+static PM_SPLIT_RANGES: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
+static PM_DECOMP: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
+static PM_DTYPE_DECOMP: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
 
 fn pm_by_name(name: &str) -> Option<&'static autorust::uop::upat::PatternMatcher> {
     match name {
         "symbolic_simple" => Some(symbolic_simple()),
-        "commutative" => Some(&pm_commutative()),
-        "mop_cleanup" => Some(&pm_mop_cleanup()),
+        "commutative" => Some(pm_commutative()),
+        "mop_cleanup" => Some(pm_mop_cleanup()),
         "div_and_mod_symbolic" => Some(autorust::uop::divandmod::div_and_mod_symbolic()),
         "symbolic" => Some(symbolic()),
         "pm_load_collapse" => Some(PM_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_load_collapse)),
@@ -87,15 +86,11 @@ fn process_line(line: &str) -> String {
         Err(e) => return serde_json_err(&format!("from_flat: {e}")),
     };
     let root = match g.roots.last() {
-        Some(&r) => r,
+        Some(r) => r.clone(),
         None => return serde_json_err("no roots"),
     };
     let mut ctx = UOpCtx::new();
     ctx.g = g;
-    // size the property caches for all nodes
-    for _ in 0..ctx.g.nodes.len() {
-        ctx.add_cache_slots();
-    }
     let ctxv = if pm_name == "pm_split_ranges" {
         CtxVal::Dict(std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())))
     } else if pm_name == "pm_dtype_decomps" {

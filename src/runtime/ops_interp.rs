@@ -74,7 +74,7 @@ impl InterpProgram {
         ctx.grow_to(n);
         ctx.g = g;
         let globals: Vec<i64> = elf.signature.iter().map(|(s, _)| *s).collect();
-        let sig_dtypes: HashMap<i64, DTypeId> = elf.signature.iter().copied().collect();
+        let sig_dtypes: HashMap<i64, DTypeId> = elf.signature.iter().cloned().collect();
         InterpProgram { ctx, uops, globals, sig_dtypes }
     }
 }

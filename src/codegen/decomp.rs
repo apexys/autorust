@@ -22,40 +22,40 @@ fn threefry2x32(ctx: &mut UOpCtx, x: UopId, key: UopId) -> UopId {
     let u64: DTypeId = dtype::UINT64;
 
     let c32 = c_int(ctx, 32);
-    let x1s = ctx.binop(Ops::Shr, x, c32);
+    let x1s = ctx.binop(Ops::Shr, x.clone(), c32.clone());
     let x1 = ctx.cast(x1s, u32);
     let x0 = ctx.cast(x, u32);
 
-    let key1s = ctx.binop(Ops::Shr, key, c32);
+    let key1s = ctx.binop(Ops::Shr, key.clone(), c32);
     let key1 = ctx.cast(key1s, u32);
     let key0 = ctx.cast(key, u32);
 
     let rotations: [[i64; 4]; 2] = [[13, 15, 26, 6], [17, 29, 16, 24]];
-    let kx1 = ctx.binop(Ops::Xor, key0, key1);
+    let kx1 = ctx.binop(Ops::Xor, key0.clone(), key1.clone());
     let cx = c_int(ctx, 0x1BD11BDA);
     let kx = ctx.binop(Ops::Xor, kx1, cx);
     let ks: [UopId; 3] = [key1, kx, key0];
 
-    let mut xr0 = ctx.binop(Ops::Add, x0, ks[2]);
-    let mut xr1 = ctx.binop(Ops::Add, x1, ks[0]);
+    let mut xr0 = ctx.binop(Ops::Add, x0, ks[2].clone());
+    let mut xr1 = ctx.binop(Ops::Add, x1, ks[0].clone());
 
     for i in 0..5 {
         for &rot in rotations[i % 2].iter() {
             // new0 = xr0 + xr1 ; new1 = new0 ^ ((xr1<<r) + (xr1>>(32-r)))
-            let new0 = ctx.binop(Ops::Add, xr0, xr1);
+            let new0 = ctx.binop(Ops::Add, xr0, xr1.clone());
             let cr = c_int(ctx, rot);
             let c32r = c_int(ctx, 32 - rot);
-            let shl = ctx.binop(Ops::Shl, xr1, cr);
+            let shl = ctx.binop(Ops::Shl, xr1.clone(), cr);
             let shr = ctx.binop(Ops::Shr, xr1, c32r);
             let rotsum = ctx.binop(Ops::Add, shl, shr);
-            let new1 = ctx.binop(Ops::Xor, new0, rotsum);
+            let new1 = ctx.binop(Ops::Xor, new0.clone(), rotsum);
             xr0 = new0;
             xr1 = new1;
         }
         // xr = [xr0 + ks[i%3], xr1 + ks[(i+1)%3] + i + 1]  (left-assoc, exactly
         // as python: ((xr1 + ks) + i) + 1)
-        let t0 = ctx.binop(Ops::Add, xr0, ks[i % 3]);
-        let t1 = ctx.binop(Ops::Add, xr1, ks[(i + 1) % 3]);
+        let t0 = ctx.binop(Ops::Add, xr0, ks[i % 3].clone());
+        let t1 = ctx.binop(Ops::Add, xr1, ks[(i + 1) % 3].clone());
         let ci = c_int(ctx, i as i64);
         let t1 = ctx.binop(Ops::Add, t1, ci);
         let one = c_int(ctx, 1);
@@ -68,8 +68,8 @@ fn threefry2x32(ctx: &mut UOpCtx, x: UopId, key: UopId) -> UopId {
     let xr1_64 = ctx.cast(xr1, u64);
     let hi = ctx.binop(Ops::Shl, xr1_64, c32b);
     let xr0_64 = ctx.cast(xr0, u64);
-    let res = ctx.binop(Ops::Or, hi, xr0_64);
-    res
+    
+    ctx.binop(Ops::Or, hi, xr0_64)
 }
 
 /// `powers_of_two` (decomp/op.py:74) — `2**i -> i` for `i in range(64)`; the
@@ -84,7 +84,7 @@ fn pow2_exp(v: i128) -> Option<i64> {
 }
 
 fn const_int(ctx: &UOpCtx, u: UopId) -> Option<i128> {
-    match ctx.val(u) {
+    match ctx.val(&u) {
         ConstVal::Int(i) => Some(i),
         _ => None,
     }
@@ -92,16 +92,16 @@ fn const_int(ctx: &UOpCtx, u: UopId) -> Option<i128> {
 
 /// `floordiv_to_idiv` (decomp/op.py:64).
 fn floordiv_to_idiv(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
-    let (avmin, avmax) = ctx.min_max(a).expect("TGERR: floordiv min_max");
-    let (bvmin, bvmax) = ctx.min_max(b).expect("TGERR: floordiv min_max");
+    let (avmin, avmax) = ctx.min_max(&a).expect("TGERR: floordiv min_max");
+    let (bvmin, bvmax) = ctx.min_max(&b).expect("TGERR: floordiv min_max");
     let (avmin, avmax) = (avmin.as_i128_or_panic(), avmax.as_i128_or_panic());
     let (bvmin, bvmax) = (bvmin.as_i128_or_panic(), bvmax.as_i128_or_panic());
-    let cdiv = ctx.alu2(Ops::Cdiv, a, b);
+    let cdiv = ctx.alu2(Ops::Cdiv, a.clone(), b.clone());
     if (avmin >= 0 && bvmin > 0) || (avmax <= 0 && bvmax < 0) {
         return cdiv;
     }
     // a.alu(CMOD, b).ne(0) & (a<0).ne(b<0)
-    let cmod = ctx.alu2(Ops::Cmod, a, b);
+    let cmod = ctx.alu2(Ops::Cmod, a.clone(), b.clone());
     let z0 = ctx.const_py(ConstVal::Int(0), None);
     let rnz = ctx.ne(cmod, z0);
     let za = ctx.const_py(ConstVal::Int(0), None);
@@ -115,24 +115,24 @@ fn floordiv_to_idiv(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
 
 /// `floormod_to_mod` (decomp/op.py:68).
 fn floormod_to_mod(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
-    let (avmin, avmax) = ctx.min_max(a).expect("TGERR: floormod min_max");
-    let (bvmin, bvmax) = ctx.min_max(b).expect("TGERR: floormod min_max");
+    let (avmin, avmax) = ctx.min_max(&a).expect("TGERR: floormod min_max");
+    let (bvmin, bvmax) = ctx.min_max(&b).expect("TGERR: floormod min_max");
     let (avmin, avmax) = (avmin.as_i128_or_panic(), avmax.as_i128_or_panic());
     let (bvmin, bvmax) = (bvmin.as_i128_or_panic(), bvmax.as_i128_or_panic());
-    let r = ctx.alu2(Ops::Cmod, a, b);
+    let r = ctx.alu2(Ops::Cmod, a.clone(), b.clone());
     if (avmin >= 0 && bvmin > 0) || (avmax <= 0 && bvmax < 0) {
         return r;
     }
     // r + (r.ne(0) & (a<0).ne(b<0)).where(b, b.const_like(0))
     let z0 = ctx.const_py(ConstVal::Int(0), None);
-    let rnz = ctx.ne(r, z0);
+    let rnz = ctx.ne(r.clone(), z0);
     let za = ctx.const_py(ConstVal::Int(0), None);
     let a_lt = ctx.lt(a, za);
     let zb = ctx.const_py(ConstVal::Int(0), None);
-    let b_lt = ctx.lt(b, zb);
+    let b_lt = ctx.lt(b.clone(), zb);
     let sign_ne = ctx.ne(a_lt, b_lt);
     let cond = ctx.and_(rnz, sign_ne);
-    let zero_b = ctx.const_like(b, ConstVal::Int(0));
+    let zero_b = ctx.const_like(b.clone(), ConstVal::Int(0));
     let w = ctx.where_(cond, b, zero_b);
     ctx.add(r, w)
 }

@@ -2,15 +2,14 @@
 //! shape-args as SRC consts (RESHAPE/EXPAND: 1 shape src; PAD/SHRINK: lo/end list
 //! srcs; PERMUTE/FLIP: int-list arg; STACK: promoted srcs).
 
-use crate::dtype::DTypeId;
 use crate::uop::arg::Arg;
 use crate::uop::ctx::{Shape, UOpCtx};
 use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
-use crate::uop::sint::SVal;
+use crate::uop::sint::{SInt, SVal};
 
 use super::ix::Ix;
-use super::{reduce, sink, stack};
+use super::{reduce, sink};
 
 /// Python `ceildiv(num, amt) = (num + amt - 1) // amt` (helpers.py:63; amt > 0).
 pub fn ceildiv(a: i128, b: i128) -> i128 {
@@ -27,15 +26,15 @@ pub fn prod_sval(ctx: &mut UOpCtx, shape: &[SVal]) -> SVal {
     if shape.iter().all(|s| matches!(s, SVal::I(_))) {
         let mut p: i128 = 1;
         for s in shape {
-            p *= s.as_i128_or_panic();
+            p *= s.clone().as_i128_or_panic();
         }
         return SVal::I(p);
     }
     let mut acc = ctx.cint(1);
-    for &s in shape {
+    for s in shape {
         let u = match s {
-            SVal::I(v) => ctx.cint_dt(v as i64, crate::dtype::default_int()),
-            SVal::U(u) => u,
+            SVal::I(v) => ctx.cint_dt(*v as i64, crate::dtype::default_int()),
+            SVal::U(u) => u.clone(),
         };
         acc = ctx.alu2(Ops::Mul, acc, u);
     }
@@ -102,11 +101,11 @@ pub fn mop_shape(ctx: &mut UOpCtx, op: Ops, x: UopId, shape: &[SVal]) -> UopId {
 /// `MovementMixin._mop` for PAD/SHRINK (`(start, stop)` pairs).
 pub fn mop_pairs(ctx: &mut UOpCtx, op: Ops, x: UopId, arg: &[(SVal, SVal)]) -> UopId {
     if arg.is_empty() {
-        assert!(ctx.shape(x).unwrap().unwrap_or_default().is_empty(), "TGERR: 0 len arg only valid on zero length shape");
+        assert!(ctx.shape(&x).unwrap().unwrap_or_default().is_empty(), "TGERR: 0 len arg only valid on zero length shape");
         return x;
     }
-    let starts: Vec<SVal> = arg.iter().map(|(a, _)| *a).collect();
-    let ends: Vec<SVal> = arg.iter().map(|(_, b)| *b).collect();
+    let starts: Vec<SVal> = arg.iter().map(|(a, _)| a.clone()).collect();
+    let ends: Vec<SVal> = arg.iter().map(|(_, b)| b.clone()).collect();
     let usrcs = vec![ctx.shape_arg(&starts), ctx.shape_arg(&ends)];
     emit_with_shape_srcs(ctx, op, x, usrcs, Arg::None)
 }
@@ -117,7 +116,7 @@ fn emit_with_shape_srcs(ctx: &mut UOpCtx, op: Ops, x: UopId, usrcs: Vec<UopId>, 
     if !usrcs.is_empty() {
         let s0 = sink(ctx, usrcs);
         let sid = crate::uop::upat::simplify(ctx, s0);
-        srcs.extend(ctx.srcs(sid).to_vec());
+        srcs.extend(ctx.srcs(&sid).to_vec());
     }
     ctx.uop(op, None, srcs, arg)
 }
@@ -128,7 +127,7 @@ pub fn reshape(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> UopId {
 }
 
 pub(crate) fn reshape_internal(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> UopId {
-    let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let self_shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let mut new_shape: Vec<SVal> = shape.to_vec();
     // resolve -1
     let c = new_shape.iter().filter(|s| **s == SVal::I(-1)).count();
@@ -143,17 +142,17 @@ pub(crate) fn reshape_internal(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> Uo
             SVal::U(u) => SVal::U(ctx.alu1(Ops::Neg, u)),
         };
         let dim = ctx.sval_div_floor(neg_prod, prod_rest);
-        new_shape = new_shape.iter().map(|s| if *s == SVal::I(-1) { dim } else { *s }).collect();
+        new_shape = new_shape.iter().map(|s| if *s == SVal::I(-1) { dim.clone() } else { s.clone() }).collect();
         let _ = n;
     }
     // prod check (only when all-int; symbolic prods compare structurally in Python)
     if self_shape.iter().all(|s| matches!(s, SVal::I(_))) && new_shape.iter().all(|s| matches!(s, SVal::I(_))) {
-        let a: i128 = self_shape.iter().map(|s| s.as_i128_or_panic()).product();
-        let b: i128 = new_shape.iter().map(|s| s.as_i128_or_panic()).product();
+        let a: i128 = self_shape.iter().map(|s| s.clone().as_i128_or_panic()).product();
+        let b: i128 = new_shape.iter().map(|s| s.clone().as_i128_or_panic()).product();
         assert_eq!(a, b, "TGERR: size mismatch, can't reshape {self_shape:?} -> {new_shape:?}");
     }
-    let ret = mop_shape(ctx, Ops::Reshape, x, &new_shape);
-    let ret_shape = ctx.shape(ret).unwrap().unwrap_or_default();
+    let ret = mop_shape(ctx, Ops::Reshape, x.clone(), &new_shape);
+    let ret_shape = ctx.shape(&ret).unwrap().unwrap_or_default();
     if ret_shape == self_shape {
         x
     } else {
@@ -163,16 +162,16 @@ pub(crate) fn reshape_internal(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> Uo
 
 /// `MovementMixin.expand` (movement.py:150-162). `shape` = target with `-1`/None pre-resolved.
 pub fn expand(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> UopId {
-    let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let self_shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let (mine, theirs) = align_left(&self_shape, shape);
-    let new_shape: Vec<SVal> = mine.iter().zip(theirs.iter()).map(|(f, t)| if *t == SVal::I(-1) { *f } else { *t }).collect();
+    let new_shape: Vec<SVal> = mine.iter().zip(theirs.iter()).map(|(f, t)| if *t == SVal::I(-1) { f.clone() } else { t.clone() }).collect();
     broadcast_to(ctx, x, &new_shape)
 }
 
 /// `MovementMixin._broadcast_to` (movement.py:129-149).
 pub fn broadcast_to(ctx: &mut UOpCtx, x: UopId, new_shape: &[SVal]) -> UopId {
-    let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
-    if self_shape.iter().copied().eq(new_shape.iter().copied()) {
+    let self_shape = ctx.shape(&x).unwrap().unwrap_or_default();
+    if self_shape.iter().cloned().eq(new_shape.iter().cloned()) {
         return x;
     }
     assert!(self_shape.len() <= new_shape.len(), "TGERR: cannot broadcast tensor to fewer dimensions");
@@ -190,9 +189,9 @@ pub fn broadcast_to(ctx: &mut UOpCtx, x: UopId, new_shape: &[SVal]) -> UopId {
     let axes = broadcast_axes(ctx, &shape, new_shape);
     let expand_at: Vec<usize> = axes.into_iter().filter(|&i| i >= n_left).map(|i| i - n_left).collect();
     let kept: Vec<usize> = (0..self_shape.len()).filter(|i| !expand_at.contains(i)).collect();
-    let squeezed = reshape_internal(ctx, x, &kept.iter().map(|&i| self_shape[i]).collect::<Vec<_>>());
+    let squeezed = reshape_internal(ctx, x, &kept.iter().map(|&i| <SInt as Clone>::clone(&self_shape[i])).collect::<Vec<_>>());
     let mut expand_shape: Vec<SVal> = new_shape[..n_left].to_vec();
-    expand_shape.extend(expand_at.iter().map(|&i| new_shape[n_left + i]));
+    expand_shape.extend(expand_at.iter().map(|&i| new_shape[n_left + i].clone()));
     let expanded = mop_shape(ctx, Ops::Expand, squeezed, &expand_shape);
     // expanded layout = [left dims] + [expand_at dims] + [kept dims]; build perm in
     // ORIGINAL self-dim order so each self dim lands at its new_shape position.
@@ -211,19 +210,19 @@ pub fn broadcast_to(ctx: &mut UOpCtx, x: UopId, new_shape: &[SVal]) -> UopId {
 /// `MovementMixin.pad` (movement.py:187-192): `arg` = (lo, hi) per dim or None → caller
 /// resolves None to (0, 0).
 pub fn pad(ctx: &mut UOpCtx, x: UopId, arg: &[(SVal, SVal)]) -> UopId {
-    let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let self_shape = ctx.shape(&x).unwrap().unwrap_or_default();
     assert_eq!(self_shape.len(), arg.len(), "TGERR: ndim != len(arg)");
     let pairs: Vec<(SVal, SVal)> = arg
         .iter()
         .zip(self_shape.iter())
         .map(|((lo, hi), s)| {
-            let lhi = ctx.sval_add(*lo, *hi);
-            let end = ctx.sval_add(*s, lhi);
-            (*lo, end)
+            let lhi = ctx.sval_add(lo.clone(), hi.clone());
+            let end = ctx.sval_add(s.clone(), lhi);
+            (lo.clone(), end)
         })
         .collect();
-    let ret = mop_pairs(ctx, Ops::Pad, x, &pairs);
-    let ret_shape = ctx.shape(ret).unwrap().unwrap_or_default();
+    let ret = mop_pairs(ctx, Ops::Pad, x.clone(), &pairs);
+    let ret_shape = ctx.shape(&ret).unwrap().unwrap_or_default();
     if ret_shape == self_shape {
         x
     } else {
@@ -233,17 +232,17 @@ pub fn pad(ctx: &mut UOpCtx, x: UopId, arg: &[(SVal, SVal)]) -> UopId {
 
 /// `MovementMixin.shrink` (movement.py:193-214): `arg` = (start, end) per dim.
 pub fn shrink(ctx: &mut UOpCtx, x: UopId, arg: &[(SVal, SVal)]) -> UopId {
-    let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let self_shape = ctx.shape(&x).unwrap().unwrap_or_default();
     assert_eq!(self_shape.len(), arg.len(), "TGERR: ndim != len(arg)");
     // graph-level SHRINK pairs are (start, size) — python's mixin converts the
     // slice bounds: `(x[0], x[1]-x[0])` (mixin/movement.py:212).
     let pairs: Vec<(SVal, SVal)> = arg
         .iter()
         .zip(self_shape.iter())
-        .map(|((a, b), s)| (*a, ctx.sval_sub(*b, *a)))
+        .map(|((a, b), _s)| (a.clone(), ctx.sval_sub(b.clone(), a.clone())))
         .collect();
-    let ret = mop_pairs(ctx, Ops::Shrink, x, &pairs);
-    let ret_shape = ctx.shape(ret).unwrap().unwrap_or_default();
+    let ret = mop_pairs(ctx, Ops::Shrink, x.clone(), &pairs);
+    let ret_shape = ctx.shape(&ret).unwrap().unwrap_or_default();
     if ret_shape == self_shape {
         x
     } else {
@@ -253,20 +252,20 @@ pub fn shrink(ctx: &mut UOpCtx, x: UopId, arg: &[(SVal, SVal)]) -> UopId {
 
 /// `MovementMixin.permute` (movement.py:215-233).
 pub fn permute(ctx: &mut UOpCtx, x: UopId, order: &[i64]) -> UopId {
-    let n = ctx.shape(x).unwrap().unwrap_or_default().len();
+    let n = ctx.shape(&x).unwrap().unwrap_or_default().len();
     let order_arg: Vec<i64> = order.iter().map(|&d| resolve_dim(n, d, false) as i64).collect();
     permute_internal(ctx, x, &order_arg.iter().map(|&d| d as usize).collect::<Vec<_>>())
 }
 
 pub(crate) fn permute_internal(ctx: &mut UOpCtx, x: UopId, order: &[usize]) -> UopId {
-    let n = ctx.shape(x).unwrap().unwrap_or_default().len();
+    let n = ctx.shape(&x).unwrap().unwrap_or_default().len();
     let mut sorted_order = order.to_vec();
     sorted_order.sort_unstable();
     assert!(
         sorted_order == (0..n).collect::<Vec<_>>(),
         "TGERR: order is not a valid permutation, getting {order:?}"
     );
-    if order.iter().copied().eq(0..n) {
+    if order.iter().cloned().eq(0..n) {
         return x;
     }
     let arg = Arg::Seq { tuple: true, items: order.iter().map(|&i| Arg::Int(i as i64)).collect() };
@@ -276,17 +275,17 @@ pub(crate) fn permute_internal(ctx: &mut UOpCtx, x: UopId, order: &[usize]) -> U
 /// `MovementMixin._pool` (movement.py:598-714): extract sliding windows.
 /// Used by conv2d and pooling layers. Returns shape: `(noop, k0, o0, k1, o1, ..., kN, oN)`.
 pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: i64, dilation: i64) -> UopId {
-    let shape = ctx.shape(x).unwrap().clone().unwrap_or_default();
+    let shape = ctx.shape(&x).unwrap().clone().unwrap_or_default();
     let ndim = shape.len();
     let k_len = k.len();
     let noop_len = ndim - k_len;
 
     // Get spatial input sizes
-    let i_: Vec<i64> = shape[ndim - k_len..].iter().map(|s| s.as_i64().unwrap_or(0)).collect();
+    let i_: Vec<i64> = shape[ndim - k_len..].iter().map(|s| s.clone().as_i64().unwrap_or(0)).collect();
 
     // Calculate output sizes: o_ = ceil((i - d*(k-1)) / s)
-    let s_: Vec<i64> = std::iter::repeat(stride).take(k_len).collect();
-    let d_: Vec<i64> = std::iter::repeat(dilation).take(k_len).collect();
+    let s_: Vec<i64> = std::iter::repeat_n(stride, k_len).collect();
+    let d_: Vec<i64> = std::iter::repeat_n(dilation, k_len).collect();
     let o_: Vec<i64> = i_.iter().zip(k.iter().zip(s_.iter().zip(d_.iter())))
         .map(|(&i, (&k, (&s, &d)))| {
             let num = i - d * (k - 1);
@@ -303,7 +302,7 @@ pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: i64, dilation: i64) -
     // Calculate repeat sizes
     let repeat_sizes: Vec<i64> = shape.iter().enumerate().map(|(idx, s)| {
         if idx < noop_len {
-            s.as_i64().unwrap_or(0)
+            s.clone().as_i64().unwrap_or(0)
         } else {
             let spatial_idx = idx - noop_len;
             let k_val = k[spatial_idx];
@@ -394,7 +393,7 @@ pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: i64, dilation: i64) -
 
 /// `MovementMixin.flip` (movement.py:234-256): `axis` must be pre-resolved to non-negative dims.
 pub fn flip(ctx: &mut UOpCtx, x: UopId, axis: &[usize]) -> UopId {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     assert!(axis.iter().all(|&a| a < shape.len()), "TGERR: flip args must be axis ints");
     assert!(axis.len() == {
         let mut v = axis.to_vec();
@@ -412,22 +411,22 @@ pub fn flip(ctx: &mut UOpCtx, x: UopId, axis: &[usize]) -> UopId {
 
 /// `MovementMixin.stack(*args, dim=0)` (movement.py:257-276).
 pub fn stack_tensors(ctx: &mut UOpCtx, tensors: &[UopId], dim: i64) -> UopId {
-    let n = ctx.shape(tensors[0]).unwrap().unwrap_or_default().len();
+    let n = ctx.shape(&tensors[0]).unwrap().unwrap_or_default().len();
     let dim = resolve_dim(n, dim, true);
-    let first = ctx.shape(tensors[0]).unwrap().unwrap_or_default();
+    let first = ctx.shape(&tensors[0]).unwrap().unwrap_or_default();
     for t in tensors {
-        assert_eq!(ctx.shape(*t).unwrap().unwrap_or_default(), first, "TGERR: all shapes must match for stack");
+        assert_eq!(ctx.shape(t).unwrap().unwrap_or_default(), first, "TGERR: all shapes must match for stack");
     }
     let dt = ctx.dtype_from_uop(Ops::Stack, tensors, &Arg::None).unwrap();
     let srcs = tensors
         .iter()
-        .map(|&u| {
-            if ctx.is_invalid(ctx.base(u)) {
-                u
+        .map(|u| {
+            if ctx.is_invalid(&ctx.base(u)) {
+                u.clone()
             } else if ctx.op_of(u) == Ops::Const {
-                ctx.const_like_dt(u, ctx.val(u), Some(dt))
+                ctx.const_like_dt(u.clone(), ctx.val(u), Some(dt))
             } else {
-                ctx.cast(u, dt)
+                ctx.cast(u.clone(), dt)
             }
         })
         .collect();
@@ -435,7 +434,7 @@ pub fn stack_tensors(ctx: &mut UOpCtx, tensors: &[UopId], dim: i64) -> UopId {
     if dim == 0 {
         ret
     } else {
-        let nd = ctx.shape(ret).unwrap().unwrap_or_default().len();
+        let nd = ctx.shape(&ret).unwrap().unwrap_or_default().len();
         let perm: Vec<usize> = (1..=dim).chain(std::iter::once(0)).chain((dim + 1)..nd).collect();
         permute_internal(ctx, ret, &perm)
     }
@@ -443,13 +442,13 @@ pub fn stack_tensors(ctx: &mut UOpCtx, tensors: &[UopId], dim: i64) -> UopId {
 
 /// `MovementMixin.shrink_to` (movement.py:277-279).
 pub fn shrink_to(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> UopId {
-    let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let self_shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let arg: Vec<(SVal, SVal)> = shape
         .iter()
         .zip(self_shape.iter())
         .map(|(ns, s)| match ns {
-            SVal::U(_) => (SVal::I(0), *s),
-            SVal::I(v) if *v < 0 => (SVal::I(0), *s),
+            SVal::U(_) => (SVal::I(0), s.clone()),
+            SVal::I(v) if *v < 0 => (SVal::I(0), s.clone()),
             SVal::I(v) => (SVal::I(0), SVal::I(*v)),
         })
         .collect();
@@ -458,18 +457,18 @@ pub fn shrink_to(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> UopId {
 
 /// `MovementMixin.pad_to` (movement.py:280-283).
 pub fn pad_to(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> UopId {
-    let self_shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let self_shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let arg: Vec<(SVal, SVal)> = shape
         .iter()
         .zip(self_shape.iter())
         .map(|(ns, s)| match ns {
-            SVal::U(_) => (SVal::I(0), *s),
-            SVal::I(v) if *v < 0 => (SVal::I(0), *s),
+            SVal::U(_) => (SVal::I(0), s.clone()),
+            SVal::I(v) if *v < 0 => (SVal::I(0), s.clone()),
             SVal::I(v) => (SVal::I(0), SVal::I(*v)),
         })
         .collect();
-    let ret = mop_pairs(ctx, Ops::Pad, x, &arg);
-    let ret_shape = ctx.shape(ret).unwrap().unwrap_or_default();
+    let ret = mop_pairs(ctx, Ops::Pad, x.clone(), &arg);
+    let ret_shape = ctx.shape(&ret).unwrap().unwrap_or_default();
     if ret_shape == self_shape {
         x
     } else {
@@ -479,10 +478,10 @@ pub fn pad_to(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> UopId {
 
 /// `MovementMixin.squeeze(dim=None)` (movement.py:288-308).
 pub fn squeeze(ctx: &mut UOpCtx, x: UopId, dim: Option<i64>) -> UopId {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     match dim {
         None => {
-            let kept: Vec<SVal> = shape.iter().filter(|s| **s != SVal::I(1)).copied().collect();
+            let kept: Vec<SVal> = shape.iter().filter(|s| **s != SVal::I(1)).cloned().collect();
             reshape_internal(ctx, x, &kept)
         }
         Some(d) => {
@@ -490,7 +489,7 @@ pub fn squeeze(ctx: &mut UOpCtx, x: UopId, dim: Option<i64>) -> UopId {
             if shape.is_empty() || shape[dim] != SVal::I(1) {
                 x
             } else {
-                let kept: Vec<SVal> = shape.iter().enumerate().filter(|(i, _)| *i != dim).map(|(_, s)| *s).collect();
+                let kept: Vec<SVal> = shape.iter().enumerate().filter(|(i, _)| *i != dim).map(|(_, s)| s.clone()).collect();
                 reshape_internal(ctx, x, &kept)
             }
         }
@@ -499,7 +498,7 @@ pub fn squeeze(ctx: &mut UOpCtx, x: UopId, dim: Option<i64>) -> UopId {
 
 /// `MovementMixin.unsqueeze(dim)` (movement.py:309-324).
 pub fn unsqueeze(ctx: &mut UOpCtx, x: UopId, dim: i64) -> UopId {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let dim = resolve_dim(shape.len(), dim, true);
     let mut new_shape: Vec<SVal> = shape[..dim].to_vec();
     new_shape.push(SVal::I(1));
@@ -509,7 +508,7 @@ pub fn unsqueeze(ctx: &mut UOpCtx, x: UopId, dim: i64) -> UopId {
 
 /// `MovementMixin.transpose(dim0=1, dim1=0)` (movement.py:329-345).
 pub fn transpose(ctx: &mut UOpCtx, x: UopId, dim0: i64, dim1: i64) -> UopId {
-    let n = ctx.shape(x).unwrap().unwrap_or_default().len();
+    let n = ctx.shape(&x).unwrap().unwrap_or_default().len();
     let mut order: Vec<usize> = (0..n).collect();
     let d0 = resolve_dim(n, dim0, false);
     let d1 = resolve_dim(n, dim1, false);
@@ -519,7 +518,7 @@ pub fn transpose(ctx: &mut UOpCtx, x: UopId, dim0: i64, dim1: i64) -> UopId {
 
 /// `MovementMixin.flatten(start_dim=0, end_dim=-1)` (movement.py:346-361).
 pub fn flatten(ctx: &mut UOpCtx, x: UopId, start_dim: i64, end_dim: i64) -> UopId {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let n = shape.len() as i64;
     // python slices clamp; negative dims resolve against ndim (0-dim -> (1,))
     let res = |d: i64| (if d < 0 { d + n } else { d }).clamp(0, n) as usize;
@@ -534,7 +533,7 @@ pub fn flatten(ctx: &mut UOpCtx, x: UopId, start_dim: i64, end_dim: i64) -> UopI
 
 /// `MovementMixin.unflatten(dim, sizes)` (movement.py:362-378).
 pub fn unflatten(ctx: &mut UOpCtx, x: UopId, dim: i64, sizes: &[i64]) -> UopId {
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let n = shape.len() as i64;
     let dim = if dim < 0 { dim + n } else { dim };
     let itemsize = sizes.iter().filter(|&&s| s != -1).map(|s| *s as i128).product::<i128>();
@@ -542,7 +541,7 @@ pub fn unflatten(ctx: &mut UOpCtx, x: UopId, dim: i64, sizes: &[i64]) -> UopId {
     for &s in sizes {
         if s == -1 {
             new_shape.push(ctx.sval_div_floor(
-                shape[dim as usize],
+                <SInt as Clone>::clone(&shape[dim as usize]),
                 SVal::I(if itemsize == 0 { 1 } else { itemsize }),
             ));
         } else {
@@ -599,7 +598,7 @@ pub fn slice_indices(length: i64, start: Option<i64>, stop: Option<i64>, step: i
         }
     };
     let _ = &mut start;
-    let mut stop = match stop {
+    let stop = match stop {
         None => {
             if step > 0 {
                 upper
@@ -631,15 +630,15 @@ pub fn parse_view_index(ctx: &mut UOpCtx, size: SVal, vmax: Option<i64>, spec: &
     // negative int bounds resolve against the (possibly symbolic) size, like
     // slice.indices: `if isinstance(start, int) and start < 0: start = start + size`
     let start_v: SVal = if start0 < 0 && size_sym {
-        let sum = ctx.sval_add(size, SVal::I(start0 as i128));
-        sum
+        
+        ctx.sval_add(size.clone(), SVal::I(start0 as i128))
     } else {
         SVal::I(start0 as i128)
     };
     let stop_v: SVal = match spec.stop {
-        Some(s) if s < 0 && size_sym => ctx.sval_add(size, SVal::I(s as i128)),
+        Some(s) if s < 0 && size_sym => ctx.sval_add(size.clone(), SVal::I(s as i128)),
         Some(s) => SVal::I(s as i128),
-        None => size,
+        None => size.clone(),
     };
     // all-int bounds -> clamp/stride via Python slice.indices (against vmax when symbolic)
     if matches!(start_v, SVal::I(_)) && matches!(stop_v, SVal::I(_)) {
@@ -664,13 +663,13 @@ pub fn parse_view_index(ctx: &mut UOpCtx, size: SVal, vmax: Option<i64>, spec: &
         // symbolic: only step == 1 with stop-start >= 0 is supported
         assert!(spec.step == 1, "TGERR: symbolic slice {spec:?} is not supported");
         assert!(
-            (|| {
-                let diff = ctx.sval_sub(stop_v, start_v);
+            {
+                let diff = ctx.sval_sub(stop_v.clone(), start_v.clone());
                 ctx.resolve_ord(diff, crate::uop::ctx::CmpOrd::Ge, SVal::I(0), false)
-            })(),
+            },
             "TGERR: symbolic slice {spec:?} is not supported"
         );
-        let size_v = ctx.sval_sub(stop_v, start_v);
+        let size_v = ctx.sval_sub(stop_v.clone(), start_v.clone());
         ViewIndex { size: size_v, boundary: (start_v, stop_v), stride: 1, collapse_dim: false }
     }
 }
@@ -679,30 +678,30 @@ pub fn parse_view_index(ctx: &mut UOpCtx, size: SVal, vmax: Option<i64>, spec: &
 pub fn apply_view_ops(ctx: &mut UOpCtx, x: UopId, mops: &[ViewIndex]) -> UopId {
     // flip negative strides
     let flip_axes: Vec<usize> = mops.iter().enumerate().filter(|(_, m)| m.stride < 0).map(|(i, _)| i).collect();
-    let boundaries: Vec<(SVal, SVal)> = mops.iter().map(|m| m.boundary).collect();
+    let boundaries: Vec<(SVal, SVal)> = mops.iter().map(|m| m.boundary.clone()).collect();
     let mut x = shrink(ctx, x, &boundaries);
     x = flip(ctx, x, &flip_axes);
     let strides: Vec<i64> = mops.iter().map(|m| m.stride.abs()).collect();
     // apply stride
     if strides.iter().any(|&st| st != 1) {
-        let shape = ctx.shape(x).unwrap().unwrap_or_default();
+        let shape = ctx.shape(&x).unwrap().unwrap_or_default();
         assert!(shape.iter().all(|s| matches!(s, SVal::I(_))), "TGERR: symbolic shape not supported");
-        let ints: Vec<i64> = shape.iter().map(|s| s.as_i128_or_panic() as i64).collect();
+        let ints: Vec<i64> = shape.iter().map(|s| s.clone().as_i128_or_panic() as i64).collect();
         let padded: Vec<SVal> = ints.iter().zip(strides.iter()).map(|(&s, &st)| SVal::I(round_up(s as i128, st as i128))).collect();
         x = pad_to(ctx, x, &padded);
-        let shape2 = ctx.shape(x).unwrap().unwrap_or_default();
+        let shape2 = ctx.shape(&x).unwrap().unwrap_or_default();
         // reshape(flatten((s // st, st) for s, st in zip(shape, strides)))
         let mut new_shape: Vec<SVal> = Vec::with_capacity(shape2.len() * 2);
         for (s, st) in shape2.iter().zip(strides.iter()) {
-            new_shape.push(ctx.sval_div_floor(*s, SVal::I(*st as i128)));
+            new_shape.push(ctx.sval_div_floor(s.clone(), SVal::I(*st as i128)));
             new_shape.push(SVal::I(*st as i128));
         }
         x = reshape_internal(ctx, x, &new_shape);
-        let shape3 = ctx.shape(x).unwrap().unwrap_or_default();
+        let shape3 = ctx.shape(&x).unwrap().unwrap_or_default();
         // shrink_to(flatten((s, 1) for s in shape[::2])).reshape(shape[::2])
-        let shrink_shape: Vec<SVal> = (0..shape3.len()).step_by(2).flat_map(|i| [shape3[i], SVal::I(1)]).collect();
+        let shrink_shape: Vec<SVal> = (0..shape3.len()).step_by(2).flat_map(|i| [<SInt as Clone>::clone(&shape3[i]), SVal::I(1)]).collect();
         x = shrink_to(ctx, x, &shrink_shape);
-        let kept: Vec<SVal> = shape3.iter().step_by(2).copied().collect();
+        let kept: Vec<SVal> = shape3.iter().step_by(2).cloned().collect();
         x = reshape_internal(ctx, x, &kept);
     }
     x
@@ -712,7 +711,7 @@ pub fn apply_view_ops(ctx: &mut UOpCtx, x: UopId, mops: &[ViewIndex]) -> UopId {
 /// Advanced (tensor) indexing is a follow-up.
 pub fn getitem(ctx: &mut UOpCtx, x: UopId, ixs: &[Ix]) -> UopId {
     use super::ix::Ix;
-    let shape = ctx.shape(x).unwrap().unwrap_or_default();
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let ndim = shape.len();
     // `_normalize_indices`: single ellipsis, fill, too-many check
     let ell_count = ixs.iter().filter(|i| matches!(i, Ix::Ellipsis)).count();
@@ -725,13 +724,13 @@ pub fn getitem(ctx: &mut UOpCtx, x: UopId, ixs: &[Ix]) -> UopId {
     let mut norm: Vec<Ix> = Vec::with_capacity(ixs.len() + fills);
     for (i, ix) in ixs.iter().enumerate() {
         if Some(i) == fill_at {
-            norm.extend(std::iter::repeat(Ix::All).take(fills));
+            norm.extend(std::iter::repeat_n(Ix::All, fills));
             continue;
         }
         norm.push(*ix);
     }
     if fill_at.is_none() {
-        norm.extend(std::iter::repeat(Ix::All).take(fills));
+        norm.extend(std::iter::repeat_n(Ix::All, fills));
     }
 
     // parse loop (op.py:80-97)
@@ -741,27 +740,27 @@ pub fn getitem(ctx: &mut UOpCtx, x: UopId, ixs: &[Ix]) -> UopId {
     for ix in &norm {
         let size = match ix {
             Ix::NewAxis => SVal::I(1),
-            _ => shape[dim],
+            _ => shape[dim].clone(),
         };
         let vi = match ix {
             Ix::NewAxis => ViewIndex { size: SVal::I(1), boundary: (SVal::I(0), SVal::I(1)), stride: 1, collapse_dim: false },
             Ix::Index(i) => {
                 // bounds check: resolve(index >= size) or resolve(index < -size) -> IndexError
-                let size_i = if size_sym_or(&size) { None } else { Some(size.as_i128_or_panic() as i64) };
-                let neg_size = ctx.sval_neg(size);
+                let size_i = if size_sym_or(&size) { None } else { Some(size.clone().as_i128_or_panic() as i64) };
+                let neg_size = ctx.sval_neg(size.clone());
                 let iv = SVal::I(*i as i128);
-                let ge = ctx.resolve_ord(iv, crate::uop::ctx::CmpOrd::Ge, size, false);
+                let ge = ctx.resolve_ord(iv.clone(), crate::uop::ctx::CmpOrd::Ge, size.clone(), false);
                 let lt = ctx.resolve_ord(iv, crate::uop::ctx::CmpOrd::Lt, neg_size, false);
                 assert!(!(ge || lt), "TGERR: IndexError index {i} is out of bounds with size {size_i:?}");
                 let b = if *i >= 0 { *i } else { *i + size_i.unwrap_or(0) };
                 ViewIndex { size, boundary: (SVal::I(b as i128), SVal::I((b + 1) as i128)), stride: 1, collapse_dim: true }
             }
             Ix::All => {
-                let vmax = sval_vmax_i(ctx, size);
+                let vmax = sval_vmax_i(ctx, size.clone());
                 parse_view_index(ctx, size, vmax, &SliceSpec { start: None, stop: None, step: 1 })
             }
             Ix::Range { start, stop, step } => {
-                let vmax = sval_vmax_i(ctx, size);
+                let vmax = sval_vmax_i(ctx, size.clone());
                 parse_view_index(ctx, size, vmax, &SliceSpec { start: *start, stop: *stop, step: *step })
             }
             Ix::Ellipsis => unreachable!(),
@@ -777,7 +776,7 @@ pub fn getitem(ctx: &mut UOpCtx, x: UopId, ixs: &[Ix]) -> UopId {
     // injection (NewAxis) + collapse (int)
     let mops: Vec<ViewIndex> = std::mem::take(&mut mops_parsed);
     let x = apply_view_ops(ctx, x, &mops);
-    let sizes: Vec<SVal> = parsed.iter().filter(|p| !p.collapse_dim).map(|p| p.size).collect();
+    let sizes: Vec<SVal> = parsed.iter().filter(|p| !p.collapse_dim).map(|p| p.size.clone()).collect();
     reshape_internal(ctx, x, &sizes)
 }
 
@@ -788,6 +787,6 @@ fn size_sym_or(s: &SVal) -> bool {
 fn sval_vmax_i(ctx: &mut UOpCtx, s: SVal) -> Option<i64> {
     match s {
         SVal::I(v) => Some(v as i64),
-        SVal::U(u) => ctx.vmax(u).ok().and_then(|v| v.as_i64()),
+        SVal::U(u) => ctx.vmax(&u).ok().and_then(|v| v.as_i64()),
     }
 }

@@ -58,16 +58,16 @@ fn xor_trains_to_convergence() {
         // first is a cache hit: the kernels are not re-lowered/re-rendered/re-compiled.
         let mut bufs = BufTable::default();
         let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
-            .reshape(&mut ctx, &[4, 2]);
-        let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, &[4, 1]);
+            .reshape(&mut ctx, [4, 2]);
+        let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, [4, 1]);
 
-        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, &[4, 2]);
+        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, [4, 2]);
         let b1t = Tensor::from_slice(&mut ctx, &b1, None, None);
-        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, &[1, 4]);
+        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, [1, 4]);
         let b2t = Tensor::from_slice(&mut ctx, &b2, None, None);
 
-        let h = nn::relu(&Linear { weight: w1t, bias: Some(b1t) }.forward(&x, &mut ctx), &mut ctx);
-        let out = Linear { weight: w2t, bias: Some(b2t) }.forward(&h, &mut ctx);
+        let h = nn::relu(&Linear { weight: w1t.clone(), bias: Some(b1t.clone()) }.forward(&x, &mut ctx), &mut ctx);
+        let out = Linear { weight: w2t.clone(), bias: Some(b2t.clone()) }.forward(&h, &mut ctx);
         let diff = out.sub(&mut ctx, &t);
         let sq = diff.mul(&mut ctx, &diff);
         let loss = sq.mean(&mut ctx, None, false);
@@ -82,8 +82,8 @@ fn xor_trains_to_convergence() {
         b1 = np[1].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
         w2 = np[2].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
         b2 = np[3].to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
-        pred = out.reshape(&mut ctx, &[4]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
-        last_loss = loss.reshape(&mut ctx, &[1]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache)[0];
+        pred = out.reshape(&mut ctx, [4]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
+        last_loss = loss.reshape(&mut ctx, [1]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache)[0];
 
         if epoch % (n / 10).max(1) == 0 || epoch == n - 1 {
             println!("epoch {epoch}: loss = {last_loss}");
@@ -113,13 +113,13 @@ fn micro_seq_kaiming_timed() {
     Tensor::manual_seed(1);
     for i in 0..4 {
         let t = Tensor::kaiming_uniform(&mut ctx, &[2,2], (5.0f64).sqrt(), None);
-        let n_before = ctx.g.nodes.len();
+        let n_before = ctx.g.live_len();
         let t0 = Instant::now();
         let v = t.to_list::<f32>(&mut ctx);
         eprintln!("[t] i={i} before={n_before} dt={:?}", t0.elapsed());
         let _ = v;
     }
-    eprintln!("[t] final nodes={}", ctx.g.nodes.len());
+    eprintln!("[t] final nodes={}", ctx.g.live_len());
 }
 
 #[test]
@@ -131,12 +131,12 @@ fn micro_repeated_realize() {
         let a = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0], None, None);
         let b = Tensor::from_slice(&mut ctx, &[4.0f32, 5.0, 6.0], None, None);
         let c = a.add(&mut ctx, &b);
-        let before = ctx.g.nodes.len();
+        let before = ctx.g.live_len();
         let t0 = Instant::now();
         let v = c.to_list_in::<f32>(&mut ctx, &mut sess);
         eprintln!(
             "[r] i={i} before={before} after={} bases={} hits={} misses={} dt={:?} v={v:?}",
-            ctx.g.nodes.len(),
+            ctx.g.live_len(),
             sess.buffers.n_bases(),
             sess.cache.hits,
             sess.cache.misses,

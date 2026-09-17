@@ -10,6 +10,7 @@
 //! bare NaN/Inf — verified empirically for nanoserde and miniserde).
 
 use nanoserde::{DeJson, SerJson};
+use std::collections::HashMap;
 
 use super::arg::{DataArg, Arg, DeviceSpec, EnumVal, NonFinite, ParamArg};
 use super::graph::{Graph, UopId};
@@ -133,9 +134,9 @@ pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, St
             } else {
                 Some(AddrSpace::from_u8(*addrspace).ok_or_else(|| format!("bad addrspace {addrspace}"))?)
             };
-            let device = if device[0] == true && device[1] == false {
+            let device = if device[0] && !device[1] {
                 Some(DeviceSpec::Single(device_single.clone()))
-            } else if device[0] == true {
+            } else if device[0] {
                 Some(DeviceSpec::Multi(device_multi.clone()))
             } else {
                 None
@@ -156,7 +157,7 @@ pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, St
         FlatArg::Data { tag, fields } => {
             let mut fs = Vec::with_capacity(fields.len());
             for (n, f) in fields {
-                fs.push((n.clone(), arg_from_flat_with(&f, dtmap)?));
+                fs.push((n.clone(), arg_from_flat_with(f, dtmap)?));
             }
             Arg::Data(DataArg { tag: tag.clone(), fields: fs })
         }
@@ -297,32 +298,32 @@ impl Graph {
             dtmap.push(d);
         }
         let mut g = Graph::new();
-        let mut idmap: Vec<UopId> = vec![UopId(u32::MAX); fg.nodes.len()];
+        let mut idmap: Vec<Option<UopId>> = vec![None; fg.nodes.len()];
         for (i, n) in fg.nodes.iter().enumerate() {
             let op = super::ops::Ops::from_u16(n.op).ok_or_else(|| format!("bad op {}", n.op))?;
             let dtype = *dtmap.get(n.dtype as usize).ok_or_else(|| format!("bad dtype idx {}", n.dtype))?;
             let mut srcs = Vec::with_capacity(n.srcs.len());
             for &s in &n.srcs {
-                let id = *idmap.get(s as usize).ok_or_else(|| format!("src idx {s} out of range"))?;
-                if id.0 == u32::MAX {
-                    return Err(format!("src {s} referenced before definition (not post-order)"));
-                }
+                let id = idmap
+                    .get(s as usize)
+                    .and_then(|o| o.clone())
+                    .ok_or_else(|| format!("src {s} referenced before definition (not post-order)"))?;
                 srcs.push(id);
             }
             let arg = arg_from_flat_with(&n.arg, &|i| {
-                dtmap.get(i as usize).copied().ok_or_else(|| format!("bad dtype idx {i} in arg"))
+                dtmap.get(i as usize).cloned().ok_or_else(|| format!("bad dtype idx {i} in arg"))
             })?;
             let tag = arg_from_flat_with(&n.tag, &|i| {
-                dtmap.get(i as usize).copied().ok_or_else(|| format!("bad dtype idx {i} in tag"))
+                dtmap.get(i as usize).cloned().ok_or_else(|| format!("bad dtype idx {i} in tag"))
             })?;
             let id = g.intern(op, dtype, srcs, arg, tag);
-            idmap[i] = id;
+            idmap[i] = Some(id);
         }
         for &r in &fg.roots {
-            let id = *idmap.get(r as usize).ok_or_else(|| format!("root idx {r} out of range"))?;
-            if id.0 == u32::MAX {
-                return Err(format!("root {r} referenced before definition"));
-            }
+            let id = idmap
+                .get(r as usize)
+                .and_then(|o| o.clone())
+                .ok_or_else(|| format!("root {r} referenced before definition"))?;
             g.roots.push(id);
         }
         Ok(g)
@@ -334,12 +335,11 @@ impl Graph {
         // current kernel's roots, so they are dropped here instead of being
         // re-embedded (each BINARY carries the prior arena's JSON, which would
         // otherwise make every later kernel's lib grow exponentially).
-        let order: Vec<UopId> = if self.roots.is_empty() {
-            (0..self.nodes.len()).map(|i| UopId(i as u32)).collect()
-        } else {
-            self.toposort()
-        };
-        let mut remap = vec![u32::MAX; self.nodes.len()];
+        let order: Vec<UopId> = self.toposort();
+        let mut remap: HashMap<u32, u32> = HashMap::with_capacity(order.len());
+        for (i, id) in order.iter().enumerate() {
+            remap.insert(id.id(), i as u32);
+        }
         let mut used: Vec<DTypeId> = Vec::new();
         fn collect_arg_dtypes(a: &Arg, used: &mut Vec<DTypeId>) {
             match a {
@@ -366,14 +366,12 @@ impl Graph {
                 _ => {}
             }
         }
-        for (i, &id) in order.iter().enumerate() {
-            remap[id.0 as usize] = i as u32;
-            let n = &self.nodes[id.0 as usize];
-            if !used.contains(&n.dtype) {
-                used.push(n.dtype);
+        for id in &order {
+            if !used.contains(&id.dtype) {
+                used.push(id.dtype);
             }
-            collect_arg_dtypes(&n.arg, &mut used);
-            collect_arg_dtypes(&n.tag, &mut used);
+            collect_arg_dtypes(&id.arg, &mut used);
+            collect_arg_dtypes(&id.tag, &mut used);
         }
         used.sort_by_key(|d| d.0);
         let dtypes = used.iter().map(|d| d.attr().to_string()).collect();
@@ -383,18 +381,15 @@ impl Graph {
         }
         let nodes = order
             .iter()
-            .map(|&id| {
-                let n = &self.nodes[id.0 as usize];
-                FlatNode {
-                    op: n.op as u16,
-                    dtype: dtidx[n.dtype.0 as usize],
-                    srcs: n.srcs.iter().map(|s| remap[s.0 as usize]).collect(),
-                    arg: arg_to_flat_with(&n.arg, Some(&dtidx)),
-                    tag: arg_to_flat_with(&n.tag, Some(&dtidx)),
-                }
+            .map(|id| FlatNode {
+                op: id.op as u16,
+                dtype: dtidx[id.dtype.0 as usize],
+                srcs: id.srcs.iter().map(|s| *remap.get(&s.id()).unwrap()).collect(),
+                arg: arg_to_flat_with(&id.arg, Some(&dtidx)),
+                tag: arg_to_flat_with(&id.tag, Some(&dtidx)),
             })
             .collect();
-        let roots = self.roots.iter().map(|r| remap[r.0 as usize]).collect();
+        let roots = self.roots.iter().filter_map(|r| remap.get(&r.id()).cloned()).collect();
         FlatGraph { dtypes, nodes, roots }
     }
 }

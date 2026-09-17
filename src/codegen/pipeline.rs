@@ -13,7 +13,7 @@
 use crate::codegen::postrange::apply_opts;
 use crate::renderer::Renderer;
 use crate::codegen::simplify::{pm_flatten_range, pm_load_collapse, pm_reduce_unparented, pm_split_ranges};
-use crate::uop::sym::{pm_cast_float_alu, pm_clean_up_group_sink, pm_mop_cleanup, pm_move_where_on_load, pm_remove_invalid, sym, symbolic, symbolic_simple, sget};
+use crate::uop::sym::{pm_cast_float_alu, pm_mop_cleanup, pm_move_where_on_load, pm_remove_invalid, sym, symbolic, symbolic_simple, sget};
 use crate::schedule::rangeify::pm_mops;
 use crate::dtype;
 use crate::uop::range::AxisType;
@@ -45,7 +45,7 @@ fn stages() -> Vec<Stage> {
     vec![
         Stage {
             name: "early movement ops",
-            pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()).add(&pm_mop_cleanup()),
+            pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()).add(pm_mop_cleanup()),
             bottom_up: true,
         },
         Stage { name: "load collapse", pm: pm_load_collapse(), bottom_up: false },
@@ -60,16 +60,16 @@ fn post_stages() -> Vec<Stage> {
     vec![
         Stage { name: "postopt symbolic", pm: sym().add(&pm_move_where_on_load()).add(&pm_flatten_range()).add(&pm_reduce_unparented()), bottom_up: false },
         Stage { name: "expander", pm: expander_pm(), bottom_up: false },
-        Stage { name: "remove reduces", pm: PatternMatcher::new(vec![]).add(&pm_mop_cleanup()).add(&crate::codegen::simplify::pm_reduce_local()), bottom_up: false },
+        Stage { name: "remove reduces", pm: PatternMatcher::new(vec![]).add(pm_mop_cleanup()).add(&crate::codegen::simplify::pm_reduce_local()), bottom_up: false },
         Stage { name: "add local buffers", pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_add_local_buffers()).add(&crate::schedule::rangeify::pm_mops()), bottom_up: true },
         Stage { name: "add gpudims", pm: crate::codegen::gpudims::pm_add_gpudims(), bottom_up: false },
         Stage { name: "*** expand broadcast / add loads", pm: symbolic_simple().add(&pm_expand_broadcast()).add(&pm_add_loads()), bottom_up: false },
-        Stage { name: "devectorize2", pm: symbolic_simple().add(&devectorizer2()).add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
-        Stage { name: "early symbolic", pm: PatternMatcher::new(vec![]).add(&sym()), bottom_up: false },
+        Stage { name: "devectorize2", pm: symbolic_simple().add(&devectorizer2()).add(crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
+        Stage { name: "early symbolic", pm: PatternMatcher::new(vec![]).add(sym()), bottom_up: false },
         Stage { name: "add images", pm: PatternMatcher::new(vec![]), bottom_up: true },
-        Stage { name: "extra symbolic", pm: sym().add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
-        Stage { name: "lower all index dtypes", pm: symbolic_simple().add(&crate::uop::weak::pm_lower_index_dtype()).add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
-        Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
+        Stage { name: "extra symbolic", pm: sym().add(crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
+        Stage { name: "lower all index dtypes", pm: symbolic_simple().add(&crate::uop::weak::pm_lower_index_dtype()).add(crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
+        Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(symbolic()), bottom_up: false },
         Stage { name: "cast float alu operands", pm: pm_cast_float_alu(), bottom_up: false },
         Stage { name: "early decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
         Stage { name: "decomp dtypes", pm: crate::codegen::decomp_dtype::pm_dtype_decomps().add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
@@ -90,21 +90,21 @@ fn pm_split_ends() -> PatternMatcher {
         UPat::ops1(crate::uop::Ops::End).allow_all_srcs().named("e"),
         r(|ctx, st, _| {
             let e = sget(st, "e");
-            let srcs = ctx.srcs(e).to_vec();
-            let ret0 = srcs[0];
+            let srcs = ctx.srcs(&e).to_vec();
+            let ret0 = srcs[0].clone();
             let mut backedge = Vec::new();
             let mut rest = Vec::new();
-            for &x in &srcs[1..] {
+            for x in &srcs[1..] {
                 let d = ctx.dt_of(x);
                 if d == crate::dtype::VOID || d == crate::dtype::BOOL {
-                    backedge.push(x);
+                    backedge.push(x.clone());
                 } else {
-                    rest.push(x);
+                    rest.push(x.clone());
                 }
             }
             let sink = crate::tensor::sink(ctx, rest.clone());
-            let mut rngs = ctx.ranges(sink).to_vec();
-            rngs.sort_by_key(|&x| std::cmp::Reverse(AxisType::range_axis_id(ctx, x)));
+            let mut rngs = ctx.ranges(&sink).to_vec();
+            rngs.sort_by_key(|x| std::cmp::Reverse(AxisType::range_axis_id(ctx, x.clone())));
             let mut ret = ret0;
             for r in rngs {
                 ret = ctx.end(ret, vec![r]);
@@ -123,71 +123,67 @@ fn pm_split_ends() -> PatternMatcher {
 
 /// `_is_local_store` (codegen/__init__.py:259).
 fn is_local_store(ctx: &UOpCtx, x: UopId) -> bool {
-    ctx.op_of(x) == crate::uop::Ops::Store && ctx.addrspace_derived(x) == Some(dtype::AddrSpace::Local)
+    ctx.op_of(&x) == crate::uop::Ops::Store && ctx.addrspace_derived(x) == Some(dtype::AddrSpace::Local)
 }
 
 /// `add_raw_barrier` (codegen/__init__.py:261): a load from a LOCAL buffer that
 /// depends (via AFTER) on LOCAL stores needs a workgroup barrier.
 fn add_raw_barrier(ctx: &mut UOpCtx, after: UopId) -> Option<UopId> {
-    if ctx.addrspace_derived(after) != Some(dtype::AddrSpace::Local) {
+    if ctx.addrspace_derived(after.clone()) != Some(dtype::AddrSpace::Local) {
         return None;
     }
-    let srcs = ctx.srcs(after).to_vec();
+    let srcs = ctx.srcs(&after).to_vec();
     let deps = crate::tensor::sink(ctx, srcs[1..].to_vec());
-    let topo = ctx.toposort_gated(deps, Some(&|x| ctx.op_of(x) != crate::uop::Ops::Barrier), true);
-    if !topo.iter().any(|&x| is_local_store(ctx, x)) {
+    let topo = ctx.toposort_gated(deps, Some(&|x| ctx.op_of(&x) != crate::uop::Ops::Barrier), true);
+    if !topo.iter().any(|x| is_local_store(ctx, x.clone())) {
         return None;
     }
     let barrier = ctx.uop(crate::uop::Ops::Barrier, None, srcs[1..].to_vec(), Arg::None);
-    Some(crate::tensor::after(ctx, srcs[0], vec![barrier]))
+    Some(crate::tensor::after(ctx, (srcs[0]).clone(), vec![barrier]))
 }
 
 /// `add_war_barrier` (codegen/__init__.py:269): a LOCAL buffer stored and loaded
 /// in the same loop needs a barrier at the end of the loop body.
 fn add_war_barrier(ctx: &mut UOpCtx, end: UopId) -> Option<UopId> {
-    let srcs = ctx.srcs(end).to_vec();
+    let srcs = ctx.srcs(&end).to_vec();
     let rngs: Vec<UopId> = srcs[1..]
-        .iter()
-        .copied()
-        .filter(|&r| {
+        .iter().filter(|&r| {
             if ctx.op_of(r) != crate::uop::Ops::Range {
                 return false;
             }
-            let at = AxisType::range_axis_type(ctx, r);
+            let at = AxisType::range_axis_type(ctx, r.clone());
             (at == AxisType::Reduce || at == AxisType::Weak || at == AxisType::Loop)
-                && matches!(ctx.vmax(r), Ok(v) if v.as_i128_or_panic() > 0)
-        })
+                && matches!(ctx.vmax(r), Ok(v) if v.clone().as_i128_or_panic() > 0)
+        }).cloned()
         .collect();
-    if rngs.is_empty() || ctx.op_of(srcs[0]) == crate::uop::Ops::Barrier {
+    if rngs.is_empty() || ctx.op_of(&srcs[0]) == crate::uop::Ops::Barrier {
         return None;
     }
-    let sl = ctx.backward_slice_with_self(srcs[0]);
+    let sl = ctx.backward_slice_with_self(&srcs[0]);
     let mut store_bufs: HashSet<UopId> = HashSet::new();
-    for &x in &sl {
-        if is_local_store(ctx, x) {
-            let xr = ctx.ranges(x);
+    for x in &sl {
+        if is_local_store(ctx, x.clone()) {
+            let xr = ctx.ranges(&x.clone());
             if rngs.iter().any(|r| xr.contains(r)) {
-                store_bufs.insert(ctx.buf_uop(x));
+                store_bufs.insert(ctx.buf_uop(x.clone()));
             }
         }
     }
     let loads: Vec<UopId> = sl
-        .iter()
-        .copied()
-        .filter(|&x| {
-            ctx.op_of(x) == crate::uop::Ops::Load && store_bufs.contains(&ctx.buf_uop(ctx.srcs(x)[0]))
-        })
+        .iter().filter(|&x| {
+            ctx.op_of(x) == crate::uop::Ops::Load && store_bufs.contains(&ctx.buf_uop(ctx.srcs(x)[0].clone()))
+        }).cloned()
         .collect();
     if loads.is_empty() {
         return None;
     }
-    let mut barrier_srcs = vec![srcs[0]];
+    let mut barrier_srcs = vec![(srcs[0]).clone()];
     barrier_srcs.extend(loads);
     let barrier = ctx.uop(crate::uop::Ops::Barrier, None, barrier_srcs, Arg::None);
     let mut new_srcs = vec![barrier];
-    new_srcs.extend(srcs[1..].iter().copied());
-    let (op, dt, _, arg, tag) = ctx.snapshot(end);
-    Some(ctx.replace(end, op, dt, new_srcs, arg, tag))
+    new_srcs.extend(srcs[1..].iter().cloned());
+    let (op, dt, _, arg, tag) = ctx.snapshot(&end);
+    Some(ctx.replace(&end, op, dt, new_srcs, arg, tag))
 }
 
 /// `pm_implicit_barriers` (codegen/__init__.py:280).
@@ -211,8 +207,8 @@ fn pm_casted_consts() -> PatternMatcher {
         UPat::ops1(crate::uop::Ops::Const).allow_all_srcs().named("c"),
         r(|ctx, st, _| {
             let c = sget(st, "c");
-            let v = ctx.val(c);
-            let d = ctx.dt_of(c);
+            let v = ctx.val(&c);
+            let d = ctx.dt_of(&c);
             if d == crate::dtype::VOID {
                 return None;
             }
@@ -228,7 +224,7 @@ fn pm_casted_consts() -> PatternMatcher {
 fn add_images(ctx: &mut Ctx2, sink: UopId) -> UopId {
     let coalesced = crate::codegen::coalesce::memory_coalescing(ctx, sink);
     let pm = PatternMatcher::new(vec![])
-        .add(&symbolic_simple())
+        .add(symbolic_simple())
         .add(&ew_devectorizer())
         .add(&pm_simplify_add_image());
     graph_rewrite(ctx, coalesced, &pm, true, None, false, false, CtxVal::None)
@@ -245,77 +241,76 @@ fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     use std::sync::Arc;
     use crate::uop::ops::Ops;
 
-    let order = ctx.toposort(sink);
+    let order = ctx.toposort(&sink);
     let mut deps: HashMap<UopId, Vec<UopId>> = HashMap::new();
     let mut dep_set: HashMap<UopId, HashSet<UopId>> = HashMap::new();
     let mut nesting: Vec<(UopId, UopId)> = Vec::new();
     let mut nesting_set: HashSet<UopId> = HashSet::new();
 
-    for &u in &order {
+    for u in &order {
         let mut d: Vec<UopId> = Vec::new();
         let mut ds: HashSet<UopId> = HashSet::new();
-        for &s in ctx.srcs(u) {
-            if let Some(sd) = deps.get(&s) {
-                for &x in sd {
-                    if ds.insert(x) {
-                        d.push(x);
+        for s in ctx.srcs(u) {
+            if let Some(sd) = deps.get(s) {
+                for x in sd {
+                    if ds.insert(x.clone()) {
+                        d.push(x.clone());
                     }
                 }
             }
         }
         let op = ctx.op_of(u);
         if op == Ops::End || op == Ops::Sink {
-            let endrange = if op == Ops::End { ctx.srcs(u).get(1).copied() } else { None };
-            for &x in &d {
+            let endrange = if op == Ops::End { ctx.srcs(u).get(1).cloned() } else { None };
+            for x in &d {
                 let nested = op == Ops::Sink
-                    || endrange.map_or(false, |r| dep_set.get(&x).map_or(false, |s| s.contains(&r)));
-                if ctx.op_of(x) == Ops::End && nested && !nesting_set.contains(&x) {
-                    nesting_set.insert(x);
-                    nesting.push((x, u));
+                    || endrange.clone().is_some_and(|r| dep_set.get(x).is_some_and(|s| s.contains(&r)));
+                if ctx.op_of(x) == Ops::End && nested && !nesting_set.contains(x) {
+                    nesting_set.insert(x.clone());
+                    nesting.push((x.clone(), u.clone()));
                 }
             }
         }
-        if op == Ops::Range || op == Ops::End {
-            if ds.insert(u) {
-                d.push(u);
+        if (op == Ops::Range || op == Ops::End)
+            && ds.insert(u.clone()) {
+                d.push(u.clone());
             }
-        }
-        deps.insert(u, d);
-        dep_set.insert(u, ds);
+        deps.insert(u.clone(), d);
+        dep_set.insert(u.clone(), ds);
     }
 
     // siblings[vv] preserves first-insertion order (dict semantics).
     let mut sibling_keys: Vec<UopId> = Vec::new();
     let mut siblings: HashMap<UopId, Vec<UopId>> = HashMap::new();
-    for &(k, vv) in &nesting {
-        if !siblings.contains_key(&vv) {
-            sibling_keys.push(vv);
+    for (k, vv) in &nesting {
+        if !siblings.contains_key(vv) {
+            sibling_keys.push(vv.clone());
         }
-        siblings.entry(vv).or_default().push(k);
+        siblings.entry(vv.clone()).or_default().push(k.clone());
     }
 
     let mut edges: HashMap<UopId, UopId> = HashMap::new();
-    for &k in &sibling_keys {
-        let v = siblings.get(&k).unwrap();
+    for k in &sibling_keys {
+        let v = siblings.get(k).unwrap();
         let mut ord = v.clone();
-        ord.sort_by_key(|&x| v.iter().filter(|&&u| dep_set.get(&x).map_or(false, |s| s.contains(&u))).count());
+        ord.sort_by_key(|x| v.iter().filter(|&u| dep_set.get(x).is_some_and(|s| s.contains(u))).count());
         if ord.is_empty() {
             continue;
         }
         let mut pairs: Vec<(UopId, UopId)> = Vec::new();
         if ctx.op_of(k) == Ops::Sink {
             for w in ord.windows(2) {
-                pairs.push((w[0], w[1]));
+                pairs.push((w[0].clone(), w[1].clone()));
             }
         } else {
-            pairs.push((ctx.srcs(k)[1], ord[0]));
+            pairs.push((ctx.srcs(k)[1].clone(), (ord[0]).clone()));
             for w in ord.windows(2) {
-                pairs.push((w[0], w[1]));
+                pairs.push((w[0].clone(), w[1].clone()));
             }
         }
         for (x, y) in pairs {
-            let ysrc1 = ctx.srcs(y)[1];
-            edges.insert(ysrc1, x);
+            let ysrc1 = &ctx.srcs(&y)[1].clone();
+            edges.insert(ysrc1.clone(), x);
         }
     }
 
@@ -324,11 +319,11 @@ fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         UPat::ops1(Ops::Range).allow_all_srcs().named("x"),
         r(move |ctx, st, _| {
             let x = sget(st, "x");
-            edges.get(&x).map(|&y| {
-                let mut srcs = ctx.srcs(x).to_vec();
-                srcs.push(y);
-                let dt = ctx.dt_of(x);
-                let arg = ctx.arg_of(x).clone();
+            edges.get(&x).map(|y| {
+                let mut srcs = ctx.srcs(&x).to_vec();
+                srcs.push(y.clone());
+                let dt = ctx.dt_of(&x);
+                let arg = ctx.arg_of(&x).clone();
                 ctx.uop(Ops::Range, Some(dt), srcs, arg)
             })
         }),
@@ -398,14 +393,14 @@ fn pm_simplify_add_image() -> PatternMatcher {
 
 /// `do_devectorize` (codegen/__init__.py:107).
 fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
-    let shape = ctx.shape(b).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+    let shape = ctx.shape(&b).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
     if shape.is_empty() {
         return None;
     }
-    let srcs = ctx.srcs(b).to_vec();
+    let srcs = ctx.srcs(&b).to_vec();
     // all srcs must have b's shape (or be INVALID consts)
-    for &x in &srcs {
-        if ctx.is_invalid(ctx.base(x)) {
+    for x in &srcs {
+        if ctx.is_invalid(&ctx.base(x)) {
             continue;
         }
         let xs = ctx.shape(x).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
@@ -416,9 +411,9 @@ fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
     // cartesian product over the (1-D corpus) shape
     let idx_lists: Vec<Vec<UopId>> = shape
         .iter()
-        .map(|&d| {
+        .map(|d| {
             let n = match d {
-                SVal::I(v) => v as i64,
+                SVal::I(v) => *v as i64,
                 _ => panic!("TGERR: symbolic devectorize"),
             };
             (0..n).map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), None)).collect()
@@ -427,21 +422,21 @@ fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
     let mut elems: Vec<UopId> = Vec::new();
     for idx_c in cartesian(&idx_lists) {
         let mut new_srcs = Vec::with_capacity(srcs.len());
-        for &x in &srcs {
-            if ctx.is_invalid(ctx.base(x)) {
+        for x in &srcs {
+            if ctx.is_invalid(&ctx.base(x)) {
                 new_srcs.push(ctx.base(x));
             } else {
                 // python: `x.index(*idx_c)` — must route through the UOp.index
                 // fold so `STACK[single_const]` collapses to its child
-                new_srcs.push(ctx.index(x, idx_c.clone()));
+                new_srcs.push(ctx.index(x.clone(), idx_c.clone()));
             }
         }
-        elems.push(ctx.uop(ctx.op_of(b), Some(ctx.dt_of(b)), new_srcs, ctx.arg_of(b).clone()));
+        elems.push(ctx.uop(ctx.op_of(&b), Some(ctx.dt_of(&b)), new_srcs, ctx.arg_of(&b).clone()));
     }
-    if ctx.op_of(b) == crate::uop::Ops::Store {
+    if ctx.op_of(&b) == crate::uop::Ops::Store {
         Some(ctx.uop(crate::uop::Ops::Group, Some(crate::dtype::VOID), elems, Arg::None))
     } else {
-        let stack = ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(b)), elems, Arg::None);
+        let stack = ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(&b)), elems, Arg::None);
         Some(crate::tensor::movement::reshape(ctx, stack, &shape))
     }
 }
@@ -452,9 +447,9 @@ fn cartesian(lists: &[Vec<UopId>]) -> Vec<Vec<UopId>> {
     for l in lists {
         let mut next = Vec::new();
         for combo in &ret {
-            for &x in l {
+            for x in l {
                 let mut c = combo.clone();
-                c.push(x);
+                c.push(x.clone());
                 next.push(c);
             }
         }
@@ -468,7 +463,7 @@ fn cartesian(lists: &[Vec<UopId>]) -> Vec<Vec<UopId>> {
 fn devectorizer2() -> PatternMatcher {
     let targets: Vec<crate::uop::Ops> = group::ELEMENTWISE
         .iter()
-        .copied()
+        .cloned()
         .chain([crate::uop::Ops::Load, crate::uop::Ops::Store])
         .collect();
     PatternMatcher::new(vec![
@@ -482,7 +477,7 @@ fn devectorizer2() -> PatternMatcher {
             UPat::ops1(crate::uop::Ops::Index)
                 .with_src_tup(vec![UPat::var(None, None)])
                 .named("x"),
-            r(|ctx, st, _| Some(ctx.srcs(sget(st, "x"))[0])),
+            r(|ctx, st, _| Some(ctx.srcs(&sget(st, "x"))[0].clone())),
         ),
         // stacked INDEX is many INDEX
         (
@@ -492,14 +487,14 @@ fn devectorizer2() -> PatternMatcher {
             r(|ctx, st, _| {
                 let b = sget(st, "b");
                 let x = sget(st, "x");
-                let ss = ctx.srcs(sget(st, "s")).to_vec();
+                let ss = ctx.srcs(&sget(st, "s")).to_vec();
                 let mut elems = Vec::new();
-                for &u in &ss {
-                    let mut srcs = vec![b, u];
-                    srcs.extend(ctx.srcs(x)[2..].iter().copied());
-                    elems.push(ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(x)), srcs, ctx.arg_of(x).clone()));
+                for u in &ss {
+                    let mut srcs = vec![b.clone(), u.clone()];
+                    srcs.extend(ctx.srcs(&x)[2..].iter().cloned());
+                    elems.push(ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(&x)), srcs, ctx.arg_of(&x).clone()));
                 }
-                Some(ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(x)), elems, ctx.arg_of(x).clone()))
+                Some(ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(&x)), elems, ctx.arg_of(&x).clone()))
             }),
         ),
         // INDEX into RESHAPE moves the RESHAPE
@@ -513,28 +508,28 @@ fn devectorizer2() -> PatternMatcher {
             r(|ctx, st, _| {
                 let b = sget(st, "b");
                 let s = sget(st, "s");
-                let shape = ctx.shape(s).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
-                let inner = ctx.srcs(s)[0];
-                let idx = ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(b)), vec![b, inner], Arg::None);
+                let shape = ctx.shape(&s).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+                let inner = &ctx.srcs(&s)[0].clone();
+                let idx = ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(&b)), vec![b, inner.clone()], Arg::None);
                 Some(crate::tensor::movement::reshape(ctx, idx, &shape))
             }),
         ),
         // RESHAPE a void is removed
         (
             UPat::ops1(crate::uop::Ops::Reshape).with_dtype(Some(vec![crate::dtype::VOID])).named("x"),
-            r(|ctx, st, _| Some(ctx.srcs(sget(st, "x"))[0])),
+            r(|ctx, st, _| Some(ctx.srcs(&sget(st, "x"))[0].clone())),
         ),
         // reshape of a single element shaped value to scalar is an index
         (
             UPat::ops1(crate::uop::Ops::Reshape).named("x"),
             r(|ctx, st, _| {
                 let x = sget(st, "x");
-                let shape = ctx.shape(x).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
-                let src = ctx.srcs(x)[0];
+                let shape = ctx.shape(&x).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+                let src = &ctx.srcs(&x)[0].clone();
                 let src_shape = ctx.shape(src).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
                 if shape.is_empty() && src_shape == vec![SVal::I(1)] {
                     let zero = ctx.const_py(crate::dtype::ConstVal::Int(0), None);
-                    return Some(ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(src)), vec![src, zero], Arg::None));
+                    return Some(ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(src)), vec![src.clone(), zero], Arg::None));
                 }
                 None
             }),
@@ -544,9 +539,9 @@ fn devectorizer2() -> PatternMatcher {
             UPat::ops1(crate::uop::Ops::Expand).with_src_any_len(true).named("out"),
             r(|ctx, st, _| {
                 let out = sget(st, "out");
-                let x = ctx.srcs(out)[0];
+                let x = &ctx.srcs(&out)[0].clone();
                 let xs = ctx.shape(x).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
-                let os = ctx.shape(out).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+                let os = ctx.shape(&out).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
                 if !xs.is_empty() || os.len() != 1 {
                     return None;
                 }
@@ -555,23 +550,23 @@ fn devectorizer2() -> PatternMatcher {
                     _ => return None,
                 };
                 // out.shape == (out.max_numel(),) — 1-D is its own max shape
-                let copies = vec![x; n as usize];
-                Some(ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(out)), copies, Arg::None))
+                let copies = vec![x.clone(); n as usize];
+                Some(ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(&out)), copies, Arg::None))
             }),
         ),
     ])
-    .add(&pm_mop_cleanup())
+    .add(pm_mop_cleanup())
     .add(&crate::schedule::rangeify::pm_mops())
 }
 
 /// `build_range_map` (codegen/__init__.py:39).
 fn build_range_map(ctx: &mut Ctx2, sink: UopId) -> HashMap<i64, usize> {
     let mut map = HashMap::new();
-    for &x in ctx.toposort(sink).iter() {
-        if ctx.op_of(x) == crate::uop::Ops::Range {
-            if let Arg::Seq { tuple: true, items } = ctx.arg_of(x) {
-                if let Arg::Enum(e) = &items[1] {
-                    if matches!(e.value, 9 | 8) {
+    for x in ctx.toposort(&sink).iter() {
+        if ctx.op_of(x) == crate::uop::Ops::Range
+            && let Arg::Seq { tuple: true, items } = ctx.arg_of(x)
+                && let Arg::Enum(e) = &items[1]
+                    && matches!(e.value, 9 | 8) {
                         // UNROLL | UPCAST
                         let axis = match &items[0] {
                             Arg::Int(i) => *i,
@@ -580,9 +575,6 @@ fn build_range_map(ctx: &mut Ctx2, sink: UopId) -> HashMap<i64, usize> {
                         let n = map.len();
                         map.entry(axis).or_insert(n);
                     }
-                }
-            }
-        }
     }
     map
 }
@@ -594,7 +586,7 @@ fn expander_pm() -> PatternMatcher {
     // via `expander_pm_with`; a stray invocation here would just find no ranges.
     PatternMatcher::new(expander_rules(HashMap::new()))
         .add(&pm_flatten_range())
-        .add(&pm_mop_cleanup())
+        .add(pm_mop_cleanup())
 }
 
 /// The `expander2` rules with the range map bound into the RANGE rule.
@@ -610,7 +602,7 @@ fn expander_rules(rm: HashMap<i64, usize>) -> Vec<(UPat, RuleFn)> {
             UPat::ops1(crate::uop::Ops::Range).named("r"),
             r(move |ctx: &mut Ctx2, st, _| {
                 let r = sget(st, "r");
-                let (op, dt, srcs, arg, tag) = ctx.snapshot(r);
+                let (op, dt, srcs, arg, _tag) = ctx.snapshot(&r);
                 let _ = op;
                 let Arg::Seq { tuple: true, items } = &arg else { return None };
                 let axis = match &items[0] {
@@ -618,7 +610,7 @@ fn expander_rules(rm: HashMap<i64, usize>) -> Vec<(UPat, RuleFn)> {
                     _ => return None,
                 };
                 let pos = *rm.get(&axis)?;
-                let vmax = match ctx.ssimplify(srcs[0]) {
+                let vmax = match ctx.ssimplify((srcs[0]).clone()) {
                     Ok(SVal::I(v)) => v as i64 - 1,
                     _ => return None,
                 };
@@ -637,19 +629,19 @@ fn expander_pm_with(ctx: &mut Ctx2, sink: UopId) -> (PatternMatcher, HashMap<i64
     let range_map = build_range_map(ctx, sink);
     let pm = PatternMatcher::new(expander_rules(range_map.clone()))
         .add(&pm_flatten_range())
-        .add(&pm_mop_cleanup());
+        .add(pm_mop_cleanup());
     (pm, range_map)
 }
 
 /// `expand_reduce` (codegen/__init__.py:49-64).
 fn expand_reduce(ctx: &mut Ctx2, r: UopId) -> Option<UopId> {
-    let (_op, dt, srcs, arg, _tag) = ctx.snapshot(r);
-    let s0 = srcs[0];
+    let (_op, dt, srcs, arg, _tag) = ctx.snapshot(&r);
+    let s0 = srcs[0].clone();
     let mut range_srcs: Vec<UopId> = Vec::new();
     let mut new_axes: Vec<usize> = Vec::new();
-    for &u in &srcs[1..] {
+    for u in &srcs[1..] {
         if ctx.op_of(u) == crate::uop::Ops::Range {
-            range_srcs.push(u);
+            range_srcs.push(u.clone());
         } else if let Ok(shape) = ctx.shape(u) {
             for (i, s) in shape.unwrap_or_default().iter().enumerate() {
                 if !matches!(s, crate::uop::sint::SVal::I(1)) {
@@ -672,10 +664,10 @@ fn expand_reduce(ctx: &mut Ctx2, r: UopId) -> Option<UopId> {
         }
         other => panic!("TGERR: expand_reduce bad arg {other:?}"),
     };
-    let s0_shape: Vec<crate::uop::sint::SVal> = ctx.shape(s0).unwrap().unwrap_or_default().as_ref().clone();
+    let s0_shape: Vec<crate::uop::sint::SVal> = ctx.shape(&s0).unwrap().unwrap_or_default().as_ref().clone();
     let perm: Vec<usize> = new_axes
         .iter()
-        .copied()
+        .cloned()
         .chain((0..s0_shape.len()).filter(|i| !new_axes.contains(i)))
         .collect();
     let permuted = crate::tensor::movement::permute_internal(ctx, s0, &perm);
@@ -687,16 +679,16 @@ fn expand_reduce(ctx: &mut Ctx2, r: UopId) -> Option<UopId> {
     let out_shape: Vec<crate::uop::sint::SVal> = s0_shape
         .iter()
         .enumerate()
-        .map(|(i, s)| if new_axes.contains(&i) { crate::uop::sint::SVal::I(1) } else { *s })
+        .map(|(i, s)| if new_axes.contains(&i) { crate::uop::sint::SVal::I(1) } else { s.clone() })
         .collect();
     Some(crate::tensor::movement::reshape_internal(ctx, red, &out_shape))
 }
 
 /// `expand_broadcast` (codegen/__init__.py:97).
 fn expand_broadcast(ctx: &mut Ctx2, x: UopId) -> Option<UopId> {
-    let srcs = ctx.srcs(x).to_vec();
+    let srcs = ctx.srcs(&x).to_vec();
     let mut shapes: Vec<Vec<SVal>> = Vec::new();
-    for &u in &srcs {
+    for u in &srcs {
         match ctx.shape(u) {
             Ok(s) => shapes.push(s.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default()),
             Err(_) => return None,
@@ -707,10 +699,10 @@ fn expand_broadcast(ctx: &mut Ctx2, x: UopId) -> Option<UopId> {
     }
     let shape = ctx.broadcast_shape(&shapes).ok()?;
     let mut new_srcs = Vec::new();
-    for &u in &srcs {
-        new_srcs.push(crate::tensor::movement::expand(ctx, u, &shape));
+    for u in &srcs {
+        new_srcs.push(crate::tensor::movement::expand(ctx, u.clone(), &shape));
     }
-    Some(ctx.uop(ctx.op_of(x), Some(ctx.dt_of(x)), new_srcs, ctx.arg_of(x).clone()))
+    Some(ctx.uop(ctx.op_of(&x), Some(ctx.dt_of(&x)), new_srcs, ctx.arg_of(&x).clone()))
 }
 
 /// `pm_expand_broadcast` (codegen/__init__.py:106) — corpus subset (no WMMA).
@@ -719,8 +711,8 @@ fn pm_expand_broadcast() -> PatternMatcher {
         UPat::op_var(
             group::BINARY
                 .iter()
-                .copied()
-                .chain(group::TERNARY.iter().copied())
+                .cloned()
+                .chain(group::TERNARY.iter().cloned())
                 .chain([crate::uop::Ops::Store])
                 .collect(),
         )
@@ -731,7 +723,7 @@ fn pm_expand_broadcast() -> PatternMatcher {
 
 /// `maybe_load` (codegen/__init__.py:245).
 fn maybe_load(ctx: &mut Ctx2, u: UopId) -> UopId {
-    match ctx.addrspace_derived(u) {
+    match ctx.addrspace_derived(u.clone()) {
         Some(a) if matches!(a, crate::dtype::AddrSpace::Global | crate::dtype::AddrSpace::Local | crate::dtype::AddrSpace::Reg) => {
             crate::tensor::load(ctx, u, vec![])
         }
@@ -743,7 +735,7 @@ fn maybe_load(ctx: &mut Ctx2, u: UopId) -> UopId {
 fn pm_add_loads() -> PatternMatcher {
     let elementwise_like: Vec<crate::uop::Ops> = group::ELEMENTWISE
         .iter()
-        .copied()
+        .cloned()
         .chain([crate::uop::Ops::Reduce, crate::uop::Ops::Wmma, crate::uop::Ops::Stack])
         .collect();
     PatternMatcher::new(vec![
@@ -751,26 +743,26 @@ fn pm_add_loads() -> PatternMatcher {
             UPat::op_var(elementwise_like).named("x"),
             r(|ctx, st, _| {
                 let x = sget(st, "x");
-                let srcs = ctx.srcs(x).to_vec();
-                let new_srcs: Vec<UopId> = srcs.iter().map(|&s| maybe_load(ctx, s)).collect();
+                let srcs = ctx.srcs(&x).to_vec();
+                let new_srcs: Vec<UopId> = srcs.iter().map(|s| maybe_load(ctx, s.clone())).collect();
                 if new_srcs == srcs {
                     return None;
                 }
-                Some(ctx.uop(ctx.op_of(x), Some(ctx.dt_of(x)), new_srcs, ctx.arg_of(x).clone()))
+                Some(ctx.uop(ctx.op_of(&x), Some(ctx.dt_of(&x)), new_srcs, ctx.arg_of(&x).clone()))
             }),
         ),
         (
             UPat::ops1(crate::uop::Ops::Store).named("x"),
             r(|ctx, st, _| {
                 let x = sget(st, "x");
-                let srcs = ctx.srcs(x).to_vec();
-                let loaded = maybe_load(ctx, srcs[1]);
+                let srcs = ctx.srcs(&x).to_vec();
+                let loaded = maybe_load(ctx, (srcs[1]).clone());
                 if loaded == srcs[1] {
                     return None;
                 }
-                let mut new_srcs = vec![srcs[0], loaded];
-                new_srcs.extend(srcs[2..].iter().copied());
-                Some(ctx.uop(crate::uop::Ops::Store, Some(ctx.dt_of(x)), new_srcs, ctx.arg_of(x).clone()))
+                let mut new_srcs = vec![(srcs[0]).clone(), loaded];
+                new_srcs.extend(srcs[2..].iter().cloned());
+                Some(ctx.uop(crate::uop::Ops::Store, Some(ctx.dt_of(&x)), new_srcs, ctx.arg_of(&x).clone()))
             }),
         ),
     ])
@@ -784,16 +776,16 @@ pub fn full_rewrite_to_sink(ctx: &mut UOpCtx, ast: UopId) -> UopId {
 
 /// temporary: readable one-line-per-node dump of the graph below `sink`.
 fn dump_ast(ctx: &mut UOpCtx, sink: UopId) -> String {
-    let order = ctx.toposort(sink);
+    let order = ctx.toposort(&sink);
     let mut out = String::new();
-    for &n in order.iter() {
+    for n in order.iter() {
         let (op, dt, srcs, arg, _tag) = ctx.snapshot(n);
         let dt_s = format!("{dt:?}");
-        let src_s: Vec<String> = srcs.iter().map(|s| s.0.to_string()).collect();
+        let src_s: Vec<String> = srcs.iter().map(|s| s.id().to_string()).collect();
         let shape = ctx.shape(n).ok().flatten().map(|s| format!("{s:?}")).unwrap_or_default();
         out.push_str(&format!(
             "{} = {:?}{} ({}) src=[{}] arg={:?}\n",
-            n.0,
+            n.id(),
             op,
             dt_s,
             shape,
@@ -826,7 +818,7 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         // temporary: dump the pre-expander AST (TG_DUMP_PRE_EXPAND=1)
         if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
             eprintln!("=== after stage {} ({}) ===", i, st.name);
-            eprintln!("{}", dump_ast(ctx, cur));
+            eprintln!("{}", dump_ast(ctx, cur.clone()));
         }
     }
     if i + 1 > limit {
@@ -837,14 +829,14 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
     i += 1;
     if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
         eprintln!("=== after stage {} (apply_opts) ===", i);
-        eprintln!("{}", dump_ast(ctx, cur));
+        eprintln!("{}", dump_ast(ctx, cur.clone()));
     }
     for st in post_stages() {
         if i + 1 > limit {
             return cur;
         }
         cur = if st.name == "expander" {
-            let (pm, _rm) = expander_pm_with(ctx, cur);
+            let (pm, _rm) = expander_pm_with(ctx, cur.clone());
             graph_rewrite(ctx, cur, &pm, st.bottom_up, None, false, false, CtxVal::None)
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "remove reduces" || st.name == "add local buffers" {
@@ -869,11 +861,11 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         };
         i += 1;
         if std::env::var("TG_DUMP_IDX").is_ok() {
-            crate::codegen::postrange::dump_index_exprs(ctx, cur, &st.name);
+            crate::codegen::postrange::dump_index_exprs(ctx, cur.clone(), st.name);
         }
         if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
             eprintln!("=== after stage {} ({}) ===", i, st.name);
-            eprintln!("{}", dump_ast(ctx, cur));
+            eprintln!("{}", dump_ast(ctx, cur.clone()));
         }
     }
     cur

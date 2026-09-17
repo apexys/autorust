@@ -21,7 +21,7 @@ pub mod optim;
 pub mod reduce;
 pub mod rand;
 
-use crate::dtype::{AddrSpace, ConstVal};
+use crate::dtype::ConstVal;
 
 /// arg for Tensor.add/mul: another Tensor or a python scalar.
 pub enum TensorAddArg {
@@ -59,60 +59,105 @@ use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
 use crate::dtype::DTypeId;
 use crate::dtype::ReadDtype;
-use crate::runtime::buffer::BufTable;
+use crate::runtime::buffer::{Buffer, BufTable};
 use crate::engine::realize::ProgCache;
 use crate::engine::session::Session;
+use std::cell::RefCell;
+use std::rc::Rc;
 use crate::uop::sint::{SInt, SVal};
 
-/// Python `Tensor.__slots__ = ("uop",)`. A `Tensor` is a plain `Copy` handle
-/// onto an interned `UopId`. `grad` is tracked in `UOpCtx` keyed by `UopId`
-/// (a gradient is itself just a `UopId`), so `backward` can populate grads
-/// without `&mut Tensor`. Whether a tensor is a *trainable parameter* is a
-/// property of the `Module` tree (see [`nn::Module`]), not of the tensor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Python `Tensor.__slots__ = ("uop",)`. In v0.14 a `Tensor` is a Python object
+/// whose identity keeps its `UOp` (and, once realized, its buffer) alive. The Rust
+/// port models that explicitly: a `Tensor` is a **`Clone`** handle (not `Copy`)
+/// holding a strong [`UopId`] (`Rc<Node>`) plus an `Rc` realized-buffer cell
+/// shared by all clones. `grad` is tracked in `UOpCtx` keyed by `UopId`. Whether a
+/// tensor is a *trainable parameter* is a property of the `Module` tree
+/// (see [`nn::Module`]), not of the tensor.
 pub struct Tensor {
     pub uop: UopId,
+    /// Realized storage, shared by clones and reused across reads.
+    buffer: Rc<RefCell<Option<Buffer>>>,
+}
+
+impl Clone for Tensor {
+    fn clone(&self) -> Self {
+        Tensor { uop: self.uop.clone(), buffer: self.buffer.clone() }
+    }
+}
+
+// Tensor identity is its uop (the buffer is bookkeeping).
+impl PartialEq for Tensor {
+    fn eq(&self, other: &Self) -> bool {
+        self.uop == other.uop
+    }
+}
+impl Eq for Tensor {}
+impl std::hash::Hash for Tensor {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.uop.hash(state);
+    }
+}
+impl std::fmt::Debug for Tensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Tensor({:?})", self.uop)
+    }
 }
 
 impl Tensor {
-    pub fn from_uop(uop: UopId) -> Tensor {
-        Tensor { uop }
+    /// Wrap an engine uop as a `Tensor` handle. The `UopId` is a strong handle, so
+    /// no extra pinning is needed; `ctx` is accepted to keep the construction
+    /// uniform with the other builders.
+    pub fn from_uop(_ctx: &UOpCtx, uop: UopId) -> Tensor {
+        Tensor { uop, buffer: Rc::new(RefCell::new(None)) }
+    }
+
+    /// The realized storage, if any (shared with clones).
+    pub fn realized_buffer(&self) -> Option<Buffer> {
+        self.buffer.borrow().clone()
+    }
+
+    /// Record realized storage for this tensor (and its clones).
+    pub fn set_realized_buffer(&self, b: Buffer) {
+        *self.buffer.borrow_mut() = Some(b);
     }
 
     /// `Tensor._apply_uop`: map a UOp-level fxn over `(self, *x).uop` and re-wrap.
     pub fn apply_uop(&self, ctx: &mut UOpCtx, srcs: &[Tensor], f: impl FnOnce(&mut UOpCtx, Vec<UopId>) -> UopId) -> Tensor {
-        let uops: Vec<UopId> = std::iter::once(self.uop).chain(srcs.iter().map(|t| t.uop)).collect();
-        Tensor::from_uop(f(ctx, uops))
+        let uops: Vec<UopId> = std::iter::once(self.uop.clone()).chain(srcs.iter().map(|t| t.uop.clone())).collect();
+        let u = f(ctx, uops);
+        Tensor::from_uop(ctx, u)
     }
 
     /// The autograd gradient attached to this tensor's `uop` in `ctx` (see
     /// [`UOpCtx::grad`]). `None` until `backward`/`gradient` populates it.
     pub fn grad(&self, ctx: &UOpCtx) -> Option<Tensor> {
-        ctx.grad(self.uop).map(Tensor::from_uop)
+        ctx.grad(&self.uop).map(|g| Tensor::from_uop(ctx, g))
     }
 
     /// `Tensor.const`: `Tensor(UOp.const(b, dtype))`.
     pub fn const_(ctx: &mut UOpCtx, b: ConstVal, dtype: Option<DTypeId>) -> Tensor {
-        Tensor::from_uop(ctx.const_py(b, dtype))
+        let u = ctx.const_py(b, dtype);
+        Tensor::from_uop(ctx, u)
     }
 
     /// `Tensor(Variable(...))`-style: 0-d BUFFER in the ALU addrspace with a value range.
     pub fn variable(ctx: &mut UOpCtx, name: &str, vmin: ConstVal, vmax: ConstVal, dtype: DTypeId, param: bool) -> Tensor {
-        Tensor::from_uop(ctx.variable(name, vmin, vmax, dtype, param))
+        let u = ctx.variable(name, vmin, vmax, dtype, param);
+        Tensor::from_uop(ctx, u)
     }
 
     /// `Tensor.shape` -> the public `Shape` wrapper (list-like ergonomics).
     pub fn shape(&self, ctx: &mut UOpCtx) -> Shape {
-        Shape::new((*ctx.shape(self.uop).unwrap().unwrap_or_default()).clone())
+        Shape::new((*ctx.shape(&self.uop).unwrap().unwrap_or_default()).clone())
     }
 
     pub fn dtype(&self, ctx: &UOpCtx) -> DTypeId {
-        ctx.dt_of(self.uop)
+        ctx.dt_of(&self.uop)
     }
 
     /// `Tensor.cast(dtype)`: in-graph cast to another dtype (a no-op when equal).
     pub fn cast(&self, ctx: &mut UOpCtx, dtype: DTypeId) -> Tensor {
-        Tensor::from_uop(ctx.cast(self.uop, dtype))
+        { let __u = ctx.cast(self.uop.clone(), dtype); Tensor::from_uop(ctx, __u) }
     }
 
     /// Trigger the compute needed to read this tensor and return its raw storage
@@ -125,13 +170,25 @@ impl Tensor {
     /// [`Tensor::to_bytes`] with a caller-owned buffer/program cache, so realized
     /// buffers can be reused across many reads (e.g. the test harness).
     pub fn to_bytes_with(&self, ctx: &mut UOpCtx, t: &mut BufTable, cache: &mut ProgCache) -> Vec<u8> {
-        crate::engine::realize::tensor_bytes(ctx, self.uop, t, cache)
+        if let Some(b) = self.realized_buffer() {
+            return crate::engine::realize::buffer_bytes(&b);
+        }
+        let b = crate::engine::realize::realize_tensor(ctx, self.uop.clone(), t, cache);
+        self.set_realized_buffer(b.clone());
+        crate::engine::realize::buffer_bytes(&b)
     }
 
     /// [`Tensor::to_bytes`] reusing a persistent [`Session`] (no recompile, no
-    /// reallocation on a second realize).
+    /// reallocation on a second realize). The realized buffer is cached on the
+    /// tensor, so even a session-less repeat reuses it.
     pub fn to_bytes_in(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<u8> {
-        sess.tensor_bytes(ctx, self.uop)
+        if let Some(b) = self.realized_buffer() {
+            return crate::engine::realize::buffer_bytes(&b);
+        }
+        let b = sess.realize_tensor(ctx, self.uop.clone());
+        let bytes = crate::engine::realize::buffer_bytes(&b);
+        self.set_realized_buffer(b);
+        bytes
     }
 
     /// `Tensor.realize`: trigger the computation needed to materialize this tensor
@@ -155,7 +212,7 @@ impl Tensor {
         let src = self.dtype(ctx);
         assert!(!crate::dtype::is_weak(src), "TGERR: cannot read a weak-dtype tensor ({src:?}) into {target:?}; realize it first");
         assert!(!crate::dtype::is_weak(target), "TGERR: cannot read tensor into weak dtype {target:?}");
-        ctx.cast(self.uop, target)
+        ctx.cast(self.uop.clone(), target)
     }
 
     /// Reinterpret little-endian bytes as `[T]` (no `f64` round-trip).
@@ -174,12 +231,18 @@ impl Tensor {
 
     /// [`Tensor::to_list`] with a caller-owned buffer/program cache.
     pub fn to_list_with<T: ReadDtype>(&self, ctx: &mut UOpCtx, t: &mut BufTable, cache: &mut ProgCache) -> Vec<T> {
+        if <T as ReadDtype>::DTYPE == self.dtype(ctx) {
+            return Self::decode::<T>(self.to_bytes_with(ctx, t, cache));
+        }
         let uop = self.read_target::<T>(ctx);
         Self::decode::<T>(crate::engine::realize::tensor_bytes(ctx, uop, t, cache))
     }
 
     /// [`Tensor::to_list`] against a persistent [`Session`].
     pub fn to_list_in<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<T> {
+        if <T as ReadDtype>::DTYPE == self.dtype(ctx) {
+            return Self::decode::<T>(self.to_bytes_in(ctx, sess));
+        }
         let uop = self.read_target::<T>(ctx);
         Self::decode::<T>(sess.tensor_bytes(ctx, uop))
     }
@@ -198,53 +261,53 @@ impl Tensor {
 
     /// `Tensor.reshape`: public wrapper taking any `ShapeArg`.
     pub fn reshape(&self, ctx: &mut UOpCtx, shape: impl ShapeArg) -> Tensor {
-        Tensor::from_uop(movement::reshape(ctx, self.uop, &shape.into_shape_vec()))
+        { let __u = movement::reshape(ctx, self.uop.clone(), &shape.into_shape_vec()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.expand`.
     pub fn expand(&self, ctx: &mut UOpCtx, shape: impl ShapeArg) -> Tensor {
-        Tensor::from_uop(movement::expand(ctx, self.uop, &shape.into_shape_vec()))
+        { let __u = movement::expand(ctx, self.uop.clone(), &shape.into_shape_vec()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.unsqueeze(dim)`.
     pub fn unsqueeze(&self, ctx: &mut UOpCtx, dim: i64) -> Tensor {
-        Tensor::from_uop(movement::unsqueeze(ctx, self.uop, dim))
+        { let __u = movement::unsqueeze(ctx, self.uop.clone(), dim); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.pad(arg)`: (lo, hi) per dim.
     pub fn pad(&self, ctx: &mut UOpCtx, arg: &[(i64, i64)]) -> Tensor {
         let pairs: Vec<(SVal, SVal)> = arg.iter().map(|(a, b)| (SVal::I(*a as i128), SVal::I(*b as i128))).collect();
-        Tensor::from_uop(movement::pad(ctx, self.uop, &pairs))
+        { let __u = movement::pad(ctx, self.uop.clone(), &pairs); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.permute(order)`.
     pub fn permute(&self, ctx: &mut UOpCtx, order: &[i64]) -> Tensor {
-        Tensor::from_uop(movement::permute(ctx, self.uop, order))
+        { let __u = movement::permute(ctx, self.uop.clone(), order); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.flip(axis)`.
     pub fn flip(&self, ctx: &mut UOpCtx, axis: &[usize]) -> Tensor {
-        Tensor::from_uop(movement::flip(ctx, self.uop, axis))
+        { let __u = movement::flip(ctx, self.uop.clone(), axis); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.transpose(dim0, dim1)`.
     pub fn transpose(&self, ctx: &mut UOpCtx, dim0: i64, dim1: i64) -> Tensor {
-        Tensor::from_uop(movement::transpose(ctx, self.uop, dim0, dim1))
+        { let __u = movement::transpose(ctx, self.uop.clone(), dim0, dim1); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.squeeze(dim=None)`.
     pub fn squeeze(&self, ctx: &mut UOpCtx, dim: Option<i64>) -> Tensor {
-        Tensor::from_uop(movement::squeeze(ctx, self.uop, dim))
+        { let __u = movement::squeeze(ctx, self.uop.clone(), dim); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.flatten(start_dim, end_dim)`.
     pub fn flatten(&self, ctx: &mut UOpCtx, start_dim: i64, end_dim: i64) -> Tensor {
-        Tensor::from_uop(movement::flatten(ctx, self.uop, start_dim, end_dim))
+        { let __u = movement::flatten(ctx, self.uop.clone(), start_dim, end_dim); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor[t1, t2, ...]` — the `s![...]` index spec.
     pub fn getitem(&self, ctx: &mut UOpCtx, ixs: &[Ix]) -> Tensor {
-        Tensor::from_uop(movement::getitem(ctx, self.uop, ixs))
+        { let __u = movement::getitem(ctx, self.uop.clone(), ixs); Tensor::from_uop(ctx, __u) }
     }
 }
 
@@ -287,8 +350,8 @@ pub fn load(ctx: &mut UOpCtx, x: UopId, srcs: Vec<UopId>) -> UopId {
 
 /// `UOp.without_after` (ops.py): unwrap one AFTER level.
 pub fn without_after(ctx: &UOpCtx, id: UopId) -> UopId {
-    if ctx.op_of(id) == Ops::After {
-        return ctx.srcs(id)[0];
+    if ctx.op_of(&id) == Ops::After {
+        return ctx.srcs(&id)[0].clone();
     }
     id
 }
@@ -298,13 +361,13 @@ pub fn stack(ctx: &mut UOpCtx, srcs: Vec<UopId>) -> UopId {
     let dt = ctx.promo_dtype(&srcs);
     let srcs = srcs
         .iter()
-        .map(|&u| {
-            if ctx.is_invalid(ctx.base(u)) {
-                u
+        .map(|u| {
+            if ctx.is_invalid(&ctx.base(u)) {
+                u.clone()
             } else if ctx.op_of(u) == Ops::Const {
-                ctx.const_like_dt(u, ctx.val(u), Some(dt))
+                ctx.const_like_dt(u.clone(), ctx.val(u), Some(dt))
             } else {
-                ctx.cast(u, dt)
+                ctx.cast(u.clone(), dt)
             }
         })
         .collect();
@@ -317,7 +380,7 @@ pub fn invalid(ctx: &mut UOpCtx) -> UopId {
 }
 
 pub fn valid(ctx: &mut UOpCtx, x: UopId, cond: UopId) -> UopId {
-    let inv = ctx.const_like_dt(x, ConstVal::Invalid, None);
+    let inv = ctx.const_like_dt(x.clone(), ConstVal::Invalid, None);
     ctx.where_(cond, x, inv)
 }
 
@@ -435,27 +498,27 @@ impl Tensor {
 
     /// Tensor-level reduce sugar.
     pub fn sum(&self, ctx: &mut UOpCtx, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> Tensor {
-        Tensor::from_uop(reduce::sum(ctx, self.uop, axis, keepdim, dtype))
+        { let __u = reduce::sum(ctx, self.uop.clone(), axis, keepdim, dtype); Tensor::from_uop(ctx, __u) }
     }
 
     pub fn prod(&self, ctx: &mut UOpCtx, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> Tensor {
-        Tensor::from_uop(reduce::prod(ctx, self.uop, axis, keepdim, dtype))
+        { let __u = reduce::prod(ctx, self.uop.clone(), axis, keepdim, dtype); Tensor::from_uop(ctx, __u) }
     }
 
     pub fn max(&self, ctx: &mut UOpCtx, axis: Option<&[usize]>, keepdim: bool) -> Tensor {
-        Tensor::from_uop(reduce::max(ctx, self.uop, axis, keepdim))
+        { let __u = reduce::max(ctx, self.uop.clone(), axis, keepdim); Tensor::from_uop(ctx, __u) }
     }
 
     pub fn mean(&self, ctx: &mut UOpCtx, axis: Option<&[usize]>, keepdim: bool) -> Tensor {
-        Tensor::from_uop(reduce::mean(ctx, self.uop, axis, keepdim))
+        { let __u = reduce::mean(ctx, self.uop.clone(), axis, keepdim); Tensor::from_uop(ctx, __u) }
     }
 
     pub fn var(&self, ctx: &mut UOpCtx, axis: Option<&[usize]>, keepdim: bool, correction: i64) -> Tensor {
-        Tensor::from_uop(reduce::var(ctx, self.uop, axis, keepdim, correction))
+        { let __u = reduce::var(ctx, self.uop.clone(), axis, keepdim, correction); Tensor::from_uop(ctx, __u) }
     }
 
     pub fn cumsum(&self, ctx: &mut UOpCtx, axis: i64) -> Tensor {
-        Tensor::from_uop(reduce::cumsum(ctx, self.uop, axis))
+        { let __u = reduce::cumsum(ctx, self.uop.clone(), axis); Tensor::from_uop(ctx, __u) }
     }
 
     // *** nn-layer operations ***
@@ -463,8 +526,8 @@ impl Tensor {
     /// `Tensor.sub(other)`: `self - other` (composed via add/neg).
     pub fn sub(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::sub(ctx, self.uop, o.uop)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::sub_c(ctx, self.uop, c)),
+            TensorAddArg::T(o) => { let __u = elementwise::sub(ctx, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::sub_c(ctx, self.uop.clone(), c); Tensor::from_uop(ctx, __u) },
         }
     }
 
@@ -483,12 +546,12 @@ impl Tensor {
 
     /// `Tensor.square()`: `self * self`.
     pub fn square(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::square(ctx, self.uop))
+        { let __u = elementwise::square(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.sqrt()`: square root.
     pub fn sqrt(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::sqrt(ctx, self.uop))
+        { let __u = elementwise::sqrt(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.mean()`: mean over all dims.
@@ -505,15 +568,15 @@ impl Tensor {
     /// `Tensor.maximum(other)`: elementwise max.
     pub fn maximum(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::maximum(ctx, self.uop, o.uop)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Max, self.uop, c)),
+            TensorAddArg::T(o) => { let __u = elementwise::maximum(ctx, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::binop_c(ctx, Ops::Max, self.uop.clone(), c); Tensor::from_uop(ctx, __u) },
         }
     }
 
     /// `Tensor.minimum(other)`: elementwise min.
     pub fn minimum(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::minimum(ctx, self.uop, o.uop)),
+            TensorAddArg::T(o) => { let __u = elementwise::minimum(ctx, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
             // No Ops::MIN — use min(a, b) == a + b - max(a, b).
             TensorAddArg::C(c) => {
                 let sum = self.add(ctx, TensorAddArg::C(c.clone()));
@@ -525,52 +588,52 @@ impl Tensor {
 
     /// `Tensor.reciprocal()`: 1 / self.
     pub fn reciprocal(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::reciprocal(ctx, self.uop))
+        { let __u = elementwise::reciprocal(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.log()`: natural log.
     pub fn log(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::log(ctx, self.uop))
+        { let __u = elementwise::log(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.log2()`: log base 2.
     pub fn log2(self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::log2(ctx, self.uop))
+        { let __u = elementwise::log2(ctx, self.uop); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.exp()`: exponential.
     pub fn exp(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::exp(ctx, self.uop))
+        { let __u = elementwise::exp(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.exp2()`: 2^self.
     pub fn exp2(self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::exp2(ctx, self.uop))
+        { let __u = elementwise::exp2(ctx, self.uop); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.trunc()`: truncate toward zero.
     pub fn trunc(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::trunc(ctx, self.uop))
+        { let __u = elementwise::trunc(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.ceil()`: ceiling.
     pub fn ceil(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::ceil(ctx, self.uop))
+        { let __u = elementwise::ceil(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.floor()`: floor.
     pub fn floor(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::floor(ctx, self.uop))
+        { let __u = elementwise::floor(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.sin()`: sine.
     pub fn sin(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::sin(ctx, self.uop))
+        { let __u = elementwise::sin(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.tanh()`: hyperbolic tangent.
     pub fn tanh(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::tanh(ctx, self.uop))
+        { let __u = elementwise::tanh(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.dot(w)`: sum product over last axis of self and second-to-last of w.
@@ -583,20 +646,20 @@ impl Tensor {
         assert!(dx > 0 && dw > 0, "Tensor::dot: both tensors must be at least 1D");
         // contraction axis of w: index dw - min(dw, 2) (last axis for 1-D w, second-to-last for N-D w)
         let axis_w = (dw - std::cmp::min(dw, 2)) as usize;
-        let x_last = x_shape[dx - 1].as_i64().unwrap_or(0);
-        let w_contract = w_shape[axis_w].as_i64().unwrap_or(0);
+        let x_last = <SInt as Clone>::clone(&x_shape[dx - 1]).as_i64().unwrap_or(0);
+        let w_contract = <SInt as Clone>::clone(&w_shape[axis_w]).as_i64().unwrap_or(0);
         assert_eq!(x_last, w_contract, "Tensor::dot: shape mismatch {} vs {}", x_shape, w_shape);
 
         let rep = std::cmp::min(std::cmp::min(dx - 1, dw - 1), 1);
         // x -> (*x.shape[:-1], [1]*rep, x.shape[-1])
         let mut xr: Vec<SVal> = x_shape[..dx - 1].to_vec();
-        xr.extend(std::iter::repeat(SVal::I(1)).take(rep));
+        xr.extend(std::iter::repeat_n(SVal::I(1), rep));
         xr.push(x_shape[dx - 1].clone());
         let x_r = self.reshape(ctx, xr);
 
         // w -> (*w.shape[:-2], [1]*rep, *w.shape[axis_w:]) then transpose(-1, axis_w - dw)
         let mut wr: Vec<SVal> = w_shape[..dw.saturating_sub(2)].to_vec();
-        wr.extend(std::iter::repeat(SVal::I(1)).take(rep));
+        wr.extend(std::iter::repeat_n(SVal::I(1), rep));
         wr.extend_from_slice(&w_shape[axis_w..]);
         let w_r = w.reshape(ctx, wr);
         let axis_w_neg = -(std::cmp::min(dw, 2) as i64);
@@ -687,40 +750,40 @@ impl Tensor {
 
     /// `Tensor.pool(kernel_size, stride, dilation)`: sliding window pool (for conv2d internals).
     pub fn pool(&self, ctx: &mut UOpCtx, kernel_size: &[i64], stride: i64, dilation: i64) -> Tensor {
-        Tensor::from_uop(movement::pool(ctx, self.uop, kernel_size, stride, dilation))
+        { let __u = movement::pool(ctx, self.uop.clone(), kernel_size, stride, dilation); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.div(other)`: elementwise division (a / b).
     pub fn div(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::div(ctx, self.uop, o.uop, None)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::div_c(ctx, self.uop, c, None)),
+            TensorAddArg::T(o) => { let __u = elementwise::div(ctx, self.uop.clone(), o.uop, None); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::div_c(ctx, self.uop.clone(), c, None); Tensor::from_uop(ctx, __u) },
         }
     }
 
     /// Tensor-level elementwise sugar for the oracle/schedule corpus.
     pub fn add(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Add, self.uop, o.uop)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Add, self.uop, c)),
+            TensorAddArg::T(o) => { let __u = elementwise::binop(ctx, Ops::Add, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::binop_c(ctx, Ops::Add, self.uop.clone(), c); Tensor::from_uop(ctx, __u) },
         }
     }
 
     pub fn mul(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Mul, self.uop, o.uop)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Mul, self.uop, c)),
+            TensorAddArg::T(o) => { let __u = elementwise::binop(ctx, Ops::Mul, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::binop_c(ctx, Ops::Mul, self.uop.clone(), c); Tensor::from_uop(ctx, __u) },
         }
     }
 
     pub fn neg(&self, ctx: &mut UOpCtx) -> Tensor {
-        Tensor::from_uop(elementwise::neg(ctx, self.uop))
+        { let __u = elementwise::neg(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.contiguous()` — CONTIGUOUS node when not virtual.
     pub fn contiguous(&self, ctx: &mut UOpCtx) -> Tensor {
         let dt = self.dtype(ctx);
-        Tensor::from_uop(ctx.uop(Ops::Contiguous, Some(dt), vec![self.uop], Arg::None))
+        { let __u = ctx.uop(Ops::Contiguous, Some(dt), vec![self.uop.clone()], Arg::None); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.alu`: `u[0].alu(op, u[1:])` — a bare op ctor; promotion/broadcast happen
@@ -731,50 +794,50 @@ impl Tensor {
 
     /// `Tensor.bitcast(dtype)` (`mixin/dtype.py:35`) — reinterpret the bits.
     pub fn bitcast(&self, ctx: &mut UOpCtx, dtype: DTypeId) -> Tensor {
-        Tensor::from_uop(ctx.bitcast(self.uop, dtype))
+        { let __u = ctx.bitcast(self.uop.clone(), dtype); Tensor::from_uop(ctx, __u) }
     }
 
     /// `bitwise_or` / `bitwise_and` / `bitwise_xor` — bare binops (`mixin/elementwise.py`).
     pub fn bitwise_or(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Or, self.uop, o.uop)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Or, self.uop, c)),
+            TensorAddArg::T(o) => { let __u = elementwise::binop(ctx, Ops::Or, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::binop_c(ctx, Ops::Or, self.uop.clone(), c); Tensor::from_uop(ctx, __u) },
         }
     }
     pub fn bitwise_and(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::And, self.uop, o.uop)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::And, self.uop, c)),
+            TensorAddArg::T(o) => { let __u = elementwise::binop(ctx, Ops::And, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::binop_c(ctx, Ops::And, self.uop.clone(), c); Tensor::from_uop(ctx, __u) },
         }
     }
     pub fn bitwise_xor(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
-            TensorAddArg::T(o) => Tensor::from_uop(elementwise::binop(ctx, Ops::Xor, self.uop, o.uop)),
-            TensorAddArg::C(c) => Tensor::from_uop(elementwise::binop_c(ctx, Ops::Xor, self.uop, c)),
+            TensorAddArg::T(o) => { let __u = elementwise::binop(ctx, Ops::Xor, self.uop.clone(), o.uop); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::binop_c(ctx, Ops::Xor, self.uop.clone(), c); Tensor::from_uop(ctx, __u) },
         }
     }
 
     /// `Tensor.shl(x)` / `Tensor.rshift(x)` — `self._binop(Ops.SHL/SHR, x)`.
     pub fn shl(&self, ctx: &mut UOpCtx, bits: i64) -> Tensor {
         let b = elementwise::ufix(ctx, ConstVal::Int(bits as i128));
-        Tensor::from_uop(ctx.shl(self.uop, b))
+        { let __u = ctx.shl(self.uop.clone(), b); Tensor::from_uop(ctx, __u) }
     }
     pub fn rshift(&self, ctx: &mut UOpCtx, bits: i64) -> Tensor {
         let b = elementwise::ufix(ctx, ConstVal::Int(bits as i128));
-        Tensor::from_uop(ctx.shr(self.uop, b))
+        { let __u = ctx.shr(self.uop.clone(), b); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.cat(*others, dim=0)` (`mixin/op.py:734`), equal-shape fast path:
     /// `self.stack(*others, dim).flatten(dim, dim+1)`. The RNG path always
     /// concatenates same-shape operands along dim 0, so this covers it.
     pub fn cat(&self, ctx: &mut UOpCtx, others: &[Tensor]) -> Tensor {
-        let uops: Vec<UopId> = std::iter::once(self.uop).chain(others.iter().map(|t| t.uop)).collect();
-        let st = Tensor::from_uop(stack(ctx, uops));
+        let uops: Vec<UopId> = std::iter::once(self.uop.clone()).chain(others.iter().map(|t| t.uop.clone())).collect();
+        let st = { let __u = stack(ctx, uops); Tensor::from_uop(ctx, __u) };
         st.flatten(ctx, 0, 2)
     }
 
     /// `Tensor.threefry(seed)` (`mixin/elementwise.py:454`): `self.alu(Ops.THREEFRY, seed)`.
     pub fn threefry(&self, ctx: &mut UOpCtx, seed: &Tensor) -> Tensor {
-        Tensor::from_uop(ctx.uop(Ops::Threefry, Some(crate::dtype::UINT64), vec![self.uop, seed.uop], Arg::None))
+        { let __u = ctx.uop(Ops::Threefry, Some(crate::dtype::UINT64), vec![self.uop.clone(), seed.uop.clone()], Arg::None); Tensor::from_uop(ctx, __u) }
     }
 }

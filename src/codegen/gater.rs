@@ -9,7 +9,7 @@ use crate::uop::upat::{PatternMatcher, UPat, UPatOrConst};
 use crate::uop::UopId;
 
 fn vconst_like(ctx: &mut UOpCtx, l: UopId, val: i64) -> UopId {
-    let dt = ctx.dt_of(l);
+    let dt = ctx.dt_of(&l);
     let c = ctx.const_py(CV::Int(val as i128), Some(dt));
     // mirror UOp.broadcast (ops.py:589): count==1 -> plain const, else STACK of copies.
     let n = ctx.max_numel(l) as usize;
@@ -25,18 +25,18 @@ fn store2(ctx: &mut UOpCtx, idx: UopId, srcs: Vec<UopId>) -> UopId {
 }
 
 fn move_where_load(ctx: &mut UOpCtx, l: UopId, a: UopId, w: UopId) -> Option<UopId> {
-    let lsrc = ctx.srcs(l).to_vec();
-    let alt = if ctx.is_invalid(a) {
-        vconst_like(ctx, l, 0)
-    } else if ctx.op_of(a) == Ops::Const {
-        ctx.const_like(l, ctx.const_arg(a)?)
-    } else if ctx.op_of(a) == Ops::Cast && ctx.dt_of(ctx.srcs(a)[0]) == ctx.dt_of(l) {
-        ctx.srcs(a)[0]
+    let lsrc = ctx.srcs(&l).to_vec();
+    let alt = if ctx.is_invalid(&a) {
+        vconst_like(ctx, l.clone(), 0)
+    } else if ctx.op_of(&a) == Ops::Const {
+        ctx.const_like(l.clone(), ctx.const_arg(&a)?)
+    } else if ctx.op_of(&a) == Ops::Cast && ctx.dt_of(&ctx.srcs(&a)[0]) == ctx.dt_of(&l) {
+        ctx.srcs(&a)[0].clone()
     } else {
-        ctx.cast(a, ctx.dt_of(l))
+        ctx.cast(a, ctx.dt_of(&l))
     };
-    let nl = ctx.uop(Ops::Load, Some(ctx.dt_of(l)), vec![lsrc[0], alt, lsrc[2]], Arg::None);
-    Some(ctx.cast(nl, ctx.dt_of(w)))
+    let nl = ctx.uop(Ops::Load, Some(ctx.dt_of(&l)), vec![(lsrc[0]).clone(), alt, (lsrc[2]).clone()], Arg::None);
+    Some(ctx.cast(nl, ctx.dt_of(&w)))
 }
 
 /// `pm_move_gates_from_index` (late/gater.py:9). The two image rules are not
@@ -67,13 +67,13 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
                 mop(),
                 r(|ctx, st, _| {
                     let (mop, gate, idx, l) = (sget(st, "mop"), sget(st, "gate"), sget(st, "idx"), sget(st, "l"));
-                    let msrc = ctx.srcs(mop).to_vec();
+                    let msrc = ctx.srcs(&mop).to_vec();
                     let new_mop = ctx.replace(
-                        mop,
-                        ctx.op_of(mop),
-                        ctx.dt_of(mop),
-                        std::iter::once(msrc[0]).chain(std::iter::once(idx)).chain(msrc[2..].iter().copied()).collect(),
-                        ctx.arg_of(mop).clone(),
+                        &mop,
+                        ctx.op_of(&mop),
+                        ctx.dt_of(&mop),
+                        std::iter::once((msrc[0]).clone()).chain(std::iter::once(idx)).chain(msrc[2..].iter().cloned()).collect(),
+                        ctx.arg_of(&mop).clone(),
                         Arg::None,
                     );
                     let alt = vconst_like(ctx, l, 0);
@@ -92,13 +92,13 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
                     .store(vec![var("data")]),
                 r(|ctx, st, _| {
                     let (mop, gate, idx, data) = (sget(st, "mop"), sget(st, "gate"), sget(st, "idx"), sget(st, "data"));
-                    let msrc = ctx.srcs(mop).to_vec();
+                    let msrc = ctx.srcs(&mop).to_vec();
                     let new_mop = ctx.replace(
-                        mop,
-                        ctx.op_of(mop),
-                        ctx.dt_of(mop),
-                        std::iter::once(msrc[0]).chain(std::iter::once(idx)).chain(msrc[2..].iter().copied()).collect(),
-                        ctx.arg_of(mop).clone(),
+                        &mop,
+                        ctx.op_of(&mop),
+                        ctx.dt_of(&mop),
+                        std::iter::once((msrc[0]).clone()).chain(std::iter::once(idx)).chain(msrc[2..].iter().cloned()).collect(),
+                        ctx.arg_of(&mop).clone(),
                         Arg::None,
                     );
                     Some(store2(ctx, new_mop, vec![data, gate]))

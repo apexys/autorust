@@ -89,7 +89,7 @@ fn reductions() {
     almost(&x.mean(&mut ctx, None, false).to_list::<f32>(&mut ctx), &[4.5]);
     almost(&x.prod(&mut ctx, None, false, None).to_list::<f32>(&mut ctx), &[40320.0]);
 
-    let m = x.reshape(&mut ctx, &[2, 4]);
+    let m = x.reshape(&mut ctx, [2, 4]);
     almost(&m.sum(&mut ctx, Some(&[0]), false, None).to_list::<f32>(&mut ctx), &[6.0, 8.0, 10.0, 12.0]);
     almost(&m.sum(&mut ctx, Some(&[1]), false, None).to_list::<f32>(&mut ctx), &[10.0, 26.0]);
 
@@ -104,23 +104,23 @@ fn movement_ops() {
     let mut ctx = UOpCtx::new();
     let x = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     // permute a 2x4 into 4x2
-    let p = x.reshape(&mut ctx, &[2, 4]).permute(&mut ctx, &[1, 0]);
+    let p = x.reshape(&mut ctx, [2, 4]).permute(&mut ctx, &[1, 0]);
     almost(&p.to_list::<f32>(&mut ctx), &[1.0, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0]);
     // transpose of 2x4 == permute(1,0)
-    let t = x.reshape(&mut ctx, &[2, 4]).transpose(&mut ctx, 0, 1);
+    let t = x.reshape(&mut ctx, [2, 4]).transpose(&mut ctx, 0, 1);
     almost(&t.to_list::<f32>(&mut ctx), &[1.0, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0]);
     // flip 1-D
     almost(&x.flip(&mut ctx, &[0]).to_list::<f32>(&mut ctx), &[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
     // flatten round-trips identity
-    almost(&x.reshape(&mut ctx, &[2, 4]).flatten(&mut ctx, 0, 1).to_list::<f32>(&mut ctx), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    almost(&x.reshape(&mut ctx, [2, 4]).flatten(&mut ctx, 0, 1).to_list::<f32>(&mut ctx), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
 }
 
 #[test]
 fn matmul_ops() {
     let mut ctx = UOpCtx::new();
     // (2x3) @ (3x2)
-    let a = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).reshape(&mut ctx, &[2, 3]);
-    let w = f32s(&mut ctx, &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).reshape(&mut ctx, &[3, 2]);
+    let a = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).reshape(&mut ctx, [2, 3]);
+    let w = f32s(&mut ctx, &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).reshape(&mut ctx, [3, 2]);
     // w = [[7,8],[9,10],[11,12]]
     // row0 = [1,2,3] -> [1*7+2*9+3*11, 1*8+2*10+3*12] = [58, 64]
     // row1 = [4,5,6] -> [4*7+5*9+6*11, 4*8+5*10+6*12] = [139, 154]

@@ -70,14 +70,13 @@ pub fn graph_summary(json: &str) -> Result<String, String> {
     let order = g.toposort();
     let mut out = String::new();
     for id in order {
-        let n = g.get(id);
         out.push_str(&format!(
             "{} {} {} srcs={} arg={:?}\n",
-            id.0,
-            n.op.pyname(),
-            n.dtype.attr(),
-            n.srcs.iter().map(|s| s.0.to_string()).collect::<Vec<_>>().join(","),
-            n.arg
+            id.id(),
+            id.op.pyname(),
+            id.dtype.attr(),
+            id.srcs.iter().map(|s| s.id().to_string()).collect::<Vec<_>>().join(","),
+            id.arg
         ));
     }
     Ok(out)

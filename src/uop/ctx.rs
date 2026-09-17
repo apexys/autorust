@@ -32,62 +32,52 @@ pub const MM_SENTINEL: i128 = i128::MAX / 4;
 
 pub struct UOpCtx {
     pub g: Graph,
-    /// `_shape` cache: uncomputed / none(no shape) / some
-    shape_c: Vec<Option<Option<Rc<Shape>>>>,
-    /// `_min_max` cache
-    mm_c: Vec<Option<Option<(SVal, SVal)>>>,
-    /// `_ranges` cache (insertion-ordered, python dict semantics)
-    pub range_c: Vec<Option<Option<Rc<Vec<UopId>>>>>,
     /// IndexingContext-style range counter (used by new_range)
     pub range_idx: i64,
     /// python `buffers` side table (the opaque-constructed slice): BUFFER uop
     /// id -> initial bytes. Engine `buffer_of` consumes this at first access
     /// (Tensor(data) -> Buffer(opaque=...)).
     pub initial_data: std::collections::HashMap<u32, std::rc::Rc<std::cell::RefCell<Vec<u8>>>>,
-    /// autograd side table: tensor uop id -> its gradient uop id, populated by
-    /// `compute_gradient`/`Tensor::backward`. Kept on the ctx (not on `Tensor`)
-    /// so a `Tensor` stays `Copy` and grads can be written without `&mut Tensor`.
-    pub grads: std::collections::HashMap<u32, u32>,
+    /// autograd side table: tensor uop id -> its gradient handle, populated by
+    /// `compute_gradient`/`Tensor::backward`. Keyed by id (not `UopId`) so the
+    /// table does not pin the target tensor; the value is a strong handle so the
+    /// gradient subgraph stays alive while attached.
+    pub grads: std::collections::HashMap<u32, UopId>,
 }
 
 use std::rc::Rc;
 
+impl Default for UOpCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UOpCtx {
     pub fn new() -> Self {
-        UOpCtx { g: Graph::new(), shape_c: Vec::new(), mm_c: Vec::new(), range_c: Vec::new(), range_idx: 0, initial_data: std::collections::HashMap::new(), grads: std::collections::HashMap::new() }
+        UOpCtx { g: Graph::new(), range_idx: 0, initial_data: std::collections::HashMap::new(), grads: std::collections::HashMap::new() }
     }
 
-    /// Grow the property caches to cover externally-loaded graphs (oracle use).
-    pub fn add_cache_slots(&mut self) {
-        self.grow();
-    }
+    /// No-op retained for the oracle/bridge API (property caches now live on
+    /// nodes, so no arena-sized slot growth is needed).
+    pub fn add_cache_slots(&mut self) {}
+
+    /// No-op retained for the oracle/bridge API.
+    pub fn grow_to(&mut self, _n: usize) {}
 
     /// Attach (or overwrite) the autograd gradient for tensor uop `target`.
-    pub fn set_grad(&mut self, target: UopId, grad: UopId) {
-        self.grads.insert(target.0, grad.0);
+    pub fn set_grad(&mut self, target: &UopId, grad: UopId) {
+        self.grads.insert(target.id(), grad);
     }
 
     /// Read the autograd gradient attached to tensor uop `target`, if any.
-    pub fn grad(&self, target: UopId) -> Option<UopId> {
-        self.grads.get(&target.0).map(|&g| UopId(g))
+    pub fn grad(&self, target: &UopId) -> Option<UopId> {
+        self.grads.get(&target.id()).cloned()
     }
 
     /// Drop every attached gradient (e.g. before a fresh `backward`).
     pub fn clear_grads(&mut self) {
         self.grads.clear();
-    }
-
-    /// Grow the property caches to cover a whole externally-loaded graph.
-    pub fn grow_to(&mut self, n: usize) {
-        while self.shape_c.len() < n {
-            self.grow();
-        }
-    }
-
-    fn grow(&mut self) {
-        self.shape_c.push(None);
-        self.mm_c.push(None);
-        self.range_c.push(None);
     }
 
     /// `UOp.const(bool)` in python's bool dtype.
@@ -99,25 +89,19 @@ impl UOpCtx {
 
     /// Raw intern with cache-slot growth (engine rebuild path).
     pub fn intern_raw(&mut self, op: Ops, dtype: DTypeId, srcs: Vec<UopId>, arg: Arg, tag: Arg) -> UopId {
-        let id = self.g.intern(op, dtype, srcs, arg, tag);
-        self.grow();
-        id
+        self.g.intern(op, dtype, srcs, arg, tag)
     }
 
     /// Python `UOp(op, dtype=None, src, arg)` constructor: derives dtype when
     /// omitted (`dtype_from_uop(op, src, arg) or dtypes.void`).
     pub fn uop(&mut self, op: Ops, dtype: Option<DTypeId>, srcs: Vec<UopId>, arg: Arg) -> UopId {
         let dt = dtype.unwrap_or_else(|| self.dtype_from_uop(op, &srcs, &arg).unwrap_or(crate::dtype::VOID));
-        let id = self.g.intern(op, dt, srcs, arg, Arg::None);
-        self.grow();
-        id
+        self.g.intern(op, dt, srcs, arg, Arg::None)
     }
 
     pub fn uop_tag(&mut self, op: Ops, dtype: Option<DTypeId>, srcs: Vec<UopId>, arg: Arg, tag: Arg) -> UopId {
         let dt = dtype.unwrap_or_else(|| self.dtype_from_uop(op, &srcs, &arg).unwrap_or(crate::dtype::VOID));
-        let id = self.g.intern(op, dt, srcs, arg, tag);
-        self.grow();
-        id
+        self.g.intern(op, dt, srcs, arg, tag)
     }
 
     /// Python `UOp.const(b, dtype=None)` for scalar values.
@@ -166,40 +150,39 @@ impl UOpCtx {
     // ---------- field access ----------
 
     #[inline]
-    pub fn op_of(&self, id: UopId) -> Ops {
-        self.g.get(id).op
+    pub fn op_of(&self, id: &UopId) -> Ops {
+        id.op
     }
 
     #[inline]
-    pub fn dt_of(&self, id: UopId) -> DTypeId {
-        self.g.get(id).dtype
+    pub fn dt_of(&self, id: &UopId) -> DTypeId {
+        id.dtype
     }
 
     #[inline]
-    pub fn srcs(&self, id: UopId) -> &[UopId] {
-        &self.g.get(id).srcs
+    pub fn srcs<'a>(&self, id: &'a UopId) -> &'a [UopId] {
+        &id.srcs
     }
 
     #[inline]
-    pub fn arg_of(&self, id: UopId) -> &Arg {
-        &self.g.get(id).arg
+    pub fn arg_of<'a>(&self, id: &'a UopId) -> &'a Arg {
+        &id.arg
     }
 
     #[inline]
-    pub fn tag_of(&self, id: UopId) -> &Arg {
-        &self.g.get(id).tag
+    pub fn tag_of<'a>(&self, id: &'a UopId) -> &'a Arg {
+        &id.tag
     }
 
     /// Node snapshot (clone) so mutations of the arena don't alias.
-    pub fn snapshot(&self, id: UopId) -> (Ops, DTypeId, Vec<UopId>, Arg, Arg) {
-        let n = self.g.get(id);
-        (n.op, n.dtype, n.srcs.clone(), n.arg.clone(), n.tag.clone())
+    pub fn snapshot(&self, id: &UopId) -> (Ops, DTypeId, Vec<UopId>, Arg, Arg) {
+        (id.op, id.dtype, id.srcs.clone(), id.arg.clone(), id.tag.clone())
     }
 
     /// CONST value (`uop.val`).
-    pub fn val(&self, id: UopId) -> ConstVal {
-        assert!(self.op_of(id) == Ops::Const, "val is only for CONST");
-        match self.arg_of(id) {
+    pub fn val(&self, id: &UopId) -> ConstVal {
+        assert!(id.op == Ops::Const, "val is only for CONST");
+        match &id.arg {
             Arg::Const(c) => c.clone(),
             Arg::Int(i) => ConstVal::Int(*i as i128),
             Arg::UInt(u) => ConstVal::Int(*u as i128),
@@ -213,31 +196,31 @@ impl UOpCtx {
     }
 
     /// CONST arg as the raw stored arg (for pattern matching, `cvar(arg=..)`).
-    pub fn const_arg(&self, id: UopId) -> Option<ConstVal> {
-        if self.op_of(id) != Ops::Const {
+    pub fn const_arg(&self, id: &UopId) -> Option<ConstVal> {
+        if id.op != Ops::Const {
             return None;
         }
         Some(self.val(id))
     }
 
-    pub fn is_invalid(&self, id: UopId) -> bool {
-        self.op_of(id) == Ops::Const && matches!(self.arg_of(id), Arg::Const(ConstVal::Invalid))
+    pub fn is_invalid(&self, id: &UopId) -> bool {
+        id.op == Ops::Const && matches!(&id.arg, Arg::Const(ConstVal::Invalid))
     }
 
-    pub fn has_param(&self, id: UopId) -> Option<&ParamArg> {
-        match self.arg_of(id) {
+    pub fn has_param<'a>(&self, id: &'a UopId) -> Option<&'a ParamArg> {
+        match &id.arg {
             Arg::Param(p) => Some(p),
             _ => None,
         }
     }
 
     /// `uop.base` — strips movement ops (and DETACH).
-    pub fn base(&self, id: UopId) -> UopId {
-        let mut u = id;
+    pub fn base(&self, id: &UopId) -> UopId {
+        let mut u = id.clone();
         loop {
-            let op = self.op_of(u);
+            let op = u.op;
             if group::in_(group::MOVEMENT, op) || op == Ops::Detach {
-                u = self.srcs(u)[0];
+                u = u.srcs[0].clone();
             } else {
                 return u;
             }
@@ -246,18 +229,15 @@ impl UOpCtx {
 
     /// `x.replace(...)` — returns id or None if nothing changed (Python returns
     /// self when fields are equal).
-    pub fn replace(&mut self, id: UopId, op: Ops, dtype: DTypeId, srcs: Vec<UopId>, arg: Arg, tag: Arg) -> UopId {
-        let (o, d, s, a, t) = self.snapshot(id);
-        if o == op && d == dtype && s == srcs && a == arg && t == tag {
-            return id;
+    pub fn replace(&mut self, id: &UopId, op: Ops, dtype: DTypeId, srcs: Vec<UopId>, arg: Arg, tag: Arg) -> UopId {
+        if id.op == op && id.dtype == dtype && id.srcs == srcs && id.arg == arg && id.tag == tag {
+            return id.clone();
         }
-        let id2 = self.g.intern(op, dtype, srcs, arg, tag);
-        self.grow();
-        id2
+        self.g.intern(op, dtype, srcs, arg, tag)
     }
 
     /// `rtag(tag=True)`.
-    pub fn rtag(&mut self, id: UopId) -> UopId {
+    pub fn rtag(&mut self, id: &UopId) -> UopId {
         let (o, d, s, a, _t) = self.snapshot(id);
         self.replace(id, o, d, s, a, Arg::Bool(true))
     }
@@ -265,7 +245,7 @@ impl UOpCtx {
     // ---------- dtype production rules (ops.py:114-184) ----------
 
     pub fn promo_dtype(&mut self, srcs: &[UopId]) -> DTypeId {
-        let mut dts = srcs.iter().map(|&s| self.dt_of(s)).collect::<Vec<_>>();
+        let mut dts = srcs.iter().map(|s| self.dt_of(s)).collect::<Vec<_>>();
         dts.dedup();
         if dts.len() == 1 {
             dts[0]
@@ -284,7 +264,7 @@ impl UOpCtx {
                 if srcs.is_empty() {
                     return Some(dtype::VOID);
                 }
-                if self.dt_of(srcs[0]) == dtype::VOID {
+                if self.dt_of(&srcs[0]) == dtype::VOID {
                     Some(dtype::VOID)
                 } else {
                     None
@@ -292,26 +272,26 @@ impl UOpCtx {
             }
             Custom | Customi | Ins | Noop => None,
             Index => {
-                let b = srcs[0];
-                if self.op_of(b) == Param && self.is_image_shape_of(b) {
+                let b = srcs[0].clone();
+                if self.op_of(&b) == Param && self.is_image_shape_of(&b) {
                     Some(crate::dtype::FLOAT32)
                 } else {
-                    Some(self.dt_of(b))
+                    Some(self.dt_of(&b))
                 }
             }
             Load | Unshard | Reduce | After | Range | Contiguous | ContiguousBackward | Copy | Stage | Detach
-            | Mstack | Mselect | Allreduce | Special => Some(self.dt_of(srcs[0])),
+            | Mstack | Mselect | Allreduce | Special => Some(self.dt_of(&srcs[0])),
             Cmplt | Cmpne | Cmpeq => Some(crate::dtype::BOOL),
             Sin | Log2 | Exp2 | Sqrt | Reciprocal => {
-                if self.is_invalid(self.base(srcs[0])) {
+                if self.is_invalid(&self.base(&srcs[0])) {
                     Some(crate::dtype::BOOL)
                 } else {
-                    Some(self.least_upper_float(self.dt_of(srcs[0])))
+                    Some(self.least_upper_float(self.dt_of(&srcs[0])))
                 }
             }
             Where => {
-                if self.dt_of(srcs[0]) != crate::dtype::BOOL {
-                    panic!("TGERR: where cond must be bool, got {}", self.dt_of(srcs[0]).attr());
+                if self.dt_of(&srcs[0]) != crate::dtype::BOOL {
+                    panic!("TGERR: where cond must be bool, got {}", self.dt_of(&srcs[0]).attr());
                 }
                 Some(self.promo_dtype(&srcs[1..]))
             }
@@ -322,22 +302,22 @@ impl UOpCtx {
                     Some(self.promo_dtype(srcs))
                 }
             }
-            Wmma => Some(self.dt_of(srcs[2])),
+            Wmma => Some(self.dt_of(&srcs[2])),
             Gettuple => {
-                let t0 = srcs[0];
-                let in_tuple = if self.op_of(t0) == Function { self.srcs(t0)[0] } else { t0 };
+                let t0 = srcs[0].clone();
+                let in_tuple = if self.op_of(&t0) == Function { self.srcs(&t0)[0].clone() } else { t0 };
                 let idx = arg_as_int(arg).expect("GETTUPLE arg int");
-                Some(self.dt_of(self.srcs(in_tuple)[idx as usize]))
+                Some(self.dt_of(&self.srcs(&in_tuple)[idx as usize]))
             }
             Getaddr => Some(crate::dtype::UINT64),
             Shl | Shr => {
                 for s in srcs {
-                    let d = self.dt_of(*s);
-                    if !(is_int(d) || self.is_invalid(self.base(*s))) {
+                    let d = self.dt_of(s);
+                    if !(is_int(d) || self.is_invalid(&self.base(s))) {
                         panic!("TGERR: shift operands must be int");
                     }
                 }
-                Some(self.dt_of(srcs[0]))
+                Some(self.dt_of(&srcs[0]))
             }
             Buffer | Param => match arg {
                 Arg::Param(p) => Some(p.dtype),
@@ -363,11 +343,11 @@ impl UOpCtx {
             },
             _ => {
                 if group::in_(group::UNARY, op) {
-                    Some(self.dt_of(srcs[0]))
+                    Some(self.dt_of(&srcs[0]))
                 } else if group::in_(group::BROADCASTABLE, op) {
                     Some(self.promo_dtype(srcs))
                 } else if group::in_(group::MOVEMENT, op) {
-                    Some(self.dt_of(srcs[0]))
+                    Some(self.dt_of(&srcs[0]))
                 } else {
                     panic!("TGERR: no dtype for {op:?} with arg {arg:?}")
                 }
@@ -385,7 +365,7 @@ impl UOpCtx {
         }
     }
 
-    pub fn is_image_shape_of(&mut self, u: UopId) -> bool {
+    pub fn is_image_shape_of(&mut self, u: &UopId) -> bool {
         match self.shape(u) {
             Ok(Some(s)) => s.len() == 3 && matches!(s[2], SVal::I(4)),
             _ => false,
@@ -393,24 +373,24 @@ impl UOpCtx {
     }
 
     /// `_shape` (ops.py:326-464), cached. `Ok(None)` = no shape (late ops).
-    pub fn shape(&mut self, id: UopId) -> Result<Option<Rc<Shape>>, String> {
-        if let Some(cached) = &self.shape_c[id.0 as usize] {
-            return Ok(cached.clone());
+    pub fn shape(&mut self, id: &UopId) -> Result<Option<Rc<Shape>>, String> {
+        if let Some(cached) = id.shape_c.borrow().clone() {
+            return Ok(cached);
         }
         let ret = self.shape_uncached(id)?;
-        self.shape_c[id.0 as usize] = Some(ret.clone());
+        *id.shape_c.borrow_mut() = Some(ret.clone());
         Ok(ret)
     }
 
     /// `shape` property — errors when the node has no shape (Python raises).
-    pub fn shape_of(&mut self, id: UopId) -> Result<Rc<Shape>, String> {
+    pub fn shape_of(&mut self, id: &UopId) -> Result<Rc<Shape>, String> {
         match self.shape(id)? {
             Some(s) => Ok(s),
-            None => Err(format!("shape requested, but {:?} doesn't have a shape", self.op_of(id))),
+            None => Err(format!("shape requested, but {:?} doesn't have a shape", id.op)),
         }
     }
 
-    fn shape_uncached(&mut self, id: UopId) -> Result<Option<Rc<Shape>>, String> {
+    fn shape_uncached(&mut self, id: &UopId) -> Result<Option<Rc<Shape>>, String> {
         use Ops::*;
         let (op, _dt, srcs, arg, _tag) = self.snapshot(id);
         let shp: Option<Shape> = match op {
@@ -432,28 +412,28 @@ impl UOpCtx {
                 }
             }
             // special (terrible) case for RESHAPE on NOOP
-            Reshape if self.op_of(srcs[0]) == Noop => Some(self.marg_shape(id)?),
+            Reshape if self.op_of(&srcs[0]) == Noop => Some(self.marg_shape(id.clone())?),
             // hacks for NOOP
             Noop => {
                 if !srcs.is_empty() {
-                    self.shape(srcs[0])?.map(|s| (*s).clone())
+                    self.shape(&srcs[0])?.map(|s| (*s).clone())
                 } else {
                     None
                 }
             }
             Gettuple => {
-                let t0 = srcs[0];
-                let (in_tuple, through_fn) = if self.op_of(t0) == Function { (self.srcs(t0)[0], true) } else { (t0, false) };
+                let t0 = srcs[0].clone();
+                let (in_tuple, through_fn) = if self.op_of(&t0) == Function { (self.srcs(&t0)[0].clone(), true) } else { (t0.clone(), false) };
                 let idx = arg_as_int(&arg).ok_or("GETTUPLE arg int")? as usize;
-                let inner = self.shape_of(self.srcs(in_tuple)[idx])?;
+                let inner = self.shape_of(&self.srcs(&in_tuple)[idx])?;
                 if through_fn {
                     // substitute internal PARAMs with the call args
-                    let args = self.srcs(t0)[1..].to_vec();
+                    let args = self.srcs(&t0)[1..].to_vec();
                     let mut out = Vec::with_capacity(inner.len());
-                    for &s in inner.iter() {
+                    for s in inner.iter() {
                         match s {
-                            SVal::U(u) => out.push(SVal::U(self.substitute_one(u, &args)?)),
-                            i => out.push(i),
+                            SVal::U(u) => out.push(SVal::U(self.substitute_one(u.clone(), &args)?)),
+                            i => out.push(i.clone()),
                         }
                     }
                     Some(out)
@@ -463,12 +443,12 @@ impl UOpCtx {
             }
             Index => {
                 let mut shp: Shape = Vec::new();
-                for &s in &srcs[1..] {
-                    shp.extend(self.shape_of(s)?.iter().copied());
+                for s in &srcs[1..] {
+                    shp.extend(self.shape_of(s)?.iter().cloned());
                 }
-                let bshape = self.shape_of(srcs[0])?;
+                let bshape = self.shape_of(&srcs[0])?;
                 let skip = srcs.len() - 1;
-                shp.extend(bshape.iter().skip(skip).copied());
+                shp.extend(bshape.iter().skip(skip).cloned());
                 Some(shp)
             }
             Stack => {
@@ -476,7 +456,7 @@ impl UOpCtx {
                     Some(vec![])
                 } else {
                     let mut shp = vec![SVal::I(srcs.len() as i128)];
-                    shp.extend(self.shape_of(srcs[0])?.iter().copied());
+                    shp.extend(self.shape_of(&srcs[0])?.iter().cloned());
                     Some(shp)
                 }
             }
@@ -487,13 +467,13 @@ impl UOpCtx {
                 let n = arg_as_int(&arg).ok_or("BINARY arg len")?;
                 Some(vec![SVal::I(n as i128)])
             }
-            Buffer => Some(self.as_shape(srcs[0])?),
+            Buffer => Some(self.as_shape((srcs[0]).clone())?),
             Custom | Customi => {
                 if self.dt_of(id) == dtype::VOID {
                     None
                 } else {
                     let mut shapes: Vec<Shape> = Vec::new();
-                    for &s in &srcs {
+                    for s in &srcs {
                         if let Some(sh) = self.shape(s)? {
                             shapes.push((*sh).clone());
                         }
@@ -509,34 +489,34 @@ impl UOpCtx {
             Stage => {
                 // STAGE adds the existing shape to the front
                 let mut shp: Shape = Vec::new();
-                for &r in &srcs[1..] {
+                for r in &srcs[1..] {
                     let vmax = self.vmax(r)?;
                     shp.push(SVal::I(vmax.as_i64_or_panic() as i128 + 1));
                 }
-                shp.extend(self.shape_of(srcs[0])?.iter().copied());
+                shp.extend(self.shape_of(&srcs[0])?.iter().cloned());
                 Some(shp)
             }
-            Param => Some(self.as_shape(srcs[0])?),
+            Param => Some(self.as_shape((srcs[0]).clone())?),
             Wmma => {
-                let a = self.shape_of(srcs[0])?;
-                let b = self.shape_of(srcs[1])?;
-                let c = self.shape_of(srcs[2])?;
+                let a = self.shape_of(&srcs[0])?;
+                let b = self.shape_of(&srcs[1])?;
+                let c = self.shape_of(&srcs[2])?;
                 let mut front = self.broadcast_shape(&[a[..a.len() - 1].to_vec(), b[..b.len() - 1].to_vec(), c[..c.len() - 1].to_vec()])?;
-                front.extend(c.last().copied());
+                front.extend(c.last().cloned());
                 Some(front)
             }
             Mstack | Mselect | Detach | Contiguous | ContiguousBackward | After | Load | Copy | Allreduce | Store | End => {
-                self.shape(srcs[0])?.map(|s| (*s).clone())
+                self.shape(&srcs[0])?.map(|s| (*s).clone())
             }
             Bitcast => {
-                let ps = self.shape(srcs[0])?;
+                let ps = self.shape(&srcs[0])?;
                 match ps {
                     None => None,
                     Some(ps) => {
                         let out_sz = self.dt_of(id).itemsize();
-                        let in_sz = self.dt_of(srcs[0]).itemsize();
+                        let in_sz = self.dt_of(&srcs[0]).itemsize();
                         if out_sz != in_sz && !ps.is_empty() {
-                            let last = *ps.last().unwrap();
+                            let last = ps.last().unwrap().clone();
                             match last {
                                 SVal::I(v) => {
                                     if (v * in_sz as i128) % out_sz as i128 != 0 {
@@ -562,23 +542,23 @@ impl UOpCtx {
             _ => {
                 // movement ops change the shape
                 if group::in_(group::MOVEMENT, op) || op == Unshard || op == Reduce {
-                    let ps = match self.shape(srcs[0])? {
+                    let ps = match self.shape(&srcs[0])? {
                         Some(p) => p,
                         None => {
                             return Err(format!(
                                 "movement op {op:?} requires shape, {:?} doesn't have one",
-                                self.op_of(srcs[0])
+                                self.op_of(&srcs[0])
                             ))
                         }
                     };
-                    return Ok(Some(Rc::new(self.shape_movement(id, op, &arg, &ps)?)));
+                    return Ok(Some(Rc::new(self.shape_movement(id.clone(), op, &arg, &ps)?)));
                 }
                 if group::in_(group::UNARY, op) || op == Cast {
-                    return Ok(Some(self.shape_of(srcs[0])?));
+                    return Ok(Some(self.shape_of(&srcs[0])?));
                 }
                 if group::in_(group::BROADCASTABLE, op) {
                     let mut input_shapes = Vec::with_capacity(srcs.len());
-                    for &s in &srcs {
+                    for s in &srcs {
                         match self.shape(s)? {
                             Some(sh) => input_shapes.push((*sh).clone()),
                             None => return Err(format!("None input shape not supported for {op:?}")),
@@ -602,11 +582,10 @@ impl UOpCtx {
             Reshape => {
                 let marg = self.marg_shape(id)?;
                 for x in &marg {
-                    if let SVal::I(v) = x {
-                        if *v < 0 {
+                    if let SVal::I(v) = x
+                        && *v < 0 {
                             return Err("shape can't contain negative numbers".into());
                         }
-                    }
                 }
                 // tinygrad asserts prod(in) == prod(out) with symbolic algebra.
                 // Our port only proves concrete products; when either side has a
@@ -614,16 +593,14 @@ impl UOpCtx {
                 // graph construction and skip the check rather than hard-fail.
                 if let (Some(prod_in), Some(prod_out)) =
                     (super::sint::prod_int(ps), super::sint::prod_int(&marg))
-                {
-                    if prod_in != prod_out {
+                    && prod_in != prod_out {
                         return Err(format!("bad reshape: {ps:?} -> {marg:?}"));
                     }
-                }
                 Ok(marg)
             }
             Expand => {
                 let mut out = self.marg_shape(id)?;
-                out.extend(ps.iter().copied());
+                out.extend(ps.iter().cloned());
                 Ok(out)
             }
             Permute => {
@@ -633,7 +610,7 @@ impl UOpCtx {
                 if sorted != (0..ps.len()).collect::<Vec<_>>() {
                     return Err(format!("invalid permutation {perm:?} of len {}", ps.len()));
                 }
-                Ok(perm.iter().map(|&i| ps[i]).collect())
+                Ok(perm.iter().map(|&i| ps[i].clone()).collect())
             }
             Pad | Shrink => {
                 let marg = self.marg_pairs_svals(id)?;
@@ -641,8 +618,8 @@ impl UOpCtx {
                     return Err(format!("invalid pad/shrink {marg:?} for {ps:?}"));
                 }
                 let mut out = Vec::with_capacity(ps.len());
-                for (i, &(o, sz)) in marg.iter().enumerate() {
-                    match (o, sz) {
+                for (i, (o, sz)) in marg.iter().enumerate() {
+                    match (o, sz.clone()) {
                         (SVal::I(o), SVal::I(sz)) => {
                             // python indexing.py conventions: PAD pairs are
                             // (start, stop) — new dim = stop; SHRINK pairs are
@@ -650,15 +627,15 @@ impl UOpCtx {
                             // the slice bounds to sizes).
                             let ok = match op {
                                 Pad => {
-                                    let start_dim = self.sval_add(SVal::I(o), ps[i]);
+                                    let start_dim = self.sval_add(SVal::I(*o), ps[i].clone());
                                     self.resolve_ord(SVal::I(sz), CmpOrd::Ge, SVal::I(0), true)
-                                        && self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(o), true)
+                                        && self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(*o), true)
                                         && self.resolve_ord(start_dim, CmpOrd::Le, SVal::I(sz), true)
                                 }
                                 _ => {
-                                    let start_dim = self.sval_add(SVal::I(o), SVal::I(sz));
-                                    self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(o), true)
-                                        && self.resolve_ord(start_dim, CmpOrd::Le, ps[i], true)
+                                    let start_dim = self.sval_add(SVal::I(*o), SVal::I(sz));
+                                    self.resolve_ord(SVal::I(0), CmpOrd::Le, SVal::I(*o), true)
+                                        && self.resolve_ord(start_dim, CmpOrd::Le, ps[i].clone(), true)
                                 }
                             };
                             if !ok {
@@ -669,9 +646,9 @@ impl UOpCtx {
                         _ => {
                             // symbolic view (e.g. a gid-derived LOCAL window):
                             // the new dim is the pair's size/stop half.
-                            match self.ssimplify_const_val(sz) {
+                            match self.ssimplify_const_val(sz.clone()) {
                                 Some(v) => out.push(SVal::I(v)),
-                                None => out.push(sz),
+                                None => out.push(sz.clone()),
                             }
                         }
                     }
@@ -680,7 +657,7 @@ impl UOpCtx {
             }
             Flip => {
                 // FLIP's arg is a tuple of bool flags (one per dim)
-                let flags: Option<Vec<bool>> = match self.arg_of(id) {
+                let flags: Option<Vec<bool>> = match self.arg_of(&id) {
                     Arg::Seq { tuple: true, items } => {
                         items.iter().map(|x| match x {
                             Arg::Bool(b) => Some(*b),
@@ -695,21 +672,21 @@ impl UOpCtx {
                 }
             }
             Unshard => {
-                let axes = self.unshard_axes(id)?;
-                let srcs = self.srcs(id).to_vec();
+                let axes = self.unshard_axes(id.clone())?;
+                let srcs = self.srcs(&id).to_vec();
                 let mut out = Vec::with_capacity(ps.len());
-                for (i, &s) in ps.iter().enumerate() {
+                for (i, s) in ps.iter().enumerate() {
                     if let Some(pos) = axes.iter().position(|&a| a as usize == i) {
-                        let vmax = self.vmax(srcs[1 + pos])?;
-                        out.push(SVal::I(s.as_i64_or_panic() as i128 * (vmax.as_i64_or_panic() as i128 + 1)));
+                        let vmax = self.vmax(&srcs[1 + pos])?;
+                        out.push(SVal::I(s.clone().as_i64_or_panic() as i128 * (vmax.as_i64_or_panic() as i128 + 1)));
                     } else {
-                        out.push(s);
+                        out.push(s.clone());
                     }
                 }
                 Ok(out)
             }
             Reduce => {
-                let num_axes = match self.arg_of(id) {
+                let num_axes = match self.arg_of(&id) {
                     Arg::Seq { tuple: true, items } => arg_as_int(&items[1]).ok_or("REDUCE arg")?,
                     _ => return Err("invalid type for axis".into()),
                 };
@@ -724,16 +701,16 @@ impl UOpCtx {
 
     /// marg for RESHAPE/EXPAND: the new shape (may be symbolic).
     pub fn marg_shape(&mut self, id: UopId) -> Result<Shape, String> {
-        let srcs = self.srcs(id).to_vec();
+        let srcs = self.srcs(&id).to_vec();
         if srcs.len() < 2 {
-            panic!("TGERR: marg_shape on {} with {} srcs", DebugOp(self.op_of(id)), srcs.len());
+            panic!("TGERR: marg_shape on {} with {} srcs", DebugOp(self.op_of(&id)), srcs.len());
         }
-        self.as_shape(srcs[1])
+        self.as_shape((srcs[1]).clone())
     }
 
     /// marg for PAD/SHRINK: (start, stop) pairs.
     pub fn marg_pairs(&mut self, id: UopId) -> Result<Vec<(i64, i64)>, String> {
-        Ok(self.marg_pairs_svals(id)?.iter().map(|(a, b)| (a.as_i64_or_panic(), b.as_i64_or_panic())).collect())
+        Ok(self.marg_pairs_svals(id)?.iter().map(|(a, b)| (a.clone().as_i64_or_panic(), b.clone().as_i64_or_panic())).collect())
     }
 
     /// A symbolic SVal that simplifies to a concrete int (e.g. the size half
@@ -752,15 +729,15 @@ impl UOpCtx {
     /// gid-derived view inside a LOCAL kernel) stay symbolic here and are
     /// resolved by ssimplify in the shape arm.
     pub fn marg_pairs_svals(&mut self, id: UopId) -> Result<Vec<(SVal, SVal)>, String> {
-        let srcs = self.srcs(id).to_vec();
+        let srcs = self.srcs(&id).to_vec();
         if srcs.len() >= 3 {
-            let starts = self.as_shape(srcs[1])?;
-            let stops = self.as_shape(srcs[2])?;
-            return Ok(starts.iter().zip(stops.iter()).map(|(a, b)| (*a, *b)).collect());
+            let starts = self.as_shape((srcs[1]).clone())?;
+            let stops = self.as_shape((srcs[2]).clone())?;
+            return Ok(starts.iter().zip(stops.iter()).map(|(a, b)| (a.clone(), b.clone())).collect());
         }
         // arg-carried pairs (schedule-created SHRINK/PAD: ((start, stop), ...));
         // other movement ops (e.g. Expand) arrive via probing callers -> Err.
-        let pairs: Vec<(SVal, SVal)> = match self.arg_of(id) {
+        let pairs: Vec<(SVal, SVal)> = match self.arg_of(&id) {
             Arg::Seq { tuple: true, items } => items
                 .iter()
                 .map(|pair| match pair {
@@ -771,21 +748,21 @@ impl UOpCtx {
                     other => Err(format!("TGERR: bad pair arg {other:?}")),
                 })
                 .collect::<Result<Vec<_>, String>>()?,
-            _ => return Err(format!("TGERR: node {} ({:?}) has no pair arg", id.0, self.op_of(id))),
+            _ => return Err(format!("TGERR: node {} ({:?}) has no pair arg", id.id(), self.op_of(&id))),
         };
         Ok(pairs)
     }
 
     /// marg for PERMUTE/FLIP: the int list arg.
     pub fn marg_ints(&mut self, id: UopId) -> Result<Vec<i64>, String> {
-        match self.arg_of(id) {
+        match self.arg_of(&id) {
             Arg::Seq { tuple: true, items } => items.iter().map(arg_as_int).collect::<Option<Vec<_>>>().ok_or("bad movement arg".to_string()),
             _ => Err("bad movement arg".into()),
         }
     }
 
     fn unshard_axes(&mut self, id: UopId) -> Result<Vec<i64>, String> {
-        match self.arg_of(id) {
+        match self.arg_of(&id) {
             Arg::Seq { tuple: true, items } => items.iter().map(arg_as_int).collect::<Option<Vec<_>>>().ok_or("UNSHARD arg".to_string()),
             _ => Err("UNSHARD arg".into()),
         }
@@ -794,20 +771,20 @@ impl UOpCtx {
     /// `marg` (ops.py:779-785): the movement op's arg, from srcs for shape-carrying ops.
     pub fn marg_of(&mut self, id: UopId) -> Result<Vec<(i64, i64)>, String> {
         use Ops::*;
-        let (op, _, srcs, arg, _) = self.snapshot(id);
+        let (op, _, srcs, arg, _) = self.snapshot(&id);
         match op {
-            Reshape | Expand => Ok(self.as_shape(srcs[1])?.iter().map(|x| (x.as_i64_or_panic(), 0)).collect()),
+            Reshape | Expand => Ok(self.as_shape((srcs[1]).clone())?.iter().map(|x| (x.clone().as_i64_or_panic(), 0)).collect()),
             Pad | Shrink => {
-                let starts = self.as_shape(srcs[1])?;
-                let stops = self.as_shape(srcs[2])?;
-                match starts.iter().zip(stops.iter()).map(|(a, b)| a.as_i64().zip(b.as_i64())).collect::<Option<Vec<_>>>() {
+                let starts = self.as_shape((srcs[1]).clone())?;
+                let stops = self.as_shape((srcs[2]).clone())?;
+                match starts.iter().zip(stops.iter()).map(|(a, b)| a.clone().as_i64().zip(b.clone().as_i64())).collect::<Option<Vec<_>>>() {
             Some(pairs) => Ok(pairs),
             None => {
                 let dbg = |sv: &SVal| match sv {
                     SVal::I(i) => format!("I({i})"),
-                    SVal::U(u) => format!("U({}: {:?} arg={:?} srcs={:?})", u.0, self.op_of(*u), self.arg_of(*u), self.srcs(*u).iter().map(|s| (s.0, self.op_of(*s))).collect::<Vec<_>>()),
+                    SVal::U(u) => format!("U({}: {:?} arg={:?} srcs={:?})", u.id(), self.op_of(u), self.arg_of(u), self.srcs(u).iter().map(|s| (s.id(), self.op_of(s))).collect::<Vec<_>>()),
                 };
-                panic!("TGERR: symbolic movement pair on node {} (op {:?}): starts=[{}] stops=[{}]", id.0, self.op_of(id), starts.iter().map(dbg).collect::<Vec<_>>().join(", "), stops.iter().map(dbg).collect::<Vec<_>>().join(", "))
+                panic!("TGERR: symbolic movement pair on node {} (op {:?}): starts=[{}] stops=[{}]", id.id(), self.op_of(&id), starts.iter().map(dbg).collect::<Vec<_>>().join(", "), stops.iter().map(dbg).collect::<Vec<_>>().join(", "))
             }
         }
             }
@@ -824,20 +801,20 @@ impl UOpCtx {
     /// `as_shape` (ops.py:773-777)
     pub fn as_shape(&mut self, u: UopId) -> Result<Shape, String> {
         
-        let (op, _, srcs, _arg, _) = self.snapshot(u);
+        let (op, _, srcs, _arg, _) = self.snapshot(&u);
         if op == Ops::Const {
-            let v = self.val(u);
+            let v = self.val(&u);
             return Ok(vec![self.constval_to_sval(&v, "as_shape")?]);
         }
         if op != Ops::Stack {
             return Ok(vec![self.ssimplify(u)?]);
         }
         let mut out = Vec::with_capacity(srcs.len());
-        for &s in &srcs {
+        for s in &srcs {
             if self.op_of(s) == Ops::Const {
                 out.push(self.constval_to_sval(&self.val(s), "as_shape")?);
             } else {
-                out.push(self.ssimplify(s)?);
+                out.push(self.ssimplify(s.clone())?);
             }
         }
         Ok(out)
@@ -846,20 +823,20 @@ impl UOpCtx {
     /// `shape_to_shape_arg` (ops.py:96-100)
     pub fn shape_arg(&mut self, shape: &[SVal]) -> UopId {
         let mut src = Vec::with_capacity(shape.len());
-        for &x in shape {
+        for x in shape {
             match x {
                 SVal::U(u) => {
                     if !is_int(self.dt_of(u)) {
                         panic!("TGERR: shape must be int");
                     }
-                    src.push(u);
+                    src.push(u.clone());
                 }
                 // Python: UOp.const(x) -> from_py(int) -> weakint
-            SVal::I(v) => src.push(self.const_py(crate::dtype::ConstVal::Int(v as i128), None)),
+            SVal::I(v) => src.push(self.const_py(crate::dtype::ConstVal::Int(*v), None)),
             }
         }
         if src.len() == 1 {
-            src[0]
+            (src[0]).clone()
         } else {
             self.uop(Ops::Stack, None, src, Arg::None)
         }
@@ -876,7 +853,7 @@ impl UOpCtx {
             let mut rest: Vec<SVal> = Vec::new();
             for s in shapes {
                 let pad = max_dim - s.len();
-                let v = if d < pad { SVal::I(1) } else { s[d - pad] };
+                let v = if d < pad { SVal::I(1) } else { s[d - pad].clone() };
                 let non_one = match v {
                     SVal::U(_) => true,
                     SVal::I(x) => x != 1,
@@ -888,40 +865,40 @@ impl UOpCtx {
             if rest.len() > 1 {
                 return Err(format!("shape mismatch: objects cannot be broadcast to a single shape {shapes:?}"));
             }
-            ret.push(rest.first().copied().unwrap_or(SVal::I(1)));
+            ret.push(rest.first().cloned().unwrap_or(SVal::I(1)));
         }
         Ok(ret)
     }
 
     /// `_min_max` (ops.py:1050-1105), cached.
-    pub fn min_max(&mut self, id: UopId) -> Result<(SVal, SVal), String> {
-        if let Some(cached) = &self.mm_c[id.0 as usize] {
-            return cached.ok_or_else(|| "no min/max".to_string());
+    pub fn min_max(&mut self, id: &UopId) -> Result<(SVal, SVal), String> {
+        if let Some(cached) = &*id.mm_c.borrow() {
+            return cached.clone().ok_or_else(|| "no min/max".to_string());
         }
         let ret = self.min_max_uncached(id);
         let ok = match &ret {
-            Ok(v) => Some(Some(*v)),
+            Ok(v) => Some(Some(v.clone())),
             Err(_) => Some(None),
         };
-        self.mm_c[id.0 as usize] = ok;
+        *id.mm_c.borrow_mut() = ok;
         ret
     }
 
-    pub fn vmin(&mut self, id: UopId) -> Result<SVal, String> {
+    pub fn vmin(&mut self, id: &UopId) -> Result<SVal, String> {
         Ok(self.min_max(id)?.0)
     }
 
-    pub fn vmax(&mut self, id: UopId) -> Result<SVal, String> {
+    pub fn vmax(&mut self, id: &UopId) -> Result<SVal, String> {
         Ok(self.min_max(id)?.1)
     }
 
-    fn min_max_uncached(&mut self, id: UopId) -> Result<(SVal, SVal), String> {
+    fn min_max_uncached(&mut self, id: &UopId) -> Result<(SVal, SVal), String> {
         use Ops::*;
         let (op, dt, srcs, _arg, _) = self.snapshot(id);
         // int-typed binary ops (Python: GroupOp.Binary and not float)
         if group::in_(group::BINARY, op) && !is_float(dt) && !srcs.is_empty() {
-            let (s0min, s0max) = self.min_max(srcs[0])?;
-            let (s1min, s1max) = self.min_max(srcs[1])?;
+            let (s0min, s0max) = self.min_max(&srcs[0])?;
+            let (s1min, s1max) = self.min_max(&srcs[1])?;
             let a0 = s0min.as_i128_or_panic();
             let a1 = s0max.as_i128_or_panic();
             let b0 = s1min.as_i128_or_panic();
@@ -961,7 +938,7 @@ impl UOpCtx {
                     if !poisoned {
                         return Ok((SVal::I(a0.wrapping_shl(b0.min(126) as u32)), SVal::I(a1.wrapping_shl(b0.min(126) as u32))));
                     }
-                    return Ok(self.mm_fallback(id, dt)?);
+                    return self.mm_fallback(id.clone(), dt);
                 }
                 Shr if b0 == b1 => {
                     if b0 < 0 {
@@ -970,7 +947,7 @@ impl UOpCtx {
                     if !poisoned {
                         return Ok((SVal::I(a0.wrapping_shr(b0.min(126) as u32)), SVal::I(a1.wrapping_shr(b0.min(126) as u32))));
                     }
-                    return Ok(self.mm_fallback(id, dt)?);
+                    return self.mm_fallback(id.clone(), dt);
                 }
                 Cmod => {
                     if b0 == b1 && b0 > 0 {
@@ -1009,7 +986,7 @@ impl UOpCtx {
                             (b0 + 1, -b0 - 1)
                         }
                     } else {
-                        return Ok(self.mm_fallback(id, dt)?);
+                        return self.mm_fallback(id.clone(), dt);
                     }
                 }
                 Cdiv => {
@@ -1017,7 +994,7 @@ impl UOpCtx {
                         let vals = [cdiv(a0, b0), cdiv(a0, b1), cdiv(a1, b0), cdiv(a1, b1)];
                         (*vals.iter().min().unwrap(), *vals.iter().max().unwrap())
                     } else {
-                        return Ok(self.mm_fallback(id, dt)?);
+                        return self.mm_fallback(id.clone(), dt);
                     }
                 }
                 Floordiv => {
@@ -1027,7 +1004,7 @@ impl UOpCtx {
                         let vals = [floordiv(a0, b0), floordiv(a0, b1), floordiv(a1, b0), floordiv(a1, b1)];
                         (*vals.iter().min().unwrap(), *vals.iter().max().unwrap())
                     } else {
-                        return Ok(self.mm_fallback(id, dt)?);
+                        return self.mm_fallback(id.clone(), dt);
                     }
                 }
                 Floormod => {
@@ -1051,7 +1028,7 @@ impl UOpCtx {
                         // NOTE: bound from s1_vmin (b0), per Python
                         (b0 + 1, 0)
                     } else {
-                        return Ok(self.mm_fallback(id, dt)?);
+                        return self.mm_fallback(id.clone(), dt);
                     }
                 }
                 Xor if b0 == b1 && b1 == -1 => (!a1, !a0),
@@ -1071,39 +1048,37 @@ impl UOpCtx {
                 ),
                 Or if dt == crate::dtype::BOOL => (a0 | b0, a1 | b1),
                 And if dt == crate::dtype::BOOL => (a0 & b0, a1 & b1),
-                _ => return Ok(self.mm_fallback(id, dt)?),
+                _ => return self.mm_fallback(id.clone(), dt),
             };
             return Ok((SVal::I(ret.0), SVal::I(ret.1)));
         }
-        self.mm_fallback(id, dt)
+        self.mm_fallback(id.clone(), dt)
     }
 
     /// the non-Binary tail of `_min_max`
     fn mm_fallback(&mut self, id: UopId, dt: DTypeId) -> Result<(SVal, SVal), String> {
         use Ops::*;
-        let (op, _, srcs, _arg, _) = self.snapshot(id);
+        let (op, _, srcs, _arg, _) = self.snapshot(&id);
         // WHERE with int dtype
         if op == Where && is_int(dt) && srcs.len() == 3 {
-            let (t0, t1) = self.min_max(srcs[1])?;
-            let (f0, f1) = self.min_max(srcs[2])?;
+            let (t0, t1) = self.min_max(&srcs[1])?;
+            let (f0, f1) = self.min_max(&srcs[2])?;
             let lo = super::ctx::sval_min(t0, f0);
             let hi = super::ctx::sval_max(t1, f1);
             return Ok((lo, hi));
         }
         // PARAM/BUFFER with vmin_vmax
-        if (op == Param || op == Buffer) && srcs.len() == 1 {
-            if let Some(p) = self.has_param(id) {
-                if let Some((vmin, vmax)) = &p.vmin_vmax {
+        if (op == Param || op == Buffer) && srcs.len() == 1
+            && let Some(p) = self.has_param(&id)
+                && let Some((vmin, vmax)) = &p.vmin_vmax {
                     let a = self.constval_to_sval(vmin, "vmin_vmax")?;
                     let b = self.constval_to_sval(vmax, "vmin_vmax")?;
                     return Ok((a, b));
                 }
-            }
-        }
         if (op == Range || op == Special) && dt != dtype::VOID && !srcs.is_empty() {
             // (self.src[0]-1).vmax — SUB with const 1; an unbounded src0 falls
             // back to dtype bounds like python's _min_max (never panics)
-            let hi = match self.vmax(srcs[0])? {
+            let hi = match self.vmax(&srcs[0])? {
                 SVal::I(v) => SVal::I(v - 1),
                 SVal::U(_) => match self.dtype_bounds(dt)?.1 {
                     SVal::I(v) => SVal::I(v - 1),
@@ -1113,7 +1088,7 @@ impl UOpCtx {
             return Ok((SVal::I(0), hi));
         }
         if op == After {
-            return self.min_max(srcs[0]);
+            return self.min_max(&srcs[0]);
         }
         if op == Stack {
             if srcs.is_empty() {
@@ -1122,22 +1097,22 @@ impl UOpCtx {
             }
             let mut lo = SVal::I(i128::MAX);
             let mut hi = SVal::I(i128::MIN);
-            for &s in &srcs {
+            for s in &srcs {
                 let (a, b) = self.min_max(s)?;
                 lo = sval_min(lo, a);
                 hi = sval_max(hi, b);
             }
             return Ok((lo, hi));
         }
-        if op == Const && !self.is_invalid(id) {
-            let v = self.constval_to_sval(&self.val(id), "min_max")?;
-            return Ok((v, v));
+        if op == Const && !self.is_invalid(&id) {
+            let v = self.constval_to_sval(&self.val(&id), "min_max")?;
+            return Ok((v.clone(), v));
         }
         if op == Index {
-            return self.min_max(srcs[0]);
+            return self.min_max(&srcs[0]);
         }
         if op == Cast {
-            let (smin, smax) = self.min_max(srcs[0])?;
+            let (smin, smax) = self.min_max(&srcs[0])?;
             // rounding is monotone
             let mut smin = smin;
             let mut smax = smax;
@@ -1151,14 +1126,14 @@ impl UOpCtx {
             let (dmin, dmax) = self.dtype_bounds(dt)?;
             if is_unsigned(dt) {
                 let zero = SVal::I(0);
-                if sval_cmp(smin, zero) != std::cmp::Ordering::Less
-                    && sval_cmp(smax, dmax) != std::cmp::Ordering::Greater
+                if sval_cmp(smin.clone(), zero) != std::cmp::Ordering::Less
+                    && sval_cmp(smax.clone(), dmax) != std::cmp::Ordering::Greater
                 {
                     return Ok((smin, smax));
                 }
             } else if dt == WEAKINT || crate::dtype::in_set(crate::dtype::FLOATS, dt) || SINTS.contains(&dt) {
-                let lo = if sval_cmp(smin, dmin) == std::cmp::Ordering::Less { dmin } else { smin };
-                let hi = if sval_cmp(smax, dmax) == std::cmp::Ordering::Greater { dmax } else { smax };
+                let lo = if sval_cmp(smin.clone(), dmin.clone()) == std::cmp::Ordering::Less { dmin } else { smin };
+                let hi = if sval_cmp(smax.clone(), dmax.clone()) == std::cmp::Ordering::Greater { dmax } else { smax };
                 return Ok((lo, hi));
             }
         }
@@ -1210,12 +1185,12 @@ impl UOpCtx {
 
     /// `ssimplify` → SVal. Placeholder: folds only CONST / CAST(CONST).
     pub fn ssimplify(&mut self, u: UopId) -> Result<SVal, String> {
-        let (op, dt, srcs, _, _) = self.snapshot(u);
+        let (op, dt, srcs, _, _) = self.snapshot(&u);
         if op == Ops::Const {
-            return self.constval_to_sval(&self.val(u), "ssimplify");
+            return self.constval_to_sval(&self.val(&u), "ssimplify");
         }
-        if op == Ops::Cast && self.op_of(srcs[0]) == Ops::Const {
-            let c = self.val(srcs[0]);
+        if op == Ops::Cast && self.op_of(&srcs[0]) == Ops::Const {
+            let c = self.val(&srcs[0]);
             let v = dtype::dtype_const(dt, c);
             return self.constval_to_sval(&v, "ssimplify");
         }
@@ -1235,7 +1210,7 @@ impl UOpCtx {
     /// bool via the same UOps Python builds (`ge` = NOT(lt)); `default` only when
     /// the folded result is not provably constant (vmin != vmax).
     pub fn resolve_ord(&mut self, a: SVal, ord: CmpOrd, b: SVal, default: bool) -> bool {
-        match (a, b) {
+        match (a.clone(), b.clone()) {
             (SVal::I(x), SVal::I(y)) => match ord {
                 CmpOrd::Lt => x < y,
                 CmpOrd::Le => x <= y,
@@ -1289,55 +1264,22 @@ impl UOpCtx {
         Ok(u)
     }
 
-    pub fn toposort(&self, root: UopId) -> Vec<UopId> {
-        let mut out = Vec::new();
-        let mut seen = vec![false; self.g.nodes.len()];
-        self.toposort_from(root, &mut out, &mut seen);
-        out
-    }
-
-    fn toposort_from(&self, root: UopId, out: &mut Vec<UopId>, seen: &mut [bool]) {
-        enum Step {
-            Enter(UopId),
-            Emit(UopId),
-        }
-        let mut stack = vec![Step::Enter(root)];
-        while let Some(s) = stack.pop() {
-            match s {
-                Step::Enter(id) => {
-                    if seen[id.0 as usize] {
-                        continue;
-                    }
-                    stack.push(Step::Emit(id));
-                    for &src in self.g.get(id).srcs.iter().rev() {
-                        if !seen[src.0 as usize] {
-                            stack.push(Step::Enter(src));
-                        }
-                    }
-                }
-                Step::Emit(id) => {
-                    if seen[id.0 as usize] {
-                        continue;
-                    }
-                    seen[id.0 as usize] = true;
-                    out.push(id);
-                }
-            }
-        }
+    pub fn toposort(&self, root: &UopId) -> Vec<UopId> {
+        Graph::toposort_root(&self.g, root)
     }
 
     /// `backward_slice` — toposort without self (set semantics used by rules).
-    pub fn backward_slice(&self, root: UopId) -> HashSet<UopId> {
+    pub fn backward_slice(&self, root: &UopId) -> HashSet<UopId> {
         let ts = self.toposort(root);
-        ts.into_iter().filter(|&x| x != root).collect()
+        ts.into_iter().filter(|x| x != root).collect()
     }
 
-    pub fn backward_slice_with_self(&self, root: UopId) -> HashSet<UopId> {
+    pub fn backward_slice_with_self(&self, root: &UopId) -> HashSet<UopId> {
         self.toposort(root).into_iter().collect()
     }
 
-    pub fn op_in_backward_slice_with_self(&self, root: UopId, ops: &[Ops]) -> bool {
-        self.toposort(root).iter().any(|&x| ops.contains(&self.op_of(x)))
+    pub fn op_in_backward_slice_with_self(&self, root: &UopId, ops: &[Ops]) -> bool {
+        self.toposort(root).iter().any(|x| ops.contains(&self.op_of(x)))
     }
 }
 
@@ -1367,14 +1309,14 @@ pub fn arg_as_int(a: &Arg) -> Option<i64> {
 
 fn resolve_uop_bool(ctx: &mut UOpCtx, u: UopId, default: bool) -> bool {
     let s = crate::uop::upat::simplify(ctx, u);
-    match ctx.min_max(s) {
+    match ctx.min_max(&s) {
         Ok((vmin, vmax)) if vmin == vmax => vmin != SVal::I(0),
         _ => default,
     }
 }
 
 pub fn sval_min(a: SVal, b: SVal) -> SVal {
-    if sval_cmp(a, b) == std::cmp::Ordering::Less {
+    if sval_cmp(a.clone(), b.clone()) == std::cmp::Ordering::Less {
         a
     } else {
         b
@@ -1382,7 +1324,7 @@ pub fn sval_min(a: SVal, b: SVal) -> SVal {
 }
 
 pub fn sval_max(a: SVal, b: SVal) -> SVal {
-    if sval_cmp(a, b) == std::cmp::Ordering::Greater {
+    if sval_cmp(a.clone(), b.clone()) == std::cmp::Ordering::Greater {
         a
     } else {
         b
@@ -1439,17 +1381,17 @@ impl UOpCtx {
 
     /// elementwise `_broadcasted` promotion (mixin/elementwise.py:21-30).
     pub fn broadcasted(&mut self, x: UopId, y: UopId) -> (UopId, UopId) {
-        let out = least_upper_dtype(&[self.dt_of(x), self.dt_of(y)]);
+        let out = least_upper_dtype(&[self.dt_of(&x), self.dt_of(&y)]);
         (self.promote(x, out), self.promote(y, out))
     }
 
     fn promote(&mut self, t: UopId, out: DTypeId) -> UopId {
-        let base = self.base(t);
-        if self.is_invalid(base) {
+        let base = self.base(&t);
+        if self.is_invalid(&base) {
             return t;
         }
-        if is_weak_dt(self.dt_of(t)) && self.op_of(base) == Ops::Const {
-            let v = self.val(base);
+        if is_weak_dt(self.dt_of(&t)) && self.op_of(&base) == Ops::Const {
+            let v = self.val(&base);
             return self.const_py(v, Some(weak_dtype(out)));
         }
         self.cast(t, out)
@@ -1457,15 +1399,15 @@ impl UOpCtx {
 
     /// `UOp.cast` (mixin/dtype.py:16-33): identity when dtypes match.
     pub fn cast(&mut self, t: UopId, dt: DTypeId) -> UopId {
-        if self.dt_of(t) == dt {
+        if self.dt_of(&t) == dt {
             return t;
         }
         self.uop(Ops::Cast, None, vec![t], Arg::Dtype(dt))
     }
 
     pub fn bitcast(&mut self, t: UopId, dt: DTypeId) -> UopId {
-        assert!(!is_weak_dt(self.dt_of(t)) && !is_weak_dt(dt), "bitcast requires concrete dtypes");
-        if self.dt_of(t) == dt {
+        assert!(!is_weak_dt(self.dt_of(&t)) && !is_weak_dt(dt), "bitcast requires concrete dtypes");
+        if self.dt_of(&t) == dt {
             return t;
         }
         self.uop(Ops::Bitcast, None, vec![t], Arg::Dtype(dt))
@@ -1493,7 +1435,7 @@ impl UOpCtx {
     }
 
     pub fn neg(&mut self, a: UopId) -> UopId {
-        if self.dt_of(a) == crate::dtype::BOOL {
+        if self.dt_of(&a) == crate::dtype::BOOL {
             return self.logical_not(a);
         }
         { let c = self.const_py(ConstVal::Int(-1), None); self.mul(a, c) }
@@ -1508,10 +1450,10 @@ impl UOpCtx {
     /// `x % y` (mixin `mod`): int/int -> FLOORMOD, else floor-div path.
     pub fn mod_(&mut self, a: UopId, b: UopId) -> UopId {
         let (x, y) = self.broadcasted(a, b);
-        if is_int(self.dt_of(x)) && is_int(self.dt_of(y)) {
+        if is_int(self.dt_of(&x)) && is_int(self.dt_of(&y)) {
             return self.alu2(Ops::Floormod, x, y);
         }
-        let d = self.div_floor(x, y);
+        let d = self.div_floor(x.clone(), y.clone());
         { let m = self.mul(d, y); self.sub(x, m) }
     }
 
@@ -1526,10 +1468,10 @@ impl UOpCtx {
 
     fn div_mode(&mut self, a: UopId, b: UopId, floor: bool) -> UopId {
         let (x, y) = self.broadcasted(a, b);
-        if is_int(self.dt_of(x)) && is_int(self.dt_of(y)) {
+        if is_int(self.dt_of(&x)) && is_int(self.dt_of(&y)) {
             return self.alu2(if floor { Ops::Floordiv } else { Ops::Cdiv }, x, y);
         }
-        let x = if is_int(self.dt_of(x)) || self.dt_of(x) == crate::dtype::BOOL {
+        let x = if is_int(self.dt_of(&x)) || self.dt_of(&x) == crate::dtype::BOOL {
             self.cast(x, crate::dtype::default_float())
         } else {
             x
@@ -1580,7 +1522,7 @@ impl UOpCtx {
 
     pub fn minimum(&mut self, a: UopId, b: UopId) -> UopId {
         let (t, x) = self.broadcasted(a, b);
-        let dt = least_upper_dtype(&[self.dt_of(t), self.dt_of(x)]);
+        let dt = least_upper_dtype(&[self.dt_of(&t), self.dt_of(&x)]);
         if is_float(dt) {
             let nt = self.neg(t);
             let nx = self.neg(x);
@@ -1590,8 +1532,8 @@ impl UOpCtx {
         // python: k = dt.const(dt.min + dt.max) — for every two's-complement
         // int dtype (weakint included) min+max == -1
         let k = self.const_py(ConstVal::Int(-1), Some(dt));
-        let a1 = self.alu2(Ops::Xor, t, k);
-        let b1 = self.alu2(Ops::Xor, x, k);
+        let a1 = self.alu2(Ops::Xor, t, k.clone());
+        let b1 = self.alu2(Ops::Xor, x, k.clone());
         let m = self.alu2(Ops::Max, a1, b1);
         self.alu2(Ops::Xor, m, k)
     }
@@ -1625,20 +1567,20 @@ impl UOpCtx {
 
     /// `usum(*uops)` — reduce add (or) over [self] + others.
     pub fn usum(&mut self, first: UopId, rest: &[UopId]) -> UopId {
-        let is_bool = self.dt_of(first) == crate::dtype::BOOL;
+        let is_bool = self.dt_of(&first) == crate::dtype::BOOL;
         let mut acc = first;
-        for &n in rest {
-            acc = if is_bool { self.or_(acc, n) } else { self.add(acc, n) };
+        for n in rest {
+            acc = if is_bool { self.or_(acc, n.clone()) } else { self.add(acc, n.clone()) };
         }
         acc
     }
 
     /// `uprod(*uops)` — reduce mul (and) over [self] + others.
     pub fn uprod(&mut self, first: UopId, rest: &[UopId]) -> UopId {
-        let is_bool = self.dt_of(first) == crate::dtype::BOOL;
+        let is_bool = self.dt_of(&first) == crate::dtype::BOOL;
         let mut acc = first;
-        for &n in rest {
-            acc = if is_bool { self.and_(acc, n) } else { self.mul(acc, n) };
+        for n in rest {
+            acc = if is_bool { self.and_(acc, n.clone()) } else { self.mul(acc, n.clone()) };
         }
         acc
     }
@@ -1657,17 +1599,17 @@ impl UOpCtx {
     /// `x.const_like(b)` — CONST (or STACK of CONSTs) with x's dtype,
     /// EXPANDed to x's shape when it differs (ops.py:581-583).
     pub fn const_like(&mut self, x: UopId, v: ConstVal) -> UopId {
-        self.const_like_dt(x, v, Some(self.dt_of(x)))
+        self.const_like_dt(x.clone(), v, Some(self.dt_of(&x)))
     }
 
     pub fn const_like_dt(&mut self, x: UopId, v: ConstVal, dtype: Option<DTypeId>) -> UopId {
         let ret = self.const_py(v, dtype);
         // expand to x's shape when it differs
-        let xshape = match self.shape(x) {
+        let xshape = match self.shape(&x) {
             Ok(s) => s,
             Err(_) => return ret,
         };
-        let rshape = match self.shape(ret) {
+        let rshape = match self.shape(&ret) {
             Ok(s) => s,
             Err(_) => return ret,
         };
@@ -1678,7 +1620,7 @@ impl UOpCtx {
                 let s0 = crate::tensor::sink(self, vec![shape_src]);
                 let sid = crate::uop::upat::simplify(self, s0);
                 let mut srcs = vec![ret];
-                srcs.extend(self.srcs(sid).to_vec());
+                srcs.extend(self.srcs(&sid).to_vec());
                 self.uop(Ops::Expand, None, srcs, Arg::None)
             }
             _ => ret,
@@ -1696,7 +1638,8 @@ impl UOpCtx {
     /// Python sint binop: int-int folds, UOp sides keep receiver order with the
     /// int side wrapped as a CONST in place (`3 + u` -> ADD(CONST(3), u)).
     pub fn sval_binop(&mut self, op: Ops, a: SVal, b: SVal) -> SVal {
-        if let (SVal::I(x), SVal::I(y)) = (a, b) {
+        if let (SVal::I(x), SVal::I(y)) = (&a, &b) {
+            let (x, y) = (*x, *y);
             return match op {
                 Ops::Add => SVal::I(x.wrapping_add(y)),
                 Ops::Sub => SVal::I(x.wrapping_sub(y)),
@@ -1760,9 +1703,9 @@ impl UOpCtx {
 
     /// `x.split_uop(sep)` — flatten the tree on `sep`.
     pub fn split_uop(&self, root: UopId, sep: Ops, out: &mut Vec<UopId>) {
-        if self.op_of(root) == sep {
-            for &s in self.srcs(root) {
-                self.split_uop(s, sep, out);
+        if self.op_of(&root) == sep {
+            for s in self.srcs(&root) {
+                self.split_uop(s.clone(), sep, out);
             }
         } else {
             out.push(root);
@@ -1777,38 +1720,38 @@ impl UOpCtx {
 
     /// `x.pop_const(op)` (ops.py:1029-1030).
     pub fn pop_const(&mut self, x: UopId, op: Ops) -> (UopId, ConstVal) {
-        let (xo, _, xsrcs, _, _) = self.snapshot(x);
-        if xo == op && xsrcs.len() >= 2 && self.op_of(xsrcs[1]) == Ops::Const {
-            (xsrcs[0], self.val(xsrcs[1]))
+        let (xo, _, xsrcs, _, _) = self.snapshot(&x);
+        if xo == op && xsrcs.len() >= 2 && self.op_of(&xsrcs[1]) == Ops::Const {
+            ((xsrcs[0]).clone(), self.val(&xsrcs[1]))
         } else {
-            { let ie = self.identity_element(op, self.dt_of(x)); let v = self.val(ie); (x, v) }
+            { let ie = self.identity_element(op, self.dt_of(&x)); let v = self.val(&ie); (x, v) }
         }
     }
 
     /// `x.const_factor()` (ops.py:1007-1015).
     pub fn const_factor(&mut self, x: UopId) -> i128 {
-        let (op, _, srcs, _arg, _) = self.snapshot(x);
+        let (op, _, srcs, _arg, _) = self.snapshot(&x);
         match op {
-            Ops::Const => self.val(x).as_int_exact().unwrap_or(1),
+            Ops::Const => self.val(&x).as_int_exact().unwrap_or(1),
             Ops::Stack => {
                 let mut g: i128 = 0;
-                for &s in &srcs {
-                    g = gcd_i128(g, self.const_factor(s));
+                for s in &srcs {
+                    g = gcd_i128(g, self.const_factor(s.clone()));
                 }
                 g
             }
-            Ops::Add => gcd_i128(self.const_factor(srcs[0]), self.const_factor(srcs[1])),
+            Ops::Add => gcd_i128(self.const_factor((srcs[0]).clone()), self.const_factor((srcs[1]).clone())),
             Ops::Mul => {
-                if self.op_of(srcs[0]) == Ops::Const {
-                    self.val(srcs[0]).as_int_exact().unwrap_or(1)
-                } else if self.op_of(srcs[1]) == Ops::Const {
-                    self.val(srcs[1]).as_int_exact().unwrap_or(1)
+                if self.op_of(&srcs[0]) == Ops::Const {
+                    self.val(&srcs[0]).as_int_exact().unwrap_or(1)
+                } else if self.op_of(&srcs[1]) == Ops::Const {
+                    self.val(&srcs[1]).as_int_exact().unwrap_or(1)
                 } else {
                     1
                 }
             }
             Ops::Param | Ops::Buffer => {
-                if let Some(p) = self.has_param(x) {
+                if let Some(p) = self.has_param(&x) {
                     p.multiple_of.unwrap_or(0).max(0) as i128
                 } else {
                     1
@@ -1823,10 +1766,10 @@ impl UOpCtx {
         if v == 1 {
             return Some(x);
         }
-        let (op, _, srcs, _, _) = self.snapshot(x);
+        let (op, _, srcs, _, _) = self.snapshot(&x);
         match op {
             Ops::Const => {
-                let val = self.val(x);
+                let val = self.val(&x);
                 let iv = val.as_int_exact()?;
                 if iv % v == 0 {
                     Some(self.const_like(x, ConstVal::Int(iv / v)))
@@ -1836,27 +1779,27 @@ impl UOpCtx {
             }
             Ops::Stack => {
                 let mut srcs2 = Vec::with_capacity(srcs.len());
-                for &s in &srcs {
-                    srcs2.push(self.divides(s, v)?);
+                for s in &srcs {
+                    srcs2.push(self.divides(s.clone(), v)?);
                 }
                 Some(self.uop(Ops::Stack, None, srcs2, Arg::None))
             }
             Ops::Add => {
-                let d0 = self.divides(srcs[0], v)?;
-                let d1 = self.divides(srcs[1], v)?;
+                let d0 = self.divides((srcs[0]).clone(), v)?;
+                let d1 = self.divides((srcs[1]).clone(), v)?;
                 Some(self.add(d0, d1))
             }
             Ops::Mul => {
-                if let Some(d0) = self.divides(srcs[0], v) {
-                    return Some(self.mul(d0, srcs[1]));
+                if let Some(d0) = self.divides((srcs[0]).clone(), v) {
+                    return Some(self.mul(d0, (srcs[1]).clone()));
                 }
-                if let Some(d1) = self.divides(srcs[1], v) {
-                    return Some(self.mul(srcs[0], d1));
+                if let Some(d1) = self.divides((srcs[1]).clone(), v) {
+                    return Some(self.mul((srcs[0]).clone(), d1));
                 }
                 None
             }
             Ops::Param | Ops::Buffer => {
-                let p = self.has_param(x)?;
+                let p = self.has_param(&x)?;
                 let m = p.multiple_of? as i128;
                 if m % v == 0 {
                     { let d = self.cint(v as i64); Some(self.div_trunc(x, d)) }
@@ -1872,20 +1815,20 @@ impl UOpCtx {
     pub fn uop_gcd(&mut self, uops: &[UopId]) -> UopId {
         let mut terms = Vec::with_capacity(uops.len());
         let mut factors = Vec::with_capacity(uops.len());
-        for &u in uops {
-            let f = self.const_factor(u);
+        for u in uops {
+            let f = self.const_factor(u.clone());
             factors.push(f);
-            terms.push((self.divides(u, f), f));
+            terms.push((self.divides(u.clone(), f), f));
         }
         // Counter intersection over MUL factors, first term's key order
         let mut count: Vec<(UopId, usize)> = Vec::new();
-        for t in self.split_uop_vec(terms[0].0.unwrap(), Ops::Mul) {
+        for t in self.split_uop_vec(terms[0].0.clone().unwrap(), Ops::Mul) {
             bump_count(&mut count, t);
         }
         for (term, _) in terms.iter().skip(1) {
             let tcount = {
                 let mut tc: Vec<(UopId, usize)> = Vec::new();
-                for t in self.split_uop_vec((*term).unwrap(), Ops::Mul) {
+                for t in self.split_uop_vec(term.clone().unwrap(), Ops::Mul) {
                     bump_count(&mut tc, t);
                 }
                 tc
@@ -1895,9 +1838,9 @@ impl UOpCtx {
                 *c = (*c).min(other);
             }
         }
-        let elements: Vec<UopId> = count.iter().filter(|(_, c)| *c > 0).flat_map(|(k, c)| vec![*k; *c]).collect();
+        let elements: Vec<UopId> = count.iter().filter(|(_, c)| *c > 0).flat_map(|(k, c)| vec![k.clone(); *c]).collect();
         let g = gcd_i128_all(&factors);
-        let const_node = self.const_like(uops[0], ConstVal::Int(g));
+        let const_node = self.const_like(uops[0].clone(), ConstVal::Int(g));
         // math.prod([*elements, const]) — default start=1: 1*e1 → MUL(CONST(1), e1);
         // callers simplify immediately, so the plain fold converges to the same graph
         let mut all = elements;
@@ -1911,17 +1854,17 @@ impl UOpCtx {
         if x == v {
             return Some(self.const_like(x, ConstVal::Int(1)));
         }
-        if self.op_of(v) == Ops::Const {
-            let iv = self.val(v).as_int_exact()?;
+        if self.op_of(&v) == Ops::Const {
+            let iv = self.val(&v).as_int_exact()?;
             return self.divides(x, iv);
         }
-        if self.op_of(x) == Ops::Add {
-            let s0 = self.divide_exact(self.srcs(x)[0], v)?;
-            let s1 = self.divide_exact(self.srcs(x)[1], v)?;
+        if self.op_of(&x) == Ops::Add {
+            let s0 = self.divide_exact(self.srcs(&x)[0].clone(), v.clone())?;
+            let s1 = self.divide_exact(self.srcs(&x)[1].clone(), v)?;
             return Some(self.add(s0, s1));
         }
-        if self.op_of(x) == Ops::Mul {
-            let (fac, c) = self.pop_const(x, Ops::Mul);
+        if self.op_of(&x) == Ops::Mul {
+            let (fac, c) = self.pop_const(x.clone(), Ops::Mul);
             let (div_fac, div_c) = self.pop_const(v, Ops::Mul);
             // Counter subtraction
             let mut count: Vec<(UopId, i64)> = Vec::new();
@@ -1939,16 +1882,16 @@ impl UOpCtx {
             let dv = div_c.as_int_exact()?;
             if cv % dv == 0 && count.iter().all(|(_, c)| *c >= 0) {
                 let elements: Vec<UopId> =
-                    count.iter().filter(|(_, c)| *c > 0).flat_map(|(k, c)| vec![*k; *c as usize]).collect();
+                    count.iter().filter(|(_, c)| *c > 0).flat_map(|(k, c)| vec![k.clone(); *c as usize]).collect();
                 // math.prod(elements, start=const_like(const//div_const)) — empty elements → start alone
                 let start = self.const_like(x, ConstVal::Int(cv / dv));
                 if elements.is_empty() {
                     return Some(start);
                 }
-                let first = elements[0];
+                let first = elements[0].clone();
                 let mut acc = self.mul(start, first);
                 for e in &elements[1..] {
-                    acc = self.mul(acc, *e);
+                    acc = self.mul(acc, e.clone());
                 }
                 return Some(acc);
             }
@@ -1957,13 +1900,12 @@ impl UOpCtx {
     }
 
     /// `x.tuplize()` — an Ord key mirroring Python's tuple for commutative flips.
-    pub fn tuplize(&self, id: UopId) -> TupKey {
-        let n = self.g.get(id);
+    pub fn tuplize(&self, id: &UopId) -> TupKey {
         TupKey {
-            op: n.op as u16,
-            arg: arg_key(&n.arg),
-            dtype: DtKey::of(n.dtype),
-            srcs: n.srcs.iter().map(|&s| self.tuplize(s)).collect(),
+            op: id.op as u16,
+            arg: arg_key(&id.arg),
+            dtype: DtKey::of(id.dtype),
+            srcs: id.srcs.iter().map(|s| self.tuplize(s)).collect(),
         }
     }
 }
@@ -2184,7 +2126,7 @@ fn gcd_i128(a: i128, b: i128) -> i128 {
 }
 
 fn gcd_i128_all(vals: &[i128]) -> i128 {
-    vals.iter().copied().fold(0, gcd_i128)
+    vals.iter().cloned().fold(0, gcd_i128)
 }
 
 /// i128 → Arg for shape arg lists (Big values not representable in args).
@@ -2207,34 +2149,33 @@ impl UOpCtx {
             Emit(UopId),
         }
         let mut out: Vec<UopId> = vec![];
-        let mut seen: Vec<bool> = vec![false; self.g.nodes.len()];
+        let mut seen: HashSet<u32> = HashSet::new();
         let mut stack = vec![Step::Enter(root)];
         while let Some(s) = stack.pop() {
             match s {
                 Step::Enter(id) => {
-                    if seen[id.0 as usize] {
+                    if seen.contains(&id.id()) {
                         continue;
                     }
                     let go = match gate {
                         None => true,
-                        Some(g) => g(id),
+                        Some(g) => g(id.clone()),
                     };
                     if go {
-                        stack.push(Step::Emit(id));
-                        let op = self.op_of(id);
+                        stack.push(Step::Emit(id.clone()));
+                        let op = id.op;
                         let skip_body = !enter_calls && matches!(op, Ops::Call | Ops::Function);
-                        let srcs = self.g.get(id).srcs.clone();
-                        for (i, &src) in srcs.iter().enumerate().rev() {
+                        for (i, src) in id.srcs.iter().enumerate().rev() {
                             if skip_body && i == 0 {
                                 continue;
                             }
-                            stack.push(Step::Enter(src));
+                            stack.push(Step::Enter(src.clone()));
                         }
                     }
                 }
                 Step::Emit(id) => {
-                    if !seen[id.0 as usize] {
-                        seen[id.0 as usize] = true;
+                    if !seen.contains(&id.id()) {
+                        seen.insert(id.id());
                         out.push(id);
                     }
                 }
@@ -2243,36 +2184,8 @@ impl UOpCtx {
         out
     }
 
-    /// `u.topovisit(visitor, cache)` — the shared-cache variant used by limit_bufs.
-    pub fn topovisit<T: Clone>(&self, root: UopId, visitor: &mut dyn FnMut(UopId) -> T, cache: &mut Vec<Option<T>>) -> T {
-        enum Step {
-            Enter(UopId),
-            Emit(UopId),
-        }
-        let mut stack = vec![Step::Enter(root)];
-        while let Some(s) = stack.pop() {
-            match s {
-                Step::Enter(id) => {
-                    if cache[id.0 as usize].is_some() {
-                        continue;
-                    }
-                    stack.push(Step::Emit(id));
-                    for &src in self.g.get(id).srcs.iter().rev() {
-                        stack.push(Step::Enter(src));
-                    }
-                }
-                Step::Emit(id) => {
-                    if cache[id.0 as usize].is_none() {
-                        cache[id.0 as usize] = Some(visitor(id));
-                    }
-                }
-            }
-        }
-        cache[root.0 as usize].clone().expect("topovisit: root not visited")
-    }
-
     /// ParamArg of a BUFFER/PARAM node, if any.
-    pub fn param_arg(&self, id: UopId) -> Option<&ParamArg> {
+    pub fn param_arg<'a>(&self, id: &'a UopId) -> Option<&'a ParamArg> {
         match self.arg_of(id) {
             Arg::Param(p) => Some(p),
             _ => None,
@@ -2280,18 +2193,18 @@ impl UOpCtx {
     }
 
     /// `u.device` — ParamArg.device of a BUFFER/PARAM (None otherwise).
-    pub fn device_of(&self, id: UopId) -> Option<&DeviceSpec> {
+    pub fn device_of<'a>(&self, id: &'a UopId) -> Option<&'a DeviceSpec> {
         self.param_arg(id).and_then(|p| p.device.as_ref())
     }
 
     /// `u.addrspace` — ParamArg.addrspace (None when absent).
     pub fn addrspace_of(&self, id: UopId) -> Option<AddrSpace> {
-        self.param_arg(id).and_then(|p| p.addrspace)
+        self.param_arg(&id).and_then(|p| p.addrspace)
     }
 
     /// `u.addrspace` derived property (ops.py:867) — python's full logic.
     pub fn addrspace_derived(&self, id: UopId) -> Option<AddrSpace> {
-        let op = self.op_of(id);
+        let op = self.op_of(&id);
         if op == Ops::Param || op == Ops::Buffer {
             return self.addrspace_of(id);
         }
@@ -2301,16 +2214,16 @@ impl UOpCtx {
         if matches!(op, Ops::Index | Ops::Cast | Ops::After | Ops::Reduce | Ops::Store | Ops::Mstack | Ops::Mselect | Ops::End | Ops::Unshard)
             || group::in_(group::MOVEMENT, op)
         {
-            let srcs = self.srcs(id);
+            let srcs = self.srcs(&id);
             if srcs.is_empty() {
                 return None;
             }
-            return self.addrspace_derived(srcs[0]);
+            return self.addrspace_derived(srcs[0].clone());
         }
         if op == Ops::Stack || op == Ops::Wmma || op == Ops::Group || group::in_(group::ELEMENTWISE, op) {
             let mut ad: Vec<AddrSpace> = Vec::new();
-            for &s in self.srcs(id) {
-                if let Some(a) = self.addrspace_derived(s) {
+            for s in self.srcs(&id) {
+                if let Some(a) = self.addrspace_derived(s.clone()) {
                     ad.push(a);
                 }
             }
@@ -2325,10 +2238,10 @@ impl UOpCtx {
     /// `u.is_variable` — 0-d ALU BUFFER with a value range (shape arg is the
     /// empty shape, checked structurally without the shape cache).
     pub fn is_variable(&self, id: UopId) -> bool {
-        if self.op_of(id) != Ops::Buffer {
+        if self.op_of(&id) != Ops::Buffer {
             return false;
         }
-        match self.param_arg(id) {
+        match self.param_arg(&id) {
             Some(p) => p.vmin_vmax.is_some() && p.addrspace == Some(AddrSpace::Alu),
             None => false,
         }
@@ -2336,21 +2249,21 @@ impl UOpCtx {
 
     /// `u.is_bound_var` — AFTER wrapping a bound variable store.
     pub fn is_bound_var(&self, id: UopId) -> bool {
-        if self.op_of(id) != Ops::After {
+        if self.op_of(&id) != Ops::After {
             return false;
         }
         // AFTER(var_buffer.store(value)): src[0].src[0] is the variable
-        let srcs = self.srcs(id);
-        if srcs.is_empty() || self.op_of(srcs[0]) != Ops::Store {
+        let srcs = self.srcs(&id);
+        if srcs.is_empty() || self.op_of(&srcs[0]) != Ops::Store {
             return false;
         }
-        let st = self.srcs(srcs[0]);
-        !st.is_empty() && self.is_variable(st[0])
+        let st = self.srcs(&srcs[0]);
+        !st.is_empty() && self.is_variable(st[0].clone())
     }
 
     /// `u.buf_uop` (ops.py:881).
     pub fn buf_uop(&mut self, id: UopId) -> UopId {
-        let op = self.op_of(id);
+        let op = self.op_of(&id);
         if op == Ops::Buffer || op == Ops::Param {
             return id;
         }
@@ -2358,46 +2271,46 @@ impl UOpCtx {
             return id; // per-device selection stays (corpus is single-device)
         }
         if op == Ops::Mstack {
-            let srcs = self.srcs(id).to_vec();
-            let bufs: Vec<UopId> = srcs.iter().map(|&s| self.buf_uop(s)).collect();
+            let srcs = self.srcs(&id).to_vec();
+            let bufs: Vec<UopId> = srcs.iter().map(|s| self.buf_uop(s.clone())).collect();
             return self.uop(Ops::Mstack, None, bufs, Arg::None);
         }
-        if self.op_of(self.base(id)) == Ops::After {
-            let b = self.base(id);
-            let bsrc = self.srcs(b)[0];
+        if self.op_of(&self.base(&id)) == Ops::After {
+            let b = self.base(&id);
+            let bsrc = self.srcs(&b)[0].clone();
             let bu = self.buf_uop(bsrc);
-            return self.base(bu);
+            return self.base(&bu);
         }
         let mut s = id;
         loop {
-            let srcs = self.srcs(s);
-            let op = self.op_of(s);
+            let srcs = self.srcs(&s);
+            let op = self.op_of(&s);
             if srcs.is_empty() || matches!(op, Ops::Buffer | Ops::Param | Ops::Stage | Ops::Mstack) {
                 return s;
             }
-            s = srcs[0];
+            s = srcs[0].clone();
         }
     }
 
     /// `u.unsharded_base` (ops.py:765) — movement/base chain to the storage base.
     pub fn unsharded_base(&mut self, id: UopId) -> UopId {
-        let op = self.op_of(id);
+        let op = self.op_of(&id);
         if group::in_(group::MOVEMENT, op) || op == Ops::Detach || op == Ops::Unshard {
-            let s0 = self.srcs(id)[0];
-            return self.base(s0);
+            let s0 = self.srcs(&id)[0].clone();
+            return self.base(&s0);
         }
         id
     }
 
     /// `u.has_buffer_identity(after_ok)` (ops.py:908).
     pub fn has_buffer_identity(&mut self, id: UopId, after_ok: bool) -> bool {
-        let op = self.op_of(id);
+        let op = self.op_of(&id);
         if matches!(op, Ops::Reshape | Ops::Unshard | Ops::Mselect) {
-            let s0 = self.srcs(id)[0];
+            let s0 = self.srcs(&id)[0].clone();
             return self.has_buffer_identity(s0, after_ok);
         }
         if after_ok && op == Ops::After {
-            let s0 = self.srcs(id)[0];
+            let s0 = self.srcs(&id)[0].clone();
             return self.has_buffer_identity(s0, after_ok);
         }
         matches!(op, Ops::Buffer | Ops::Param)
@@ -2411,12 +2324,12 @@ impl UOpCtx {
 
     /// `u.max_shape` — per-axis vmax (concrete ints in the corpus).
     pub fn max_shape(&mut self, id: UopId) -> Vec<i64> {
-        let shp = self.shape_of(id).expect("TGERR: max_shape on shapeless node");
+        let shp = self.shape_of(&id).expect("TGERR: max_shape on shapeless node");
         shp.iter()
             .map(|s| match s {
                 SVal::I(i) => *i as i64,
                 SVal::U(u) => {
-                    let (_, vmax) = self.min_max(*u).expect("TGERR: unbounded symbolic shape");
+                    let (_, vmax) = self.min_max(u).expect("TGERR: unbounded symbolic shape");
                     vmax.as_i64_or_panic()
                 }
             })
@@ -2431,31 +2344,31 @@ impl UOpCtx {
 
     /// `contiguous_view` (ops.py:890) — (tagged base buffer, offset).
     pub fn contiguous_view(&mut self, x: UopId) -> Option<(UopId, i64)> {
-        let numel = self.max_numel(x);
+        let numel = self.max_numel(x.clone());
         let flat = crate::tensor::movement::flatten(self, x, -1, -1);
         let r = self.range(SVal::I(numel as i128), 0, crate::uop::range::AxisType::Weak);
         let idx = self.index(flat, vec![r]);
         let pm = crate::uop::sym::pm_mop_cleanup();
         let cvo = crate::uop::ops::pm_contiguous_view_offset();
-        let full = pm.add(&crate::uop::sym::symbolic()).add(&cvo);
+        let full = pm.add(crate::uop::sym::symbolic()).add(&cvo);
         let out = crate::uop::upat::graph_rewrite(self, idx, &full, false, None, false, false, super::upat::CtxVal::None).ok()?;
-        if self.op_of(out) != Ops::Index {
+        if self.op_of(&out) != Ops::Index {
             return None;
         }
-        let osrcs = self.srcs(out).to_vec();
+        let osrcs = self.srcs(&out).to_vec();
         if osrcs.len() != 2 {
             return None;
         }
         // (b:=out.src[0]).tag must be truthy
-        let tagged = !matches!(self.tag_of(osrcs[0]), Arg::None);
+        let tagged = !matches!(self.tag_of(&osrcs[0]), Arg::None);
         if !tagged {
             return None;
         }
-        if self.op_of(osrcs[1]) != Ops::Const {
+        if self.op_of(&osrcs[1]) != Ops::Const {
             return None;
         }
-        match self.val(osrcs[1]) {
-            ConstVal::Int(i) if i >= i64::MIN as i128 && i <= i64::MAX as i128 => Some((osrcs[0], i as i64)),
+        match self.val(&osrcs[1]) {
+            ConstVal::Int(i) if i >= i64::MIN as i128 && i <= i64::MAX as i128 => Some(((osrcs[0]).clone(), i as i64)),
             _ => None,
         }
     }

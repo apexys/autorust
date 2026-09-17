@@ -12,7 +12,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::dtype::DTypeId;
 use crate::uop::arg::{Arg, DeviceSpec};
@@ -205,21 +205,50 @@ impl Buffer {
 }
 
 /// The engine's `buffers` dict: BUFFER uops (and views) → engine Buffers.
+///
+/// `bases` holds the strong reference that keeps a realized allocation alive for
+/// the duration of a realize; `views` are weak handles rebuilt on access.
+/// [`BufTable::prune`] (called at the start of each realize) drops any base no
+/// live caller (e.g. a `Tensor`-owned buffer) still references, keeping the table
+/// bounded across repeated computation.
 #[derive(Default)]
 pub struct BufTable {
     bases: HashMap<u32, Rc<BufferBase>>,
-    views: HashMap<u32, Buffer>,
+    views: HashMap<u32, WeakBuffer>,
+}
+
+/// A non-owning `Buffer` handle (base + window metadata).
+#[derive(Clone)]
+struct WeakBuffer {
+    base: Weak<BufferBase>,
+    size: usize,
+    dtype: DTypeId,
+    offset: usize,
+}
+
+impl WeakBuffer {
+    fn of(b: &Buffer) -> WeakBuffer {
+        WeakBuffer { base: Rc::downgrade(&b.base), size: b.size, dtype: b.dtype, offset: b.offset }
+    }
+    fn upgrade(&self) -> Option<Buffer> {
+        self.base.upgrade().map(|base| Buffer { base, size: self.size, dtype: self.dtype, offset: self.offset })
+    }
 }
 
 impl BufTable {
-    /// Number of distinct base allocations currently tracked (leak observability:
-    /// a repeated realize that reuses storage must not grow this).
+    /// Number of base allocations still referenced by a live caller (leak
+    /// observability: a repeated realize that reuses storage must not grow).
     pub fn n_bases(&self) -> usize {
-        self.bases.len()
+        self.bases.values().filter(|b| Rc::strong_count(b) > 1).count()
     }
-    /// Number of cached view entries (uop id → `Buffer`).
+    /// Number of cached view entries (uop id → weak `Buffer`).
     pub fn n_views(&self) -> usize {
         self.views.len()
+    }
+    /// Drop bases (and their views) with no reference outside the table.
+    pub fn prune(&mut self) {
+        self.bases.retain(|_, b| Rc::strong_count(b) > 1);
+        self.views.retain(|_, v| v.base.strong_count() > 0);
     }
 }
 
@@ -228,7 +257,7 @@ impl BufTable {
 /// `ctx.initial_data` for opaque-constructed storage); movement/bitcast views
 /// resolve to `base.view(size, dtype, byte_offset)`.
 pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
-    match ctx.op_of(u) {
+    match ctx.op_of(&u) {
         Ops::Contiguous
         | Ops::Reshape
         | Ops::After
@@ -242,14 +271,14 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
             // view/movement ops share the base buffer; the reshape/permute/pad/
             // expand/flip mapping is applied through the kernel's index math, so
             // storage resolution just walks to src[0]'s buffer.
-            let s0 = ctx.srcs(u)[0];
-            buffer_of(ctx, t, s0)
+            let s0 = &ctx.srcs(&u)[0].clone();
+            buffer_of(ctx, t, s0.clone())
         }
         Ops::Buffer => {
-            if let Some(b) = t.views.get(&u.0) {
-                return b.clone();
+            if let Some(b) = t.views.get(&u.id()).and_then(|v| v.upgrade()) {
+                return b;
             }
-            let pa: crate::uop::arg::ParamArg = match ctx.arg_of(u) {
+            let pa: crate::uop::arg::ParamArg = match ctx.arg_of(&u) {
                 Arg::Param(p) => p.clone(),
                 other => panic!("TGERR: BUFFER arg {other:?}"),
             };
@@ -258,7 +287,7 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
                 Some(DeviceSpec::Multi(v)) => v[0].clone(),
                 None => "CPU".to_string(),
             };
-            let size = ctx.max_numel(u) as usize;
+            let size = ctx.max_numel(u.clone()) as usize;
             let dt = pa.dtype;
             let base = Rc::new(BufferBase {
                 device: dev,
@@ -270,48 +299,48 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
             });
             // Tensor(data) path: initial bytes staged, copied in on allocation
             // (through the backend allocator, so any device works).
-            if let Some(bytes) = ctx.initial_data.get(&u.0) {
+            if let Some(bytes) = ctx.initial_data.get(&u.id()) {
                 let nb = size * dt.itemsize();
                 assert!(bytes.borrow().len() == nb, "TGERR: initial data size mismatch");
                 *base.pending_copyin.borrow_mut() = Some(bytes.borrow().clone());
             }
             let b = Buffer { base: base.clone(), size, dtype: dt, offset: 0 };
-            t.bases.insert(u.0, base);
-            t.views.insert(u.0, b.clone());
+            t.bases.insert(u.id(), base);
+            t.views.insert(u.id(), WeakBuffer::of(&b));
             b
         }
         Ops::Bitcast => {
-            if let Some(b) = t.views.get(&u.0) {
-                return b.clone();
+            if let Some(b) = t.views.get(&u.id()).and_then(|v| v.upgrade()) {
+                return b;
             }
-            let s0 = ctx.srcs(u)[0];
-            let inner = buffer_of(ctx, t, s0);
-            let (n, dt) = (ctx.max_numel(u) as usize, ctx.dt_of(u));
+            let s0 = &ctx.srcs(&u)[0].clone();
+            let inner = buffer_of(ctx, t, s0.clone());
+            let (n, dt) = (ctx.max_numel(u.clone()) as usize, ctx.dt_of(&u));
             let b = inner.view(n, dt, 0);
-            t.views.insert(u.0, b.clone());
+            t.views.insert(u.id(), WeakBuffer::of(&b));
             b
         }
         Ops::Copy => {
             // single-device corpus: a COPY aliases its source's storage (the
             // copy-in/copy-out through the allocator keeps bytes in sync).
-            let s0 = ctx.srcs(u)[0];
-            buffer_of(ctx, t, s0)
+            let s0 = &ctx.srcs(&u)[0].clone();
+            buffer_of(ctx, t, s0.clone())
         }
         Ops::Shrink => {
-            if let Some(b) = t.views.get(&u.0) {
-                return b.clone();
+            if let Some(b) = t.views.get(&u.id()).and_then(|v| v.upgrade()) {
+                return b;
             }
-            let src = ctx.srcs(u)[0];
-            let inner = buffer_of(ctx, t, src);
-            let start = match ctx.val(ctx.srcs(u)[1]) {
+            let src = &ctx.srcs(&u)[0].clone();
+            let inner = buffer_of(ctx, t, src.clone());
+            let start = match ctx.val(&ctx.srcs(&u)[1]) {
                 crate::dtype::ConstVal::Int(v) => v as usize,
                 other => panic!("TGERR: view SHRINK start {other:?}"),
             };
             // SHRINK args are elements of the inner dtype
             let byte_off = start * ctx.dt_of(src).itemsize();
-            let (n, dt) = (ctx.max_numel(u) as usize, ctx.dt_of(u));
+            let (n, dt) = (ctx.max_numel(u.clone()) as usize, ctx.dt_of(&u));
             let b = inner.view(n, dt, byte_off);
-            t.views.insert(u.0, b.clone());
+            t.views.insert(u.id(), WeakBuffer::of(&b));
             b
         }
         other => panic!("TGERR: buffer_of op {other:?}"),

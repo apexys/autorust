@@ -105,7 +105,7 @@ pub const OPS_ALL: &[Ops] = &[
 
 impl Ops {
     pub fn from_u16(v: u16) -> Option<Ops> {
-        OPS_ALL.iter().copied().find(|o| *o as u16 == v)
+        OPS_ALL.iter().cloned().find(|o| *o as u16 == v)
     }
     /// Python enum member name, e.g. "Ops.CONTIGUOUS_BACKWARD".
     pub fn pyname(self) -> &'static str {
@@ -254,7 +254,7 @@ use crate::uop::upat::{PatternMatcher, RuleFn, UPat, UPatOrConst};
 
 /// python `rtag()` — set tag to True (replace is a no-op when already set).
 fn rtag(ctx: &mut UOpCtx, b: UopId) -> UopId {
-    let (op, dt, srcs, arg, tag) = ctx.snapshot(b);
+    let (op, dt, srcs, arg, tag) = ctx.snapshot(&b);
     if matches!(tag, Arg::Bool(true)) {
         return b;
     }
@@ -269,10 +269,10 @@ pub fn pm_contiguous_view_offset() -> PatternMatcher {
             UPat::ops1(Ops::Bitcast).named("b"),
             r(|ctx, st, _| {
                 let b = sget(st, "b");
-                let shape = ctx.shape(b).ok().flatten()?;
+                let shape = ctx.shape(&b).ok().flatten()?;
                 if shape.len() != 1 {
-                    let flat = crate::tensor::movement::flatten(ctx, ctx.srcs(b)[0], -1, -1);
-                    let bc = ctx.bitcast(flat, ctx.dt_of(b));
+                    let flat = crate::tensor::movement::flatten(ctx, ctx.srcs(&b)[0].clone(), -1, -1);
+                    let bc = ctx.bitcast(flat, ctx.dt_of(&b));
                     Some(crate::tensor::movement::reshape(ctx, bc, &shape))
                 } else {
                     None

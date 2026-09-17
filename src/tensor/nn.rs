@@ -37,8 +37,8 @@ pub fn scoped<'a>(parent: &'a str, it: impl Iterator<Item = (String, Tensor)> + 
 
 impl Module for Linear {
     fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
-        let w = std::iter::once(("weight".to_string(), self.weight));
-        let b = self.bias.map(|b| ("bias".to_string(), b));
+        let w = std::iter::once(("weight".to_string(), self.weight.clone()));
+        let b = self.bias.clone().map(|b| ("bias".to_string(), b));
         Box::new(w.chain(b))
     }
 }
@@ -137,10 +137,10 @@ impl Conv2d {
         let w_shape = self.weight.clone().shape(ctx);
         let _x_shape = x.shape(ctx);
         let w_len = w_shape.len() as isize;
-        let _kh: i64 = w_shape.get(w_len - 2).unwrap().as_i64().unwrap_or(0);
-        let _kw: i64 = w_shape.get(w_len - 1).unwrap().as_i64().unwrap_or(0);
+        let _kh: i64 = w_shape.get(w_len - 2).unwrap().clone().as_i64().unwrap_or(0);
+        let _kw: i64 = w_shape.get(w_len - 1).unwrap().clone().as_i64().unwrap_or(0);
         // Output shape: (B, out_channels, out_h, out_w) — simplified to just out_channels
-        let _out_channels: i64 = w_shape.get(0).unwrap().as_i64().unwrap_or(0);
+        let _out_channels: i64 = w_shape.get(0).unwrap().clone().as_i64().unwrap_or(0);
         match &self.bias {
             Some(b) => b.clone(),
             None => Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(0.0), None),
@@ -166,15 +166,15 @@ impl BatchNorm {
     /// Create a new BatchNorm layer.
     /// sz: feature size, eps: epsilon for numerical stability.
     pub fn new(ctx: &mut UOpCtx, sz: i64, eps: f64, affine: bool, track_running_stats: bool, momentum: f64) -> Self {
-        let weight = if affine { Some(Tensor::ones(ctx, &[sz])) } else { None };
-        let bias = if affine { Some(Tensor::zeros(ctx, &[sz])) } else { None };
+        let weight = if affine { Some(Tensor::ones(ctx, [sz])) } else { None };
+        let bias = if affine { Some(Tensor::zeros(ctx, [sz])) } else { None };
         let running_mean = if track_running_stats {
-            Some(Tensor::zeros(ctx, &[sz]))
+            Some(Tensor::zeros(ctx, [sz]))
         } else {
             None
         };
         let running_var = if track_running_stats {
-            Some(Tensor::ones(ctx, &[sz]))
+            Some(Tensor::ones(ctx, [sz]))
         } else {
             None
         };
@@ -200,11 +200,11 @@ impl BatchNorm {
         // Reduce over all dims except batch (dim 0) and channels (dim 1)
         let reduce_axis: Vec<usize> = (0..ndim).filter(|&i| i != 1).collect();
         let batch_mean = x.clone().mean(ctx, Some(&reduce_axis), false);
-        let norm_shape = self._norm_shape(&*x_shape);
+        let norm_shape = self._norm_shape(&x_shape);
         let batch_mean_reshaped = batch_mean.reshape(ctx, &norm_shape);
         let diff = x.sub(ctx, &(batch_mean_reshaped));
         let batch_var = diff.square(ctx).mean(ctx, Some(&reduce_axis), false);
-        let batch_var_shape = self._norm_shape(&*x_shape);
+        let batch_var_shape = self._norm_shape(&x_shape);
         let batch_var_reshaped = batch_var.reshape(ctx, &batch_var_shape);
         let eps_tensor = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(self.eps), None);
         let invstd = batch_var_reshaped.add(ctx, &(eps_tensor)).sqrt(ctx).reciprocal(ctx);
@@ -220,8 +220,8 @@ impl BatchNorm {
 
     /// Forward pass with inference mode (uses running stats).
     pub fn forward_inference(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        let mean = self.running_mean.clone().unwrap_or_else(|| Tensor::zeros(ctx, &[self.num_features]));
-        let var = self.running_var.clone().unwrap_or_else(|| Tensor::ones(ctx, &[self.num_features]));
+        let mean = self.running_mean.clone().unwrap_or_else(|| Tensor::zeros(ctx, [self.num_features]));
+        let var = self.running_var.clone().unwrap_or_else(|| Tensor::ones(ctx, [self.num_features]));
 
         let eps_tensor = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(self.eps), None);
         let invstd = var.add(ctx, &(eps_tensor)).sqrt(ctx).reciprocal(ctx);
@@ -238,7 +238,7 @@ impl BatchNorm {
             }
         }
         let mean_reshaped = mean.reshape(ctx, &norm_shape);
-        let var_reshaped = var.reshape(ctx, &norm_shape);
+        let _var_reshaped = var.reshape(ctx, &norm_shape);
         let invstd_reshaped = invstd.reshape(ctx, &norm_shape);
 
         let diff = x.sub(ctx, &(mean_reshaped));
@@ -344,8 +344,8 @@ impl GroupNorm {
     /// Create a new GroupNorm layer.
     pub fn new(ctx: &mut UOpCtx, num_groups: i64, num_channels: i64, eps: f64, affine: bool) -> Self {
         assert_eq!(num_channels % num_groups, 0, "num_channels must be divisible by num_groups");
-        let weight = if affine { Some(Tensor::ones(ctx, &[num_channels])) } else { None };
-        let bias = if affine { Some(Tensor::zeros(ctx, &[num_channels])) } else { None };
+        let weight = if affine { Some(Tensor::ones(ctx, [num_channels])) } else { None };
+        let bias = if affine { Some(Tensor::zeros(ctx, [num_channels])) } else { None };
 
         GroupNorm {
             num_groups,
@@ -363,16 +363,16 @@ impl GroupNorm {
         let ndim = x_shape.len();
         // GroupNorm: normalize over channels within groups
         // Reshape to (B, G, C_per_G, ...) -> normalize over C_per_G and spatial dims
-        let c_per_g = self.num_channels / self.num_groups;
+        let _c_per_g = self.num_channels / self.num_groups;
 
         // For simplicity, use the same reduction axes as BatchNorm but per-group
         // This is a simplified implementation
         let reduce_axis: Vec<usize> = (0..ndim).filter(|&i| i != 1).collect();
         let batch_mean = x.mean(ctx, Some(&reduce_axis), false);
-        let batch_mean_reshaped = batch_mean.reshape(ctx, &self._norm_shape(ndim));
+        let batch_mean_reshaped = batch_mean.reshape(ctx, self._norm_shape(ndim));
         let diff = x.sub(ctx, &(batch_mean_reshaped));
         let batch_var = diff.square(ctx).mean(ctx, Some(&reduce_axis), false);
-        let batch_var_reshaped = batch_var.reshape(ctx, &self._norm_shape(ndim));
+        let batch_var_reshaped = batch_var.reshape(ctx, self._norm_shape(ndim));
         let eps_tensor = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(self.eps), None);
         let invstd = batch_var_reshaped.add(ctx, &(eps_tensor)).sqrt(ctx).reciprocal(ctx);
 

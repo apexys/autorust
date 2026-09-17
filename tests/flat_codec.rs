@@ -9,7 +9,7 @@ fn flat_roundtrip_synthetic() {
     let c1 = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(2.5), Arg::None);
     let c2 = g.intern(Ops::Const, INT32, vec![], Arg::Int(3), Arg::None);
     let c3 = g.intern(Ops::Const, BOOL, vec![], Arg::Bool(true), Arg::None);
-    let w = g.intern(Ops::Where, FLOAT32, vec![c3, c1, c1], Arg::None, Arg::None);
+    let w = g.intern(Ops::Where, FLOAT32, vec![c3, c1.clone(), c1], Arg::None, Arg::None);
     let nan = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(f64::NAN), Arg::None);
     let inf = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(f64::INFINITY), Arg::None);
     let ninf = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(f64::NEG_INFINITY), Arg::None);
@@ -37,9 +37,7 @@ fn flat_roundtrip_synthetic() {
     assert_eq!(json, json2);
     // node identity: same roots, interned equality for the reduce chain
     assert_eq!(g.roots.len(), g2.roots.len());
-    for (a, b) in g.roots.iter().zip(g2.roots.iter()) {
-        let na = g.get(*a);
-        let nb = g2.get(*b);
+    for (na, nb) in g.roots.iter().zip(g2.roots.iter()) {
         assert_eq!(na.op, nb.op, "op mismatch");
         assert_eq!(na.dtype, nb.dtype);
         assert_eq!(na.srcs.len(), nb.srcs.len());
@@ -75,7 +73,7 @@ fn arg_json_shapes() {
     for (name, a) in cases {
         let j = arg_to_flat(&a).serialize_json();
         println!("{name}: {j}");
-        let back: FlatGraph = FlatGraph::deserialize_json(&format!("{{\"dtypes\":[],\"nodes\":[],\"roots\":[]}}")).unwrap();
+        let back: FlatGraph = FlatGraph::deserialize_json(&"{\"dtypes\":[],\"nodes\":[],\"roots\":[]}".to_string()).unwrap();
         assert!(back.dtypes.is_empty());
     }
 }

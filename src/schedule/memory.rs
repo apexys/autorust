@@ -66,7 +66,7 @@ impl TlsfAllocator {
 
     fn lv2(&self, size: i64) -> usize {
         let bl = bit_length(size);
-        let denom = 1i64 << bl.saturating_sub(self.l2_cnt).max(0);
+        let denom = 1i64 << bl.saturating_sub(self.l2_cnt);
         ((size - (1i64 << (bl - 1))) / denom) as usize
     }
 
@@ -94,19 +94,18 @@ impl TlsfAllocator {
         self.remove_block(start, size, None);
         self.insert_block(start, new_size, None);
         self.insert_block(start + new_size, size - new_size, Some(start));
-        if let Some(n) = nxt {
-            if let Some(b) = self.blocks.get_mut(&n) {
+        if let Some(n) = nxt
+            && let Some(b) = self.blocks.get_mut(&n) {
                 let (bsize, bnext, _, bfree) = *b;
                 *b = (bsize, bnext, Some(start + new_size), bfree);
             }
-        }
     }
 
     fn merge_right(&mut self, start: i64) {
         let (mut size, mut nxt, _, is_free) = self.blocks[&start];
         assert!(is_free, "TGERR: block must be free");
         while let Some(n) = nxt {
-            let Some(&(bsize, bnext, _, bfree)) = self.blocks.get(&n).copied().as_ref() else { break };
+            let Some(&(bsize, bnext, _, bfree)) = self.blocks.get(&n).cloned().as_ref() else { break };
             // python: if the NEIGHBOR is not free, stop merging
             if !bfree {
                 break;
@@ -119,12 +118,11 @@ impl TlsfAllocator {
             self.blocks.remove(&n);
             nxt = bnext;
         }
-        if let Some(n) = nxt {
-            if let Some(b) = self.blocks.get_mut(&n) {
+        if let Some(n) = nxt
+            && let Some(b) = self.blocks.get_mut(&n) {
                 let (bsize, bnext, _, bfree) = *b;
                 *b = (bsize, bnext, Some(start), bfree);
             }
-        }
     }
 
     fn merge_block(&mut self, start: i64) {
@@ -142,7 +140,7 @@ impl TlsfAllocator {
     pub fn alloc(&mut self, req_size: i64, align: i64) -> i64 {
         let req_size = self.block_size.max(req_size);
         let mut size = self.block_size.max(req_size + align - 1);
-        size = round_up(size, 1i64 << bit_length(size).saturating_sub(self.l2_cnt).max(0));
+        size = round_up(size, 1i64 << bit_length(size).saturating_sub(self.l2_cnt));
         let sz_l1 = self.lv1(size);
         let sz_l2 = self.lv2(size);
         for l1 in sz_l1..self.storage.len() {
@@ -186,11 +184,11 @@ impl TlsfAllocator {
 
 /// `_collect_bufs`.
 fn collect_bufs(ctx: &UOpCtx, u: UopId, out: &mut Vec<UopId>) {
-    match ctx.op_of(u) {
+    match ctx.op_of(&u) {
         Ops::Buffer => out.push(u),
         Ops::Mselect | Ops::Mstack => {
-            for &s in ctx.srcs(u) {
-                collect_bufs(ctx, s, out);
+            for s in ctx.srcs(&u) {
+                collect_bufs(ctx, s.clone(), out);
             }
         }
         _ => {}
@@ -211,25 +209,25 @@ fn can_plan(ctx: &mut UOpCtx, b: UopId, held: &[UopId]) -> bool {
 
 /// `memory_plan_rewrite` — suballocate internal buffers into per-lane arenas.
 pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId]) -> UopId {
-    let srcs = ctx.srcs(linear).to_vec();
+    let srcs = ctx.srcs(&linear).to_vec();
     let mut first_appearance: HashMap<UopId, i64> = HashMap::new();
     let mut last_appearance: HashMap<UopId, i64> = HashMap::new();
     let mut order: Vec<UopId> = Vec::new();
     let mut copy_bufs: HashSet<UopId> = HashSet::new();
-    for (i, &si) in srcs.iter().enumerate() {
+    for (i, si) in srcs.iter().enumerate() {
         let call_srcs = ctx.srcs(si).to_vec();
         let mut si_bufs = Vec::new();
-        for &s in call_srcs.get(1..).unwrap_or(&[]) {
-            collect_bufs(ctx, s, &mut si_bufs);
+        for s in call_srcs.get(1..).unwrap_or(&[]) {
+            collect_bufs(ctx, s.clone(), &mut si_bufs);
         }
-        si_bufs.retain(|&b| can_plan(ctx, b, held_bufs));
+        si_bufs.retain(|b| can_plan(ctx, b.clone(), held_bufs));
         for b in si_bufs {
             if !first_appearance.contains_key(&b) {
-                first_appearance.insert(b, i as i64);
-                order.push(b);
+                first_appearance.insert(b.clone(), i as i64);
+                order.push(b.clone());
             }
-            last_appearance.insert(b, i as i64);
-            if ctx.op_of(call_srcs[0]) == Ops::Copy {
+            last_appearance.insert(b.clone(), i as i64);
+            if ctx.op_of(&call_srcs[0]) == Ops::Copy {
                 copy_bufs.insert(b);
             }
         }
@@ -249,23 +247,23 @@ pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId])
         (dev, if is_copy { 1 } else { 0 })
     };
     let mut buf_hold: HashMap<UopId, i64> = HashMap::new();
-    for &b in &order {
-        if copy_bufs.contains(&b) {
-            buf_hold.insert(b, last_appearance[&b] - first_appearance[&b] + 1);
+    for b in &order {
+        if copy_bufs.contains(b) {
+            buf_hold.insert(b.clone(), last_appearance[b] - first_appearance[b] + 1);
         }
     }
 
     let block_size: i64 = 256;
     let mut nbytes: HashMap<UopId, i64> = HashMap::new();
-    for &b in &order {
-        let bytes = ctx.max_numel(b) as i64 * ctx.dt_of(b).itemsize() as i64;
-        nbytes.insert(b, round_up(bytes, block_size));
+    for b in &order {
+        let bytes = ctx.max_numel(b.clone()) * ctx.dt_of(b).itemsize() as i64;
+        nbytes.insert(b.clone(), round_up(bytes, block_size));
     }
     // build sorted open/close events
     let mut events: Vec<(i64, bool, UopId)> = Vec::new();
-    for &b in &order {
-        events.push((first_appearance[&b], true, b));
-        events.push((last_appearance[&b] + 1 + buf_hold.get(&b).copied().unwrap_or(0), false, b));
+    for b in &order {
+        events.push((first_appearance[b], true, b.clone()));
+        events.push((last_appearance[b] + 1 + buf_hold.get(b).cloned().unwrap_or(0), false, b.clone()));
     }
     events.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     let total_memory: i64 = nbytes.values().sum::<i64>() * 2;
@@ -273,14 +271,14 @@ pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId])
     let mut offsets: HashMap<UopId, i64> = HashMap::new();
     let mut allocators: HashMap<(String, i64), (i64, TlsfAllocator)> = HashMap::new();
     for (_, is_open, buf) in events {
-        let key = lane_of(ctx, buf);
+        let key = lane_of(ctx, buf.clone());
         let alloc = allocators
             .entry(key.clone())
             .or_insert_with(|| (0, TlsfAllocator::new(total_memory, 0, block_size, 32)));
         if is_open {
             let off = alloc.1.alloc(nbytes[&buf], 1);
-            offsets.insert(buf, off);
-            let peak = off + ctx.max_numel(buf) as i64 * ctx.dt_of(buf).itemsize() as i64;
+            offsets.insert(buf.clone(), off);
+            let peak = off + ctx.max_numel(buf.clone()) * ctx.dt_of(&buf).itemsize() as i64;
             alloc.0 = alloc.0.max(peak);
         } else {
             alloc.1.free(offsets[&buf]);
@@ -294,18 +292,18 @@ pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId])
     // build replace_map: each buffer becomes a SHRINK/BITCAST into a shared arena
     let mut arenas: HashMap<(String, i64), UopId> = HashMap::new();
     let mut replace_map: HashMap<UopId, UopId> = HashMap::new();
-    for &b in &order {
-        let key = lane_of(ctx, b);
+    for b in &order {
+        let key = lane_of(ctx, b.clone());
         let sz = arena_sizes[&key];
-        let arena = *arenas.entry(key).or_insert_with(|| {
-            let dev_s = match crate::schedule::indexing::device_of(ctx, b) {
+        let arena = arenas.entry(key).or_insert_with(|| {
+            let dev_s = match crate::schedule::indexing::device_of(ctx, b.clone()) {
                 Some(crate::uop::arg::DeviceSpec::Single(s)) => s,
                 _ => String::new(),
             };
             crate::tensor::creation::new_buffer(ctx, &dev_s, SVal::I(sz as i128), crate::dtype::INT8, None)
-        });
-        let off = offsets[&b];
-        let nbytes_b = ctx.max_numel(b) as i64 * ctx.dt_of(b).itemsize() as i64;
+        }).clone();
+        let off = offsets[b];
+        let nbytes_b = ctx.max_numel(b.clone()) * ctx.dt_of(b).itemsize() as i64;
         // python: arena[offset:offset+nbytes] — movement::shrink takes (start, stop)
         let view = crate::tensor::movement::shrink(
             ctx,
@@ -313,7 +311,7 @@ pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId])
             &[(SVal::I(off as i128), SVal::I((off + nbytes_b) as i128))],
         );
         let bc = ctx.bitcast(view, ctx.dt_of(b));
-        replace_map.insert(b, bc);
+        replace_map.insert(b.clone(), bc);
     }
 
     crate::uop::upat::substitute(ctx, linear, replace_map, true, true)

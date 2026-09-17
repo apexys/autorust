@@ -25,15 +25,15 @@ impl SvalLike for SVal {
     }
 }
 
-impl<T: SvalLike + Copy, const N: usize> ShapeArg for &[T; N] {
+impl<T: SvalLike + Clone, const N: usize> ShapeArg for &[T; N] {
     fn into_shape_vec(self) -> Vec<SVal> {
-        self.iter().map(|x| x.into_sval()).collect()
+        self.iter().map(|x| (*x).clone().into_sval()).collect()
     }
 }
 
-impl<T: SvalLike + Copy> ShapeArg for &[T] {
+impl<T: SvalLike + Clone> ShapeArg for &[T] {
     fn into_shape_vec(self) -> Vec<SVal> {
-        self.iter().map(|x| x.into_sval()).collect()
+        self.iter().map(|x| (*x).clone().into_sval()).collect()
     }
 }
 
@@ -49,9 +49,9 @@ impl<T: SvalLike> ShapeArg for Vec<T> {
     }
 }
 
-impl<T: SvalLike + Copy> ShapeArg for &Vec<T> {
+impl<T: SvalLike + Clone> ShapeArg for &Vec<T> {
     fn into_shape_vec(self) -> Vec<SVal> {
-        self.iter().map(|x| x.into_sval()).collect()
+        self.iter().map(|x| (*x).clone().into_sval()).collect()
     }
 }
 
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn test_shape_arg_coercion() {
         // the Python `&[1, 2, 3]` experience
-        assert_eq!(len(&[1, 2, 3]), 3);
+        assert_eq!(len([1, 2, 3]), 3);
         assert_eq!(len([2, 3]), 2);
         assert_eq!(len((2, 3)), 2);
         assert_eq!(len(6), 1);

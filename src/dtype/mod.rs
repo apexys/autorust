@@ -132,7 +132,7 @@ impl DTypeId {
         self.dt().fmt
     }
     pub fn itemsize(&self) -> usize {
-        ((self.bitsize() + 7) / 8) as usize
+        self.bitsize().div_ceil(8) as usize
     }
 }
 
@@ -175,7 +175,7 @@ pub static BY_ATTR: LazyLock<HashMap<&'static str, DTypeId>> = LazyLock::new(|| 
 });
 
 pub fn by_attr(attr: &str) -> Option<DTypeId> {
-    BY_ATTR.get(attr).copied()
+    BY_ATTR.get(attr).cloned()
 }
 
 /// `to_dtype(DTypeLike)` for the str case.
@@ -608,7 +608,7 @@ pub fn f64_to_f16_bits(x: f64) -> u16 {
     let mant = abs & 0x000FFFFFFFFFFFFF;
     // unbiased f64 exponent -15 = f16 exponent
     let f16exp = exp - 1023 + 15;
-    if f16exp >= 1 && f16exp <= 30 {
+    if (1..=30).contains(&f16exp) {
         // normal: mantissa top 10 bits + RNE using the rest
         let shift = 42; // 52 - 10
         let m = mant >> shift;
@@ -737,7 +737,7 @@ pub fn float_to_fp8(x: f64, d: DTypeId) -> u8 {
     }
     let xbits = x.to_bits();
     let half_ulp = 1u64 << (52 - c.sig_bits);
-    let sign = (((xbits >> 63) & 1) << 7) as u64;
+    let sign = ((xbits >> 63) & 1) << 7;
     let exp = (((xbits >> 52) & 0x7FF) as i64) - 1023 + c.bias as i64;
     let mantissa = (xbits >> (53 - c.sig_bits)) & c.mant_mask;
     let absx = xbits & 0x7FFFFFFFFFFFFFFF;
@@ -936,7 +936,7 @@ pub fn to_storage_scalar(v: ConstVal, d: DTypeId) -> StorageScalar {
                 other => other.as_f64(),
             };
             let u = float_to_bf16(f);
-            let x = (u as f32).to_bits() as u32;
+            let x = (u as f32).to_bits();
             StorageScalar::U64(((x >> 16) & 0xFFFF) as u64)
         }
         FP8E4M3 | FP8E5M2 | FP8E4M3FNUZ | FP8E5M2FNUZ => StorageScalar::U64(

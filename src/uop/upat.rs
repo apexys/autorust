@@ -13,7 +13,7 @@
 //! - `early_reject` = ops of single-op src patterns, precomputed (ops.py:1344-1347).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use super::arg::Arg;
 use super::ctx::UOpCtx;
@@ -79,11 +79,10 @@ impl UPat {
         };
         let mut early_reject = Vec::new();
         for p in direct {
-            if let Some(ops) = &p.op {
-                if ops.len() == 1 && !early_reject.contains(&ops[0]) {
+            if let Some(ops) = &p.op
+                && ops.len() == 1 && !early_reject.contains(&ops[0]) {
                     early_reject.push(ops[0]);
                 }
-            }
         }
         UPat { op, dtype, tag, arg, name, src, strict_length, required_len, early_reject }
     }
@@ -192,11 +191,10 @@ impl UPat {
 
     pub(crate) fn recompute_early_reject_rep(&mut self, p: &UPat) {
         let mut er = Vec::new();
-        if let Some(ops) = &p.op {
-            if ops.len() == 1 {
+        if let Some(ops) = &p.op
+            && ops.len() == 1 {
                 er.push(ops[0]);
             }
-        }
         self.early_reject = er;
     }
 
@@ -204,11 +202,10 @@ impl UPat {
         let mut er = Vec::new();
         if let SrcPat::Tup(v) = &self.src {
             for p in v {
-                if let Some(ops) = &p.op {
-                    if ops.len() == 1 && !er.contains(&ops[0]) {
+                if let Some(ops) = &p.op
+                    && ops.len() == 1 && !er.contains(&ops[0]) {
                         er.push(ops[0]);
                     }
-                }
             }
         }
         self.early_reject = er;
@@ -421,8 +418,8 @@ impl UPat {
             Some(n) => self.named(n),
         };
         let b = {
-            let p = UPat::new(Some(vec![Ops::After]), None, SrcPat::Tup(vec![self.clone()]), None, name, true, None);
-            p
+            
+            UPat::new(Some(vec![Ops::After]), None, SrcPat::Tup(vec![self.clone()]), None, name, true, None)
         };
         UPat::any(vec![a, b])
     }
@@ -432,46 +429,42 @@ impl UPat {
     pub fn match_uop(&self, ctx: &UOpCtx, uop: UopId, store: Store, out: &mut Vec<Store>) {
         if let SrcPat::Any(alts) = &self.src {
             for alt in alts {
-                alt.match_uop(ctx, uop, store.clone(), out);
+                alt.match_uop(ctx, uop.clone(), store.clone(), out);
             }
             return;
         }
         // op check
-        if let Some(ops) = &self.op {
-            if !ops.contains(&ctx.op_of(uop)) {
+        if let Some(ops) = &self.op
+            && !ops.contains(&ctx.op_of(&uop)) {
                 return;
             }
-        }
         // name binding (identity)
         let mut store = store;
         if let Some(n) = self.name {
             match store.get(n) {
-                Some(&prev) if prev != uop => return,
+                Some(prev) if *prev != uop => return,
                 Some(_) => {}
                 None => {
-                    store.insert(n, uop);
+                    store.insert(n, uop.clone());
                 }
             }
         }
         // dtype
-        if let Some(dts) = &self.dtype {
-            if !dts.contains(&ctx.dt_of(uop)) {
+        if let Some(dts) = &self.dtype
+            && !dts.contains(&ctx.dt_of(&uop)) {
                 return;
             }
-        }
         // arg (Python `!=` — bools compare as ints)
-        if let Some(pa) = &self.arg {
-            if !arg_matches(pa, ctx.arg_of(uop)) {
+        if let Some(pa) = &self.arg
+            && !arg_matches(pa, ctx.arg_of(&uop)) {
                 return;
             }
-        }
         // tag
-        if let Some(tags) = &self.tag {
-            if !tags.iter().any(|t| t == ctx.tag_of(uop)) {
+        if let Some(tags) = &self.tag
+            && !tags.iter().any(|t| t == ctx.tag_of(&uop)) {
                 return;
             }
-        }
-        let srcs = ctx.srcs(uop);
+        let srcs = ctx.srcs(&uop);
         if srcs.len() < self.required_len || (self.strict_length && srcs.len() != self.required_len) {
             return;
         }
@@ -486,11 +479,11 @@ impl UPat {
             SrcPat::Repeat(p) => {
                 // zip with an infinite repeat: all srcs against the same pattern
                 let mut stores = vec![store];
-                for &uu in srcs {
+                for uu in srcs {
                     let mut next = Vec::new();
                     for s in stores {
                         let mut o = Vec::new();
-                        p.match_uop(ctx, uu, s, &mut o);
+                        p.match_uop(ctx, uu.clone(), s, &mut o);
                         next.extend(o);
                     }
                     stores = next;
@@ -513,12 +506,12 @@ impl UPat {
         out: &mut Vec<Store>,
     ) {
         let mut stores = vec![store];
-        for &uu in srcs {
+        for uu in srcs {
             let Some(vv) = vp.next() else { break };
             let mut new_stores = Vec::new();
             for s in stores {
                 let mut o = Vec::new();
-                vv.match_uop(ctx, uu, s, &mut o);
+                vv.match_uop(ctx, uu.clone(), s, &mut o);
                 new_stores.extend(o);
             }
             stores = new_stores;
@@ -647,7 +640,35 @@ pub fn permutations<T: Clone + PartialEq>(v: Vec<T>) -> Vec<Vec<T>> {
 
 // ---------- PatternMatcher ----------
 
-pub type RuleFn = Arc<dyn Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + Send + Sync>;
+pub type RuleFn = Arc<dyn Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId>>;
+
+/// Single-threaded lazy `PatternMatcher` slot. `OnceLock` requires `Sync`, but
+/// rules hold `Rc`-backed UOps; the engine is single-threaded, so we cache in an
+/// (unsafely) `Sync` cell and leak one matcher per slot.
+pub struct PmSlot(std::cell::RefCell<Option<&'static PatternMatcher>>);
+// SAFETY: the rewrite engine is single-threaded; `PatternMatcher` is never
+// accessed from more than one thread.
+unsafe impl Sync for PmSlot {}
+unsafe impl Send for PmSlot {}
+impl Default for PmSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PmSlot {
+    pub const fn new() -> Self {
+        PmSlot(std::cell::RefCell::new(None))
+    }
+    pub fn get_or_init(&self, build: impl FnOnce() -> PatternMatcher) -> &'static PatternMatcher {
+        if let Some(p) = *self.0.borrow() {
+            return p;
+        }
+        let p: &'static PatternMatcher = Box::leak(Box::new(build()));
+        *self.0.borrow_mut() = Some(p);
+        p
+    }
+}
 
 pub struct Rule {
     pub pat: UPat,
@@ -696,10 +717,10 @@ pub struct LocalAddBufferContext {
 
 impl LocalAddBufferContext {
     pub fn map_get(&self, k: UopId) -> Option<UopId> {
-        self.map_keys.iter().position(|&x| x == k).map(|i| self.map_vals[i])
+        self.map_keys.iter().position(|x| *x == k).map(|i| (self.map_vals[i]).clone())
     }
     pub fn map_insert(&mut self, k: UopId, v: UopId) {
-        if self.map_get(k).is_none() {
+        if self.map_get(k.clone()).is_none() {
             self.map_keys.push(k);
             self.map_vals.push(v);
         }
@@ -709,7 +730,7 @@ impl LocalAddBufferContext {
 impl CtxVal {
     pub fn get_subst(&self, u: UopId) -> Option<UopId> {
         match self {
-            CtxVal::Subst(m) => m.get(&u).copied(),
+            CtxVal::Subst(m) => m.get(&u).cloned(),
             _ => None,
         }
     }
@@ -718,7 +739,7 @@ impl CtxVal {
 /// rule helper: closure over (IndexingContext, UOpCtx, store)
 pub fn r_idx<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut crate::schedule::indexing::IndexingContext, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut crate::schedule::indexing::IndexingContext, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Idx(ictx) => f(&mut ictx.borrow_mut(), ctx, st),
@@ -729,7 +750,7 @@ where
 /// rule helper: closure over (UOpCtx, store) with no special ctx
 pub fn r_ctx<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, _ctxv| f(ctx, st))
 }
@@ -737,7 +758,7 @@ where
 /// rule helper: closure over (AllocCtx, UOpCtx, store)
 pub fn r_al<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut crate::tensor::callify::AllocCtx, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut crate::tensor::callify::AllocCtx, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Al(a) => f(&mut a.borrow_mut(), ctx, st),
@@ -748,7 +769,7 @@ where
 /// rule helper: closure over (LocalAddBufferContext, UOpCtx, store)
 pub fn r_la<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut LocalAddBufferContext, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut LocalAddBufferContext, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::La(l) => f(&mut l.borrow_mut(), ctx, st),
@@ -759,7 +780,7 @@ where
 /// rule helper: closure over (counter, UOpCtx, store)
 pub fn r_cnt<F>(f: F) -> RuleFn
 where
-    F: Fn(&std::cell::Cell<i64>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&std::cell::Cell<i64>, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Cnt(c) => f(c, ctx, st),
@@ -770,7 +791,7 @@ where
 /// rule helper: closure over (device ctx, UOpCtx, store)
 pub fn r_dev<F>(f: F) -> RuleFn
 where
-    F: Fn(&Option<crate::uop::arg::DeviceSpec>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&Option<crate::uop::arg::DeviceSpec>, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Dev(d) => f(d, ctx, st),
@@ -781,7 +802,7 @@ where
 /// rule helper: closure over (mutable mark dict, UOpCtx, store)
 pub fn r_dict<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut HashMap<UopId, UopId>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut HashMap<UopId, UopId>, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Dict(d) => f(&mut d.borrow_mut(), ctx, st),
@@ -792,7 +813,7 @@ where
 /// rule helper: closure over ((from, to) dtype pair, UOpCtx, store)
 pub fn r_pair<F>(f: F) -> RuleFn
 where
-    F: Fn(crate::dtype::DTypeId, crate::dtype::DTypeId, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(crate::dtype::DTypeId, crate::dtype::DTypeId, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Pair(fr, to) => f(*fr, *to, ctx, st),
@@ -804,8 +825,6 @@ where
 pub fn r_decomp<F>(f: F) -> RuleFn
 where
     F: Fn(&mut crate::codegen::decomp_dtype::DtypeDecompCtx, &mut UOpCtx, &Store) -> Option<UopId>
-        + Send
-        + Sync
         + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
@@ -822,8 +841,6 @@ where
             &mut UOpCtx,
             &Store,
         ) -> Option<UopId>
-        + Send
-        + Sync
         + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
@@ -859,29 +876,28 @@ impl PatternMatcher {
 
     /// `pm.rewrite(uop, ctx)` — first rule match wins.
     pub fn rewrite(&self, ctx: &mut UOpCtx, uop: UopId, ctxval: &CtxVal) -> Option<UopId> {
-        let idxs = self.pdict.get(&ctx.op_of(uop))?;
-        let ler: HashSet<Ops> = ctx.srcs(uop).iter().map(|&s| ctx.op_of(s)).collect();
+        let idxs = self.pdict.get(&ctx.op_of(&uop))?;
+        let ler: HashSet<Ops> = ctx.srcs(&uop).iter().map(|s| ctx.op_of(s)).collect();
         for &i in idxs {
             let rule = &self.rules[i];
             if !rule.early_reject.iter().all(|o| ler.contains(o)) {
                 continue;
             }
             let mut stores = Vec::new();
-            rule.pat.match_uop(ctx, uop, Store::new(), &mut stores);
+            rule.pat.match_uop(ctx, uop.clone(), Store::new(), &mut stores);
             for store in &stores {
                 if std::env::var("TG_TRACE").is_ok() {
-                    eprintln!("RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}", i, self.rules.len(), rule.pat.name, rule.pat.op, uop.0, ctx.op_of(uop));
+                    eprintln!("RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}", i, self.rules.len(), rule.pat.name, rule.pat.op, uop.id(), ctx.op_of(&uop));
                 }
                 let _r = (rule.f)(ctx, store, ctxval);
                 if std::env::var("TG_TRACE").is_ok() {
-                    eprintln!("  -> u{} op {:?}", _r.map(|x| x.0).unwrap_or(0), _r.map(|x| ctx.op_of(x)));
+                    eprintln!("  -> u{} op {:?}", _r.clone().map(|x| x.id()).unwrap_or(0), _r.as_ref().map(|x| ctx.op_of(x)));
                 }
-                if let Some(ret) = _r {
-                    if ret != uop {
+                if let Some(ret) = _r
+                    && ret != uop {
                         return Some(ret);
                     }
                     // python: rules returning self are skipped, try the next rule
-                }
             }
         }
         None
@@ -890,28 +906,28 @@ impl PatternMatcher {
 
 /// helper for rules: `st["x"]`
 pub fn sget(store: &Store, name: &str) -> UopId {
-    *store.get(name).unwrap_or_else(|| {
-        let keys: Vec<&str> = store.keys().copied().collect();
+    store.get(name).unwrap_or_else(|| {
+        let keys: Vec<&str> = store.keys().cloned().collect();
         panic!("TGERR: missing pattern binding {name} (have {keys:?})")
-    })
+    }).clone()
 }
 
 pub fn sget_opt(store: &Store, name: &str) -> Option<UopId> {
-    store.get(name).copied()
+    store.get(name).cloned()
 }
 
 /// `const_arg(u)` (symbolic.py:30-34): CONST val, CAST-of-CONST canonicalized
 /// to the cast dtype, or STACK tuple of vals.
 pub fn const_arg(ctx: &mut UOpCtx, u: UopId) -> Option<ConstArgVal> {
-    let (op, dt, srcs, _, _) = ctx.snapshot(u);
+    let (op, dt, srcs, _, _) = ctx.snapshot(&u);
     match op {
-        Ops::Const => Some(ConstArgVal::One(ctx.val(u))),
-        Ops::Cast if ctx.op_of(srcs[0]) == Ops::Const => {
-            let v = crate::dtype::dtype_const(dt, ctx.val(srcs[0]));
+        Ops::Const => Some(ConstArgVal::One(ctx.val(&u))),
+        Ops::Cast if ctx.op_of(&srcs[0]) == Ops::Const => {
+            let v = crate::dtype::dtype_const(dt, ctx.val(&srcs[0]));
             Some(ConstArgVal::One(v))
         }
-        Ops::Stack if srcs.iter().all(|&s| ctx.op_of(s) == Ops::Const) => {
-            Some(ConstArgVal::Vec(srcs.iter().map(|&s| ctx.val(s)).collect()))
+        Ops::Stack if srcs.iter().all(|s| ctx.op_of(s) == Ops::Const) => {
+            Some(ConstArgVal::Vec(srcs.iter().map(|s| ctx.val(s)).collect()))
         }
         _ => None,
     }
@@ -944,7 +960,7 @@ pub fn opset_union(a: &[Ops], b: &[Ops]) -> Vec<Ops> {
 }
 
 pub fn opset_diff(a: &[Ops], b: &[Ops]) -> Vec<Ops> {
-    a.iter().filter(|o| !b.contains(o)).copied().collect()
+    a.iter().filter(|o| !b.contains(o)).cloned().collect()
 }
 
 pub fn opset_single(set: &[Ops]) -> Vec<Ops> {
@@ -952,12 +968,12 @@ pub fn opset_single(set: &[Ops]) -> Vec<Ops> {
 }
 
 pub fn tuplize_lt(ctx: &UOpCtx, a: UopId, b: UopId) -> std::cmp::Ordering {
-    ctx.tuplize(a).cmp(&ctx.tuplize(b))
+    ctx.tuplize(&a).cmp(&ctx.tuplize(&b))
 }
 
 /// `bool` dtype membership used by several rules.
 pub fn is_bool_dtype(ctx: &UOpCtx, u: UopId) -> bool {
-    is_bool(ctx.dt_of(u))
+    is_bool(ctx.dt_of(&u))
 }
 
 // ---------- graph rewrite engine (ops.py:1627-1746) ----------
@@ -972,25 +988,25 @@ pub const REWRITE_STACK_LIMIT: usize = 250000;
 pub const OPAQUE_CALL_BODIES: &[Ops] = &[Ops::Sink, Ops::Program, Ops::Linear, Ops::Copy, Ops::CustomFunction];
 
 fn is_opaque_body_call(ctx: &UOpCtx, n: UopId) -> bool {
-    let op = ctx.op_of(n);
+    let op = ctx.op_of(&n);
     if op == Ops::Function {
         return true;
     }
     if op == Ops::Call {
-        let srcs = ctx.srcs(n);
-        return !srcs.is_empty() && group::in_(OPAQUE_CALL_BODIES, ctx.op_of(srcs[0]));
+        let srcs = ctx.srcs(&n);
+        return !srcs.is_empty() && group::in_(OPAQUE_CALL_BODIES, ctx.op_of(&srcs[0]));
     }
     false
 }
 
 /// `_rebuild_dtype` (ops.py:1748-1751).
 fn rebuild_dtype(ctx: &mut UOpCtx, n: UopId, new_src: &[UopId]) -> DTypeId {
-    let old = ctx.srcs(n);
-    if old.len() == new_src.len() && old.iter().zip(new_src).all(|(a, b)| ctx.dt_of(*a) == ctx.dt_of(*b)) {
-        return ctx.dt_of(n);
+    let old = ctx.srcs(&n);
+    if old.len() == new_src.len() && old.iter().zip(new_src).all(|(a, b)| ctx.dt_of(a) == ctx.dt_of(b)) {
+        return ctx.dt_of(&n);
     }
-    let (_, _, _, arg, _) = ctx.snapshot(n);
-    ctx.dtype_from_uop(ctx.op_of(n), new_src, &arg).unwrap_or_else(|| panic!("TGERR: dtype derivation failed in rebuild"))
+    let (_, _, _, arg, _) = ctx.snapshot(&n);
+    ctx.dtype_from_uop(ctx.op_of(&n), new_src, &arg).unwrap_or_else(|| panic!("TGERR: dtype derivation failed in rebuild"))
 }
 
 struct RewriteCtxt<'a> {
@@ -1008,11 +1024,11 @@ impl<'a> RewriteCtxt<'a> {
     }
 
     fn cached_bpm_rewrite(&mut self, ctx: &mut UOpCtx, x: UopId) -> Result<Option<UopId>, BottomUpGate> {
-        if let Some(&ret) = self.bpm_cache.get(&x) {
-            return Ok(ret);
+        if let Some(ret) = self.bpm_cache.get(&x) {
+            return Ok(ret.clone());
         }
-        let ret = self.bpm.unwrap().rewrite(ctx, x, self.ctxval);
-        self.bpm_cache.insert(x, ret);
+        let ret = self.bpm.unwrap().rewrite(ctx, x.clone(), self.ctxval);
+        self.bpm_cache.insert(x, ret.clone());
         Ok(ret)
     }
 
@@ -1022,7 +1038,7 @@ impl<'a> RewriteCtxt<'a> {
             Enter(UopId),
             Rebuild(UopId),
         }
-        let mut stack = vec![Step::Enter(root)];
+        let mut stack = vec![Step::Enter(root.clone())];
         let mut iters = 0usize;
         while let Some(step) = stack.pop() {
             iters += 1;
@@ -1036,40 +1052,40 @@ impl<'a> RewriteCtxt<'a> {
                     }
                     // bottom-up: try bpm on the original node first, use result as-is
                     if self.bpm.is_some() {
-                        let rewritten = self.cached_bpm_rewrite(ctx, n).map_err(|_| "bottom-up gate in walk".to_string())?;
+                        let rewritten = self.cached_bpm_rewrite(ctx, n.clone()).map_err(|_| "bottom-up gate in walk".to_string())?;
                         if let Some(r) = rewritten {
                             self.replace.insert(n, r);
                             continue;
                         }
                     }
-                    stack.push(Step::Rebuild(n));
-                    if !self.enter_calls && is_opaque_body_call(ctx, n) {
-                        let body = ctx.srcs(n)[0];
-                        self.replace.insert(body, body);
+                    stack.push(Step::Rebuild(n.clone()));
+                    if !self.enter_calls && is_opaque_body_call(ctx, n.clone()) {
+                        let body = &ctx.srcs(&n)[0].clone();
+                        self.replace.insert(body.clone(), body.clone());
                     }
-                    for &x in ctx.srcs(n).iter().rev() {
-                        if !self.replace.contains_key(&x) {
-                            stack.push(Step::Enter(x));
+                    for x in ctx.srcs(&n).iter().rev() {
+                        if !self.replace.contains_key(x) {
+                            stack.push(Step::Enter(x.clone()));
                         }
                     }
                 }
                 Step::Rebuild(n) => {
-                    let srcs = ctx.srcs(n).to_vec();
-                    let new_src: Vec<UopId> = srcs.iter().map(|&x| self.replace.get(&x).copied().unwrap_or(x)).collect();
+                    let srcs = ctx.srcs(&n).to_vec();
+                    let new_src: Vec<UopId> = srcs.iter().map(|x| self.replace.get(x).cloned().unwrap_or(x.clone())).collect();
                     let new_n = if new_src != srcs {
-                        let (op, _, _, arg, tag) = ctx.snapshot(n);
-                        let dt = rebuild_dtype(ctx, n, &new_src);
+                        let (op, _, _, arg, tag) = ctx.snapshot(&n);
+                        let dt = rebuild_dtype(ctx, n.clone(), &new_src);
                         ctx.intern_raw(op, dt, new_src, arg, tag)
                     } else {
-                        n
+                        n.clone()
                     };
                     // top-down: try pm on the rebuilt node, use result as-is
-                    let new_n = if self.pm.is_some() { self.pm_rewrite(ctx, new_n).unwrap_or(new_n) } else { new_n };
+                    let new_n = if self.pm.is_some() { self.pm_rewrite(ctx, new_n.clone()).unwrap_or(new_n) } else { new_n };
                     self.replace.insert(n, new_n);
                 }
             }
         }
-        Ok(self.replace.get(&root).copied().unwrap_or(root))
+        Ok(self.replace.get(&root).cloned().unwrap_or(root))
     }
 
     /// the main driver (ops.py:1675-1741).
@@ -1080,8 +1096,8 @@ impl<'a> RewriteCtxt<'a> {
             S1,
             S2,
         }
-        let mut stack: Vec<(UopId, Stage, UopId)> = vec![(root, Stage::S0, root)];
-        let mut on_stack: HashSet<UopId> = HashSet::from([root]);
+        let mut stack: Vec<(UopId, Stage, UopId)> = vec![(root.clone(), Stage::S0, root.clone())];
+        let mut on_stack: HashSet<UopId> = HashSet::from([root.clone()]);
         let mut waitlist: HashMap<UopId, Vec<(UopId, Stage, UopId)>> = HashMap::new();
         let mut iters = 0usize;
         while let Some((n, stage, new_n)) = stack.pop() {
@@ -1105,16 +1121,16 @@ impl<'a> RewriteCtxt<'a> {
                     let mut new_n = new_n;
                     if let Some(_bpm) = self.bpm {
                         // apply rewrite rules until a fixed point is reached
-                        let mut test_n: Option<UopId> = Some(new_n);
+                        let mut test_n: Option<UopId> = Some(new_n.clone());
                         let mut seen: HashSet<UopId> = HashSet::new();
                         let mut gated: Option<UopId> = None;
                         while let Some(tn) = test_n {
                             if seen.contains(&tn) {
                                 return Err("infinite loop in fixed_point_rewrite".into());
                             }
-                            seen.insert(tn);
-                            new_n = tn;
-                            match self.cached_bpm_rewrite(ctx, tn) {
+                            seen.insert(tn.clone());
+                            new_n = tn.clone();
+                            match self.cached_bpm_rewrite(ctx, tn.clone()) {
                                 Ok(Some(next)) => test_n = Some(next),
                                 Ok(None) => test_n = None,
                                 Err(BottomUpGate) => {
@@ -1125,35 +1141,35 @@ impl<'a> RewriteCtxt<'a> {
                         }
                         if let Some(tn) = gated {
                             // gate: done with this node, don't continue down the srcs
-                            self.replace.insert(n, tn);
+                            self.replace.insert(n.clone(), tn);
                             if let Some(w) = waitlist.remove(&n) {
                                 stack.extend(w);
                             }
                             continue;
                         }
                     }
-                    stack.push((n, Stage::S1, new_n));
-                    if !self.enter_calls && is_opaque_body_call(ctx, new_n) {
-                        let body = ctx.srcs(new_n)[0];
-                        self.replace.insert(body, body);
+                    stack.push((n, Stage::S1, new_n.clone()));
+                    if !self.enter_calls && is_opaque_body_call(ctx, new_n.clone()) {
+                        let body = &ctx.srcs(&new_n)[0].clone();
+                        self.replace.insert(body.clone(), body.clone());
                     }
-                    for &x in ctx.srcs(new_n).iter().rev() {
-                        if on_stack.contains(&x) {
+                    for x in ctx.srcs(&new_n).iter().rev() {
+                        if on_stack.contains(x) {
                             continue;
                         }
-                        stack.push((x, Stage::S0, x));
-                        on_stack.insert(x);
+                        stack.push((x.clone(), Stage::S0, x.clone()));
+                        on_stack.insert(x.clone());
                     }
                 }
                 Stage::S1 => {
-                    let srcs = ctx.srcs(new_n).to_vec();
+                    let srcs = ctx.srcs(&new_n).to_vec();
                     let mut tmp = Vec::with_capacity(srcs.len());
                     let mut ready = true;
-                    for &x in &srcs {
-                        match self.replace.get(&x) {
-                            Some(&rx) => tmp.push(rx),
+                    for x in &srcs {
+                        match self.replace.get(x) {
+                            Some(rx) => tmp.push(rx.clone()),
                             None => {
-                                waitlist.entry(x).or_default().push((n, Stage::S1, new_n));
+                                waitlist.entry(x.clone()).or_default().push((n.clone(), Stage::S1, new_n.clone()));
                                 ready = false;
                                 break;
                             }
@@ -1165,35 +1181,35 @@ impl<'a> RewriteCtxt<'a> {
                     let new_src = tmp;
                     if new_src == srcs {
                         // top-down rewrite of the node as-is
-                        let rewritten = if self.pm.is_some() { self.pm_rewrite(ctx, new_n) } else { None };
+                        let rewritten = if self.pm.is_some() { self.pm_rewrite(ctx, new_n.clone()) } else { None };
                         match rewritten {
                             None => {
-                                self.replace.insert(n, new_n);
+                                self.replace.insert(n.clone(), new_n);
                                 if let Some(w) = waitlist.remove(&n) {
                                     stack.extend(w);
                                 }
                                 continue;
                             }
                             Some(new_src_n) => {
-                                stack.push((n, Stage::S2, new_src_n));
-                                stack.push((new_src_n, Stage::S0, new_src_n));
+                                stack.push((n, Stage::S2, new_src_n.clone()));
+                                stack.push((new_src_n.clone(), Stage::S0, new_src_n));
                             }
                         }
                     } else {
-                        let (op, _, _, arg, tag) = ctx.snapshot(new_n);
+                        let (op, _, _, arg, tag) = ctx.snapshot(&new_n);
                         let dt = rebuild_dtype(ctx, new_n, &new_src);
                         let new_src_n = ctx.intern_raw(op, dt, new_src, arg, tag);
-                        stack.push((n, Stage::S2, new_src_n));
-                        stack.push((new_src_n, Stage::S0, new_src_n));
+                        stack.push((n, Stage::S2, new_src_n.clone()));
+                        stack.push((new_src_n.clone(), Stage::S0, new_src_n));
                     }
                 }
                 Stage::S2 => {
                     match self.replace.get(&new_n) {
                         None => {
-                            waitlist.entry(new_n).or_default().push((n, Stage::S2, new_n));
+                            waitlist.entry(new_n.clone()).or_default().push((n, Stage::S2, new_n));
                         }
-                        Some(&rn) => {
-                            self.replace.insert(n, rn);
+                        Some(rn) => {
+                            self.replace.insert(n.clone(), rn.clone());
                             if let Some(w) = waitlist.remove(&n) {
                                 stack.extend(w);
                             }
@@ -1203,8 +1219,8 @@ impl<'a> RewriteCtxt<'a> {
             }
         }
         match self.replace.get(&root) {
-            Some(&r) => Ok(r),
-            None => Err(format!("rewrite did not complete root {:?}", root.0)),
+            Some(r) => Ok(r.clone()),
+            None => Err(format!("rewrite did not complete root {:?}", root.id())),
         }
     }
 }
@@ -1260,11 +1276,11 @@ pub fn substitute(ctx: &mut UOpCtx, root: UopId, dvars: HashMap<UopId, UopId>, w
         return root;
     }
     let pm = substitute_pm();
-    graph_rewrite(ctx, root, &pm, true, None, walk, enter_calls, CtxVal::Subst(dvars))
+    graph_rewrite(ctx, root, pm, true, None, walk, enter_calls, CtxVal::Subst(dvars))
         .unwrap_or_else(|e| panic!("TGERR: substitute failed: {e}"))
 }
 
-static SUBSTITUTE_PM: OnceLock<PatternMatcher> = OnceLock::new();
+static SUBSTITUTE_PM: PmSlot = PmSlot::new();
 
 pub fn substitute_pm() -> &'static PatternMatcher {
     SUBSTITUTE_PM.get_or_init(|| {
@@ -1275,11 +1291,11 @@ pub fn substitute_pm() -> &'static PatternMatcher {
 
 /// `UOp.simplify` (ops.py:510-516) with `symbolic` (sym.rs).
 pub fn simplify(ctx: &mut UOpCtx, u: UopId) -> UopId {
-    if ctx.op_of(u) == Ops::Const {
+    if ctx.op_of(&u) == Ops::Const {
         return u;
     }
-    if ctx.op_of(u) == Ops::Sink {
-        let ok = ctx.srcs(u).iter().all(|&s| ctx.op_of(s) == Ops::Const || {
+    if ctx.op_of(&u) == Ops::Sink {
+        let ok = ctx.srcs(&u).iter().all(|s| ctx.op_of(s) == Ops::Const || {
             ctx.op_of(s) == Ops::Stack && ctx.srcs(s).is_empty()
         });
         if ok {
@@ -1311,7 +1327,7 @@ impl SymVal {
                 };
                 SVal::I(i)
             }
-            SymVal::U(u) => SVal::U(*u),
+            SymVal::U(u) => SVal::U(u.clone()),
         }
     }
 }
@@ -1319,24 +1335,24 @@ impl SymVal {
 /// `ssimplify` (ops.py:517-519): simplify, then const-ify `CAST(CONST)`/`CONST`.
 pub fn ssimplify(ctx: &mut UOpCtx, u: UopId) -> SymVal {
     let ret = simplify(ctx, u);
-    let (op, dt, srcs, _, _) = ctx.snapshot(ret);
-    if op == Ops::Cast && ctx.op_of(srcs[0]) == Ops::Const {
-        let v = crate::dtype::dtype_const(dt, ctx.val(srcs[0]));
+    let (op, dt, srcs, _, _) = ctx.snapshot(&ret);
+    if op == Ops::Cast && ctx.op_of(&srcs[0]) == Ops::Const {
+        let v = crate::dtype::dtype_const(dt, ctx.val(&srcs[0]));
         return SymVal::C(v);
     }
     if op == Ops::Const {
-        return SymVal::C(ctx.val(ret));
+        return SymVal::C(ctx.val(&ret));
     }
     SymVal::U(ret)
 }
 
 /// `resolve` (ops.py:54-58).
 pub fn resolve(ctx: &mut UOpCtx, x: UopId, default: bool) -> bool {
-    if !is_bool(ctx.dt_of(x)) {
+    if !is_bool(ctx.dt_of(&x)) {
         panic!("TGERR: UOp in resolve must be bool");
     }
     let sx = simplify(ctx, x);
-    let (vmin, vmax) = ctx.min_max(sx).unwrap_or_else(|e| panic!("TGERR: {e}"));
+    let (vmin, vmax) = ctx.min_max(&sx).unwrap_or_else(|e| panic!("TGERR: {e}"));
     if vmin == vmax {
         // bool(vmin)
         match vmin {

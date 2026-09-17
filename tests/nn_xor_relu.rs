@@ -25,14 +25,14 @@ fn xor_relu_converges() {
     let mut last_loss = 0.0f32;
     for epoch in 0..n {
         let mut ctx = UOpCtx::new();
-        let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None).reshape(&mut ctx, &[4, 2]);
-        let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, &[4, 1]);
-        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, &[4, 2]);
+        let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None).reshape(&mut ctx, [4, 2]);
+        let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, [4, 1]);
+        let w1t = Tensor::from_slice(&mut ctx, &w1, None, None).reshape(&mut ctx, [4, 2]);
         let b1t = Tensor::from_slice(&mut ctx, &b1, None, None);
-        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, &[1, 4]);
+        let w2t = Tensor::from_slice(&mut ctx, &w2, None, None).reshape(&mut ctx, [1, 4]);
         let b2t = Tensor::from_slice(&mut ctx, &b2, None, None);
-        let h = nn::relu(&Linear { weight: w1t, bias: Some(b1t) }.forward(&x, &mut ctx), &mut ctx);
-        let out = Linear { weight: w2t, bias: Some(b2t) }.forward(&h, &mut ctx);
+        let h = nn::relu(&Linear { weight: w1t.clone(), bias: Some(b1t.clone()) }.forward(&x, &mut ctx), &mut ctx);
+        let out = Linear { weight: w2t.clone(), bias: Some(b2t.clone()) }.forward(&h, &mut ctx);
         let diff = out.sub(&mut ctx, &t);
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
         let params = vec![w1t, b1t, w2t, b2t];
@@ -43,8 +43,8 @@ fn xor_relu_converges() {
         b1 = np[1].to_list::<f32>(&mut ctx);
         w2 = np[2].to_list::<f32>(&mut ctx);
         b2 = np[3].to_list::<f32>(&mut ctx);
-        pred = out.reshape(&mut ctx, &[4]).to_list::<f32>(&mut ctx);
-        last_loss = loss.reshape(&mut ctx, &[1]).to_list::<f32>(&mut ctx)[0];
+        pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx);
+        last_loss = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx)[0];
         if epoch % 10 == 0 || epoch == n - 1 {
             println!("epoch {epoch}: loss = {last_loss:.8}");
         }

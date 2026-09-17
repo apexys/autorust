@@ -84,7 +84,7 @@ fn sym_of(op: Ops) -> &'static str {
 /// `UOp.render(simplify=True)` — the expr string for a (small) symbolic graph.
 pub fn expr_render(ctx: &mut UOpCtx, u: UopId) -> String {
     // simplify first (python: self.simplify()); const-folded → plain number
-    match ctx.ssimplify(u) {
+    match ctx.ssimplify(u.clone()) {
         Ok(SVal::I(v)) => v.to_string(),
         Ok(SVal::U(n)) => {
             let mut cache: HashMap<UopId, String> = HashMap::new();
@@ -101,31 +101,31 @@ fn expr_node(ctx: &mut UOpCtx, u: UopId, cache: &mut HashMap<UopId, String>) -> 
     if let Some(s) = cache.get(&u) {
         return s.clone();
     }
-    let (op, dt, srcs, _arg, _tag) = ctx.snapshot(u);
+    let (op, dt, srcs, _arg, _tag) = ctx.snapshot(&u);
     let s = |ctx: &mut UOpCtx, id: UopId, cache: &mut HashMap<UopId, String>| expr_node(ctx, id, cache);
     let out = match op {
-        Ops::Param => match ctx.arg_of(u).clone() {
+        Ops::Param => match ctx.arg_of(&u).clone() {
             Arg::Param(p) => match &p.name {
                 Some(n) => n.clone(),
                 None => format!("p{}", p.slot),
             },
             other => panic!("TGERR: expr_render PARAM {other:?}"),
         },
-        Ops::Buffer => match ctx.arg_of(u) {
+        Ops::Buffer => match ctx.arg_of(&u) {
             Arg::Param(p) => match &p.name {
                 Some(n) => n.clone(),
                 None => format!("b{}", p.slot),
             },
             other => panic!("TGERR: expr_render BUFFER {other:?}"),
         },
-        Ops::After => s(ctx, srcs[0], cache),
-        Ops::Special => match ctx.arg_of(u) {
+        Ops::After => s(ctx, (srcs[0]).clone(), cache),
+        Ops::Special => match ctx.arg_of(&u) {
             Arg::Str(s) => s.clone(),
             other => panic!("TGERR: expr_render SPECIAL {other:?}"),
         },
         Ops::Range => {
             if dt == dtype::VOID {
-                let n = match ctx.arg_of(u) {
+                let n = match ctx.arg_of(&u) {
                     Arg::Seq { items, .. } => items.last().map(|it| match it {
                         Arg::Int(v) => v.to_string(),
                         _ => "?".to_string(),
@@ -134,31 +134,31 @@ fn expr_node(ctx: &mut UOpCtx, u: UopId, cache: &mut HashMap<UopId, String>) -> 
                 };
                 format!("loop{n}")
             } else {
-                let rs = range_str_of(ctx, u);
+                let rs = range_str_of(ctx, u.clone());
                 format!("r{rs}")
             }
         }
-        Ops::Const => const_str(&ctx.val(u)),
+        Ops::Const => const_str(&ctx.val(&u)),
         Ops::Cast => {
             // weak/bool consts state the value; other casts state the width
-            let c = srcs[0];
-            if ctx.op_of(c) == Ops::Const && (dtype::is_weak(dt) || dt == dtype::BOOL) {
-                const_str(&ctx.val(c))
+            let c = srcs[0].clone();
+            if ctx.op_of(&c) == Ops::Const && (dtype::is_weak(dt) || dt == dtype::BOOL) {
+                const_str(&ctx.val(&c))
             } else {
-                format!("({})({})", ctx.dt_of(u).attr(), s(ctx, c, cache))
+                format!("({})({})", ctx.dt_of(&u).attr(), s(ctx, c, cache))
             }
         }
-        Ops::Neg => format!("(-{})", s(ctx, srcs[0], cache)),
-        Ops::Reciprocal => format!("(1/{})", s(ctx, srcs[0], cache)),
-        Ops::Max => format!("max({}, {})", s(ctx, srcs[0], cache), s(ctx, srcs[1], cache)),
-        Ops::Mulacc => format!("({}*{}+{})", s(ctx, srcs[0], cache), s(ctx, srcs[1], cache), s(ctx, srcs[2], cache)),
-        Ops::Where => format!("({} if {} else {})", s(ctx, srcs[1], cache), s(ctx, srcs[0], cache), s(ctx, srcs[2], cache)),
-        Ops::Cdiv => format!("cdiv({}, {})", s(ctx, srcs[0], cache), s(ctx, srcs[1], cache)),
-        Ops::Cmod => format!("cmod({}, {})", s(ctx, srcs[0], cache), s(ctx, srcs[1], cache)),
+        Ops::Neg => format!("(-{})", s(ctx, (srcs[0]).clone(), cache)),
+        Ops::Reciprocal => format!("(1/{})", s(ctx, (srcs[0]).clone(), cache)),
+        Ops::Max => format!("max({}, {})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache)),
+        Ops::Mulacc => format!("({}*{}+{})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache), s(ctx, (srcs[2]).clone(), cache)),
+        Ops::Where => format!("({} if {} else {})", s(ctx, (srcs[1]).clone(), cache), s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[2]).clone(), cache)),
+        Ops::Cdiv => format!("cdiv({}, {})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache)),
+        Ops::Cmod => format!("cmod({}, {})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache)),
         Ops::Add | Ops::Sub | Ops::Mul | Ops::Floordiv | Ops::Floormod | Ops::Shl | Ops::Shr | Ops::And | Ops::Or | Ops::Xor => {
-            let a = s(ctx, srcs[0], cache);
-            let b = s(ctx, srcs[1], cache);
-            let (lo, ro) = (Some(ctx.op_of(srcs[0])), Some(ctx.op_of(srcs[1])));
+            let a = s(ctx, (srcs[0]).clone(), cache);
+            let b = s(ctx, (srcs[1]).clone(), cache);
+            let (lo, ro) = (Some(ctx.op_of(&srcs[0])), Some(ctx.op_of(&srcs[1])));
             binary(op, &a, &b, lo, ro)
         }
         other => panic!("TGERR: expr_render op {other:?} not ported"),
@@ -169,7 +169,7 @@ fn expr_node(ctx: &mut UOpCtx, u: UopId, cache: &mut HashMap<UopId, String>) -> 
 
 /// `range_str` — '_'.join(str(x) for x in arg[0..-1]).
 fn range_str_of(ctx: &UOpCtx, u: UopId) -> String {
-    match ctx.arg_of(u) {
+    match ctx.arg_of(&u) {
         Arg::Seq { items, .. } => {
             let parts: Vec<String> = items[..items.len().saturating_sub(1)]
                 .iter()
