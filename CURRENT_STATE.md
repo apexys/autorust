@@ -457,6 +457,12 @@ those nodes).
   with the tensor's subgraph instead of leaking in ctx-wide `HashMap<u32, _>` tables.
   `zero_grad` clears each param's node (`UOpCtx::clear_grad`); pinned by
   `tests/session.rs::node_side_data_dies_with_the_node`.
+- **PatternMatcher slots (fixed)**: `RuleFn = Arc<dyn Fn + Send + Sync>` and the cached
+  matchers live in plain `OnceLock`s (`PmSlot`), so the parallel test harness shares one
+  genuinely thread-safe matcher per slot. The previous `OnceLock`+`unsafe Sync` cell
+  (`RefCell`) could race between two threads and panic with "already borrowed". Rules that
+  need arena-specific data (e.g. `add_control_flow`'s edge map) now receive it via
+  `CtxVal::Dict` instead of capturing a `UopId`.
 
 ### 8.9 Backends
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +

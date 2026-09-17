@@ -358,7 +358,7 @@ fn pm_data_invalid() -> PatternMatcher {
 // shorthand for rule closures
 pub fn r<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + 'static,
+    F: Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(f)
 }

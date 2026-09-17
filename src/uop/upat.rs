@@ -640,16 +640,17 @@ pub fn permutations<T: Clone + PartialEq>(v: Vec<T>) -> Vec<Vec<T>> {
 
 // ---------- PatternMatcher ----------
 
-pub type RuleFn = Arc<dyn Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId>>;
+pub type RuleFn = Arc<dyn Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + Send + Sync>;
 
-/// Single-threaded lazy `PatternMatcher` slot. `OnceLock` requires `Sync`, but
-/// rules hold `Rc`-backed UOps; the engine is single-threaded, so we cache in an
-/// (unsafely) `Sync` cell and leak one matcher per slot.
-pub struct PmSlot(std::cell::RefCell<Option<&'static PatternMatcher>>);
-// SAFETY: the rewrite engine is single-threaded; `PatternMatcher` is never
-// accessed from more than one thread.
-unsafe impl Sync for PmSlot {}
-unsafe impl Send for PmSlot {}
+/// Lazy `PatternMatcher` slot for a `static`.
+///
+/// `PatternMatcher` is `Send + Sync` (patterns are owned data and rules are
+/// `Arc<dyn Fn + Send + Sync>` that capture no arena state), so a `OnceLock`
+/// hands out a process-wide `&'static` with thread-safe initialization — no
+/// leak, no `unsafe`, and no per-thread copies. Rules that need arena-specific
+/// data receive it through [`CtxVal`] rather than capturing it.
+pub struct PmSlot(std::sync::OnceLock<PatternMatcher>);
+
 impl Default for PmSlot {
     fn default() -> Self {
         Self::new()
@@ -658,15 +659,10 @@ impl Default for PmSlot {
 
 impl PmSlot {
     pub const fn new() -> Self {
-        PmSlot(std::cell::RefCell::new(None))
+        PmSlot(std::sync::OnceLock::new())
     }
-    pub fn get_or_init(&self, build: impl FnOnce() -> PatternMatcher) -> &'static PatternMatcher {
-        if let Some(p) = *self.0.borrow() {
-            return p;
-        }
-        let p: &'static PatternMatcher = Box::leak(Box::new(build()));
-        *self.0.borrow_mut() = Some(p);
-        p
+    pub fn get_or_init(&'static self, build: impl FnOnce() -> PatternMatcher) -> &'static PatternMatcher {
+        self.0.get_or_init(build)
     }
 }
 
@@ -739,7 +735,7 @@ impl CtxVal {
 /// rule helper: closure over (IndexingContext, UOpCtx, store)
 pub fn r_idx<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut crate::schedule::indexing::IndexingContext, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(&mut crate::schedule::indexing::IndexingContext, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Idx(ictx) => f(&mut ictx.borrow_mut(), ctx, st),
@@ -750,7 +746,7 @@ where
 /// rule helper: closure over (UOpCtx, store) with no special ctx
 pub fn r_ctx<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(&mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, _ctxv| f(ctx, st))
 }
@@ -758,7 +754,7 @@ where
 /// rule helper: closure over (AllocCtx, UOpCtx, store)
 pub fn r_al<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut crate::tensor::callify::AllocCtx, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(&mut crate::tensor::callify::AllocCtx, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Al(a) => f(&mut a.borrow_mut(), ctx, st),
@@ -769,7 +765,7 @@ where
 /// rule helper: closure over (LocalAddBufferContext, UOpCtx, store)
 pub fn r_la<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut LocalAddBufferContext, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(&mut LocalAddBufferContext, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::La(l) => f(&mut l.borrow_mut(), ctx, st),
@@ -780,7 +776,7 @@ where
 /// rule helper: closure over (counter, UOpCtx, store)
 pub fn r_cnt<F>(f: F) -> RuleFn
 where
-    F: Fn(&std::cell::Cell<i64>, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(&std::cell::Cell<i64>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Cnt(c) => f(c, ctx, st),
@@ -791,7 +787,7 @@ where
 /// rule helper: closure over (device ctx, UOpCtx, store)
 pub fn r_dev<F>(f: F) -> RuleFn
 where
-    F: Fn(&Option<crate::uop::arg::DeviceSpec>, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(&Option<crate::uop::arg::DeviceSpec>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Dev(d) => f(d, ctx, st),
@@ -802,7 +798,7 @@ where
 /// rule helper: closure over (mutable mark dict, UOpCtx, store)
 pub fn r_dict<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut HashMap<UopId, UopId>, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(&mut HashMap<UopId, UopId>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Dict(d) => f(&mut d.borrow_mut(), ctx, st),
@@ -813,7 +809,7 @@ where
 /// rule helper: closure over ((from, to) dtype pair, UOpCtx, store)
 pub fn r_pair<F>(f: F) -> RuleFn
 where
-    F: Fn(crate::dtype::DTypeId, crate::dtype::DTypeId, &mut UOpCtx, &Store) -> Option<UopId> + 'static,
+    F: Fn(crate::dtype::DTypeId, crate::dtype::DTypeId, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Pair(fr, to) => f(*fr, *to, ctx, st),
@@ -825,7 +821,7 @@ where
 pub fn r_decomp<F>(f: F) -> RuleFn
 where
     F: Fn(&mut crate::codegen::decomp_dtype::DtypeDecompCtx, &mut UOpCtx, &Store) -> Option<UopId>
-        + 'static,
+        + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Decomp(d) => f(&mut d.borrow_mut(), ctx, st),
@@ -841,7 +837,7 @@ where
             &mut UOpCtx,
             &Store,
         ) -> Option<UopId>
-        + 'static,
+        + Send + Sync + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::L2i(d) => f(d, ctx, st),

@@ -227,7 +227,7 @@ fn sym_sget(st: &crate::uop::upat::Store, name: &str) -> UopId {
 /// rule helper over the (cache, args) call context.
 pub fn r_ca<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut CallCtx, &mut UOpCtx, &crate::uop::upat::Store) -> Option<UopId> + 'static,
+    F: Fn(&mut CallCtx, &mut UOpCtx, &crate::uop::upat::Store) -> Option<UopId> + Send + Sync + 'static,
 {
     std::sync::Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Ca(c) => f(&mut c.borrow_mut(), ctx, st),

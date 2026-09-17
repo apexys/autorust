@@ -238,7 +238,6 @@ fn add_images(ctx: &mut Ctx2, sink: UopId) -> UopId {
 /// headers outer-first (and lets the interpreter nest loops correctly).
 fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     use std::collections::HashSet;
-    use std::sync::Arc;
     use crate::uop::ops::Ops;
 
     let order = ctx.toposort(&sink);
@@ -314,10 +313,13 @@ fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         }
     }
 
-    let edges = Arc::new(edges);
+    // The edge map is arena-specific, so it travels through the rewrite
+    // `CtxVal` instead of being captured by the rule closure (capturing a
+    // `UopId` would make the rule — and every cached `PatternMatcher` — non-Send).
+    let edges = std::rc::Rc::new(std::cell::RefCell::new(edges));
     let pm = PatternMatcher::new(vec![(
         UPat::ops1(Ops::Range).allow_all_srcs().named("x"),
-        r(move |ctx, st, _| {
+        crate::uop::upat::r_dict(|edges, ctx, st| {
             let x = sget(st, "x");
             edges.get(&x).map(|y| {
                 let mut srcs = ctx.srcs(&x).to_vec();
@@ -328,7 +330,7 @@ fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
             })
         }),
     )]);
-    graph_rewrite(ctx, sink, &pm, true, None, false, false, CtxVal::None)
+    graph_rewrite(ctx, sink, &pm, true, None, false, false, CtxVal::Dict(edges))
         .unwrap_or_else(|e| panic!("TGERR: add control flow: {e}"))
 }
 
