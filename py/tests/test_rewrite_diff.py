@@ -287,6 +287,24 @@ def rand_long_graph(rng):
     raise AssertionError("long generator failed 20x")
 
 
+def rand_fp8_graph(rng):
+    """Graphs exercising `pm_dtype_decomps` (emulate fp8 as half)."""
+    for _ in range(20):
+        try:
+            a = UOp.new_buffer("CPU", 4, dtypes.fp8e4m3)
+            b = UOp.new_buffer("CPU", 4, dtypes.fp8e4m3)
+            ops = [
+                lambda: a.cast(dtypes.float32),
+                lambda: a.cast(dtypes.half),
+                lambda: a + b,
+                lambda: (a < b).where(a, b),
+            ]
+            return UOp.sink(rng.choice(ops)())
+        except Exception:
+            continue
+    raise AssertionError("fp8 generator failed 20x")
+
+
 class TestRewriteDifferential(unittest.TestCase):
     ORACLE = None
 
@@ -391,13 +409,14 @@ class TestRewriteDifferential(unittest.TestCase):
         ren = PythonRenderer.__new__(PythonRenderer)
         PythonRenderer.__init__(ren, Target.parse("cpu"))
         old_env, old_val = os.environ.get("EMULATED_DTYPES"), EMULATED_DTYPES.value
-        os.environ["EMULATED_DTYPES"] = "half,long"
-        EMULATED_DTYPES.value = "half,long"
+        os.environ["EMULATED_DTYPES"] = "half,long,fp8e4m3"
+        EMULATED_DTYPES.value = "half,long,fp8e4m3"
         orc = Oracle()
         try:
             rng = random.Random(51)
             graphs = [rand_half_graph(rng) for _ in range(100)]
             graphs += [rand_long_graph(rng) for _ in range(100)]
+            graphs += [rand_fp8_graph(rng) for _ in range(50)]
             self._diff("pm_dtype_decomps", pm_dtype_decomps, graphs, ctx=(set(), ren), oracle=orc)
         finally:
             orc.close()
