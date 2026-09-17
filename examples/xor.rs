@@ -9,12 +9,11 @@
 //! ```
 //!
 //! The layers are created once; their parameters are buffer-backed leaves that
-//! the optimizer updates in place (`into_params` + `Optim::step_inplace`), so the
+//! the optimizer updates in place (`into_params` + `Optim::step`), so the
 //! per-step graph stays identical and bounded and every step after the first is a
 //! compiled-program cache hit.
 
-use autorust::engine::realize::ProgCache;
-use autorust::runtime::buffer::BufTable;
+use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, Linear};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::Tensor;
@@ -32,14 +31,19 @@ fn main() {
     println!("XOR training: 2->4(relu)->1 MLP, MSE, SGD lr={lr}, epochs={n}, seed={seed}");
 
     let mut ctx = UOpCtx::new();
-    let mut bufs = BufTable::default();
-    let mut cache = ProgCache::default();
+    let mut sess = Session::new();
 
     // Create the layers once and make their params updateable buffer leaves.
     Tensor::manual_seed(seed);
     let l1 = Linear::new(&mut ctx, 2, 4, true).into_params(&mut ctx);
     let l2 = Linear::new(&mut ctx, 4, 1, true).into_params(&mut ctx);
-    let sgd = SGD::new(lr);
+    let params = vec![
+        l1.weight.clone(),
+        l1.bias.clone().unwrap(),
+        l2.weight.clone(),
+        l2.bias.clone().unwrap(),
+    ];
+    let sgd = SGD::new(params.clone(), lr);
 
     let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
         .reshape(&mut ctx, [4, 2]);
@@ -56,21 +60,15 @@ fn main() {
         let diff = out.sub(&mut ctx, &t);
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
 
-        let params = vec![
-            l1.weight.clone(),
-            l1.bias.clone().unwrap(),
-            l2.weight.clone(),
-            l2.bias.clone().unwrap(),
-        ];
         loss.backward(&mut ctx, &params, None);
-        sgd.step_inplace(&mut ctx, &mut bufs, &mut cache, &params);
-        sgd.zero_grad(&ctx, &params);
+        sgd.step(&mut ctx, &mut sess);
+        sgd.zero_grad(&ctx);
 
-        pred = out.reshape(&mut ctx, [4]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
-        last_loss = loss.reshape(&mut ctx, [1]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache)[0];
+        pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);
+        last_loss = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx, &mut sess)[0];
 
         if epoch == 0 {
-            first_epoch_misses = cache.misses;
+            first_epoch_misses = sess.cache.misses;
         }
         if epoch % log_every == 0 || epoch == n - 1 {
             println!("epoch {epoch:>5}: loss = {last_loss:.5}");
@@ -79,9 +77,9 @@ fn main() {
 
     println!(
         "to_program: {} misses / {} hits ({} cached)",
-        cache.misses,
-        cache.hits,
-        cache.len()
+        sess.cache.misses,
+        sess.cache.hits,
+        sess.cache.len()
     );
 
     let truth = [false, true, true, false];
@@ -97,8 +95,8 @@ fn main() {
     }
 
     println!("\nfinal loss: {last_loss:.6}");
-    if cache.misses != first_epoch_misses {
-        eprintln!("warning: epochs after the first recompiled {} kernel(s)", cache.misses - first_epoch_misses);
+    if sess.cache.misses != first_epoch_misses {
+        eprintln!("warning: epochs after the first recompiled {} kernel(s)", sess.cache.misses - first_epoch_misses);
     }
     if !ok {
         eprintln!("XOR training did not converge; try more EPOCHS or a different LR/SEED.");

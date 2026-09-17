@@ -13,14 +13,13 @@ fn xor_relu_converges() {
         Tensor::manual_seed(42);
         let l1 = Linear::new(&mut ctx, 2, 4, true);
         let l2 = Linear::new(&mut ctx, 4, 1, true);
-        w1 = l1.weight.to_list::<f32>(&mut ctx);
-        b1 = l1.bias.unwrap().to_list::<f32>(&mut ctx);
-        w2 = l2.weight.to_list::<f32>(&mut ctx);
-        b2 = l2.bias.unwrap().to_list::<f32>(&mut ctx);
+        w1 = l1.weight.to_list_fresh::<f32>(&mut ctx);
+        b1 = l1.bias.unwrap().to_list_fresh::<f32>(&mut ctx);
+        w2 = l2.weight.to_list_fresh::<f32>(&mut ctx);
+        b2 = l2.bias.unwrap().to_list_fresh::<f32>(&mut ctx);
     }
     let lr: f32 = std::env::var("LR").ok().and_then(|s| s.parse().ok()).unwrap_or(0.1);
     let n: usize = std::env::var("EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
-    let sgd = SGD::new(lr);
     let mut pred: Vec<f32> = Vec::new();
     let mut last_loss = 0.0f32;
     for epoch in 0..n {
@@ -37,14 +36,15 @@ fn xor_relu_converges() {
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
         let params = vec![w1t, b1t, w2t, b2t];
         loss.backward(&mut ctx, &params, None);
-        let np = sgd.step(&mut ctx, &params);
-        sgd.zero_grad(&ctx, &params);
-        w1 = np[0].to_list::<f32>(&mut ctx);
-        b1 = np[1].to_list::<f32>(&mut ctx);
-        w2 = np[2].to_list::<f32>(&mut ctx);
-        b2 = np[3].to_list::<f32>(&mut ctx);
-        pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx);
-        last_loss = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx)[0];
+        let sgd = SGD::new(params.clone(), lr);
+        let np = sgd.step_graph(&mut ctx);
+        sgd.zero_grad(&ctx);
+        w1 = np[0].to_list_fresh::<f32>(&mut ctx);
+        b1 = np[1].to_list_fresh::<f32>(&mut ctx);
+        w2 = np[2].to_list_fresh::<f32>(&mut ctx);
+        b2 = np[3].to_list_fresh::<f32>(&mut ctx);
+        pred = out.reshape(&mut ctx, [4]).to_list_fresh::<f32>(&mut ctx);
+        last_loss = loss.reshape(&mut ctx, [1]).to_list_fresh::<f32>(&mut ctx)[0];
         if epoch % 10 == 0 || epoch == n - 1 {
             println!("epoch {epoch}: loss = {last_loss:.8}");
         }

@@ -391,7 +391,7 @@ cast.
 ### 8.5 Tensor-op tests (DONE)
 `tests/ops.rs` 9/9 (binary/unary/reduce/cast/activation/movement/matmul). Op bugs found &
 fixed: `log` = `log2 * ln2` (was `/`), `dot` N-D reshape math, `tanh` argument, `buffer_of`
-view ops, `to_bytes_with` materializing copy, `expand`/`broadcast_to` axis order.
+view ops, `to_bytes` materializing copy, `expand`/`broadcast_to` axis order.
 
 ### 8.6 Autograd (engine DONE)
 `src/tensor/grad.rs` ports `mixin/gradient.py` (`compute_gradient`, `_deepwalk`,
@@ -421,9 +421,11 @@ those nodes).
   defaulted `params()` + `scoped(prefix, iter)` (`"l1.weight"`, safetensors-ready).
   `Box<dyn Iterator>` keeps `Module` object-safe; names live in the trait, never on
   `Tensor`.
-- `src/tensor/optim.rs`: `Optim` trait + `SGD { lr }` (`w -= lr*grad`, missing grad leaves
-  the param untouched) + `zero_grad`. `step` returns updated tensors; `step_inplace` assigns
-  them back into the parameter buffers (see §8.10). **No Adam/momentum/weight-decay.**
+- `src/tensor/optim.rs`: `Optim` trait + `SGD` owning its `params` (`SGD::new(params, lr)`,
+  tinygrad `optim.SGD([w,b], lr)`; `w -= lr*grad`, missing grad leaves the param untouched).
+  `step(&mut ctx, &mut sess)` is tinygrad's in-place `Optimizer.step`; `step_graph(&mut ctx)`
+  returns updated tensors (parity tests); `zero_grad(&ctx)` uses the owned params.
+  **No Adam/momentum/weight-decay.**
 - No `nn/state.py` equivalent (`state_dict`/`load_state_dict`/safetensors), no
   `fetch`/`from_url`, no Embedding/LSTM/InstanceNorm/RMSNorm.
 - Tensor helpers added for nn: `dot`, `linear`, `batchnorm`, `layernorm`, `pool`, `uniform`,
@@ -449,11 +451,16 @@ those nodes).
   retained bases** (was ~133k nodes / ~5.4k bases, RSS 240MB → 15MB). Regression test
   `tests/mem_probe.rs::single_ctx_training_is_memory_bounded`.
 - **Persistent realize state (`Session`)**: `engine::session::Session` bundles a `BufTable` +
-  `ProgCache` + `var_vals` + a `realized` memo. `ProgCache` is content-keyed
+  `ProgCache` + `var_vals` and is passed as the single realize-state argument to every read
+  (`t.to_list::<f32>(&mut ctx, &mut sess)`) and optimizer step. `ProgCache` is content-keyed
   (`Graph::content_key`), so compiled kernels survive a fresh `UOpCtx` per step; its hit path
   re-interns the PROGRAM uop in the current arena (the cached `uop` id is arena-local).
-  The XOR training loop shares one `ProgCache`: **21 kernels compiled, 3291 hits / 300
-  epochs**, ~47s → ~22s. `tests/session.rs` (3 tests) pins it.
+  The XOR training loop shares one `Session`: **10 kernels compiled, 3290 hits / 300
+  epochs**. `tests/session.rs` (4 tests) pins it. There is deliberately **no session-wide
+  `realized` memo** — the per-tensor buffer cell (tinygrad `Tensor.realized`) is the memo;
+  a uop-keyed map would pin every step's graph in a training loop. For one-shot reads use the
+  `_fresh` conveniences (`to_list_fresh`/`to_bytes_fresh`/`item_fresh`/`realize_fresh`),
+  which allocate a throwaway session.
 - **`add_local_buffer` (DONE, `11ab94a`)** + `pm_add_local_buffers` wired into the
   `"add local buffers"` stage (receives a slot counter `CtxVal::Cnt`).
 - **Per-node side tables (DONE)**: the staged `initial_data` bytes and the autograd `grad`
@@ -480,7 +487,7 @@ a **pure-graph** optimizer (`step` returns new tensors), which forced callers to
 rebind (`w = w - lr*grad`, making each weight's subgraph contain the previous one → O(N)
 graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights through host
 `Vec<f32>` every step (what `nn_xor`/`mem_probe` used to do).
-- `Tensor::assign(ctx, &mut BufTable, &mut ProgCache, value)` realizes `value` and copies its
+- `Tensor::assign(ctx, sess, value)` realizes `value` and copies its
   bytes into this tensor's storage **by buffer identity** (`buffer_of(self.uop)` — the same
   base the forward pass resolves), leaving `self.uop` unchanged. The copy half is
   `realize::buffer_copyin` (device `_copyin`).
@@ -489,10 +496,11 @@ graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights thro
   every realize. `to_param` realizes the init once and stages it on a buffer-backed leaf
   (`Node.initial_data`), i.e. tinygrad's "parameters are realized buffers". Do it once
   before training.
-- `Optim::step_inplace` = `step` + `assign` each update back into its parameter (tinygrad
-  `Optimizer.step`); `step` (return-new-tensors) is kept for the parity tests.
+- `Optim::step(&mut ctx, &mut sess)` = `step_graph` + `assign` each update back into its
+  parameter (tinygrad `Optimizer.step`); `step_graph(&mut ctx)` (return-new-tensors) is kept
+  for the parity tests. `SGD` owns its params (`SGD::new(params, lr)`).
 - Result: `tests/nn_xor.rs`, `examples/xor.rs` and the rewritten `tests/mem_probe.rs` hold
-  the `Linear` layers and loop `forward → backward → step_inplace → zero_grad`. The per-step
+  the `Linear` layers and loop `forward → backward → step → zero_grad`. The per-step
   graph is identical, so every step after the first is a program-cache hit and the live graph
   is flat (the last XOR run: 10 misses / 3290 hits, loss 0.021).
 - Caveat: `assign` mutates a param buffer in place, so a *derived* uop realized in an earlier
@@ -510,7 +518,7 @@ problem (persistent, collectible state) and should be designed together.
 See §8.8 for the full write-up. Summary: `Tensor` owns its realized `Buffer` (`Rc`, shared
 by clones, reused on repeat reads); `BufTable` stores views as `Weak` and prunes any base no
 live caller references at the start of each realize; `Session` bundles `BufTable` +
-`ProgCache` (+ `var_vals` + `realized` memo) and is reusable across steps. The
+`ProgCache` + `var_vals` and is reusable across steps. The
 content-keyed `ProgCache` makes compiled kernels survive a fresh `UOpCtx` per step.
 Residual (DONE): staged bytes and grads now live on the node — see §8.8/§9.2.
 

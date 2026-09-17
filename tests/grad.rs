@@ -23,9 +23,9 @@ fn grad_sum_square() {
     let x = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0]);
     let sq = x.mul(&mut ctx, &x);
     let loss = sq.sum(&mut ctx, None, false, None);
-    assert_eq!(loss.to_list::<f32>(&mut ctx), vec![30.0]);
+    assert_eq!(loss.to_list_fresh::<f32>(&mut ctx), vec![30.0]);
     let gs = loss.gradient(&mut ctx, &[x], None);
-    almost(&gs[0].to_list::<f32>(&mut ctx), &[2.0, 4.0, 6.0, 8.0]);
+    almost(&gs[0].to_list_fresh::<f32>(&mut ctx), &[2.0, 4.0, 6.0, 8.0]);
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn grad_linear_affine() {
     let lin = x.mul(&mut ctx, 2.0).add(&mut ctx, 3.0);
     let loss = lin.sum(&mut ctx, None, false, None);
     let gs = loss.gradient(&mut ctx, &[x], None);
-    almost(&gs[0].to_list::<f32>(&mut ctx), &[2.0, 2.0, 2.0, 2.0]);
+    almost(&gs[0].to_list_fresh::<f32>(&mut ctx), &[2.0, 2.0, 2.0, 2.0]);
 }
 
 #[test]
@@ -46,8 +46,8 @@ fn grad_bias_broadcast() {
     let out = x.add(&mut ctx, &b);
     let loss = out.sum(&mut ctx, None, false, None);
     let gs = loss.gradient(&mut ctx, &[x, b], None);
-    almost(&gs[0].to_list::<f32>(&mut ctx), &[1.0; 12]);
-    almost(&gs[1].to_list::<f32>(&mut ctx), &[3.0, 3.0, 3.0, 3.0]);
+    almost(&gs[0].to_list_fresh::<f32>(&mut ctx), &[1.0; 12]);
+    almost(&gs[1].to_list_fresh::<f32>(&mut ctx), &[3.0, 3.0, 3.0, 3.0]);
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn grad_sigmoid() {
     let gs = loss.gradient(&mut ctx, &[x], None);
     let sig = |z: f32| 1.0 / (1.0 + (-z).exp());
     let exp: Vec<f32> = [0.0f32, 1.0, -1.0, 2.0].iter().map(|&z| sig(z) * (1.0 - sig(z))).collect();
-    almost(&gs[0].to_list::<f32>(&mut ctx), &exp);
+    almost(&gs[0].to_list_fresh::<f32>(&mut ctx), &exp);
 }
 
 #[test]
@@ -71,9 +71,9 @@ fn grad_matmul() {
     let loss = y.sum(&mut ctx, None, false, None);
     let gs = loss.gradient(&mut ctx, &[a, w], None);
     // grad_w[i][j] = sum of column i of a (same across j)
-    almost(&gs[1].to_list::<f32>(&mut ctx), &[5.0, 5.0, 5.0, 5.0, 7.0, 7.0, 7.0, 7.0, 9.0, 9.0, 9.0, 9.0]);
+    almost(&gs[1].to_list_fresh::<f32>(&mut ctx), &[5.0, 5.0, 5.0, 5.0, 7.0, 7.0, 7.0, 7.0, 9.0, 9.0, 9.0, 9.0]);
     // grad_a[p][i] = row sum of w[i]
-    almost(&gs[0].to_list::<f32>(&mut ctx), &[6.0, 22.0, 38.0, 6.0, 22.0, 38.0]);
+    almost(&gs[0].to_list_fresh::<f32>(&mut ctx), &[6.0, 22.0, 38.0, 6.0, 22.0, 38.0]);
 }
 
 #[test]
@@ -86,6 +86,6 @@ fn grad_mse_like() {
     let sq = diff.mul(&mut ctx, &diff);
     let loss = sq.mean(&mut ctx, None, false);
     let gs = loss.gradient(&mut ctx, &[x, t], None);
-    almost(&gs[0].to_list::<f32>(&mut ctx), &[2.0 * (1.0 - 2.0) / 3.0, 0.0, 2.0 * (3.0 - 2.0) / 3.0]);
-    almost(&gs[1].to_list::<f32>(&mut ctx), &[-2.0 * (1.0 - 2.0) / 3.0, 0.0, -2.0 * (3.0 - 2.0) / 3.0]);
+    almost(&gs[0].to_list_fresh::<f32>(&mut ctx), &[2.0 * (1.0 - 2.0) / 3.0, 0.0, 2.0 * (3.0 - 2.0) / 3.0]);
+    almost(&gs[1].to_list_fresh::<f32>(&mut ctx), &[-2.0 * (1.0 - 2.0) / 3.0, 0.0, -2.0 * (3.0 - 2.0) / 3.0]);
 }

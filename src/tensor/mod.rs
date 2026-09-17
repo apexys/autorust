@@ -59,8 +59,7 @@ use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
 use crate::dtype::DTypeId;
 use crate::dtype::ReadDtype;
-use crate::runtime::buffer::{Buffer, BufTable};
-use crate::engine::realize::ProgCache;
+use crate::runtime::buffer::Buffer;
 use crate::engine::session::Session;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -162,26 +161,10 @@ impl Tensor {
 
     /// Trigger the compute needed to read this tensor and return its raw storage
     /// bytes at its own dtype (python `_buffer()` copyout). For typed,
-    /// cast-aware read-out use [`Tensor::to_list`] / [`Tensor::item`].
-    pub fn to_bytes(&self, ctx: &mut UOpCtx) -> Vec<u8> {
-        self.to_bytes_in(ctx, &mut Session::new())
-    }
-
-    /// [`Tensor::to_bytes`] with a caller-owned buffer/program cache, so realized
-    /// buffers can be reused across many reads (e.g. the test harness).
-    pub fn to_bytes_with(&self, ctx: &mut UOpCtx, t: &mut BufTable, cache: &mut ProgCache) -> Vec<u8> {
-        if let Some(b) = self.realized_buffer() {
-            return crate::engine::realize::buffer_bytes(&b);
-        }
-        let b = crate::engine::realize::realize_tensor(ctx, self.uop.clone(), t, cache);
-        self.set_realized_buffer(b.clone());
-        crate::engine::realize::buffer_bytes(&b)
-    }
-
-    /// [`Tensor::to_bytes`] reusing a persistent [`Session`] (no recompile, no
-    /// reallocation on a second realize). The realized buffer is cached on the
-    /// tensor, so even a session-less repeat reuses it.
-    pub fn to_bytes_in(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<u8> {
+    /// cast-aware read-out use [`Tensor::to_list`] / [`Tensor::item`]. The
+    /// realized buffer is cached on the tensor (shared by clones), so a repeat
+    /// read does not re-realize.
+    pub fn to_bytes(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<u8> {
         if let Some(b) = self.realized_buffer() {
             return crate::engine::realize::buffer_bytes(&b);
         }
@@ -191,6 +174,11 @@ impl Tensor {
         bytes
     }
 
+    /// [`Tensor::to_bytes`] with a throwaway [`Session`] (one-shot reads).
+    pub fn to_bytes_fresh(&self, ctx: &mut UOpCtx) -> Vec<u8> {
+        self.to_bytes(ctx, &mut Session::new())
+    }
+
     /// `Tensor.assign` (tensor.py:436): realize `value` and copy its bytes into
     /// *this* tensor's storage in place, leaving `self.uop` unchanged.
     ///
@@ -198,15 +186,15 @@ impl Tensor {
     /// steps: `w - lr*grad` is built as a fresh subgraph, written back into `w`'s
     /// buffer, then dropped. Without it, rebinding `w = w - lr*grad` chains each
     /// step into the previous one and the graph grows without bound.
-    pub fn assign(&self, ctx: &mut UOpCtx, t: &mut BufTable, cache: &mut ProgCache, value: &Tensor) {
+    pub fn assign(&self, ctx: &mut UOpCtx, sess: &mut Session, value: &Tensor) {
         assert_eq!(self.dtype(ctx), value.dtype(ctx), "TGERR: assign dtype mismatch");
         // Realize the value first: its graph reads the parameter's current bytes.
-        let src = crate::engine::realize::realize_tensor(ctx, value.uop.clone(), t, cache);
+        let src = sess.realize_tensor(ctx, value.uop.clone());
         let bytes = crate::engine::realize::buffer_bytes(&src);
         // Destination is this tensor's storage *by buffer identity* — the same
         // base the forward pass resolves through `buffer_of`, so the write is
         // visible to subsequent realizes.
-        let dst = crate::runtime::buffer::buffer_of(ctx, t, self.uop.clone());
+        let dst = crate::runtime::buffer::buffer_of(ctx, &mut sess.buffers, self.uop.clone());
         crate::engine::realize::buffer_copyin(&dst, &bytes);
         self.set_realized_buffer(dst);
     }
@@ -220,9 +208,9 @@ impl Tensor {
     pub fn to_param(&self, ctx: &mut UOpCtx) -> Tensor {
         let shape = self.shape(ctx);
         let dt = self.dtype(ctx);
-        // Realize the init in a throwaway engine table (it may be on a different
+        // Realize the init in a throwaway session (it may be on a different
         // device than the training buffers) and stage the bytes on the leaf.
-        let bytes = self.to_bytes_with(ctx, &mut BufTable::default(), &mut ProgCache::default());
+        let bytes = self.to_bytes_fresh(ctx);
         let dev = self.realized_buffer().map(|b| b.device().to_string()).unwrap_or_else(|| "PYTHON".to_string());
         let u = crate::tensor::creation::empty(ctx, &shape, dt, &dev);
         crate::tensor::creation::register_initial(ctx, u.clone(), bytes);
@@ -230,16 +218,15 @@ impl Tensor {
     }
 
     /// `Tensor.realize`: trigger the computation needed to materialize this tensor
-    /// and return `&self`. The default allocates a throwaway [`Session`]; use
-    /// [`Tensor::realize_in`] to persist buffers/programs across calls.
-    pub fn realize(&self, ctx: &mut UOpCtx) -> &Tensor {
-        let _ = self.to_bytes(ctx);
+    /// and return `&self`.
+    pub fn realize(&self, ctx: &mut UOpCtx, sess: &mut Session) -> &Tensor {
+        let _ = self.to_bytes(ctx, sess);
         self
     }
 
-    /// [`Tensor::realize`] against a persistent [`Session`].
-    pub fn realize_in(&self, ctx: &mut UOpCtx, sess: &mut Session) -> &Tensor {
-        let _ = self.to_bytes_in(ctx, sess);
+    /// [`Tensor::realize`] with a throwaway [`Session`].
+    pub fn realize_fresh(&self, ctx: &mut UOpCtx) -> &Tensor {
+        let _ = self.to_bytes_fresh(ctx);
         self
     }
 
@@ -263,38 +250,29 @@ impl Tensor {
     /// Read the tensor out as `Vec<T>`: cast to `T::DTYPE` in the graph (a no-op
     /// when already that dtype), realize, and reinterpret the little-endian bytes
     /// — no `f64` round-trip. Panics if the tensor cannot be cast to `T::DTYPE`.
-    pub fn to_list<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> Vec<T> {
-        self.to_list_in(ctx, &mut Session::new())
-    }
-
-    /// [`Tensor::to_list`] with a caller-owned buffer/program cache.
-    pub fn to_list_with<T: ReadDtype>(&self, ctx: &mut UOpCtx, t: &mut BufTable, cache: &mut ProgCache) -> Vec<T> {
+    pub fn to_list<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<T> {
         if <T as ReadDtype>::DTYPE == self.dtype(ctx) {
-            return Self::decode::<T>(self.to_bytes_with(ctx, t, cache));
-        }
-        let uop = self.read_target::<T>(ctx);
-        Self::decode::<T>(crate::engine::realize::tensor_bytes(ctx, uop, t, cache))
-    }
-
-    /// [`Tensor::to_list`] against a persistent [`Session`].
-    pub fn to_list_in<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<T> {
-        if <T as ReadDtype>::DTYPE == self.dtype(ctx) {
-            return Self::decode::<T>(self.to_bytes_in(ctx, sess));
+            return Self::decode::<T>(self.to_bytes(ctx, sess));
         }
         let uop = self.read_target::<T>(ctx);
         Self::decode::<T>(sess.tensor_bytes(ctx, uop))
     }
 
-    /// Read a single-element tensor out as `T` (python `item()`); asserts `numel()==1`.
-    pub fn item<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> T {
-        self.item_in(ctx, &mut Session::new())
+    /// [`Tensor::to_list`] with a throwaway [`Session`] (one-shot reads).
+    pub fn to_list_fresh<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> Vec<T> {
+        self.to_list(ctx, &mut Session::new())
     }
 
-    /// [`Tensor::item`] against a persistent [`Session`].
-    pub fn item_in<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> T {
+    /// Read a single-element tensor out as `T` (python `item()`); asserts `numel()==1`.
+    pub fn item<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> T {
         let n = self.shape(ctx).numel_int().unwrap_or(0);
         assert_eq!(n, 1, "TGERR: item() requires exactly one element, tensor has {n}");
-        self.to_list_in::<T>(ctx, sess).into_iter().next().expect("TGERR: item() on empty tensor")
+        self.to_list::<T>(ctx, sess).into_iter().next().expect("TGERR: item() on empty tensor")
+    }
+
+    /// [`Tensor::item`] with a throwaway [`Session`].
+    pub fn item_fresh<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> T {
+        self.item(ctx, &mut Session::new())
     }
 
     /// `Tensor.reshape`: public wrapper taking any `ShapeArg`.

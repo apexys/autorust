@@ -18,7 +18,7 @@ fn xor_parity_tinygrad_seed42() {
     let mut w2 = w2_init.clone();
     let mut b2 = b2_init.clone();
 
-    let sgd = SGD::new(0.5);
+    let sgd_lr = 0.5;
     let n: usize = std::env::var("TEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
     for epoch in 0..n {
         let mut ctx = UOpCtx::new();
@@ -37,22 +37,23 @@ fn xor_parity_tinygrad_seed42() {
         let loss = sq.mean(&mut ctx, None, false);
 
         if epoch == 0 {
-            let h0 = h.reshape(&mut ctx, [4, 2]).to_list::<f32>(&mut ctx);
+            let h0 = h.reshape(&mut ctx, [4, 2]).to_list_fresh::<f32>(&mut ctx);
             println!("h0 {h0:?}");
-            let out0 = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx);
+            let out0 = out.reshape(&mut ctx, [4]).to_list_fresh::<f32>(&mut ctx);
             println!("out0 {out0:?}");
         }
 
         let params = vec![w1t, b1t, w2t, b2t];
         loss.backward(&mut ctx, &params, None);
-        let np = sgd.step(&mut ctx, &params);
-        sgd.zero_grad(&ctx, &params);
+        let sgd = SGD::new(params.clone(), sgd_lr);
+        let np = sgd.step_graph(&mut ctx);
+        sgd.zero_grad(&ctx);
 
-        w1 = np[0].to_list::<f32>(&mut ctx);
-        b1 = np[1].to_list::<f32>(&mut ctx);
-        w2 = np[2].to_list::<f32>(&mut ctx);
-        b2 = np[3].to_list::<f32>(&mut ctx);
-        let l = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx)[0];
+        w1 = np[0].to_list_fresh::<f32>(&mut ctx);
+        b1 = np[1].to_list_fresh::<f32>(&mut ctx);
+        w2 = np[2].to_list_fresh::<f32>(&mut ctx);
+        b2 = np[3].to_list_fresh::<f32>(&mut ctx);
+        let l = loss.reshape(&mut ctx, [1]).to_list_fresh::<f32>(&mut ctx)[0];
         println!("epoch {epoch}: loss = {l:.8}");
     }
 }
@@ -65,19 +66,19 @@ fn dot_probe() {
     let w1 = Tensor::from_slice(&mut ctx, &[0.047_263_98_f32, 0.240_635_74, 0.372_049_78, -0.096_088_41], None, None).reshape(&mut ctx, [2, 2]);
     let b1 = Tensor::from_slice(&mut ctx, &[0.089_121_03_f32, -0.695_566_95], None, None);
     let h = nn::sigmoid(&Linear { weight: w1, bias: Some(b1) }.forward(&x, &mut ctx), &mut ctx);
-    println!("h {:?}", h.reshape(&mut ctx, [4, 2]).to_list::<f32>(&mut ctx));
+    println!("h {:?}", h.reshape(&mut ctx, [4, 2]).to_list_fresh::<f32>(&mut ctx));
 
     let w = Tensor::from_slice(&mut ctx, &[0.047_621_723_f32, -0.175_591_19], None, None)
         .reshape(&mut ctx, [1, 2]);
     let b = Tensor::from_slice(&mut ctx, &[0.445_369_45_f32], None, None);
     let wt = w.transpose(&mut ctx, 0, 1);
     let o = h.linear(&mut ctx, &wt, Some(&b));
-    let ov = o.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx);
+    let ov = o.reshape(&mut ctx, [4]).to_list_fresh::<f32>(&mut ctx);
     println!("dot_probe {ov:?}");
-    let hv = h.reshape(&mut ctx, [4, 2]).to_list::<f32>(&mut ctx);
+    let hv = h.reshape(&mut ctx, [4, 2]).to_list_fresh::<f32>(&mut ctx);
     let h2 = Tensor::from_slice(&mut ctx, &hv, None, None).reshape(&mut ctx, [4, 2]);
     let o2 = h2.linear(&mut ctx, &wt, Some(&b));
-    let o2v = o2.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx);
+    let o2v = o2.reshape(&mut ctx, [4]).to_list_fresh::<f32>(&mut ctx);
     println!("dot_probe_copy {o2v:?}");
 
     let expected = [0.41180462f32, 0.41831934, 0.39708504, 0.40397506];

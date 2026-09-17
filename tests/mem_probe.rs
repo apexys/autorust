@@ -8,8 +8,7 @@
 //! round-tripped through host `Vec<f32>` each step. Now each step references the
 //! same parameter leaves and the live-node / base counts stay flat.
 
-use autorust::engine::realize::ProgCache;
-use autorust::runtime::buffer::BufTable;
+use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, Linear};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::Tensor;
@@ -19,11 +18,16 @@ use autorust::uop::ctx::UOpCtx;
 fn single_ctx_training_is_memory_bounded() {
     Tensor::manual_seed(42);
     let mut ctx = UOpCtx::new();
-    let mut cache = ProgCache::default();
-    let mut bufs = BufTable::default();
+    let mut sess = Session::new();
     let l1 = Linear::new(&mut ctx, 2, 4, true).into_params(&mut ctx);
     let l2 = Linear::new(&mut ctx, 4, 1, true).into_params(&mut ctx);
-    let sgd = SGD::new(0.1);
+    let params = vec![
+        l1.weight.clone(),
+        l1.bias.clone().unwrap(),
+        l2.weight.clone(),
+        l2.bias.clone().unwrap(),
+    ];
+    let sgd = SGD::new(params.clone(), 0.1);
 
     let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
         .reshape(&mut ctx, [4, 2]);
@@ -35,24 +39,19 @@ fn single_ctx_training_is_memory_bounded() {
         let out = l2.forward(&h, &mut ctx);
         let diff = out.sub(&mut ctx, &t);
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
-        let params = vec![
-            l1.weight.clone(),
-            l1.bias.clone().unwrap(),
-            l2.weight.clone(),
-            l2.bias.clone().unwrap(),
-        ];
+
         loss.backward(&mut ctx, &params, None);
-        sgd.step_inplace(&mut ctx, &mut bufs, &mut cache, &params);
-        sgd.zero_grad(&ctx, &params);
-        let _ = loss.reshape(&mut ctx, [1]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
+        sgd.step(&mut ctx, &mut sess);
+        sgd.zero_grad(&ctx);
+        let _ = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx, &mut sess);
 
         if i == 9 {
-            baseline = Some((ctx.g.live_len(), bufs.n_bases()));
+            baseline = Some((ctx.g.live_len(), sess.buffers.n_bases()));
         }
     }
 
     let (base_nodes, base_bases) = baseline.expect("baseline captured at step 10");
-    let (nodes, bases) = (ctx.g.live_len(), bufs.n_bases());
+    let (nodes, bases) = (ctx.g.live_len(), sess.buffers.n_bases());
     // Nodes may fluctuate by a small constant but must not scale with step count.
     assert!(nodes <= base_nodes + 64, "live nodes grew with steps: {base_nodes} -> {nodes}");
     assert!(bases <= base_bases + 4, "buffer bases grew with steps: {base_bases} -> {bases}");

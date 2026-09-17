@@ -7,15 +7,13 @@
 //!   buffer-backed leaves (`into_params`); the optimizer updates those buffers
 //!   in place with `Tensor::assign` (tinygrad `Optimizer.step`). So each step's
 //!   graph references the *same* parameter leaves and is structurally identical
-//!   — the graph does not chain into previous steps. See CURRENT_STATE §9.
+//!   — the graph does not chain into previous steps. See CURRENT_STATE §8.10.
 //! - Because the graph is identical each step, every step after the first is a
 //!   program-cache hit: kernels are not re-lowered/re-rendered/re-compiled.
 //! - Config matches the tinygrad reference sweep that converges reliably
 //!   (`2->4` ReLU hidden, linear output, MSE, `lr=0.1`, seed 42, ~300 epochs).
 
-use autorust::engine::realize::ProgCache;
 use autorust::engine::session::Session;
-use autorust::runtime::buffer::BufTable;
 use autorust::tensor::nn::{self, Linear};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::Tensor;
@@ -24,8 +22,7 @@ use autorust::uop::ctx::UOpCtx;
 #[test]
 fn xor_trains_to_convergence() {
     let mut ctx = UOpCtx::new();
-    let mut bufs = BufTable::default();
-    let mut cache = ProgCache::default();
+    let mut sess = Session::new();
 
     // Draw the initial weights once and turn them into buffer-backed leaves so
     // the optimizer can assign into them in place.
@@ -34,7 +31,13 @@ fn xor_trains_to_convergence() {
     let l2 = Linear::new(&mut ctx, 4, 1, true).into_params(&mut ctx);
 
     let lr: f32 = std::env::var("LR").ok().and_then(|s| s.parse().ok()).unwrap_or(0.1);
-    let sgd = SGD::new(lr);
+    let params = vec![
+        l1.weight.clone(),
+        l1.bias.clone().unwrap(),
+        l2.weight.clone(),
+        l2.bias.clone().unwrap(),
+    ];
+    let sgd = SGD::new(params.clone(), lr);
 
     // The inputs are constant; the graph is reused every step.
     let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
@@ -52,29 +55,23 @@ fn xor_trains_to_convergence() {
         let diff = out.sub(&mut ctx, &t);
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
 
-        let params = vec![
-            l1.weight.clone(),
-            l1.bias.clone().unwrap(),
-            l2.weight.clone(),
-            l2.bias.clone().unwrap(),
-        ];
         loss.backward(&mut ctx, &params, None);
-        // `step_inplace` assigns into the parameter buffers; the leaves are
-        // unchanged, so the next step's graph is identical.
-        sgd.step_inplace(&mut ctx, &mut bufs, &mut cache, &params);
-        sgd.zero_grad(&ctx, &params);
+        // `step` assigns into the parameter buffers; the leaves are unchanged,
+        // so the next step's graph is identical.
+        sgd.step(&mut ctx, &mut sess);
+        sgd.zero_grad(&ctx);
 
-        pred = out.reshape(&mut ctx, [4]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache);
-        last_loss = loss.reshape(&mut ctx, [1]).to_list_with::<f32>(&mut ctx, &mut bufs, &mut cache)[0];
+        pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);
+        last_loss = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx, &mut sess)[0];
 
         if epoch % (n / 10).max(1) == 0 || epoch == n - 1 {
             println!("epoch {epoch}: loss = {last_loss}");
         }
         if epoch == 0 {
-            first_epoch_misses = Some(cache.misses);
+            first_epoch_misses = Some(sess.cache.misses);
         }
     }
-    println!("to_program: {} misses / {} hits ({} cached)", cache.misses, cache.hits, cache.len());
+    println!("to_program: {} misses / {} hits ({} cached)", sess.cache.misses, sess.cache.hits, sess.cache.len());
 
     let truth = [false, true, true, false];
     for (i, (p, tt)) in pred.iter().zip(truth).enumerate() {
@@ -84,8 +81,8 @@ fn xor_trains_to_convergence() {
     assert!(last_loss < 0.05, "loss did not drop enough: {last_loss}");
     // Every step builds an identical-shaped graph, so no epoch after the first may
     // compile a new kernel (the point of 9.1's persistent, content-keyed ProgCache).
-    assert_eq!(cache.misses, first_epoch_misses.unwrap(), "epochs after the first must not recompile");
-    assert!(cache.hits > cache.misses * 10, "expected heavy program-cache reuse, got {} hits / {} misses", cache.hits, cache.misses);
+    assert_eq!(sess.cache.misses, first_epoch_misses.unwrap(), "epochs after the first must not recompile");
+    assert!(sess.cache.hits > sess.cache.misses * 10, "expected heavy program-cache reuse, got {} hits / {} misses", sess.cache.hits, sess.cache.misses);
 }
 
 #[test]
@@ -97,7 +94,7 @@ fn micro_seq_kaiming_timed() {
         let t = Tensor::kaiming_uniform(&mut ctx, &[2,2], (5.0f64).sqrt(), None);
         let n_before = ctx.g.live_len();
         let t0 = Instant::now();
-        let v = t.to_list::<f32>(&mut ctx);
+        let v = t.to_list_fresh::<f32>(&mut ctx);
         eprintln!("[t] i={i} before={n_before} dt={:?}", t0.elapsed());
         let _ = v;
     }
@@ -115,7 +112,7 @@ fn micro_repeated_realize() {
         let c = a.add(&mut ctx, &b);
         let before = ctx.g.live_len();
         let t0 = Instant::now();
-        let v = c.to_list_in::<f32>(&mut ctx, &mut sess);
+        let v = c.to_list::<f32>(&mut ctx, &mut sess);
         eprintln!(
             "[r] i={i} before={before} after={} bases={} hits={} misses={} dt={:?} v={v:?}",
             ctx.g.live_len(),
