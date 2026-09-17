@@ -591,9 +591,9 @@ rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on co
 | 18 | lower all index dtypes `symbolic_simple`+`pm_lower_index_dtype`+`indexing_simplify` | ✅ | weak lowering wired; **bug fix**: `_lower_weak_ops` must exclude COMPARISON (Cmpne oscillation, fixed in weak.rs) |
 | 19 | final symbolic `symbolic` | ✅ | |
 | 20 | cast float alu `pm_cast_float_alu` | ✅ | |
-| 21 | early decompositions `symbolic_simple`+`get_simplifying_rewrite_patterns` | ⬜ | **TODO**: floordiv/floormod/idiv decomposition (only `symbolic_simple` today) |
-| 22 | decomp dtypes `pm_dtype_decomps`+`pm_commit_weak` | ⬜ | **TODO**: non-native-float decomp (fp16/bf16/fp8); fp32 corpus unaffected |
-| 23 | late decompositions `pm_decomp` | ⬜ | same as #21 |
+| 21 | early decompositions `symbolic_simple`+`get_simplifying_rewrite_patterns` | ✅ | floordiv/floormod->idiv/mod + pow2 shr/and + threefry (`decomp.rs`) |
+| 22 | decomp dtypes `pm_dtype_decomps`+`pm_commit_weak` | ✅ | long-as-2xint32 + fp8/bf16/fp16 float emulation (`decomp_dtype.rs`) |
+| 23 | late decompositions `pm_decomp` | ⬜ | has `symbolic_simple`+`get_simplifying_rewrite_patterns`; still missing `get_late_rewrite_patterns`/`get_transcendental_patterns` |
 | 24 | move gates from index `pm_move_gates_from_index` | ✅ | `gater.rs` (4 non-image rules) |
 | 25 | final rewrite `pm_final_rewrite`+`pm_remove_invalid` | ✅ | |
 | 26 | casted consts `pm_casted_consts` | ✅ | walk |
@@ -603,10 +603,9 @@ rule-parity commit. ✅ = wired and firing, ⬜ = empty placeholder (no-op on co
 
 Highest-value remaining gaps, ordered: (A) ~~`pm_add_local_buffers`+`pm_implicit_barriers`+
 `pm_add_control_flow` (the local-memory triad)~~ **DONE**; (B) ~~`pm_split_ranges`~~ **DONE**;
-(C) `get_simplifying_rewrite_patterns` floordiv/mod decomp +
-`pm_dtype_decomps` (needed for int-index-heavy + non-native-float kernels). Each is currently
-a no-op on the fp32 corpus, so no gate regressed; port each with a targeted differential kernel.
-Also still empty/partial: `pm_number_params` (#29), images (#16, descoped),
+(C) ~~`get_simplifying_rewrite_patterns` floordiv/mod decomp + `pm_dtype_decomps`~~ **DONE**.
+Remaining: `get_late_rewrite_patterns`+`get_transcendental_patterns` (finish #23 late decompositions),
+then `pm_number_params` (#29). Also still empty/partial: images (#16, descoped),
 `multi_pm` (#1, descoped).
 
 

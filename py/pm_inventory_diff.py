@@ -68,6 +68,7 @@ def tg_inventory():
         ("pm_reduce_local", C.pm_reduce_local), ("pm_add_local_buffers", C.pm_add_local_buffers),
         ("pm_add_gpudims", GD.pm_add_gpudims), ("indexing_simplify", CO.indexing_simplify),
         ("pm_simplify_add_image", CO.pm_simplify_add_image), ("pm_decomp", pm_decomp()),
+        ("pm_dtype_decomps", C.pm_dtype_decomps),
         ("pm_move_gates_from_index", GA.pm_move_gates_from_index), ("pm_cast_float_alu", C.pm_cast_float_alu),
         ("pm_commit_weak", WK.pm_commit_weak), ("pm_cast_weak", WK.pm_cast_weak),
         ("pm_lower_index_dtype", WK.pm_lower_index_dtype), ("pm_casted_consts", C.pm_casted_consts),

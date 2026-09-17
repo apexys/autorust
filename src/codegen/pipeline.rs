@@ -72,7 +72,7 @@ fn post_stages() -> Vec<Stage> {
         Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
         Stage { name: "cast float alu operands", pm: pm_cast_float_alu(), bottom_up: false },
         Stage { name: "early decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
-        Stage { name: "decomp dtypes", pm: PatternMatcher::new(vec![]).add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
+        Stage { name: "decomp dtypes", pm: crate::codegen::decomp_dtype::pm_dtype_decomps().add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
         Stage { name: "late decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
         Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },
         Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&pm_remove_invalid()), bottom_up: false },
@@ -852,6 +852,15 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "add images" {
             add_images(ctx, cur)
+        } else if st.name == "decomp dtypes" {
+            let dctx = crate::codegen::decomp_dtype::DtypeDecompCtx {
+                dtypes: HashSet::new(),
+                supported: ren.supported_dtypes.clone(),
+                emulated: crate::codegen::decomp_dtype::emulated_dtypes(),
+            };
+            graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false,
+                          CtxVal::Decomp(std::rc::Rc::new(std::cell::RefCell::new(dctx))))
+                .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "add control flow" {
             add_control_flow(ctx, cur)
         } else {
@@ -899,6 +908,7 @@ pub fn pm_inventory() -> Vec<(&'static str, Vec<String>)> {
     add!("indexing_simplify", crate::codegen::coalesce::indexing_simplify());
     add!("pm_simplify_add_image", pm_simplify_add_image());
     add!("pm_decomp", crate::codegen::decomp::pm_decomp());
+    add!("pm_dtype_decomps", crate::codegen::decomp_dtype::pm_dtype_decomps());
     add!("pm_move_gates_from_index", crate::codegen::gater::pm_move_gates_from_index());
     add!("pm_cast_float_alu", pm_cast_float_alu());
     add!("pm_commit_weak", crate::uop::weak::pm_commit_weak());

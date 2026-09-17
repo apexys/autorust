@@ -56,6 +56,12 @@ class Oracle:
             raise RuntimeError(resp.get("error", "oracle error"))
         return json_to_uop(json.dumps(resp["graph"]))
 
+    def close(self):
+        self.p.stdin.close()
+        self.p.stdout.close()
+        self.p.kill()
+        self.p.wait()
+
 
 # ---------- random graph generators ----------
 
@@ -228,6 +234,59 @@ def rand_threefry_graph(rng):
     raise AssertionError("threefry generator failed 20x")
 
 
+def rand_half_graph(rng):
+    """Graphs exercising `pm_dtype_decomps` (emulate half as float)."""
+    for _ in range(20):
+        try:
+            a = UOp.variable("a", -4, 4, dtypes.half, param=True)
+            b = UOp.variable("b", -4, 4, dtypes.half, param=True)
+            ops = [
+                lambda: a + b,
+                lambda: a * b,
+                lambda: (a < b).where(a, b),
+                lambda: a * a,
+                lambda: -a,
+                lambda: a.maximum(b),
+                lambda: a.cast(dtypes.float32).cast(dtypes.half),
+            ]
+            g = rng.choice(ops)()
+            if rng.random() < 0.5:
+                g = g.cast(dtypes.half)
+            return UOp.sink(g)
+        except Exception:
+            continue
+    raise AssertionError("half generator failed 20x")
+
+
+def rand_long_graph(rng):
+    """Graphs exercising `pm_dtype_decomps` (long/ulong as two int32 words)."""
+    for _ in range(20):
+        try:
+            a = UOp.new_buffer("CPU", 4, dtypes.long)
+            b = UOp.new_buffer("CPU", 4, dtypes.long)
+            ops = [
+                lambda: a + b,
+                lambda: a - b,
+                lambda: a * b,
+                lambda: (a < b).where(a, b),
+                lambda: a & b,
+                lambda: a | b,
+                lambda: a ^ b,
+                lambda: -a,
+                lambda: a << 3,
+                lambda: a >> 3,
+                lambda: a.cast(dtypes.int32),
+                lambda: a.cast(dtypes.float32),
+                lambda: a.maximum(b),
+                lambda: a.eq(b),
+                lambda: a < b,
+            ]
+            return UOp.sink(rng.choice(ops)())
+        except Exception:
+            continue
+    raise AssertionError("long generator failed 20x")
+
+
 class TestRewriteDifferential(unittest.TestCase):
     ORACLE = None
 
@@ -237,7 +296,8 @@ class TestRewriteDifferential(unittest.TestCase):
             raise unittest.SkipTest("oracle_rewrite not built")
         cls.ORACLE = Oracle()
 
-    def _diff(self, pm_name, pm_py, graphs, ctx=None):
+    def _diff(self, pm_name, pm_py, graphs, ctx=None, oracle=None):
+        oracle = oracle or self.ORACLE
         n_ok, n_skip, n_fail = 0, 0, 0
         for gi, g in enumerate(graphs):
             py_err = None
@@ -249,7 +309,7 @@ class TestRewriteDifferential(unittest.TestCase):
             rust_err = None
             rust_out = None
             try:
-                rust_out = self.ORACLE.rewrite(pm_name, g)
+                rust_out = oracle.rewrite(pm_name, g)
             except Exception as e:
                 rust_err = f"{type(e).__name__}: {e}"
             if py_err is not None and rust_err is not None:
@@ -322,6 +382,30 @@ class TestRewriteDifferential(unittest.TestCase):
         graphs = [rand_symbolic_graph(rng) for _ in range(300)]
         graphs += [rand_threefry_graph(rng) for _ in range(50)]
         self._diff("pm_decomp", pm, graphs)
+
+    def test_pm_dtype_decomps(self):
+        import os
+        from tinygrad.codegen.decomp.dtype import pm_dtype_decomps
+        from tinygrad.runtime.ops_python import PythonRenderer
+        from tinygrad.helpers import Target, EMULATED_DTYPES
+        ren = PythonRenderer.__new__(PythonRenderer)
+        PythonRenderer.__init__(ren, Target.parse("cpu"))
+        old_env, old_val = os.environ.get("EMULATED_DTYPES"), EMULATED_DTYPES.value
+        os.environ["EMULATED_DTYPES"] = "half,long"
+        EMULATED_DTYPES.value = "half,long"
+        orc = Oracle()
+        try:
+            rng = random.Random(51)
+            graphs = [rand_half_graph(rng) for _ in range(100)]
+            graphs += [rand_long_graph(rng) for _ in range(100)]
+            self._diff("pm_dtype_decomps", pm_dtype_decomps, graphs, ctx=(set(), ren), oracle=orc)
+        finally:
+            orc.close()
+            EMULATED_DTYPES.value = old_val
+            if old_env is None:
+                os.environ.pop("EMULATED_DTYPES", None)
+            else:
+                os.environ["EMULATED_DTYPES"] = old_env
 
 
 if __name__ == "__main__":

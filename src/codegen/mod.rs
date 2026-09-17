@@ -6,3 +6,4 @@ pub mod coalesce;
 pub mod linearize;
 pub mod gater;
 pub mod decomp;
+pub mod decomp_dtype;

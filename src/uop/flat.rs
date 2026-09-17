@@ -341,12 +341,39 @@ impl Graph {
         };
         let mut remap = vec![u32::MAX; self.nodes.len()];
         let mut used: Vec<DTypeId> = Vec::new();
+        fn collect_arg_dtypes(a: &Arg, used: &mut Vec<DTypeId>) {
+            match a {
+                Arg::Dtype(d) => {
+                    if !used.contains(d) {
+                        used.push(*d);
+                    }
+                }
+                Arg::Param(p) => {
+                    if !used.contains(&p.dtype) {
+                        used.push(p.dtype);
+                    }
+                }
+                Arg::Seq { items, .. } => {
+                    for i in items {
+                        collect_arg_dtypes(i, used);
+                    }
+                }
+                Arg::Data(d) => {
+                    for (_, f) in &d.fields {
+                        collect_arg_dtypes(f, used);
+                    }
+                }
+                _ => {}
+            }
+        }
         for (i, &id) in order.iter().enumerate() {
             remap[id.0 as usize] = i as u32;
-            let d = self.nodes[id.0 as usize].dtype;
-            if !used.contains(&d) {
-                used.push(d);
+            let n = &self.nodes[id.0 as usize];
+            if !used.contains(&n.dtype) {
+                used.push(n.dtype);
             }
+            collect_arg_dtypes(&n.arg, &mut used);
+            collect_arg_dtypes(&n.tag, &mut used);
         }
         used.sort_by_key(|d| d.0);
         let dtypes = used.iter().map(|d| d.attr().to_string()).collect();

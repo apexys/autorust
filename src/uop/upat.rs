@@ -675,6 +675,12 @@ pub enum CtxVal {
     Ca(std::rc::Rc<std::cell::RefCell<crate::schedule::sched::CallCtx>>),
     /// Mutable mark dict context (e.g. `pm_split_ranges`).
     Dict(std::rc::Rc<std::cell::RefCell<HashMap<UopId, UopId>>>),
+    /// Read-only (from, to) dtype pair for `pm_float_decomp`.
+    Pair(crate::dtype::DTypeId, crate::dtype::DTypeId),
+    /// Dtype set context for `pm_dtype_decomps`.
+    Decomp(std::rc::Rc<std::cell::RefCell<crate::codegen::decomp_dtype::DtypeDecompCtx>>),
+    /// Memo dict for `pm_long_decomp` `split_l2i`.
+    L2i(std::rc::Rc<std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>>),
 }
 
 /// `LocalAddBufferContext` (rangeify.py:469).
@@ -783,6 +789,48 @@ where
     })
 }
 
+/// rule helper: closure over ((from, to) dtype pair, UOpCtx, store)
+pub fn r_pair<F>(f: F) -> RuleFn
+where
+    F: Fn(crate::dtype::DTypeId, crate::dtype::DTypeId, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::Pair(fr, to) => f(*fr, *to, ctx, st),
+        _ => panic!("TGERR: rule requires Pair ctx"),
+    })
+}
+
+/// rule helper: closure over (DtypeDecompCtx, UOpCtx, store)
+pub fn r_decomp<F>(f: F) -> RuleFn
+where
+    F: Fn(&mut crate::codegen::decomp_dtype::DtypeDecompCtx, &mut UOpCtx, &Store) -> Option<UopId>
+        + Send
+        + Sync
+        + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::Decomp(d) => f(&mut d.borrow_mut(), ctx, st),
+        _ => panic!("TGERR: rule requires Decomp ctx"),
+    })
+}
+
+/// rule helper: closure over (L2i memo dict, UOpCtx, store)
+pub fn r_l2i<F>(f: F) -> RuleFn
+where
+    F: Fn(
+            &std::rc::Rc<std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>>,
+            &mut UOpCtx,
+            &Store,
+        ) -> Option<UopId>
+        + Send
+        + Sync
+        + 'static,
+{
+    Arc::new(move |ctx, st, ctxv| match ctxv {
+        CtxVal::L2i(d) => f(d, ctx, st),
+        _ => panic!("TGERR: rule requires L2i ctx"),
+    })
+}
 #[derive(Default)]
 pub struct PatternMatcher {
     pdict: HashMap<Ops, Vec<usize>>,
