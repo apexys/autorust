@@ -71,7 +71,7 @@ fn post_stages() -> Vec<Stage> {
         Stage { name: "lower all index dtypes", pm: symbolic_simple().add(&crate::uop::weak::pm_lower_index_dtype()).add(&crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
         Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(&symbolic()), bottom_up: false },
         Stage { name: "cast float alu operands", pm: pm_cast_float_alu(), bottom_up: false },
-        Stage { name: "early decompositions", pm: PatternMatcher::new(vec![]).add(&symbolic_simple()), bottom_up: false },
+        Stage { name: "early decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
         Stage { name: "decomp dtypes", pm: PatternMatcher::new(vec![]).add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
         Stage { name: "late decompositions", pm: crate::codegen::decomp::pm_decomp(), bottom_up: false },
         Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },

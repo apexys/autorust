@@ -213,6 +213,21 @@ def rand_split_graph(rng):
     raise AssertionError("split generator failed 20x")
 
 
+def rand_threefry_graph(rng):
+    """Graphs exercising the THREEFRY decomposition in `pm_decomp`."""
+    for _ in range(20):
+        try:
+            x = Variable("x", 0, 1000, dtypes.uint64)
+            key = Variable("key", 0, 1000, dtypes.uint64)
+            g = UOp(Ops.THREEFRY, dtypes.uint64, (x, key))
+            if rng.random() < 0.5:
+                g = (g & uconst(0xFFFF, dtypes.uint64)) + uconst(rng.randint(0, 3), dtypes.uint64)
+            return g
+        except Exception:
+            continue
+    raise AssertionError("threefry generator failed 20x")
+
+
 class TestRewriteDifferential(unittest.TestCase):
     ORACLE = None
 
@@ -295,6 +310,18 @@ class TestRewriteDifferential(unittest.TestCase):
         rng = random.Random(49)
         graphs = [rand_split_graph(rng) for _ in range(300)]
         self._diff("pm_split_ranges", pm_split_ranges, graphs, ctx={})
+
+    def test_pm_decomp(self):
+        from tinygrad.codegen.decomp.op import get_simplifying_rewrite_patterns
+        from tinygrad.runtime.ops_python import PythonRenderer
+        from tinygrad.helpers import Target
+        ren = PythonRenderer.__new__(PythonRenderer)
+        PythonRenderer.__init__(ren, Target.parse("cpu"))
+        pm = symbolic_simple + get_simplifying_rewrite_patterns(tuple(ren.code_for_op.keys()))
+        rng = random.Random(50)
+        graphs = [rand_symbolic_graph(rng) for _ in range(300)]
+        graphs += [rand_threefry_graph(rng) for _ in range(50)]
+        self._diff("pm_decomp", pm, graphs)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ use autorust::uop::upat::{graph_rewrite, CtxVal};
 static PM_LOAD_COLLAPSE: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
 static PM_REDUCE_LOAD_COLLAPSE: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
 static PM_SPLIT_RANGES: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
+static PM_DECOMP: OnceLock<autorust::uop::upat::PatternMatcher> = OnceLock::new();
 
 fn pm_by_name(name: &str) -> Option<&'static autorust::uop::upat::PatternMatcher> {
     match name {
@@ -26,6 +27,7 @@ fn pm_by_name(name: &str) -> Option<&'static autorust::uop::upat::PatternMatcher
         "pm_load_collapse" => Some(PM_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_load_collapse)),
         "pm_reduce_load_collapse" => Some(PM_REDUCE_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_reduce_load_collapse)),
         "pm_split_ranges" => Some(PM_SPLIT_RANGES.get_or_init(autorust::codegen::simplify::pm_split_ranges)),
+        "pm_decomp" => Some(PM_DECOMP.get_or_init(autorust::codegen::decomp::pm_decomp)),
         _ => None,
     }
 }
