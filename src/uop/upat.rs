@@ -51,6 +51,10 @@ pub struct UPat {
 
 pub type Store = HashMap<&'static str, UopId>;
 
+// `add`/`sub`/`mul`/`shl`/`shr` build *patterns* for those Ops (named after
+// tinygrad's `UPat` helpers), not arithmetic on `UPat`; they take
+// `impl Into<UPatOrConst>`, which a std operator could not cover.
+#[allow(clippy::should_implement_trait)]
 impl UPat {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

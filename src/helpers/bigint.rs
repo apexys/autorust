@@ -24,6 +24,17 @@ impl PartialOrd for BigInt {
     }
 }
 
+impl Ord for BigInt {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.is_negative(), other.is_negative()) {
+            (false, true) => std::cmp::Ordering::Greater,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, false) => Self::cmp_mag(&self.mag, &other.mag),
+            (true, true) => Self::cmp_mag(&other.mag, &self.mag),
+        }
+    }
+}
+
 impl BigInt {
     pub fn zero() -> Self {
         BigInt { neg: false, mag: vec![] }
@@ -154,15 +165,6 @@ impl BigInt {
 
     pub fn sub(&self, other: &BigInt) -> BigInt {
         self.add(&other.negate())
-    }
-
-    pub fn cmp(&self, other: &BigInt) -> std::cmp::Ordering {
-        match (self.is_negative(), other.is_negative()) {
-            (false, true) => std::cmp::Ordering::Greater,
-            (true, false) => std::cmp::Ordering::Less,
-            (false, false) => Self::cmp_mag(&self.mag, &other.mag),
-            (true, true) => Self::cmp_mag(&other.mag, &self.mag),
-        }
     }
 
     pub fn cmp_i128(&self, other: i128) -> std::cmp::Ordering {
