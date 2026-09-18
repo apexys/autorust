@@ -37,6 +37,45 @@ fn reduce_broadcast_reduce_values() {
     close(&o.to_list::<f32>(&mut ctx, &mut sess), &[4.8125, 73.0, 54.0, 83.0, 441.25, 225.0]);
 }
 
+/// Two *independent* full reductions in one realize where one input is itself a
+/// reduce. tinygrad fuses them into a single kernel that uses one REG accumulator
+/// per reduce; that lowering must keep the accumulator in the reduce's real shape.
+///
+/// Two port bugs made this wrong/crash:
+/// - `placeholder_reg` built the flat `(prod(shape),)` buffer but never reshaped it
+///   to `shape` like `UOp.placeholder` does (`ops.py:1148`), so `acc.alu(ADD, inp)`
+///   broadcast a 1-D acc against a 2-D input (`[2] + [2,1] -> [2,2]`) and the
+///   reduction silently summed wrong.
+/// - `memory_coalescing` tested `addrspace_of` (ParamArg only) instead of the
+///   derived `buf.addrspace`, so the `AFTER`-wrapped REG buffer wasn't skipped and
+///   its (legitimately repeated) serial-reduce stores tripped the coalesce assert
+///   ("attempting multiple stores").
+#[test]
+fn sibling_reductions_same_realize() {
+    let mut ctx = UOpCtx::new();
+    let mut sess = Session::new();
+    let a = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], None, None).reshape(&mut ctx, [2, 3]);
+    let b = Tensor::from_slice(&mut ctx, &[1.0f32, 1.0], None, None);
+    let bs = b.sum(&mut ctx, None, false, None);
+    let out = a.sum(&mut ctx, Some(&[1]), false, None).sum(&mut ctx, None, false, None).add(&mut ctx, &bs);
+    close(&out.to_list::<f32>(&mut ctx, &mut sess), &[23.0]);
+}
+
+/// Same shape of graph but with a multi-element non-reduced axis, so the REG
+/// accumulator's shape matters for broadcasting (`a.sum(2).sum(1) + b.sum()`).
+#[test]
+fn sibling_reductions_batched() {
+    let mut ctx = UOpCtx::new();
+    let mut sess = Session::new();
+    // a:(2,4,3), reduce twice -> (2); b:(4) reduce -> scalar; sum them.
+    let a = Tensor::arange(&mut ctx, 1.0, Some(25.0), 1.0, None).reshape(&mut ctx, [2, 4, 3]);
+    let b = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
+    let bs = b.sum(&mut ctx, None, false, None);
+    let out = a.sum(&mut ctx, Some(&[2]), false, None).sum(&mut ctx, Some(&[1]), false, None).add(&mut ctx, &bs);
+    // batch0 = sum(1..12) = 78, batch1 = sum(13..24) = 222; + b.sum() = 10.
+    close(&out.to_list::<f32>(&mut ctx, &mut sess), &[88.0, 232.0]);
+}
+
 #[test]
 fn reduce_broadcast_reduce_grad() {
     let mut ctx = UOpCtx::new();

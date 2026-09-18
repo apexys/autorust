@@ -739,7 +739,16 @@ fn placeholder_reg(ctx: &mut UOpCtx, like: UopId, slot: i64) -> UopId {
         volatile: false,
     };
     let src = ctx.shape_arg(&[numel]);
-    ctx.uop(Ops::Buffer, None, vec![src], Arg::Param(arg))
+    let buf = ctx.uop(Ops::Buffer, None, vec![src], Arg::Param(arg));
+    // python `UOp.placeholder`: the flat `(prod(shape),)` buffer is reshaped to
+    // `shape` whenever it has more than one dim (ops.py:1148). Skipping this makes
+    // `acc.alu(op, inp)` broadcast a 1-D acc against a 2-D input, e.g. the row-sum
+    // `acc[2] + inp[2,1]` widens to `[2,2]`, which silently corrupts the reduction.
+    if shape.len() > 1 {
+        crate::tensor::movement::reshape(ctx, buf, &shape)
+    } else {
+        buf
+    }
 }
 
 /// `x.ended_ranges` (ops.py:481-488).

@@ -33,7 +33,10 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         let isrcs = ctx.srcs(&idx_u).to_vec();
         let buf = isrcs[0].clone();
         // REG buffers skipped
-        if ctx.addrspace_of(buf.clone()) == Some(dtype::AddrSpace::Reg) {
+        // python: `if buf.addrspace == AddrSpace.REG: continue` (coalesce.py:114).
+        // Use the *derived* property: `buf` is often an AFTER/INDEX wrapping the
+        // real BUFFER, and addrspace propagates through those (ops.py:867).
+        if ctx.addrspace_derived(buf.clone()) == Some(dtype::AddrSpace::Reg) {
             continue;
         }
         // python: buf, idx_u = u.src[0].src — the idx EXPR, not the INDEX node

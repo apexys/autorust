@@ -1248,7 +1248,10 @@ fn debuf(lctx: &mut crate::uop::upat::LocalAddBufferContext, ctx: &mut UOpCtx, b
 
 /// `handle_after` (rangeify.py:488).
 fn handle_after(lctx: &mut crate::uop::upat::LocalAddBufferContext, ctx: &mut UOpCtx, after: UopId) -> Option<UopId> {
-    if ctx.addrspace_of(after.clone()) == Some(AddrSpace::Local) {
+    // python `handle_after`: `if after.addrspace == AddrSpace.LOCAL` — the derived
+    // property, so an AFTER wrapping a LOCAL buffer is skipped (addrspace_of alone
+    // would return None and wrongly add it).
+    if ctx.addrspace_derived(after.clone()) == Some(AddrSpace::Local) {
         return None;
     }
     let buf = ctx.buf_uop(after.clone());

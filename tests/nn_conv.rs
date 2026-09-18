@@ -56,7 +56,6 @@ fn max_pool2d_matches_tinygrad() {
 }
 
 #[test]
-#[ignore = "scheduler bug: nested reduces + a second reduce fuse to two stores on one buffer (CURRENT_STATE §8.12)"]
 fn sparse_categorical_crossentropy_matches_tinygrad() {
     for c in CE_GOLDEN {
         let mut ctx = UOpCtx::new();
