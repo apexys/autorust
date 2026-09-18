@@ -40,6 +40,9 @@ def run_rust(prog):
 def slice_prog(start, stop, step):
     return ix_spec(slice=[start, stop, step])
 
+def tensor_ix(n):
+    return {"tensor": n}
+
 CASES = [
     # (name, rust_steps, python_builder)
     ("const f32 PYTHON", [
@@ -126,6 +129,45 @@ CASES = [
         {"op": "reshape", "x": 0, "shape": [2, 3, 4]},
         {"op": "getitem", "x": 1, "ixs": [slice_prog(1, None, -1), slice_prog(None, None, 2), ix_spec(i=3)]},
     ], lambda: Tensor.arange(24).reshape(2, 3, 4)[1::-1, ::2, 3]),
+    # ---- advanced (tensor) indexing: mixin/op.py _getitem advanced path ----
+    ("getitem tensor idx dim0", [
+        {"op": "arange", "start": 0, "stop": 12, "step": 1, "dtype": None},
+        {"op": "reshape", "x": 0, "shape": [3, 4]},
+        {"op": "from_slice", "kind": "i32", "data": [0, 2], "dtype": None, "device": None},
+        {"op": "getitem", "x": 1, "ixs": [tensor_ix(2), slice_prog(None, None, None)]},
+    ], lambda: Tensor.arange(12).reshape(3, 4)[Tensor([0, 2], dtype=dtypes.int32), :]),
+    ("getitem tensor idx dim1", [
+        {"op": "arange", "start": 0, "stop": 12, "step": 1, "dtype": None},
+        {"op": "reshape", "x": 0, "shape": [3, 4]},
+        {"op": "from_slice", "kind": "i32", "data": [1, 3], "dtype": None, "device": None},
+        {"op": "getitem", "x": 1, "ixs": [slice_prog(None, None, None), tensor_ix(2)]},
+    ], lambda: Tensor.arange(12).reshape(3, 4)[:, Tensor([1, 3], dtype=dtypes.int32)]),
+    ("getitem two consecutive tensors", [
+        {"op": "arange", "start": 0, "stop": 12, "step": 1, "dtype": None},
+        {"op": "reshape", "x": 0, "shape": [3, 4]},
+        {"op": "from_slice", "kind": "i32", "data": [0, 2], "dtype": None, "device": None},
+        {"op": "from_slice", "kind": "i32", "data": [1, 3], "dtype": None, "device": None},
+        {"op": "getitem", "x": 1, "ixs": [tensor_ix(2), tensor_ix(3)]},
+    ], lambda: Tensor.arange(12).reshape(3, 4)[Tensor([0, 2], dtype=dtypes.int32), Tensor([1, 3], dtype=dtypes.int32)]),
+    ("getitem tensor negative and oob", [
+        {"op": "arange", "start": 0, "stop": 12, "step": 1, "dtype": None},
+        {"op": "reshape", "x": 0, "shape": [3, 4]},
+        {"op": "from_slice", "kind": "i32", "data": [-1, 0, 5], "dtype": None, "device": None},
+        {"op": "getitem", "x": 1, "ixs": [tensor_ix(2), slice_prog(None, None, None)]},
+    ], lambda: Tensor.arange(12).reshape(3, 4)[Tensor([-1, 0, 5], dtype=dtypes.int32), :]),
+    ("getitem mixed basic advanced", [
+        {"op": "arange", "start": 0, "stop": 12, "step": 1, "dtype": None},
+        {"op": "reshape", "x": 0, "shape": [3, 4]},
+        {"op": "from_slice", "kind": "i32", "data": [0, 2], "dtype": None, "device": None},
+        {"op": "getitem", "x": 1, "ixs": [slice_prog(1, None, 1), tensor_ix(2)]},
+    ], lambda: Tensor.arange(12).reshape(3, 4)[1:, Tensor([0, 2], dtype=dtypes.int32)]),
+    ("getitem 3d non-consecutive tensors", [
+        {"op": "arange", "start": 0, "stop": 24, "step": 1, "dtype": None},
+        {"op": "reshape", "x": 0, "shape": [2, 3, 4]},
+        {"op": "from_slice", "kind": "i32", "data": [0, 1], "dtype": None, "device": None},
+        {"op": "from_slice", "kind": "i32", "data": [1, 2], "dtype": None, "device": None},
+        {"op": "getitem", "x": 1, "ixs": [tensor_ix(2), slice_prog(None, None, None), tensor_ix(3)]},
+    ], lambda: Tensor.arange(24).reshape(2, 3, 4)[Tensor([0, 1], dtype=dtypes.int32), :, Tensor([1, 2], dtype=dtypes.int32)]),
 ]
 
 class TestTensorDiff(unittest.TestCase):
@@ -136,6 +178,7 @@ class TestTensorDiff(unittest.TestCase):
             with self.subTest(name=name):
                 # both sides start each case with a fresh BUFFER slot counter
                 UOp.unique_num = itertools.count(0)
+                UOp.ucache.clear()
                 rust_key = run_rust(steps).key
                 py_val = py_build()
                 py_key = py_val.uop.key

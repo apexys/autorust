@@ -39,6 +39,8 @@ fn main() {
         newaxis: Option<bool>,
         ellipsis: Option<bool>,
         slice: Option<Vec<Option<i64>>>,
+        /// Advanced indexing: reference a prior program step's tensor as the index.
+        tensor: Option<usize>,
     }
     #[derive(nanoserde::DeJson, Default)]
     struct Step {
@@ -119,6 +121,8 @@ fn main() {
                             Ix::Ellipsis
                         } else if let Some(s) = &ix.slice {
                             Ix::Range { start: s[0], stop: s[1], step: s[2].unwrap_or(1) }
+                        } else if let Some(ti) = ix.tensor {
+                            Ix::Tensor(tensors[ti].clone())
                         } else {
                             panic!("TGERR: bad IxSpec (step {i})")
                         }

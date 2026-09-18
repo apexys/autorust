@@ -672,6 +672,12 @@ impl Tensor {
         { let __u = elementwise::gt(ctx, self.uop.clone(), o); Tensor::from_uop(ctx, __u) }
     }
 
+    /// `Tensor.__ge__` — elementwise `self >= other` (tinygrad `ge`).
+    pub fn ge(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        let o = self.cmp_operand(ctx, other);
+        { let __u = elementwise::ge(ctx, self.uop.clone(), o); Tensor::from_uop(ctx, __u) }
+    }
+
     /// `Tensor.__lt__` — elementwise `self < other`.
     pub fn lt(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         let o = self.cmp_operand(ctx, other);

@@ -10,9 +10,15 @@
 //! the macro bodies live.
 #![allow(clippy::vec_init_then_push)]
 
-/// One element of an index expression — Python's `int | slice | None | Ellipsis`.
-/// (Tensor indices — advanced indexing — are added when that lands.)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+use super::Tensor;
+
+/// One element of an index expression — Python's
+/// `int | slice | Tensor | None | Ellipsis`.
+///
+/// `Clone` (not `Copy`) because [`Ix::Tensor`] carries a tensor handle for
+/// advanced indexing. `PartialEq` is by UOp identity, which lets the `s!`/`p!`
+/// macro tests keep comparing basic specs.
+#[derive(Clone, Debug)]
 pub enum Ix {
     /// `slice(None, None, None)` / `..`
     All,
@@ -24,11 +30,34 @@ pub enum Ix {
     NewAxis,
     /// Python `Ellipsis` — fills remaining dims with `All` (at most one).
     Ellipsis,
+    /// Python `Tensor` index (advanced/fancy indexing). A 0-d tensor index is
+    /// treated as a `sint` in tinygrad and is not supported by the port yet.
+    Tensor(Tensor),
 }
+
+impl PartialEq for Ix {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Ix::All, Ix::All) | (Ix::NewAxis, Ix::NewAxis) | (Ix::Ellipsis, Ix::Ellipsis) => true,
+            (Ix::Index(a), Ix::Index(b)) => a == b,
+            (Ix::Range { start: a0, stop: a1, step: a2 }, Ix::Range { start: b0, stop: b1, step: b2 }) => {
+                a0 == b0 && a1 == b1 && a2 == b2
+            }
+            (Ix::Tensor(a), Ix::Tensor(b)) => a.uop == b.uop,
+            _ => false,
+        }
+    }
+}
+impl Eq for Ix {}
 
 impl Ix {
     pub fn slice(start: Option<i64>, stop: Option<i64>, step: i64) -> Ix {
         Ix::Range { start, stop, step }
+    }
+
+    /// Python `t[tensor]`: advanced indexing on this dim.
+    pub fn tensor(t: Tensor) -> Ix {
+        Ix::Tensor(t)
     }
 }
 

@@ -77,6 +77,7 @@ ordinary tokens, so `p![1:5:2, ::-1]` works directly. Both produce the same
 | `t[..., 0]` | `t.getitem(&s![..., 0])` (or `Ellipsis`) |
 | `t[1, 2]` | `t.getitem(&s![1, 2])` |
 | `t[-1]` | `t.getitem(&s![-1])` / `t.getitem(&p![-1])` |
+| `t[Tensor([0,2]), :]` | `t.getitem(&[Ix::Tensor(idx), Ix::All])` |
 
 Negative bounds are supported everywhere Python allows them (`s![-2..]`,
 `s![..-2]`, `s![1..-2;2]`) — inside the macro `-` is a separate token, so each
@@ -99,11 +100,13 @@ pub enum Ix {
     Index(i64),                                                // int — collapses the dim
     NewAxis,                                                   // None — injects a size-1 dim
     Ellipsis,                                                  // fills remaining dims with All
+    Tensor(Tensor),                                            // advanced/fancy index
 }
 ```
 
-`Ix` is `Copy`, so specs can be built programmatically and mixed with the
-macro: `let i = ix_of_dim; t.getitem(&[Ix::All, Ix::Index(i)])`.
+`Ix` is `Clone` (the `Tensor` variant carries a handle); build specs
+programmatically and mix with the macro:
+`t.getitem(&[Ix::All, Ix::Tensor(idx)])`.
 
 ---
 
@@ -131,10 +134,23 @@ macro: `let i = ix_of_dim; t.getitem(&[Ix::All, Ix::Index(i)])`.
    `shrink_to((s, 1)...)` → `RESHAPE(shape[::2])`.
 4. **Reshape** to the parsed sizes of the non-collapsed dims (this injects the
    `NewAxis` size-1 dims and drops collapsed `Index` dims).
+5. **Advanced indexing** (`t[Tensor([0,2]), :]`): the normalized index tensors
+   follow the same two branches as tinygrad (`_getitem`, op.py:104-146):
+   - *consecutive int dims* (`len(dims) > 1`, contiguous, all-static shape):
+     linear indexing — combine the indices into one flat index
+     (`usum(t * stride)`), mask out-of-range positions to 0 with a boolean
+     `valid` mask, basic-index the reshaped tensor with that flat index, then
+     `valid.where(x, 0)`;
+   - *otherwise*: `_one_hot_along_dim` per index, `uprod` the masks, `where` the
+     data, `sum` the injected `big_shape` axes, and the special `permute` case
+     for multiple non-contiguous advanced dims.
 
-Advanced indexing (`t[Tensor([0,2]), :]`) is **not implemented yet** — `Ix`
-will gain a tensor variant when it lands (see the M3 deferred list in
-`CURRENT_STATE.md`). Same for `__setitem__` (assign/store machinery, M4+).
+   This is expressed entirely with already-ported elementwise/movement/reduce
+   ops, so it needs no new engine machinery, and it is **graph-key equal** to
+   tinygrad (see `py/tests/test_tensor_diff.py`). A 0-d tensor index (tinygrad
+   treats it as a `sint`) is not supported yet, and Python `list`/`tuple`
+   indices are not exposed in the Rust API (construct an index `Tensor` and use
+   `Ix::Tensor`).
 
 ## 3. Deliberate differences from Python
 

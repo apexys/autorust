@@ -707,10 +707,60 @@ pub fn apply_view_ops(ctx: &mut UOpCtx, x: UopId, mops: &[ViewIndex]) -> UopId {
     x
 }
 
-/// `Tensor._getitem` (op.py:74-163), basic path: int/None/slice/Ellipsis indices.
-/// Advanced (tensor) indexing is a follow-up.
+/// One parsed index: the basic view index plus, for a tensor index, the
+/// (normalized) advanced-index tensor. `newaxis` marks a `None` index, which
+/// participates in the size reshape but not in `_apply_view_ops`.
+struct GetItemEntry {
+    vi: ViewIndex,
+    adv: Option<super::Tensor>,
+    newaxis: bool,
+}
+
+/// `_broadcast_shape(*shapes)` (ops.py:70-77): right-aligned broadcast of the
+/// index-tensor shapes; a size-1 dim broadcasts, otherwise all must agree.
+fn broadcast_shape(shapes: &[Vec<SVal>]) -> Vec<SVal> {
+    if shapes.windows(2).all(|w| w[0] == w[1]) {
+        return shapes.first().cloned().unwrap_or_default();
+    }
+    let max_dim = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+    let aligned: Vec<Vec<SVal>> = shapes
+        .iter()
+        .map(|s| {
+            let mut v = vec![SVal::I(1); max_dim - s.len()];
+            v.extend(s.iter().cloned());
+            v
+        })
+        .collect();
+    let mut ret = Vec::with_capacity(max_dim);
+    for i in 0..max_dim {
+        // tinygrad keeps a symbolic size even when its value is 1, so only an
+        // explicit int 1 is dropped.
+        let mut rest: Vec<SVal> = Vec::new();
+        for s in &aligned {
+            let sz = s[i].clone();
+            if !matches!(sz, SVal::I(1)) && !rest.contains(&sz) {
+                rest.push(sz);
+            }
+        }
+        assert!(rest.len() <= 1, "TGERR: IndexError shape mismatch: objects cannot be broadcast to a single shape");
+        ret.push(rest.into_iter().next().unwrap_or(SVal::I(1)));
+    }
+    ret
+}
+
+/// `usum`/`uprod` on a non-empty slice (elementwise.py:36-37).
+fn fold_sum(ctx: &mut UOpCtx, terms: &[super::Tensor]) -> super::Tensor {
+    terms.iter().skip(1).fold(terms[0].clone(), |a, b| a.add(ctx, b))
+}
+fn fold_prod(ctx: &mut UOpCtx, terms: &[super::Tensor]) -> super::Tensor {
+    terms.iter().skip(1).fold(terms[0].clone(), |a, b| a.bitwise_and(ctx, b))
+}
+
+/// `Tensor._getitem` (op.py:34-146): basic int/None/slice/Ellipsis indices plus
+/// advanced (tensor) indexing. Returns a `UopId`; the advanced path is expressed
+/// entirely with ported elementwise/movement/reduce ops (`one_hot_along_dim`,
+/// `where`, `sum`), so it needs no new engine machinery.
 pub fn getitem(ctx: &mut UOpCtx, x: UopId, ixs: &[Ix]) -> UopId {
-    use super::ix::Ix;
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let ndim = shape.len();
     // `_normalize_indices`: single ellipsis, fill, too-many check
@@ -727,23 +777,26 @@ pub fn getitem(ctx: &mut UOpCtx, x: UopId, ixs: &[Ix]) -> UopId {
             norm.extend(std::iter::repeat_n(Ix::All, fills));
             continue;
         }
-        norm.push(*ix);
+        norm.push(ix.clone());
     }
     if fill_at.is_none() {
         norm.extend(std::iter::repeat_n(Ix::All, fills));
     }
 
     // parse loop (op.py:80-97)
-    let mut parsed: Vec<ViewIndex> = Vec::with_capacity(norm.len());
-    let mut mops_parsed: Vec<ViewIndex> = Vec::with_capacity(norm.len());
+    let mut entries: Vec<GetItemEntry> = Vec::with_capacity(norm.len());
     let mut dim = 0usize;
     for ix in &norm {
         let size = match ix {
             Ix::NewAxis => SVal::I(1),
             _ => shape[dim].clone(),
         };
-        let vi = match ix {
-            Ix::NewAxis => ViewIndex { size: SVal::I(1), boundary: (SVal::I(0), SVal::I(1)), stride: 1, collapse_dim: false },
+        let (vi, adv, newaxis): (ViewIndex, Option<super::Tensor>, bool) = match ix {
+            Ix::NewAxis => (
+                ViewIndex { size: SVal::I(1), boundary: (SVal::I(0), SVal::I(1)), stride: 1, collapse_dim: false },
+                None,
+                true,
+            ),
             Ix::Index(i) => {
                 // bounds check: resolve(index >= size) or resolve(index < -size) -> IndexError
                 let size_i = if size_sym_or(&size) { None } else { Some(size.clone().as_i128_or_panic() as i64) };
@@ -753,31 +806,158 @@ pub fn getitem(ctx: &mut UOpCtx, x: UopId, ixs: &[Ix]) -> UopId {
                 let lt = ctx.resolve_ord(iv, crate::uop::ctx::CmpOrd::Lt, neg_size, false);
                 assert!(!(ge || lt), "TGERR: IndexError index {i} is out of bounds with size {size_i:?}");
                 let b = if *i >= 0 { *i } else { *i + size_i.unwrap_or(0) };
-                ViewIndex { size, boundary: (SVal::I(b as i128), SVal::I((b + 1) as i128)), stride: 1, collapse_dim: true }
+                (
+                    ViewIndex { size, boundary: (SVal::I(b as i128), SVal::I((b + 1) as i128)), stride: 1, collapse_dim: true },
+                    None,
+                    false,
+                )
             }
             Ix::All => {
                 let vmax = sval_vmax_i(ctx, size.clone());
-                parse_view_index(ctx, size, vmax, &SliceSpec { start: None, stop: None, step: 1 })
+                (parse_view_index(ctx, size, vmax, &SliceSpec { start: None, stop: None, step: 1 }), None, false)
             }
             Ix::Range { start, stop, step } => {
                 let vmax = sval_vmax_i(ctx, size.clone());
-                parse_view_index(ctx, size, vmax, &SliceSpec { start: *start, stop: *stop, step: *step })
+                (parse_view_index(ctx, size, vmax, &SliceSpec { start: *start, stop: *stop, step: *step }), None, false)
             }
             Ix::Ellipsis => unreachable!(),
+            Ix::Tensor(t) => {
+                // `is_adv`: a 0-d tensor is a `sint` in tinygrad (unsupported here).
+                assert!(!t.shape(ctx).is_empty(), "TGERR: IndexError 0-d tensor indices are not supported yet");
+                assert!(crate::dtype::is_int(t.dtype(ctx)), "TGERR: IndexError index dtype is not supported");
+                assert!(matches!(size, SVal::I(_)), "TGERR: assert size must be an int");
+                let size_i = size.clone().as_i128_or_panic();
+                // `(index < 0).where(index + size, index)`
+                let neg = t.lt(ctx, 0i64);
+                let plus = t.add(ctx, size_i as i64);
+                let idx = neg.where_(ctx, &plus, t);
+                (
+                    ViewIndex { size: size.clone(), boundary: (SVal::I(0), size), stride: 1, collapse_dim: false },
+                    Some(idx),
+                    false,
+                )
+            }
         };
-        if !matches!(ix, Ix::NewAxis) {
-            mops_parsed.push(vi.clone());
+        if !newaxis {
             dim += 1;
         }
-        parsed.push(vi);
+        entries.push(GetItemEntry { vi, adv, newaxis });
     }
 
-    // apply view ops on the non-None dims (`p["index"] is not None`), then dim
-    // injection (NewAxis) + collapse (int)
-    let mops: Vec<ViewIndex> = std::mem::take(&mut mops_parsed);
+    // `_apply_view_ops` on the non-None dims, then dim injection (None) + collapse (int)
+    let mops: Vec<ViewIndex> = entries.iter().filter(|e| !e.newaxis).map(|e| e.vi.clone()).collect();
     let x = apply_view_ops(ctx, x, &mops);
-    let sizes: Vec<SVal> = parsed.iter().filter(|p| !p.collapse_dim).map(|p| p.size.clone()).collect();
-    reshape_internal(ctx, x, &sizes)
+    let x_dims: Vec<&GetItemEntry> = entries.iter().filter(|e| !e.vi.collapse_dim).collect();
+    let sizes: Vec<SVal> = x_dims.iter().map(|e| e.vi.size.clone()).collect();
+    let x = reshape_internal(ctx, x, &sizes);
+
+    // tensor indexing (op.py:104-146)
+    let tops: Vec<(usize, super::Tensor)> = x_dims
+        .iter()
+        .enumerate()
+        .filter_map(|(d, e)| e.adv.clone().map(|t| (d, t)))
+        .collect();
+    if tops.is_empty() {
+        return x;
+    }
+    advanced_getitem(ctx, x, &tops)
+}
+
+/// Advanced indexing body of `_getitem` (op.py:106-146), for the `v is None`
+/// (pure getitem) case.
+fn advanced_getitem(ctx: &mut UOpCtx, x: UopId, tops: &[(usize, super::Tensor)]) -> UopId {
+    let dims: Vec<usize> = tops.iter().map(|(d, _)| *d).collect();
+    let tensors: Vec<super::Tensor> = tops.iter().map(|(_, t)| t.clone()).collect();
+    let index_shapes: Vec<Vec<SVal>> = tensors.iter().map(|t| t.shape(ctx).into_vec()).collect();
+    let big_shape = broadcast_shape(&index_shapes);
+
+    let x_shape = ctx.shape(&x).unwrap().unwrap_or_default();
+    let x_ndim = x_shape.len();
+    let x_dtype = ctx.dt_of(&x);
+    let x_t = super::Tensor::from_uop(ctx, x.clone());
+
+    // consecutive tensor indices with int shapes: linear indexing instead of one-hot masks
+    let consecutive = dims.iter().enumerate().all(|(i, d)| *d == dims[0] + i);
+    if dims.len() > 1 && consecutive {
+        let ishp_int: Option<Vec<i64>> = dims.iter().map(|&d| x_shape[d].clone().as_i64()).collect();
+        if let Some(ishp) = ishp_int {
+            // strides[i] = prod(ishp[i+1:])
+            let k = ishp.len();
+            let mut strides = vec![1i64; k];
+            for i in (0..k.saturating_sub(1)).rev() {
+                strides[i] = strides[i + 1] * ishp[i + 1];
+            }
+            let terms: Vec<super::Tensor> = tensors.iter().zip(strides.iter()).map(|(t, &s)| t.mul(ctx, s)).collect();
+            let linear_idx = fold_sum(ctx, &terms);
+            let valids: Vec<super::Tensor> = tensors
+                .iter()
+                .zip(ishp.iter())
+                .map(|(t, &s)| {
+                    let ge = t.ge(ctx, 0i64);
+                    let lt = t.lt(ctx, s);
+                    ge.bitwise_and(ctx, &lt)
+                })
+                .collect();
+            let valid = fold_prod(ctx, &valids);
+
+            let pre: Vec<SVal> = x_shape[..dims[0]].to_vec();
+            let post: Vec<SVal> = x_shape[dims[dims.len() - 1] + 1..].to_vec();
+            let total: i64 = ishp.iter().product();
+            let mut mid_shape: Vec<SVal> = pre.clone();
+            mid_shape.push(SVal::I(total as i128));
+            mid_shape.extend(post.iter().cloned());
+            let xr = x_t.reshape(ctx, mid_shape);
+            let mut idxs: Vec<Ix> = pre.iter().map(|_| Ix::All).collect();
+            idxs.push(Ix::Tensor(valid.where_(ctx, &linear_idx, 0i64)));
+            let xr_u = xr.uop.clone();
+            let gx = getitem(ctx, xr_u, &idxs);
+            let x2 = super::Tensor::from_uop(ctx, gx);
+
+            let mut vshape: Vec<SVal> = vec![SVal::I(1); pre.len()];
+            vshape.extend(big_shape.iter().cloned());
+            vshape.extend(vec![SVal::I(1); post.len()]);
+            let v = valid.reshape(ctx, vshape);
+            return v.where_(ctx, &x2, 0i64).uop;
+        }
+    }
+
+    // create index masks (op.py:119-131)
+    let k = big_shape.len();
+    let mut pre_reduce_shape: Vec<SVal> = x_shape[..dims[0]].to_vec();
+    pre_reduce_shape.extend(big_shape.iter().cloned());
+    pre_reduce_shape.extend(x_shape[dims[0]..].iter().cloned());
+
+    let mut masks: Vec<super::Tensor> = Vec::with_capacity(tensors.len());
+    for (&dim, t) in dims.iter().zip(tensors.iter()) {
+        let mut tshape: Vec<SVal> = t.shape(ctx).into_vec();
+        tshape.extend(std::iter::repeat_n(SVal::I(1), x_ndim - dims[0]));
+        let num_classes = x_shape[dim].clone().as_i64().expect("TGERR: advanced index size must be static");
+        let i = t.reshape(ctx, tshape).expand(ctx, pre_reduce_shape.clone());
+        masks.push(i.one_hot_along_dim(ctx, num_classes, dim as i64 - x_ndim as i64));
+    }
+    let mask = fold_prod(ctx, &masks);
+
+    // inject 1's for the extra dims added in create masks, then sum-reduce them
+    let mut reshape_arg: Vec<SVal> = x_shape[..dims[0]].to_vec();
+    reshape_arg.extend(std::iter::repeat_n(SVal::I(1), k));
+    reshape_arg.extend(x_shape[dims[0]..].iter().cloned());
+    let xr = x_t.reshape(ctx, reshape_arg);
+    let masked = mask.where_(ctx, &xr, 0i64);
+    let sum_axis: Vec<usize> = dims.iter().map(|&d| d + k).collect();
+    let mut x_adv = masked.sum(ctx, Some(&sum_axis), false, Some(x_dtype));
+
+    // special permute case (op.py:133-135): only `x` matters for getitem
+    let permuted = dims[0] != 0 && dims.len() != 1 && dims != (dims[0]..=dims[dims.len() - 1]).collect::<Vec<_>>();
+    if permuted {
+        let x_ndim_adv = x_adv.shape(ctx).len();
+        let order: Vec<i64> = (dims[0]..dims[0] + k)
+            .chain(0..dims[0])
+            .chain(dims[0] + k..x_ndim_adv)
+            .map(|i| i as i64)
+            .collect();
+        x_adv = x_adv.permute(ctx, &order);
+    }
+    x_adv.uop
 }
 
 fn size_sym_or(s: &SVal) -> bool {

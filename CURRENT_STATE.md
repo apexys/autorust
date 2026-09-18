@@ -297,7 +297,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 | Omitted | Consequence / guardrail |
 |---|---|
 | multi-device (`UNSHARD`, sharding, allreduce) | assert single-device in Tensor ctor; corpus avoids `.shard()` |
-| fancy `__getitem__` corpus coverage | `INDEX` machinery itself is ported in M4; corpus sticks to basic slicing until M7 |
+| fancy `__getitem__` corpus coverage | ported in M7 Phase 4 (§8.15): `Ix::Tensor` + the advanced path, with graph-key gates; 0-d/list indices not exposed |
 | GPU runtimes (CUDA/AMD/NV/...), HCQ/HCQ2, graph capture | concrete devices are SKIP, but the traits they plug into are PORTED (M6) so OpenCL (M8) is additive; `exec_copy` simplified to memcpy |
 | GPU memory mgmt: `DepsTracker`, `MemoryManager`/page tables | needed only by HCQ-class devices; OCL gets plain `LRUAllocator` semantics |
 | BEAM driver / tensor-core layouts | not walled: `expand_wmma` + opts parameterization ported in M5; `opt/search.py` + `tc.py` activate in M7 |
@@ -342,7 +342,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **93 passed, 6 ignored, 0 failed**. The ignored = 1 `backend_harness`
+- `cargo test` → **102 passed, 6 ignored, 0 failed**. The ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 4 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
@@ -632,6 +632,25 @@ device-copy primitive. Gates: `tests/assign.rs`.
   update is still not wired (`forward_train` is a no-op for stats). Neither is used by XOR;
   both matter for MNIST Phase 5 and are tracked for that step.
 
+### 8.15 M7 Phase-4 advanced (tensor) indexing (DONE)
+`Ix` gained a `Tensor(Tensor)` variant (so `Ix` is now `Clone`, not `Copy`), and
+`movement::getitem` ports `_getitem`'s advanced path (`mixin/op.py:104-146`):
+- negative-index normalization `(index < 0).where(index + size, index)`;
+- `_broadcast_shape` over the index tensors (right-aligned; size-1 broadcasts);
+- the **consecutive-int-dim linear fast path** (`usum(t*stride)` + a `valid` boolean
+  mask + `valid.where(x, 0)`), and the general `_one_hot_along_dim` → `uprod` → `where`
+  → `sum` mask path with the non-contiguous `permute` case;
+- out-of-bounds reads zero.
+It is built entirely from already-ported elementwise/movement/reduce ops, so no engine
+change was needed. `Tensor::ge` was added (tinygrad `ge`).
+Gates: `tests/indexing.rs` (9 numeric cases vs the tinygrad oracle) and
+`py/tests/test_tensor_diff.py` (6 new **graph-key equality** cases, incl. the fast path and
+the permute path). `py/tests/test_tensor_diff.py` now clears `UOp.ucache` per subtest (the
+eagerly-allocated index BUFFERs collided across cases after the `unique_num` reset).
+Known gaps (documented in `INDEXING.md`): 0-d tensor indices (tinygrad treats them as
+`sint`), Python `list`/`tuple` indices in the Rust API (`Ix::Tensor` covers them), and
+`__setitem__` (not needed for MNIST).
+
 ---
 
 ## 9. Next steps
@@ -723,6 +742,8 @@ default-suite test; INTERP training is slow), mirroring
    broadcast indices, `_one_hot_along_dim` masks, `uprod` + `where` + `sum`, and the
    consecutive-int-dim linear-index fast path; out-of-bounds → 0. Differential-test vs
    tinygrad. Needed for `X[samples]`/`Y[samples]`.
+   **DONE** (§8.15): `Ix::Tensor`, the full advanced path, numeric gates
+   (`tests/indexing.rs`) and graph-key gates (`py/tests/test_tensor_diff.py`).
 5. **MNIST example** — same layer list as `beautiful_mnist.py`; data loader shells out to
    `curl` via `std::process::Command` (single `sh -c 'curl … | gunzip > file'`, skipped if
    present) into a cache dir; IDX parsing in Rust; minibatched with `randint` + advanced
