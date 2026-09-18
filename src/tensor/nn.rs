@@ -138,22 +138,17 @@ impl Conv2d {
 
     /// Forward pass: `x.conv2d(self.weight, self.bias, ...)`.
     /// Input: (batch, channels, height, width) or (channels, height, width).
-    /// NOTE: Simplified implementation — full conv2d logic is TODO'd in
-    /// CURRENT_STATE.md §9.3.
     pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        // TODO: Implement full conv2d logic (see CURRENT_STATE.md §9.3)
-        // For now, return a zero tensor with the expected output shape
-        let w_shape = self.weight.clone().shape(ctx);
-        let _x_shape = x.shape(ctx);
-        let w_len = w_shape.len() as isize;
-        let _kh: i64 = w_shape.get(w_len - 2).unwrap().clone().as_i64().unwrap_or(0);
-        let _kw: i64 = w_shape.get(w_len - 1).unwrap().clone().as_i64().unwrap_or(0);
-        // Output shape: (B, out_channels, out_h, out_w) — simplified to just out_channels
-        let _out_channels: i64 = w_shape.get(0).unwrap().clone().as_i64().unwrap_or(0);
-        match &self.bias {
-            Some(b) => b.clone(),
-            None => Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(0.0), None),
-        }
+        x.conv2d(
+            ctx,
+            &self.weight,
+            self.bias.as_ref(),
+            self.groups,
+            self.stride,
+            self.dilation,
+            &self.padding,
+            None,
+        )
     }
 }
 
@@ -429,7 +424,7 @@ pub fn softmax(x: &Tensor, ctx: &mut UOpCtx, axis: Option<usize>) -> Tensor {
     let max_val = x.max(ctx, axis_vec.as_deref(), true);
     let x_shifted = x.sub(ctx, &max_val);
     let exp_x = x_shifted.exp(ctx);
-    let sum_exp = exp_x.sum(ctx, axis_vec.as_deref(), false, None);
+    let sum_exp = exp_x.sum(ctx, axis_vec.as_deref(), true, None);
     let recip = sum_exp.reciprocal(ctx);
     exp_x.mul(ctx, &recip)
 }
@@ -440,7 +435,7 @@ pub fn log_softmax(x: &Tensor, ctx: &mut UOpCtx, axis: Option<usize>) -> Tensor 
     let max_val = x.max(ctx, axis_vec.as_deref(), true);
     let x_shifted = x.sub(ctx, &max_val);
     let exp_x = x_shifted.exp(ctx);
-    let sum_exp = exp_x.sum(ctx, axis_vec.as_deref(), false, None);
+    let sum_exp = exp_x.sum(ctx, axis_vec.as_deref(), true, None);
     let log_sum_exp = sum_exp.log(ctx);
     x_shifted.sub(ctx, &log_sum_exp)
 }

@@ -342,9 +342,10 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **78 passed, 6 ignored, 0 failed**. The 6 ignored = 1 `backend_harness`
+- `cargo test` → **81 passed, 7 ignored, 0 failed**. The ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
-  `nn_xor_parity::xor_parity_tinygrad_seed42`, 4 doc-tests.
+  `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `nn_conv::sparse_categorical_crossentropy`
+  (§8.12 scheduler bug), 4 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
   `test_roundtrip`, `test_tensor_diff`, `test_schedule_diff`, `test_codegen_diff`,
   `test_exec_diff`, `test_native_exec`.
@@ -561,6 +562,29 @@ gradients wrong on every backend (`a.dot(w.T)` is exactly this reduce→broadcas
   INTERP XOR runs agree exactly (loss 0.030414 at 100 epochs, all 4 cases correct), and
   `tests/nn_xor_relu.rs::xor_relu_converges` passes on CL.
 
+### 8.12 M7 nn op coverage + a scheduler bug blocking cross-entropy (OPEN)
+- **conv2d DONE** (`src/tensor/op.rs`): full port of `mixin/op.py:1595-1607` (`_pad_constant`
+  incl. negative pads, `_pool`, `flat_to_grouped`/`resolve_pool_pads`), plus
+  `Tensor.max_pool2d` (ceil_mode + return_indices), `Tensor.one_hot`, `Tensor.argmax`,
+  `Tensor.eq`, and a faithful `sparse_categorical_crossentropy`. `nn::Conv2d::forward` now
+  calls it. Also fixed a real `_pool` mis-port: the noop dims must keep their sizes in the
+  interleaved reshapes and the stride shrink must happen **before** the `(k,o,s)` reshape
+  (the stub had never exercised `_pool`). Gates: `tests/nn_conv.rs` (conv2d 5/5, max_pool 4/4,
+  one_hot) vs `tests/nn_golden.rs` (`py/dump_nn_golden.py`).
+- **OPEN — scheduler fuses two independent full reductions into one kernel writing the same
+  buffer.** Minimal repro (`tests/` scratch, removed): for a leaf `a:(2,3)`, `b:(2,)`,
+  `a.sum(axis=1).sum() + b.sum()` (or `.neg().div(&b.sum())`) panics in
+  `src/codegen/coalesce.rs` `assert!(us.len() == 1)` ("attempting multiple stores"). The two
+  STOREs share one `INDEX` (same buffer + offset) but have different reduce values, i.e. the
+  scheduler assigned both reduce outputs to one buffer and fused the kernels. Each of the two
+  outputs alone schedules fine; `a.sum(axis=1).sum()` with a scalar divisor is fine; the
+  failure needs a nested reduce **and** a second independent reduce in the same realize.
+  `sparse_categorical_crossentropy` hits it (its `unreduced` contains sibling axis-reduces and
+  is then fully reduced alongside `loss_mask.sum()`), so its golden test is `#[ignore]`d and
+  **MNIST e2e is blocked on this fix**. Next step: bisect the stage (`TG_M5_STAGES` with
+  `--features dump`) that duplicates the store; likely `split_kernels` fusion vs the
+  memory-plan buffer assignment, or `maybe_realize_axes` not realizing both sibling reduces.
+
 ---
 
 ## 9. Next steps
@@ -637,6 +661,10 @@ default-suite test; INTERP training is slow), mirroring
    `Tensor.max_pool2d` (`return_indices`+`ceil_mode` included), `Tensor.sequential`,
    `Tensor.sparse_categorical_crossentropy` (`ignore_index`/`label_smoothing`/`reduction`),
    `Tensor.argmax`. Gate against tinygrad goldens.
+   **DONE except CE / `sequential`**: conv2d + max_pool2d + one_hot + argmax + eq are in
+   `src/tensor/op.rs` and green (`tests/nn_conv.rs`). `sequential` is deferred to the Phase-3
+   model struct. `sparse_categorical_crossentropy` is written but its gate is `#[ignore]`d:
+   the scheduler mis-fuses sibling/nested reduces (§8.12), which blocks MNIST.
 3. **Module trait adoption** — implement `Module` for Conv2d/BatchNorm/LayerNorm/GroupNorm,
    plus `impl<T: Module> Module for &[T]`/`Vec<T>` and an `nn::Sequential`. Add a generic
    `into_params` so examples don't hand-list params. Rewrite `examples/xor.rs` and the XOR

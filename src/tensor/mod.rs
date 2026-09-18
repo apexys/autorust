@@ -17,6 +17,7 @@ pub mod elementwise;
 pub mod grad;
 pub mod movement;
 pub mod nn;
+pub mod op;
 pub mod optim;
 pub mod reduce;
 pub mod rand;
@@ -322,6 +323,12 @@ impl Tensor {
     pub fn pad(&self, ctx: &mut UOpCtx, arg: &[(i64, i64)]) -> Tensor {
         let pairs: Vec<(SVal, SVal)> = arg.iter().map(|(a, b)| (SVal::I(*a as i128), SVal::I(*b as i128))).collect();
         { let __u = movement::pad(ctx, self.uop.clone(), &pairs); Tensor::from_uop(ctx, __u) }
+    }
+
+    /// `Tensor.shrink(arg)`: explicit `(start, end)` bounds per dim.
+    pub fn shrink(&self, ctx: &mut UOpCtx, arg: &[(i64, i64)]) -> Tensor {
+        let pairs: Vec<(SVal, SVal)> = arg.iter().map(|(a, b)| (SVal::I(*a as i128), SVal::I(*b as i128))).collect();
+        { let __u = movement::shrink(ctx, self.uop.clone(), &pairs); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.permute(order)`.
@@ -838,7 +845,15 @@ impl Tensor {
     }
 
     /// `Tensor.pool(kernel_size, stride, dilation)`: sliding window pool (for conv2d internals).
+    /// Scalar `stride`/`dilation` broadcast to every spatial dim.
     pub fn pool(&self, ctx: &mut UOpCtx, kernel_size: &[i64], stride: i64, dilation: i64) -> Tensor {
+        let s: Vec<i64> = vec![stride; kernel_size.len()];
+        let d: Vec<i64> = vec![dilation; kernel_size.len()];
+        self.pool_vec(ctx, kernel_size, &s, &d)
+    }
+
+    /// `Tensor._pool(k, stride, dilation)` with per-dim `stride`/`dilation`.
+    pub fn pool_vec(&self, ctx: &mut UOpCtx, kernel_size: &[i64], stride: &[i64], dilation: &[i64]) -> Tensor {
         { let __u = movement::pool(ctx, self.uop.clone(), kernel_size, stride, dilation); Tensor::from_uop(ctx, __u) }
     }
 

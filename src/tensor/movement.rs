@@ -273,19 +273,22 @@ pub(crate) fn permute_internal(ctx: &mut UOpCtx, x: UopId, order: &[usize]) -> U
 }
 
 /// `MovementMixin._pool` (movement.py:598-714): extract sliding windows.
-/// Used by conv2d and pooling layers. Returns shape: `(noop, k0, o0, k1, o1, ..., kN, oN)`.
-pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: i64, dilation: i64) -> UopId {
+/// Used by conv2d and pooling layers. `stride`/`dilation` are per-spatial-dim
+/// (tinygrad accepts tuples). Returns shape: `(noop, o0, o1, ..., k0, k1, ...)`.
+pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: &[i64], dilation: &[i64]) -> UopId {
     let shape = ctx.shape(&x).unwrap().clone().unwrap_or_default();
     let ndim = shape.len();
     let k_len = k.len();
     let noop_len = ndim - k_len;
+    assert_eq!(k_len, stride.len(), "TGERR: pool kernel/stride length mismatch");
+    assert_eq!(k_len, dilation.len(), "TGERR: pool kernel/dilation length mismatch");
 
     // Get spatial input sizes
     let i_: Vec<i64> = shape[ndim - k_len..].iter().map(|s| s.clone().as_i64().unwrap_or(0)).collect();
 
     // Calculate output sizes: o_ = ceil((i - d*(k-1)) / s)
-    let s_: Vec<i64> = std::iter::repeat_n(stride, k_len).collect();
-    let d_: Vec<i64> = std::iter::repeat_n(dilation, k_len).collect();
+    let s_: Vec<i64> = stride.to_vec();
+    let d_: Vec<i64> = dilation.to_vec();
     let o_: Vec<i64> = i_.iter().zip(k.iter().zip(s_.iter().zip(d_.iter())))
         .map(|(&i, (&k, (&s, &d)))| {
             let num = i - d * (k - 1);
@@ -320,12 +323,15 @@ pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: i64, dilation: i64) -
     }
     let x_repeated = reduce::repeat(ctx, x, &repeat_args);
 
-    // Step 2: shrink to k * (i * f + d)
-    let shrink_sizes: Vec<SVal> = repeat_sizes.iter().map(|&x| SVal::I(x as i128)).collect();
-    let x_shrunk = shrink_to(ctx, x_repeated, &shrink_sizes);
+    // Step 2: shrink to noop + [k*(i*f + d)]  (movement.py:610)
+    let mut shrink_sizes: Vec<SVal> = shape[..noop_len].to_vec();
+    for spatial_idx in 0..k_len {
+        shrink_sizes.push(SVal::I((k[spatial_idx] * (i_[spatial_idx] * f_[spatial_idx] + d_[spatial_idx])) as i128));
+    }
+    let x = shrink_to(ctx, x_repeated, &shrink_sizes);
 
-    // Step 3: reshape to (noop + flatten((k, i*f + d)))
-    let mut reshape_dims: Vec<SVal> = vec![SVal::I(1); noop_len];
+    // Step 3: reshape to noop(1) + flatten((k, i*f + d))  (movement.py:611)
+    let mut reshape_dims: Vec<SVal> = shape[..noop_len].to_vec();
     for (spatial_idx, &k_val) in k.iter().enumerate() {
         reshape_dims.push(SVal::I(k_val as i128));
         let i_val = i_[spatial_idx];
@@ -333,47 +339,41 @@ pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: i64, dilation: i64) -
         let f_val = f_[spatial_idx];
         reshape_dims.push(SVal::I((i_val * f_val + d_val) as i128));
     }
-    let x_reshaped = reshape(ctx, x_shrunk, &reshape_dims);
+    let x = reshape(ctx, x, &reshape_dims);
 
-    // Step 4: handle stride - reshape to (k, o*s)
-    let mut stride_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
-    for (spatial_idx, &k_val) in k.iter().enumerate() {
-        stride_reshape.push(SVal::I(k_val as i128));
-        stride_reshape.push(SVal::I((o_[spatial_idx] * s_[spatial_idx]) as i128));
+    // Step 4a: shrink to noop + flatten((k, o*s))  (movement.py:613)
+    let mut shrink_stride: Vec<SVal> = shape[..noop_len].to_vec();
+    for spatial_idx in 0..k_len {
+        shrink_stride.push(SVal::I(k[spatial_idx] as i128));
+        shrink_stride.push(SVal::I((o_[spatial_idx] * s_[spatial_idx]) as i128));
     }
-    let x_stride_reshaped = reshape(ctx, x_reshaped, &stride_reshape);
+    let x = shrink_to(ctx, x, &shrink_stride);
 
-    // Shrink last spatial dim to o*s
-    let shrink_end: Vec<SVal> = stride_reshape.clone();
-    let x_stride_shrunk = shrink_to(ctx, x_stride_reshaped, &shrink_end);
-
-    // Reshape to (k, o, s)
-    let mut kos_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
-    for (spatial_idx, &k_val) in k.iter().enumerate() {
-        kos_reshape.push(SVal::I(k_val as i128));
+    // Step 4b: reshape to noop(1) + flatten((k, o, s))
+    let mut kos_reshape: Vec<SVal> = shape[..noop_len].to_vec();
+    for spatial_idx in 0..k_len {
+        kos_reshape.push(SVal::I(k[spatial_idx] as i128));
         kos_reshape.push(SVal::I(o_[spatial_idx] as i128));
         kos_reshape.push(SVal::I(s_[spatial_idx] as i128));
     }
-    let x_kos = reshape(ctx, x_stride_shrunk, &kos_reshape);
+    let x = reshape(ctx, x, &kos_reshape);
 
-    // Shrink to (k, o, 1) and reshape to (k, o)
-    let mut ko1_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
-    for (spatial_idx, &k_val) in k.iter().enumerate() {
-        ko1_reshape.push(SVal::I(k_val as i128));
-        ko1_reshape.push(SVal::I(o_[spatial_idx] as i128));
-        ko1_reshape.push(SVal::I(1));
+    // Step 4c: shrink to noop + flatten((k, o, 1))  (movement.py:614)
+    let mut shrink_ko1: Vec<SVal> = shape[..noop_len].to_vec();
+    for spatial_idx in 0..k_len {
+        shrink_ko1.push(SVal::I(k[spatial_idx] as i128));
+        shrink_ko1.push(SVal::I(o_[spatial_idx] as i128));
+        shrink_ko1.push(SVal::I(1));
     }
-    let x_ko1 = reshape(ctx, x_kos, &ko1_reshape);
+    let x = shrink_to(ctx, x, &shrink_ko1);
 
-    let ko_shrink_end: Vec<SVal> = ko1_reshape.clone();
-    let x_ko_shrunk = shrink_to(ctx, x_ko1, &ko_shrink_end);
-
-    let mut ko_reshape: Vec<SVal> = vec![SVal::I(1); noop_len];
-    for (spatial_idx, &k_val) in k.iter().enumerate() {
-        ko_reshape.push(SVal::I(k_val as i128));
+    // Step 4d: reshape to noop(1) + flatten((k, o))
+    let mut ko_reshape: Vec<SVal> = shape[..noop_len].to_vec();
+    for spatial_idx in 0..k_len {
+        ko_reshape.push(SVal::I(k[spatial_idx] as i128));
         ko_reshape.push(SVal::I(o_[spatial_idx] as i128));
     }
-    let x_ko = reshape(ctx, x_ko_shrunk, &ko_reshape);
+    let x_ko = reshape(ctx, x, &ko_reshape);
 
     // Step 5: permute to (noop, k0, k1, ..., o0, o1, ...)
     // Permute order: noop + [len(noop)+0*2+1, len(noop)+1*2+1, ...] + [len(noop)+0*2, len(noop)+1*2, ...]
