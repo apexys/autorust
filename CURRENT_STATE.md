@@ -279,8 +279,9 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 **Remaining real gaps**: `get_late_rewrite_patterns`+`get_transcendental_patterns`
 (#23), then `pm_number_params` (#29). Descoped: images (#16), `multi_pm` (#1).
 
-**Differential gates** (`py/tests/test_rewrite_diff.py`, run directly; pytest not
-installed): 10 tests, all green — `commutative` 192/8, `div_and_mod_symbolic` 192/8,
+**Differential gates** (`py/tests/test_rewrite_diff.py`; pytest is available in
+`../tinygrad/.venv`, but the gates also run as plain scripts): 10 tests, all green —
+`commutative` 192/8, `div_and_mod_symbolic` 192/8,
 `mop_cleanup` 200/0, `pm_decomp` 336/14, `pm_dtype_decomps` 250/0,
 `pm_load_collapse` 300/0, `pm_reduce_load_collapse` 300/0, `pm_split_ranges` 300/0,
 `symbolic` 278/22, `symbolic_simple` 287/13 (ok/skip).
@@ -614,3 +615,52 @@ behavioural change; the rewrite differentials (see §8.0) are unchanged.
 4. **M7 acceptance gate — MNIST e2e**: an MLP train step and a Conv inference pass, weights
    loaded via `State`, optimizer-step numerics diffed against tinygrad. This is the
    milestone that exercises custom kernels, rand, gradient, and conv ops together.
+
+### 9.5 Agreed MNIST-session plan (decisions to implement)
+The session goal is the M7 MNIST e2e, built as `autorust/examples/mnist.rs` (not a
+default-suite test; INTERP training is slow), mirroring
+`tinygrad/examples/beautiful_mnist.py`. Work order:
+
+1. **Optimizers (LARS/SGD/Adam/AdamW/LAMB)** — port `nn/optim.py` one-for-one.
+   - `Tensor::zeros_param` via the existing `to_param` (a pure `empty` leaf with
+     `initial_data`, **no in-graph STORE**) is how optimizer state must be created:
+     `Tensor::zeros` yields `AFTER(empty, STORE)`, and since there is no session-wide
+     realized memo the STORE would re-run and reset the state each step. `realize()`
+     alone does not fix this. Pin with a re-realize regression test.
+   - `Optim::step` becomes tinygrad's `_step` shape: it may `assign` state buffers
+     (with `sess`) and returns the parameter updates; add `Optim::schedule_step`
+     returning `extra_state + params + buffers`.
+   - **Co-realization**: add `Session::realize_many` (mirroring `Tensor.realize(*tensors)`;
+     `sink`/`create_linear_with_vars` already accept multiple roots) and have the training
+     loop realize `[loss] + opt.schedule_step(...)` in one schedule. Full kernel fusion of
+     the param write needs tinygrad's buffer-identity `STORE`/`AFTER` assign (tensor.py:455;
+     not ported — follow-up, not this session).
+   - Optimizer order: state assigns first, then updates read the updated state.
+2. **conv2d + pooling/loss** — full ports of `Tensor.conv2d`
+   (`mixin/op.py:1595-1607`) incl. `_pad_constant`/`flat_to_grouped`/`resolve_pool_pads`,
+   `Tensor.max_pool2d` (`return_indices`+`ceil_mode` included), `Tensor.sequential`,
+   `Tensor.sparse_categorical_crossentropy` (`ignore_index`/`label_smoothing`/`reduction`),
+   `Tensor.argmax`. Gate against tinygrad goldens.
+3. **Module trait adoption** — implement `Module` for Conv2d/BatchNorm/LayerNorm/GroupNorm,
+   plus `impl<T: Module> Module for &[T]`/`Vec<T>` and an `nn::Sequential`. Add a generic
+   `into_params` so examples don't hand-list params. Rewrite `examples/xor.rs` and the XOR
+   tests to use `Module`.
+4. **Tensor indexing (new prerequisite)** — `Ix` has no Tensor variant today. Port
+   `_getitem`'s advanced path (`mixin/op.py:74-146`): negative-index normalization,
+   broadcast indices, `_one_hot_along_dim` masks, `uprod` + `where` + `sum`, and the
+   consecutive-int-dim linear-index fast path; out-of-bounds → 0. Differential-test vs
+   tinygrad. Needed for `X[samples]`/`Y[samples]`.
+5. **MNIST example** — same layer list as `beautiful_mnist.py`; data loader shells out to
+   `curl` via `std::process::Command` (single `sh -c 'curl … | gunzip > file'`, skipped if
+   present) into a cache dir; IDX parsing in Rust; minibatched with `randint` + advanced
+   indexing; Adam default; `TARGET_EVAL_ACC_PCT` check like tinygrad. Add one `#[ignore]`d
+   `tests/mnist_e2e.rs` acceptance gate (small subset + conv goldens).
+6. **Docs** — keep this file current; `AGENTS.md` at the repo root states the faithful-port
+   and end-user-feel rules and must be edited if its facts change.
+
+**Deferred:** a faster CPU backend. Backends are pluggable (`register_device` + the trait
+seams), but the engine is deliberately single-threaded (`Rc`/`RefCell`, `thread_local!`
+registry), so a threaded interpreter needs an owned `Send` kernel representation and
+`Arc`-based storage; `rayon` would also break the std-only policy (`std::thread::scope`
+would not). A cstyle→`cc -shared` native backend is the alternative. Tracked as a future
+option, not worked this session.
