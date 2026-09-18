@@ -55,15 +55,18 @@ pub trait Optim {
             .collect();
         let (updates, extra) = self._step(ctx, sess, params, &grads);
         // `tt.assign(self._apply_update(tt, updates[i]))`: build the applied
-        // value (`t.detach() - up`), co-realize it with the caller's roots and
-        // state, then copy it into the parameter's buffer.
+        // value (`t.detach() - up`) and its STORE+AFTER write effect, co-realize
+        // those effects **with** the caller's roots and state so the parameter
+        // write fuses into the same schedule as the loss, then pin each
+        // parameter's buffer (tinygrad's Tensor owns its storage).
         let applied: Vec<Tensor> = params.iter().zip(updates.iter()).map(|(p, u)| self._apply_update(ctx, p, u)).collect();
+        let effects: Vec<Tensor> = params.iter().zip(applied.iter()).map(|(p, a)| p.assign_effect(ctx, a)).collect();
         let mut to_realize: Vec<&Tensor> = roots.iter().collect();
-        to_realize.extend(applied.iter());
+        to_realize.extend(effects.iter());
         to_realize.extend(extra.iter());
         Tensor::realize_many(ctx, sess, to_realize);
-        for (p, a) in params.iter().zip(applied.iter()) {
-            p.assign(ctx, sess, a);
+        for p in params.iter() {
+            p.pin_buffer(ctx, sess);
         }
         let mut ret = extra;
         ret.extend(params.iter().cloned());

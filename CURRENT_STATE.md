@@ -342,7 +342,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **84 passed, 6 ignored, 0 failed**. The ignored = 1 `backend_harness`
+- `cargo test` → **88 passed, 6 ignored, 0 failed**. The ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 4 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
@@ -518,13 +518,21 @@ a **pure-graph** optimizer (`step` returns new tensors), which forced callers to
 rebind (`w = w - lr*grad`, making each weight's subgraph contain the previous one → O(N)
 graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights through host
 `Vec<f32>` every step (what `nn_xor`/`mem_probe` used to do).
-- `Tensor::assign(ctx, sess, value)` realizes `value` and copies its
-  bytes into this tensor's storage **by buffer identity** (`buffer_of(self.uop)` — the same
-  base the forward pass resolves), leaving `self.uop` unchanged. The copy is
-  `realize::buffer_copy_into`: on the **same device** a direct buffer-to-buffer copy
-  (`BackendAllocator::_copy_into` — OpenCL `clEnqueueCopyBuffer`; host backends copy the
-  windows directly, no host round-trip), and only **across devices** a host round-trip
-  (`buffer_bytes` + `buffer_copyin`).
+- `Tensor::assign(ctx, sess, value)` is the faithful tinygrad path (tensor.py:455):
+  `self.uop.after(self.uop.store(value.uop))` — a fused `STORE`+`AFTER` that the scheduler
+  runs as part of the surrounding schedule, leaving `self.uop` a stable leaf. `AFTER` orders
+  any read of the parameter in the same schedule **before** the store, and
+  `Optim::schedule_step` builds the effects with `Tensor::assign_effect` so the parameter
+  write fuses into the same schedule as the loss (`Tensor.realize_many(roots + effects +
+  state)`), instead of a separate realize-then-copy pass. `Tensor::assign` (the standalone
+  one-shot form) realizes the effect and then `Tensor::pin_buffer`s the parameter.
+- `Tensor::pin_buffer(ctx, sess)` pins the parameter's own storage (`buffer_of(self.uop)`)
+  onto the shared buffer cell. tinygrad's `Tensor` object owns its realized storage; here the
+  cell is that owner, so `BufTable::prune` cannot free a parameter's buffer between the
+  schedule that wrote it and the next read. **Without this, a fused `STORE` into a
+  not-yet-pinned parameter was silently lost** (the buffer was pruned and re-zeroed); the
+  `tests/assign.rs` gates pin the read-before-store ordering for both elementwise and
+  reduce reads. `buffer_copy_into` remains as a device-copy primitive (`tests/session.rs`).
 - `Tensor::to_param` / `nn::Linear::into_params`: random-init parameters are *expressions*
   (`uniform` = `rand*range + low`), which would be recomputed — discarding the update — on
   every realize. `to_param` realizes the init once and stages it on a buffer-backed leaf
@@ -537,9 +545,13 @@ graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights thro
   the `Linear` layers and loop `forward → backward → step → zero_grad`. The per-step
   graph is identical, so every step after the first is a program-cache hit and the live graph
   is flat (the last XOR run: 10 misses / 3290 hits, loss 0.021).
-- Caveat: `assign` mutates a param buffer in place, so a *derived* uop realized in an earlier
-  step must not be reused (training loops build fresh derived nodes each step). The faithful
-  STORE+AFTER buffer-identity/view-assign path (tinygrad tensor.py:455-463) is not ported.
+- Remaining port simplification: tinygrad rewrites the parameter's *uop* to the `AFTER`
+  (`self.uop = assign`, or the `_apply_map_to_tensors` view-assign at tensor.py:455-463) so
+  later ops on it reference the write. The port leaves `self.uop` a leaf and relies on the
+  shared buffer cell (pinned) plus `AFTER` ordering, which is equivalent for the eager,
+  per-step graphs here. Consequently a *derived* uop materialized in an earlier step still
+  must not be reused (training loops build fresh derived nodes each step); the write itself
+  is now fused and ordered rather than a post-hoc copy.
 
 ### 8.11 Rangeify realize: `PCONTIG` arm in `maybe_realize_axes` (DONE)
 `schedule/indexing.py:274` gates per-axis realization on

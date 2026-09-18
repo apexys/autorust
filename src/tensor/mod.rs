@@ -188,30 +188,49 @@ impl Tensor {
         self.to_bytes(ctx, &mut Session::new())
     }
 
-    /// `Tensor.assign` (tensor.py:436): realize `value` and copy its bytes into
-    /// *this* tensor's storage in place, leaving `self.uop` unchanged.
+    /// The write effect for `self = value` (tinygrad tensor.py:455):
+    /// `self.uop.after(self.uop.store(value.uop))`. STORE is the write effect
+    /// (void), AFTER wraps the view for correct shape/ranging and orders any
+    /// read of `self` in the same schedule *before* the store.
+    ///
+    /// Returned as a `Tensor` so a caller can co-realize it with other roots
+    /// (`Optim::schedule_step`), folding the parameter write into the same
+    /// schedule as the loss instead of a separate copy pass.
+    pub fn assign_effect(&self, ctx: &mut UOpCtx, value: &Tensor) -> Tensor {
+        assert_eq!(self.dtype(ctx), value.dtype(ctx), "TGERR: assign dtype mismatch");
+        let st = crate::tensor::store(ctx, self.uop.clone(), value.uop.clone(), None);
+        let aft = crate::tensor::after(ctx, self.uop.clone(), vec![st]);
+        Tensor::from_uop(ctx, aft)
+    }
+
+    /// tinygrad's Tensor object owns its realized buffer, so a parameter's
+    /// storage is not garbage-collected between steps. Here the shared buffer
+    /// cell is that owner: pin *this* tensor's own storage by buffer identity
+    /// (`buffer_of(self.uop)`) so `BufTable::prune` cannot drop it before the
+    /// next read — without this, a schedule that writes a parameter through a
+    /// fused STORE would see its buffer freed and re-zeroed on the next realize.
+    pub fn pin_buffer(&self, ctx: &mut UOpCtx, sess: &mut Session) {
+        let dst = crate::runtime::buffer::buffer_of(ctx, &mut sess.buffers, self.uop.clone());
+        self.set_realized_buffer(dst);
+    }
+
+    /// `Tensor.assign` (tensor.py:436): write `value` into *this* tensor's
+    /// storage in place (a fused STORE+AFTER, not a copy), leaving `self.uop`
+    /// unchanged.
     ///
     /// This is what keeps a persistent parameter a stable leaf across optimizer
-    /// steps: `w - lr*grad` is built as a fresh subgraph, written back into `w`'s
-    /// buffer, then dropped. Without it, rebinding `w = w - lr*grad` chains each
-    /// step into the previous one and the graph grows without bound.
+    /// steps: `w - lr*grad` is built as a fresh subgraph, stored back into `w`'s
+    /// buffer by the scheduler, then dropped. Without it, rebinding
+    /// `w = w - lr*grad` chains each step into the previous one and the graph
+    /// grows without bound.
     pub fn assign(&self, ctx: &mut UOpCtx, sess: &mut Session, value: &Tensor) {
-        assert_eq!(self.dtype(ctx), value.dtype(ctx), "TGERR: assign dtype mismatch");
-        // Realize the value first: its graph reads the parameter's current bytes.
-        // If the value was already co-realized (e.g. via `Tensor::realize_many`
-        // in `Optimizer.step`), reuse that buffer instead of scheduling again.
-        let src = match value.realized_buffer() {
-            Some(b) => b,
-            None => sess.realize_tensor(ctx, value.uop.clone()),
-        };
-        // Destination is this tensor's storage *by buffer identity* — the same
-        // base the forward pass resolves through `buffer_of`, so the write is
-        // visible to subsequent realizes.
-        let dst = crate::runtime::buffer::buffer_of(ctx, &mut sess.buffers, self.uop.clone());
-        // Same device: direct buffer-to-buffer copy (no host round-trip).
-        // Different devices: host round-trip inside `buffer_copy_into`.
-        crate::engine::realize::buffer_copy_into(&dst, &src);
-        self.set_realized_buffer(dst);
+        let effect = self.assign_effect(ctx, value);
+        // Realize the STORE. If the caller is co-realizing a larger schedule,
+        // `schedule_step` uses `assign_effect` directly so the write fuses with
+        // the loss; this standalone path is for one-off writes (e.g. running
+        // stats, optimizer moments that are read again immediately).
+        let _ = sess.realize_tensor(ctx, effect.uop.clone());
+        self.pin_buffer(ctx, sess);
     }
 
     /// Turn a computed tensor (e.g. a random-initialized parameter) into a
