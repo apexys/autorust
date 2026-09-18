@@ -8,17 +8,50 @@
 //! EPOCHS=1000 LR=0.05 cargo run --release --example xor
 //! ```
 //!
-//! The layers are created once; their parameters are buffer-backed leaves that
-//! the optimizer updates in place (`into_params` + `Optim::schedule_step`), and
-//! the loss is co-realized with the update in one schedule, so the per-step
-//! graph stays identical and bounded and every step after the first is a
-//! compiled-program cache hit.
+//! The model is a [`Module`] (like tinygrad's `class Model`): `new` builds the
+//! layers, `into_params` turns their random init into buffer-backed leaves, and
+//! `params()` collects them for the optimizer — no hand-listing. The optimizer
+//! stores updates into those buffers in place (`Optim::schedule_step`), and the
+//! loss is co-realized with the update in one schedule, so the per-step graph
+//! stays identical and bounded and every step after the first is a compiled-
+//! program cache hit.
 
 use autorust::engine::session::Session;
-use autorust::tensor::nn::{self, Linear};
+use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::Tensor;
 use autorust::uop::ctx::UOpCtx;
+
+/// tinygrad-style model: layers wired by hand in `forward`, mirroring a
+/// `class Model` in tinygrad.
+struct XorModel {
+    l1: Linear,
+    l2: Linear,
+}
+
+impl XorModel {
+    fn new(ctx: &mut UOpCtx) -> Self {
+        XorModel {
+            l1: Linear::new(ctx, 2, 4, true),
+            l2: Linear::new(ctx, 4, 1, true),
+        }
+    }
+
+    fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        let h = nn::relu(&self.l1.forward(x, ctx), ctx);
+        self.l2.forward(&h, ctx)
+    }
+}
+
+impl Module for XorModel {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        Box::new(nn::scoped("l1", self.l1.named_params()).chain(nn::scoped("l2", self.l2.named_params())))
+    }
+
+    fn into_params(self, ctx: &mut UOpCtx) -> Self {
+        XorModel { l1: self.l1.into_params(ctx), l2: self.l2.into_params(ctx) }
+    }
+}
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
@@ -34,16 +67,11 @@ fn main() {
     let mut ctx = UOpCtx::new();
     let mut sess = Session::new();
 
-    // Create the layers once and make their params updateable buffer leaves.
+    // Build the model, make its params updateable buffer leaves, and collect
+    // them generically for the optimizer.
     Tensor::manual_seed(seed);
-    let l1 = Linear::new(&mut ctx, 2, 4, true).into_params(&mut ctx);
-    let l2 = Linear::new(&mut ctx, 4, 1, true).into_params(&mut ctx);
-    let params = vec![
-        l1.weight.clone(),
-        l1.bias.clone().unwrap(),
-        l2.weight.clone(),
-        l2.bias.clone().unwrap(),
-    ];
+    let model = XorModel::new(&mut ctx).into_params(&mut ctx);
+    let params: Vec<Tensor> = model.params().collect();
     let sgd = SGD::new(params.clone(), lr);
 
     let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
@@ -56,15 +84,14 @@ fn main() {
     let log_every = (n / 10).max(1);
 
     for epoch in 0..n {
-        let h = nn::relu(&l1.forward(&x, &mut ctx), &mut ctx);
-        let out = l2.forward(&h, &mut ctx);
+        let out = model.forward(&x, &mut ctx);
         let diff = out.sub(&mut ctx, &t);
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
 
         loss.backward(&mut ctx, &params, None);
         // Co-realize the loss with the optimizer update in one schedule
         // (`loss.realize(*opt.schedule_step())` in tinygrad), then clear grads.
-        sgd.schedule_step(&mut ctx, &mut sess, &[loss.clone()]);
+        sgd.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
         sgd.zero_grad(&ctx);
 
         pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);

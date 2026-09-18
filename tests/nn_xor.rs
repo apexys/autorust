@@ -2,10 +2,14 @@
 //! Functional golden — after training the outputs must classify XOR correctly
 //! (out>0.5 matches the truth table) and the loss must drop sharply.
 //!
+//! The model is a [`Module`] (mirroring a tinygrad `class Model`): it owns the
+//! layers, `forward` wires them, and `params()` collects the parameters
+//! generically for the optimizer.
+//!
 //! Notes on the graph discipline here:
-//! - The `Linear` layers are created once and their parameters are turned into
-//!   buffer-backed leaves (`into_params`); the optimizer updates those buffers
-//!   in place with `Tensor::assign` (tinygrad `Optimizer.step`). So each step's
+//! - The model's parameters are turned into buffer-backed leaves (`into_params`);
+//!   the optimizer stores updates into those buffers in place with a fused
+//!   `STORE`+`AFTER` (`Tensor::assign` / `Optim::schedule_step`). So each step's
 //!   graph references the *same* parameter leaves and is structurally identical
 //!   — the graph does not chain into previous steps. See CURRENT_STATE §8.10.
 //! - Because the graph is identical each step, every step after the first is a
@@ -14,10 +18,39 @@
 //!   (`2->4` ReLU hidden, linear output, MSE, `lr=0.1`, seed 42, ~300 epochs).
 
 use autorust::engine::session::Session;
-use autorust::tensor::nn::{self, Linear};
+use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::Tensor;
 use autorust::uop::ctx::UOpCtx;
+
+struct XorModel {
+    l1: Linear,
+    l2: Linear,
+}
+
+impl XorModel {
+    fn new(ctx: &mut UOpCtx) -> Self {
+        XorModel {
+            l1: Linear::new(ctx, 2, 4, true),
+            l2: Linear::new(ctx, 4, 1, true),
+        }
+    }
+
+    fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        let h = nn::relu(&self.l1.forward(x, ctx), ctx);
+        self.l2.forward(&h, ctx)
+    }
+}
+
+impl Module for XorModel {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        Box::new(nn::scoped("l1", self.l1.named_params()).chain(nn::scoped("l2", self.l2.named_params())))
+    }
+
+    fn into_params(self, ctx: &mut UOpCtx) -> Self {
+        XorModel { l1: self.l1.into_params(ctx), l2: self.l2.into_params(ctx) }
+    }
+}
 
 #[test]
 fn xor_trains_to_convergence() {
@@ -25,29 +58,18 @@ fn xor_trains_to_convergence() {
     let mut sess = Session::new();
 
     // Draw the initial weights once and turn them into buffer-backed leaves so
-    // the optimizer can assign into them in place.
+    // the optimizer can store into them in place.
     Tensor::manual_seed(42);
-    let l1 = Linear::new(&mut ctx, 2, 4, true).into_params(&mut ctx);
-    let l2 = Linear::new(&mut ctx, 4, 1, true).into_params(&mut ctx);
+    let model = XorModel::new(&mut ctx).into_params(&mut ctx);
+    let params: Vec<Tensor> = model.params().collect();
 
-    // Confirm which backend actually holds the parameters (env DEFAULT_DEVICE >
-    // CL when compiled+present > INTERP). `to_param` stages each leaf on the
-    // device its init was realized on.
     eprintln!(
-        "[xor] default device = {}, l1.weight = {:?}, l1.bias = {:?}, l2.weight = {:?}",
+        "[xor] default device = {}, params = {}",
         autorust::tensor::creation::default_device(),
-        l1.weight.device(&ctx),
-        l1.bias.as_ref().and_then(|b| b.device(&ctx)),
-        l2.weight.device(&ctx),
+        params.len()
     );
 
     let lr: f32 = std::env::var("LR").ok().and_then(|s| s.parse().ok()).unwrap_or(0.1);
-    let params = vec![
-        l1.weight.clone(),
-        l1.bias.clone().unwrap(),
-        l2.weight.clone(),
-        l2.bias.clone().unwrap(),
-    ];
     let sgd = SGD::new(params.clone(), lr);
 
     // The inputs are constant; the graph is reused every step.
@@ -61,8 +83,7 @@ fn xor_trains_to_convergence() {
     let mut pred: Vec<f32> = Vec::new();
 
     for epoch in 0..n {
-        let h = nn::relu(&l1.forward(&x, &mut ctx), &mut ctx);
-        let out = l2.forward(&h, &mut ctx);
+        let out = model.forward(&x, &mut ctx);
         let diff = out.sub(&mut ctx, &t);
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
 
@@ -70,7 +91,7 @@ fn xor_trains_to_convergence() {
         // `loss.realize(*opt.schedule_step())`: co-realize the loss and the
         // optimizer update in one schedule; the leaves are unchanged, so the
         // next step's graph is identical.
-        sgd.schedule_step(&mut ctx, &mut sess, &[loss.clone()]);
+        sgd.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
         sgd.zero_grad(&ctx);
 
         pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);

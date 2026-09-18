@@ -9,7 +9,7 @@
 //! same parameter leaves and the live-node / base counts stay flat.
 
 use autorust::engine::session::Session;
-use autorust::tensor::nn::{self, Linear};
+use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::Tensor;
 use autorust::uop::ctx::UOpCtx;

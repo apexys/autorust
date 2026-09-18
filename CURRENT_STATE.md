@@ -342,7 +342,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **88 passed, 6 ignored, 0 failed**. The ignored = 1 `backend_harness`
+- `cargo test` → **93 passed, 6 ignored, 0 failed**. The ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 4 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
@@ -533,7 +533,7 @@ graph growth, `toposort_from` dominated, ~180 MB) or round-trip the weights thro
   not-yet-pinned parameter was silently lost** (the buffer was pruned and re-zeroed); the
   `tests/assign.rs` gates pin the read-before-store ordering for both elementwise and
   reduce reads. `buffer_copy_into` remains as a device-copy primitive (`tests/session.rs`).
-- `Tensor::to_param` / `nn::Linear::into_params`: random-init parameters are *expressions*
+- `Tensor::to_param` / `nn::Module::into_params`: random-init parameters are *expressions*
   (`uniform` = `rand*range + low`), which would be recomputed — discarding the update — on
   every realize. `to_param` realizes the init once and stages it on a buffer-backed leaf
   (`Node.initial_data`), i.e. tinygrad's "parameters are realized buffers". Do it once
@@ -601,6 +601,36 @@ gradients wrong on every backend (`a.dot(w.T)` is exactly this reduce→broadcas
   Gates: `tests/reduce_broadcast.rs::{sibling_reductions_same_realize,sibling_reductions_batched}`,
   `tests/nn_conv.rs::sparse_categorical_crossentropy_matches_tinygrad` (un-ignored). **MNIST
   e2e is no longer blocked on this.**
+
+### 8.13 `Tensor.assign` faithful STORE+AFTER (DONE)
+See §8.10 for the full write-up. `assign` is now
+`self.uop.after(self.uop.store(value.uop))` (tensor.py:455) rather than realize-then-copy;
+`Optim::schedule_step` builds the write effects and co-realizes them with the loss and state
+so the parameter update fuses into one schedule; `Tensor::pin_buffer` makes the parameter own
+its storage so `BufTable::prune` cannot drop a fused write. `buffer_copy_into` remains a
+device-copy primitive. Gates: `tests/assign.rs`.
+
+### 8.14 M7 Phase-3 Module/parameter collection (DONE)
+- `nn::Module` gained `fn into_params(self, ctx) -> Self` (a required method, consuming and
+  rebuilding) alongside `named_params`/`params` (tinygrad `nn.state.get_parameters`
+  analogue). Every layer implements it: `Linear`, `Conv2d`, `BatchNorm`, `LayerNorm`,
+  `GroupNorm`, plus `impl<T: Module> Module for Vec<T>` (numeric path prefixes like
+  tinygrad's `get_state_dict` list indexing: `"0.weight"`). `nn::Sequential` was **cut** by
+  request — models are explicit structs with a hand-written `forward` (like tinygrad's
+  `class Model`), which is both simpler and closer to the reference.
+- `examples/xor.rs` and `tests/nn_xor.rs` now define an `XorModel` struct wired with `Module`
+  (`new` → `into_params` → `params().collect()` for the optimizer), so no call site
+  hand-lists parameters.
+- Fixed a real `LayerNorm::forward` bug while implementing its `Module` impl: it computed
+  `x + weight*bias` instead of tinygrad's `x * weight + bias` (nn/__init__.py:258). Gate:
+  `tests/nn_module.rs::layernorm_applies_weight_then_bias` (non-trivial weight/bias vs the
+  tinygrad oracle).
+- Gates: `tests/nn_module.rs` (nested name flattening, `Vec<T>` indexing, `into_params`
+  leaf materialization, LayerNorm affine).
+- **Known simplification (not touched):** `GroupNorm::forward` is still a placeholder
+  (normalizes like BatchNorm, `_norm_shape` returns all-ones); `BatchNorm`'s running-stat
+  update is still not wired (`forward_train` is a no-op for stats). Neither is used by XOR;
+  both matter for MNIST Phase 5 and are tracked for that step.
 
 ---
 
@@ -683,9 +713,11 @@ default-suite test; INTERP training is slow), mirroring
    (`tests/nn_conv.rs`, 4/4). `sequential` is deferred to the Phase-3 model struct. The
    sibling-reduce scheduler bug that blocked CE is fixed (§8.12), so MNIST is unblocked.
 3. **Module trait adoption** — implement `Module` for Conv2d/BatchNorm/LayerNorm/GroupNorm,
-   plus `impl<T: Module> Module for &[T]`/`Vec<T>` and an `nn::Sequential`. Add a generic
-   `into_params` so examples don't hand-list params. Rewrite `examples/xor.rs` and the XOR
-   tests to use `Module`.
+   plus `impl<T: Module> Module for Vec<T>`. Add a generic `into_params` so examples don't
+   hand-list params. Rewrite `examples/xor.rs` and the XOR tests to use `Module`.
+   **DONE** (§8.14): all four layers + `Vec<T>` implement `Module` with `into_params`;
+   `XorModel` structs replace the hand-listed params. `nn::Sequential` was cut (models define
+   `forward` themselves). Fixed `LayerNorm::forward` (`x*weight+bias`).
 4. **Tensor indexing (new prerequisite)** — `Ix` has no Tensor variant today. Port
    `_getitem`'s advanced path (`mixin/op.py:74-146`): negative-index normalization,
    broadcast indices, `_one_hot_along_dim` masks, `uprod` + `where` + `sum`, and the

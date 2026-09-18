@@ -19,10 +19,23 @@ pub trait Module {
     /// parents prefix them with the child path using [`scoped`].
     fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_>;
 
-    /// Just the parameter tensors, dropping the names.
+    /// Just the parameter tensors, dropping the names. This is what an
+    /// optimizer is constructed from (tinygrad `nn.state.get_parameters`).
     fn params(&self) -> impl Iterator<Item = Tensor> + '_ {
         self.named_params().map(|(_name, p)| p)
     }
+
+    /// Materialize every parameter into a buffer-backed leaf (see
+    /// [`Tensor::to_param`]), consuming and rebuilding the module. Recurse
+    /// through nested modules. Do this once before training so the optimizer can
+    /// store updates into the parameter buffers in place ([`Tensor::assign`]).
+    ///
+    /// This is the port's stand-in for tinygrad realizing parameters as buffers
+    /// with stable identity; a raw init expression would be recomputed (and the
+    /// update lost) on every realize.
+    fn into_params(self, ctx: &mut UOpCtx) -> Self
+    where
+        Self: Sized;
 }
 
 /// Prefix every param name in `it` with `parent` + `"."`, for nesting a child
@@ -37,10 +50,35 @@ pub fn scoped<'a>(parent: &'a str, it: impl Iterator<Item = (String, Tensor)> + 
 
 impl Module for Linear {
     fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
-        let w = std::iter::once(("weight".to_string(), self.weight.clone()));
-        let b = self.bias.clone().map(|b| ("bias".to_string(), b));
-        Box::new(w.chain(b))
+        weight_bias(&self.weight, &self.bias)
     }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        self.weight = self.weight.to_param(ctx);
+        self.bias = self.bias.map(|b| b.to_param(ctx));
+        self
+    }
+}
+
+/// The `(name, tensor)` pairs shared by every layer with a `weight` and an
+/// optional `bias` (`Linear`, `Conv2d`, …), mirroring tinygrad's attribute names.
+fn weight_bias(weight: &Tensor, bias: &Option<Tensor>) -> Box<dyn Iterator<Item = (String, Tensor)> + 'static> {
+    let w = std::iter::once(("weight".to_string(), weight.clone()));
+    let b = bias.clone().map(|b| ("bias".to_string(), b));
+    Box::new(w.chain(b))
+}
+
+/// Map the optional `weight`/`bias` of an affine layer to buffer-backed leaves.
+fn affine_into_params(weight: Option<Tensor>, bias: Option<Tensor>, ctx: &mut UOpCtx) -> (Option<Tensor>, Option<Tensor>) {
+    (weight.map(|w| w.to_param(ctx)), bias.map(|b| b.to_param(ctx)))
+}
+
+/// `(name, tensor)` pairs for a layer whose `weight`/`bias` are optional
+/// (`BatchNorm`, `LayerNorm`, `GroupNorm`).
+fn optional_weight_bias(weight: &Option<Tensor>, bias: &Option<Tensor>) -> Box<dyn Iterator<Item = (String, Tensor)> + 'static> {
+    let w = weight.clone().map(|w| ("weight".to_string(), w));
+    let b = bias.clone().map(|b| ("bias".to_string(), b));
+    Box::new(IntoIterator::into_iter(w).chain(b))
 }
 
 /// `nn::Linear`: `x.linear(weight.transpose(), bias)`.
@@ -69,15 +107,6 @@ impl Linear {
     pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
         let w = self.weight.transpose(ctx, 0, 1);
         x.linear(ctx, &w, self.bias.as_ref())
-    }
-
-    /// Materialize the random-init parameters into buffer-backed leaves (see
-    /// [`Tensor::to_param`]) so the optimizer can update them in place with
-    /// [`Tensor::assign`]. Do this once before training.
-    pub fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
-        self.weight = self.weight.to_param(ctx);
-        self.bias = self.bias.map(|b| b.to_param(ctx));
-        self
     }
 }
 
@@ -149,6 +178,18 @@ impl Conv2d {
             &self.padding,
             None,
         )
+    }
+}
+
+impl Module for Conv2d {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        weight_bias(&self.weight, &self.bias)
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        self.weight = self.weight.to_param(ctx);
+        self.bias = self.bias.map(|b| b.to_param(ctx));
+        self
     }
 }
 
@@ -275,6 +316,20 @@ impl BatchNorm {
     }
 }
 
+impl Module for BatchNorm {
+    /// Trainable params only (`weight`/`bias`). `running_mean`/`running_var`/
+    /// `num_batches_tracked` are non-trainable buffers (`is_param_(False)` in
+    /// tinygrad) and are not collected by the optimizer.
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        optional_weight_bias(&self.weight, &self.bias)
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        (self.weight, self.bias) = affine_into_params(self.weight, self.bias, ctx);
+        self
+    }
+}
+
 /// `nn::LayerNorm`: layer normalization.
 pub struct LayerNorm {
     pub normalized_shape: Vec<i64>,
@@ -317,11 +372,11 @@ impl LayerNorm {
         let normalized = diff.mul(ctx, &(invstd));
 
         if self.affine {
+            // tinygrad `LayerNorm.__call__`: `x * self.weight + self.bias`.
             let norm_shape = self._norm_shape(ndim);
-            let w_reshaped = self.weight.as_ref().unwrap().reshape(ctx, &norm_shape);
-            let b_reshaped = self.bias.as_ref().unwrap().reshape(ctx, &norm_shape);
-            let wb = w_reshaped.mul(ctx, &b_reshaped);
-            normalized.add(ctx, &wb)
+            let w = self.weight.as_ref().unwrap().reshape(ctx, &norm_shape);
+            let b = self.bias.as_ref().unwrap().reshape(ctx, &norm_shape);
+            normalized.mul(ctx, &w).add(ctx, &b)
         } else {
             normalized
         }
@@ -331,6 +386,17 @@ impl LayerNorm {
         let mut shape = vec![crate::uop::sint::SVal::I(1); total_ndim - self.normalized_shape.len()];
         shape.extend(self.normalized_shape.iter().map(|&s| crate::uop::sint::SVal::I(s as i128)));
         shape
+    }
+}
+
+impl Module for LayerNorm {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        optional_weight_bias(&self.weight, &self.bias)
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        (self.weight, self.bias) = affine_into_params(self.weight, self.bias, ctx);
+        self
     }
 }
 
@@ -391,6 +457,34 @@ impl GroupNorm {
                 crate::uop::sint::SVal::I(1) // simplified
             }
         }).collect()
+    }
+}
+
+impl Module for GroupNorm {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        optional_weight_bias(&self.weight, &self.bias)
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        (self.weight, self.bias) = affine_into_params(self.weight, self.bias, ctx);
+        self
+    }
+}
+
+/// A list of modules, indexed like tinygrad `nn.state.get_state_dict` on a
+/// Python `list` (`"0.weight"`, `"1.weight"`, …). Handy for `Vec<Conv2d>` or a
+/// `Vec<Linear>` MLP without hand-listing every parameter.
+impl<T: Module> Module for Vec<T> {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        Box::new(
+            self.iter()
+                .enumerate()
+                .flat_map(|(i, m)| m.named_params().map(move |(n, t)| (format!("{i}.{n}"), t))),
+        )
+    }
+
+    fn into_params(self, ctx: &mut UOpCtx) -> Self {
+        self.into_iter().map(|m| m.into_params(ctx)).collect()
     }
 }
 
