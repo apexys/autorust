@@ -136,9 +136,11 @@ pub fn pm_commit_weak() -> PatternMatcher {
     ])
 }
 
-/// `_lower_weak_ops` (weak.py:45).
+/// `_lower_weak_ops` (weak.py:41). NOTE: tinygrad's `GroupOp.Binary` *includes*
+/// the comparisons (`CMPLT`/`CMPNE`/`CMPEQ`), so comparisons are lowered here too
+/// — a comparison demands a common operand width and `lower_weak_node` unifies it.
 fn in_lower_weak_ops(op: Ops) -> bool {
-    (group::in_(group::BINARY, op) && !group::in_(group::COMPARISON, op)) || group::in_(group::UNARY, op) || matches!(op, Ops::Where | Ops::Range | Ops::Stack | Ops::Special)
+    group::in_(group::BINARY, op) || group::in_(group::UNARY, op) || matches!(op, Ops::Where | Ops::Range | Ops::Stack | Ops::Special)
 }
 
 /// `lower_weak_node` (weak.py:47).
@@ -159,7 +161,7 @@ fn lower_weak_node(ctx: &mut UOpCtx, u: UopId) -> Option<UopId> {
         return None;
     }
     let dd = default_dtype(ctx, u);
-    let dt = if group::in_(group::BINARY, op) && !group::in_(group::COMPARISON, op) {
+    let dt = if group::in_(group::BINARY, op) {
         let mut dts = vec![dd];
         dts.extend(src.iter().map(|s| ctx.dt_of(s)));
         dtype::strong_dtype(dtype::least_upper_dtype(&dts))
@@ -174,7 +176,10 @@ fn lower_weak_node(ctx: &mut UOpCtx, u: UopId) -> Option<UopId> {
             new_srcs.push(commit_weak(ctx, s.clone(), dt));
         }
     }
-    let rebuilt = ctx.uop_tag(op, Some(dt), new_srcs, arg, tag);
+    // `u.replace(dtype=None, src=...)` re-derives the node's dtype from op+srcs
+    // (a comparison is `bool`, not the unified operand width `dt`).
+    let rebuilt_dt = ctx.dtype_from_uop(op, &new_srcs, &arg).unwrap_or(udt);
+    let rebuilt = ctx.uop_tag(op, Some(rebuilt_dt), new_srcs, arg, tag);
     Some(ctx.cast(rebuilt, udt))
 }
 

@@ -291,6 +291,15 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     }
 
     let mut r: HashMap<UopId, String> = HashMap::new();
+    // CONST nodes are not named in `r` (they render inline). tinygrad's
+    // `code_for_op[Ops.CONST]` renders them on demand, so any op that consumes a
+    // CONST *directly* (e.g. `x != 0`, or a LOAD's fill) can inline it too.
+    let mut consts: HashMap<UopId, String> = HashMap::new();
+    for u in lst {
+        if info[u].op == Ops::Const {
+            consts.insert(u.clone(), const_text(ctx, info[u].dt, u.clone(), lang));
+        }
+    }
     // bufs: (name, param info) in first-encounter order
     let mut bufs: Vec<(String, Info, bool)> = Vec::new();
     let mut kernel: Vec<String> = Vec::new();
@@ -376,7 +385,20 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         }
 
         // render the op to a string
-        let g = |m: &HashMap<UopId, String>, id: &UopId| -> String { m[id].clone() };
+        let g = |m: &HashMap<UopId, String>, id: &UopId| -> String {
+            match m.get(id).or_else(|| consts.get(id)) {
+                Some(s) => s.clone(),
+                None => {
+                    let op = info.get(id).map(|i| format!("{:?}", i.op)).unwrap_or_else(|| "NOT-IN-LST".to_string());
+                    let parent = info
+                        .iter()
+                        .find(|(_, inf)| inf.srcs.contains(id))
+                        .map(|(_, inf)| format!("{:?}", inf.op))
+                        .unwrap_or_else(|| "?".to_string());
+                    panic!("TGERR: cstyle render missing name for node {} op {op}, referenced by {parent}", id.id())
+                }
+            }
+        };
         let l: String = match i.op {
             Ops::Range => {
                 if i.dt == dtype::VOID {
@@ -634,18 +656,24 @@ fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId, lang: &CStyleLang) -> Str
         if !vfloat.is_finite() {
             let inf = lang.infinity;
             let nan = lang.nan;
-            return if vfloat.is_nan() {
-                format!("({nan})")
+            let inner = if vfloat.is_nan() {
+                nan.to_string()
             } else if vfloat > 0.0 {
-                format!("({inf})")
+                inf.to_string()
             } else {
-                format!("(-{inf})")
+                format!("-{inf}")
             };
+            // tinygrad: f"({render_cast(x, ...)})" -> ((type)(inner))
+            return format!("(({})({}))", lang.type_name(dt), inner);
         }
         if dt == dtype::FLOAT32 {
             return format!("{}f", py_float(vfloat));
         }
-        // f64 falls through to default
+        // consts are rendered to a larger type and casted (fp8s/bf16/f16)
+        if dtype::in_set(dtype::FP8S, dt) || dtype::in_set(&[dtype::BFLOAT16, dtype::FLOAT16], dt) {
+            return format!("(({})({}f))", lang.type_name(dt), py_float(vfloat));
+        }
+        // f64 (and other native floats) render as the plain value
         return py_float(vfloat);
     }
     if dt == dtype::INT64 {
@@ -660,14 +688,12 @@ fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId, lang: &CStyleLang) -> Str
     if dt == dtype::BOOL {
         return if vint.unwrap_or(0) != 0 { "1".to_string() } else { "0".to_string() };
     }
-    if dtype::in_set(&[dtype::BFLOAT16, dtype::FLOAT16], dt) {
-        return format!("(({})({}f))", lang.type_name(dt), py_float(vfloat));
-    }
+    // tinygrad wraps these as f"({render_cast(x, ...)})" -> ((type)(val))
     if dt == dtype::UINT8 || dt == dtype::UINT16 {
-        return format!("({}({}u))", lang.type_name(dt), vint.unwrap_or(0));
+        return format!("(({})({}u))", lang.type_name(dt), vint.unwrap_or(0));
     }
     if dt == dtype::INT8 || dt == dtype::INT16 {
-        return format!("({}({}))", lang.type_name(dt), vint.unwrap_or(0));
+        return format!("(({})({}))", lang.type_name(dt), vint.unwrap_or(0));
     }
     format!("{}", vint.unwrap_or(0))
 }
@@ -746,5 +772,49 @@ fn code_for_op(op: Ops, a: &[String], clang: bool, dt: crate::dtype::DTypeId) ->
         Ops::Cmpeq => format!("({}=={})", a[0], a[1]),
         Ops::Fdiv => format!("({}/{})", a[0], a[1]),
         other => panic!("TGERR: cstyle ALU {other:?} not ported"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render a scalar const through `const_text` (the `base_rewrite` const rules).
+    fn ctext(v: ConstVal, dt: DTypeId, lang: &CStyleLang) -> String {
+        let mut ctx = UOpCtx::new();
+        let c = ctx.const_py(v, Some(dt));
+        const_text(&mut ctx, dt, c, lang)
+    }
+
+    /// The uint8/int8 const casts must keep the parens around the type name:
+    /// tinygrad wraps `render_cast` in another pair (`((uchar)(0u))`), and the
+    /// old `(uchar(0u))` parsed as a function call and failed to build on CL.
+    #[test]
+    fn const_cast_rendering_matches_tinygrad() {
+        let cl = CStyleLang::opencl();
+        assert_eq!(ctext(ConstVal::Int(0), dtype::UINT8, &cl), "((uchar)(0u))");
+        assert_eq!(ctext(ConstVal::Int(3), dtype::INT8, &cl), "((char)(3))");
+        assert_eq!(ctext(ConstVal::Int(3), dtype::UINT16, &cl), "((ushort)(3u))");
+        assert_eq!(ctext(ConstVal::Int(3), dtype::INT16, &cl), "((short)(3))");
+        assert_eq!(ctext(ConstVal::Int(3), dtype::UINT32, &cl), "3u");
+        assert_eq!(ctext(ConstVal::Int(3), dtype::INT32, &cl), "3");
+        assert_eq!(ctext(ConstVal::Bool(true), dtype::BOOL, &cl), "1");
+        assert_eq!(ctext(ConstVal::Float(2.0), dtype::FLOAT32, &cl), "2.0f");
+        // OpenCL has no half type_map entry -> tinygrad renders `half`; Clang maps it.
+        assert_eq!(ctext(ConstVal::Float(2.0), dtype::FLOAT16, &cl), "((half)(2.0f))");
+        let clang = CStyleLang::clang();
+        assert_eq!(ctext(ConstVal::Float(2.0), dtype::FLOAT16, &clang), "((__fp16)(2.0f))");
+    }
+
+    /// Non-finite float consts are rendered through a cast of the lang's
+    /// `nan`/`infinity` (tinygrad: `((float)(NAN))`, not a bare `(NAN)`).
+    #[test]
+    fn const_nonfinite_rendering_matches_tinygrad() {
+        let cl = CStyleLang::opencl();
+        assert_eq!(ctext(ConstVal::Float(f64::NAN), dtype::FLOAT32, &cl), "((float)(NAN))");
+        assert_eq!(ctext(ConstVal::Float(f64::INFINITY), dtype::FLOAT32, &cl), "((float)(INFINITY))");
+        assert_eq!(ctext(ConstVal::Float(f64::NEG_INFINITY), dtype::FLOAT32, &cl), "((float)(-INFINITY))");
+        let clang = CStyleLang::clang();
+        assert_eq!(ctext(ConstVal::Float(f64::NAN), dtype::FLOAT32, &clang), "((float)(__builtin_nanf(\"\")))");
     }
 }
