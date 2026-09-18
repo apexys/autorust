@@ -51,7 +51,7 @@ src/renderer/   Renderer trait + cstyle (OpenCL under `backend_cl`)
 src/runtime/    Buffer/allocator/compiler/device traits, INTERP + CL
 src/engine/     realize, session (BufTable + ProgCache), ProgramInfo
 src/bin/        oracle_* cargo bins driven by pytest (JSON graph files)
-examples/       runnable demos (xor.rs; mnist.rs planned) — mirror tinygrad
+examples/       runnable demos (xor.rs, mnist.rs) — mirror tinygrad
 tests/          Rust unit/differential/golden/nn tests
 py/             dev-only Python bridge + differential gates
     bridge.py       uop_to_json / json_to_uop / realize_in_tg
