@@ -12,31 +12,20 @@ use crate::uop::upat::{substitute, PatternMatcher};
 use crate::uop::UopId;
 use std::collections::HashMap;
 
-/// `_group_dims` — merge dims while any exceeds max.
+/// `_group_dims` (gpudims.py:8) — recursively merge adjacent dims that fit.
 fn group_dims(dims: &[i64], max_sizes: &[i64]) -> Option<Vec<i64>> {
-    let mut dims = dims.to_vec();
-    while dims.len() > max_sizes.len() || dims.iter().zip(max_sizes.iter()).any(|(d, m)| d > m) {
-        let mut merged = false;
-        for i in 0..max_sizes.len() {
-            if i < dims.len() - 1 && dims[i] * dims[i + 1] <= max_sizes[i] {
-                dims = dims[..i].to_vec();
-                dims.push(0); // placeholder, replaced below
-                let _ = dims.pop();
-                // rebuild: dims[:i] + [dims[i]*dims[i+1]] + dims[i+2:]
-                let mut nd = Vec::with_capacity(dims.len() - 1);
-                nd.extend_from_slice(&dims[..i]);
+    if dims.len() > max_sizes.len() || dims.iter().zip(max_sizes.iter()).any(|(d, m)| d > m) {
+        for i in 0..dims.len().saturating_sub(1) {
+            if dims[i] * dims[i + 1] <= max_sizes[i] {
+                let mut nd = dims[..i].to_vec();
                 nd.push(dims[i] * dims[i + 1]);
                 nd.extend_from_slice(&dims[i + 2..]);
-                dims = nd;
-                merged = true;
-                break;
+                return group_dims(&nd, max_sizes);
             }
         }
-        if !merged {
-            return None;
-        }
+        return None;
     }
-    Some(dims)
+    Some(dims.to_vec())
 }
 
 /// `_split_dims` — split oversized dims into factors.
@@ -74,7 +63,12 @@ fn special(ctx: &mut UOpCtx, size: i64, name: &str) -> UopId {
 /// `get_grouped_dims` — returns per-dim UOp idx expressions.
 fn get_grouped_dims(ctx: &mut UOpCtx, prefix: &str, dims: &[i64], max_sizes: Option<&[i64]>, reverse: bool) -> Vec<UopId> {
     if reverse {
-        let mut r = get_grouped_dims(ctx, prefix, dims, max_sizes, false);
+        // tinygrad: `get_grouped_dims(prefix, dims[::-1], max_sizes)[::-1]` — the
+        // specials are *named* in reversed dim order (gidx0 ↔ the last global
+        // dim), then the result list is put back in `dims` order.
+        let mut rd = dims.to_vec();
+        rd.reverse();
+        let mut r = get_grouped_dims(ctx, prefix, &rd, max_sizes, false);
         r.reverse();
         return r;
     }

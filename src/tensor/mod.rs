@@ -251,6 +251,22 @@ impl Tensor {
         Tensor::from_uop(ctx, u)
     }
 
+    /// Freeze an already-realized tensor into a buffer-backed leaf that *shares*
+    /// its computed bytes (no recomputation). Used by the optimizer to realize a
+    /// batch of gradient subgraphs once — as a single shared schedule — and then
+    /// let the per-parameter state updates read a plain buffer instead of
+    /// re-realizing the whole backward graph.
+    pub fn realize_to_leaf(&self, ctx: &mut UOpCtx) -> Tensor {
+        let b = self.realized_buffer().unwrap_or_else(|| panic!("TGERR: realize_to_leaf requires a realized tensor"));
+        let bytes = crate::engine::realize::buffer_bytes(&b);
+        let shape = self.shape(ctx);
+        let dt = self.dtype(ctx);
+        let dev = b.device().to_string();
+        let u = crate::tensor::creation::empty(ctx, &shape, dt, &dev);
+        crate::tensor::creation::register_initial(ctx, u.clone(), bytes);
+        Tensor::from_uop(ctx, u)
+    }
+
     /// `Tensor.realize`: trigger the computation needed to materialize this tensor
     /// and return `&self`.
     pub fn realize(&self, ctx: &mut UOpCtx, sess: &mut Session) -> &Tensor {
@@ -634,6 +650,11 @@ impl Tensor {
         { let __u = elementwise::sqrt(ctx, self.uop.clone()); Tensor::from_uop(ctx, __u) }
     }
 
+    /// `Tensor.rsqrt()`: reciprocal square root (`1 / sqrt(x)`).
+    pub fn rsqrt(&self, ctx: &mut UOpCtx) -> Tensor {
+        self.sqrt(ctx).reciprocal(ctx)
+    }
+
     /// `Tensor.mean()`: mean over all dims.
     pub fn mean_all(&self, ctx: &mut UOpCtx) -> Tensor {
         self.mean(ctx, None, false)
@@ -825,13 +846,14 @@ impl Tensor {
         axis: &[usize],
     ) -> Tensor {
         let shape = self.shape(ctx);
-        // Build reduction shape: dim i is 1 if i in axis, else shape[i]
+        // tinygrad `batchnorm`: `shape = tuple(s if ax in axis_ else 1 ...)` —
+        // the reduced axes keep their size (e.g. (1, C, 1, 1) for axis=1).
         let mut norm_shape = Vec::with_capacity(shape.len());
         for (i, s) in shape.iter().enumerate() {
             if axis.contains(&i) {
-                norm_shape.push(SVal::I(1));
-            } else {
                 norm_shape.push(s.clone());
+            } else {
+                norm_shape.push(SVal::I(1));
             }
         }
         let mean_reshaped = mean.reshape(ctx, &norm_shape);

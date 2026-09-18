@@ -78,9 +78,28 @@ impl Tensor {
         { let __u = super::elementwise::eq(ctx, self.uop.clone(), o); Tensor::from_uop(ctx, __u) }
     }
 
-    /// `Tensor.argmax(axis, keepdim)`.
+    /// `Tensor.argmax(axis, keepdim)` (op.py:866-891): index of the max along
+    /// `axis`. `m = (x == x.max(axis, keepdim=True))`; `idx = m * arange(C, 0, -1)`;
+    /// result `C - idx.max(axis, keepdim)` (the descending arange makes the
+    /// smallest index win ties, matching tinygrad).
     pub fn argmax(&self, ctx: &mut UOpCtx, axis: Option<i64>, keepdim: bool) -> Tensor {
-        { let __u = super::reduce::argmax(ctx, self.uop.clone(), axis, keepdim); Tensor::from_uop(ctx, __u) }
+        let axis = match axis {
+            None => return self.flatten(ctx, 0, -1).argmax(ctx, Some(0), keepdim),
+            Some(a) => super::movement::resolve_dim(self.shape(ctx).len(), a, false),
+        };
+        let ndim = self.shape(ctx).len();
+        let c = self.shape(ctx)[axis].clone().as_i64().unwrap_or(0);
+        let mx_axis = self.max(ctx, Some(&[axis]), true);
+        let m = self.eq(ctx, mx_axis);
+        let ar = Tensor::arange(ctx, c as f64, Some(0.0), -1.0, Some(dtype::default_int()));
+        let mut sh: Vec<SVal> = vec![SVal::I(c as i128)];
+        sh.extend(std::iter::repeat_n(SVal::I(1), ndim - axis - 1));
+        let arr = ar.reshape(ctx, sh);
+        let idx = m.mul(ctx, &arr);
+        let mx = idx.max(ctx, Some(&[axis]), keepdim);
+        let c_u = ctx.const_like(mx.uop.clone(), ConstVal::Int(c as i128));
+        let c_t = Tensor::from_uop(ctx, c_u);
+        c_t.sub(ctx, &mx).cast(ctx, dtype::default_int())
     }
 
     /// `Tensor._pad_constant(p_x, value)` (op.py:282-290): shrink first for

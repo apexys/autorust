@@ -2,9 +2,11 @@
 //! Mirrors tinygrad's nn classes: Linear, Conv2d, BatchNorm, LayerNorm, GroupNorm,
 //! and helper activations (relu, gelu, softmax, etc.).
 
+use crate::dtype::ConstVal;
+use crate::engine::session::Session;
 use crate::tensor::Tensor;
 use crate::uop::ctx::UOpCtx;
-use crate::dtype::ConstVal;
+use crate::uop::sint::SVal;
 
 /// A neural-network module: anything that owns trainable parameters.
 ///
@@ -193,11 +195,9 @@ impl Module for Conv2d {
     }
 }
 
-/// `nn::BatchNorm`: batch normalization.
+/// `nn::BatchNorm`: batch normalization (nn/__init__.py:8-64).
 pub struct BatchNorm {
-    pub num_features: i64,
     pub eps: f64,
-    pub affine: bool,
     pub track_running_stats: bool,
     pub momentum: f64,
     pub weight: Option<Tensor>,
@@ -213,106 +213,90 @@ impl BatchNorm {
     pub fn new(ctx: &mut UOpCtx, sz: i64, eps: f64, affine: bool, track_running_stats: bool, momentum: f64) -> Self {
         let weight = if affine { Some(Tensor::ones(ctx, [sz])) } else { None };
         let bias = if affine { Some(Tensor::zeros(ctx, [sz])) } else { None };
-        let running_mean = if track_running_stats {
-            Some(Tensor::zeros(ctx, [sz]))
+        // `num_batches_tracked = Tensor.zeros(dtype='long').is_param_(False)`
+        let num_batches_tracked = Some(Tensor::full(ctx, &[] as &[i64], ConstVal::Int(0), Some(crate::dtype::INT64), None));
+        let (running_mean, running_var) = if track_running_stats {
+            (Some(Tensor::zeros(ctx, [sz])), Some(Tensor::ones(ctx, [sz])))
         } else {
-            None
-        };
-        let running_var = if track_running_stats {
-            Some(Tensor::ones(ctx, [sz]))
-        } else {
-            None
+            (None, None)
         };
 
         BatchNorm {
-            num_features: sz,
             eps,
-            affine,
             track_running_stats,
             momentum,
             weight,
             bias,
             running_mean,
             running_var,
-            num_batches_tracked: None, // Not implemented yet
+            num_batches_tracked,
         }
     }
 
-    /// Forward pass with training mode.
-    pub fn forward_train(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        let x_shape = x.clone().shape(ctx);
+    /// `BatchNorm.calc_stats` (nn/__init__.py:27-35):
+    /// `shape_mask = [1, -1, *([1]*(x.ndim-2))]`; in eval with tracked stats it
+    /// returns the (reshaped) running stats, otherwise the batch mean/variance.
+    pub fn calc_stats(&self, x: &Tensor, ctx: &mut UOpCtx, training: bool) -> (Tensor, Tensor) {
+        let x_shape: Vec<SVal> = x.shape(ctx).into_vec();
         let ndim = x_shape.len();
-        // Reduce over all dims except batch (dim 0) and channels (dim 1)
-        let reduce_axis: Vec<usize> = (0..ndim).filter(|&i| i != 1).collect();
-        let batch_mean = x.clone().mean(ctx, Some(&reduce_axis), false);
-        let norm_shape = self._norm_shape(&x_shape);
-        let batch_mean_reshaped = batch_mean.reshape(ctx, &norm_shape);
-        let diff = x.sub(ctx, &(batch_mean_reshaped));
-        let batch_var = diff.square(ctx).mean(ctx, Some(&reduce_axis), false);
-        let batch_var_shape = self._norm_shape(&x_shape);
-        let batch_var_reshaped = batch_var.reshape(ctx, &batch_var_shape);
-        let eps_tensor = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(self.eps), None);
-        let invstd = batch_var_reshaped.add(ctx, &(eps_tensor)).sqrt(ctx).reciprocal(ctx);
-
-        // Update running stats if tracking
-        if self.track_running_stats {
-            // In a real implementation, we'd update running_mean and running_var here
-            // For now, just return the normalized output
+        let mut shape_mask: Vec<crate::uop::sint::SVal> = vec![crate::uop::sint::SVal::I(1), crate::uop::sint::SVal::I(-1)];
+        shape_mask.extend(std::iter::repeat_n(crate::uop::sint::SVal::I(1), ndim - 2));
+        if self.track_running_stats && !training {
+            let running_mean = self.running_mean.clone().unwrap();
+            let running_var = self.running_var.clone().unwrap().reshape(ctx, &shape_mask);
+            return (running_mean, running_var);
         }
-
-        x.batchnorm(ctx, self.weight.as_ref(), self.bias.as_ref(), &batch_mean, &invstd, &reduce_axis)
+        let reduce_axes: Vec<usize> = (0..ndim).filter(|&i| i != 1).collect();
+        let batch_mean = x.mean(ctx, Some(&reduce_axes), false);
+        // `y = (x - batch_mean.detach().reshape(shape_mask))` — d(var)/d(mean) = 0
+        let mean_detached = batch_mean.detach(ctx).reshape(ctx, &shape_mask);
+        let y = x.sub(ctx, &mean_detached);
+        let batch_var = y.square(ctx).mean(ctx, Some(&reduce_axes), false);
+        (batch_mean, batch_var)
     }
 
-    /// Forward pass with inference mode (uses running stats).
+    /// `BatchNorm.__call__` (nn/__init__.py:37-46). In training with tracked
+    /// stats, the running mean/variance (and batch counter) are updated in place
+    /// via [`Tensor::assign`] (hence `sess`); eval reads them.
+    pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx, sess: &mut Session, training: bool) -> Tensor {
+        let (batch_mean, batch_var) = self.calc_stats(x, ctx, training);
+
+        if self.track_running_stats && training {
+            let x_shape: Vec<SVal> = x.shape(ctx).into_vec();
+            let numel: i64 = x_shape.iter().map(|s| s.clone().as_i64().unwrap_or(0)).product();
+            let channels = x_shape[1].clone().as_i64().unwrap_or(0);
+            // running_mean.assign((1-momentum)*running_mean + momentum*batch_mean.detach())
+            let running_mean = self.running_mean.clone().unwrap();
+            let mean_term = batch_mean.detach(ctx).mul(ctx, self.momentum);
+            let new_mean = running_mean.mul(ctx, 1.0 - self.momentum).add(ctx, &mean_term);
+            running_mean.assign(ctx, sess, &new_mean);
+            // running_var.assign((1-momentum)*running_var + momentum*numel/(numel-C)*batch_var.detach())
+            let factor = self.momentum * numel as f64 / (numel - channels) as f64;
+            let running_var = self.running_var.clone().unwrap();
+            let var_term = batch_var.detach(ctx).mul(ctx, factor);
+            let new_var = running_var.mul(ctx, 1.0 - self.momentum).add(ctx, &var_term);
+            running_var.assign(ctx, sess, &new_var);
+            // num_batches_tracked += 1
+            if let Some(nbt) = &self.num_batches_tracked {
+                let updated = nbt.add(ctx, 1i64);
+                nbt.assign(ctx, sess, &updated);
+            }
+        }
+
+        let invstd = batch_var.add(ctx, self.eps).rsqrt(ctx);
+        x.batchnorm(ctx, self.weight.as_ref(), self.bias.as_ref(), &batch_mean, &invstd, &[1])
+    }
+
+    /// Training-mode convenience (`forward` with `training = true`).
+    pub fn forward_train(&self, x: &Tensor, ctx: &mut UOpCtx, sess: &mut Session) -> Tensor {
+        self.forward(x, ctx, sess, true)
+    }
+
+    /// Inference-mode convenience (`forward` with `training = false`).
     pub fn forward_inference(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        let mean = self.running_mean.clone().unwrap_or_else(|| Tensor::zeros(ctx, [self.num_features]));
-        let var = self.running_var.clone().unwrap_or_else(|| Tensor::ones(ctx, [self.num_features]));
-
-        let eps_tensor = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(self.eps), None);
-        let invstd = var.add(ctx, &(eps_tensor)).sqrt(ctx).reciprocal(ctx);
-
-        // Reshape mean and var for broadcasting
-        let x_shape = x.shape(ctx);
-        let ndim = x_shape.len();
-        let mut norm_shape = Vec::with_capacity(ndim);
-        for i in 0..ndim {
-            if i == 1 {
-                norm_shape.push(crate::uop::sint::SVal::I(1));
-            } else {
-                norm_shape.push(x_shape[i].clone());
-            }
-        }
-        let mean_reshaped = mean.reshape(ctx, &norm_shape);
-        let _var_reshaped = var.reshape(ctx, &norm_shape);
-        let invstd_reshaped = invstd.reshape(ctx, &norm_shape);
-
-        let diff = x.sub(ctx, &(mean_reshaped));
-        let normalized = diff.mul(ctx, &(invstd_reshaped));
-
-        match (&self.weight, &self.bias) {
-            (Some(w), Some(b)) => {
-                let w_reshaped = w.clone().reshape(ctx, &norm_shape);
-                let b_reshaped = b.clone().reshape(ctx, &norm_shape);
-                let wb = w_reshaped.mul(ctx, &b_reshaped);
-                normalized.add(ctx, &wb)
-            }
-            (Some(w), None) => {
-                let w_reshaped = w.clone().reshape(ctx, &norm_shape);
-                normalized.mul(ctx, &(w_reshaped))
-            }
-            _ => normalized,
-        }
-    }
-
-    fn _norm_shape(&self, x_shape: &[crate::uop::sint::SVal]) -> Vec<crate::uop::sint::SVal> {
-        let ndim = x_shape.len();
-        (0..ndim).map(|i| {
-            if i == 1 {
-                crate::uop::sint::SVal::I(1)
-            } else {
-                x_shape[i].clone()
-            }
-        }).collect()
+        let (batch_mean, batch_var) = self.calc_stats(x, ctx, false);
+        let invstd = batch_var.add(ctx, self.eps).rsqrt(ctx);
+        x.batchnorm(ctx, self.weight.as_ref(), self.bias.as_ref(), &batch_mean, &invstd, &[1])
     }
 }
 
@@ -326,6 +310,11 @@ impl Module for BatchNorm {
 
     fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
         (self.weight, self.bias) = affine_into_params(self.weight, self.bias, ctx);
+        // Running stats are buffer-backed leaves too (they are assigned in place
+        // during training), but they stay out of `named_params` (non-trainable).
+        self.running_mean = self.running_mean.map(|t| t.to_param(ctx));
+        self.running_var = self.running_var.map(|t| t.to_param(ctx));
+        self.num_batches_tracked = self.num_batches_tracked.map(|t| t.to_param(ctx));
         self
     }
 }
@@ -427,36 +416,27 @@ impl GroupNorm {
         }
     }
 
-    /// Forward pass.
+    /// Forward pass (nn/__init__.py:195-203): reshape to
+    /// `(N, num_groups, -1)`, layer-norm the last axis, reshape back, then apply
+    /// the per-channel affine `x * weight.reshape(1,-1,1..) + bias.reshape(...)`.
     pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        let x_shape = x.shape(ctx);
+        let x_shape: Vec<SVal> = x.shape(ctx).into_vec();
         let ndim = x_shape.len();
-        // GroupNorm: normalize over channels within groups
-        // Reshape to (B, G, C_per_G, ...) -> normalize over C_per_G and spatial dims
-        let _c_per_g = self.num_channels / self.num_groups;
-
-        // For simplicity, use the same reduction axes as BatchNorm but per-group
-        // This is a simplified implementation
-        let reduce_axis: Vec<usize> = (0..ndim).filter(|&i| i != 1).collect();
-        let batch_mean = x.mean(ctx, Some(&reduce_axis), false);
-        let batch_mean_reshaped = batch_mean.reshape(ctx, self._norm_shape(ndim));
-        let diff = x.sub(ctx, &(batch_mean_reshaped));
-        let batch_var = diff.square(ctx).mean(ctx, Some(&reduce_axis), false);
-        let batch_var_reshaped = batch_var.reshape(ctx, self._norm_shape(ndim));
-        let eps_tensor = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(self.eps), None);
-        let invstd = batch_var_reshaped.add(ctx, &(eps_tensor)).sqrt(ctx).reciprocal(ctx);
-
-        x.batchnorm(ctx, self.weight.as_ref(), self.bias.as_ref(), &batch_mean, &invstd, &reduce_axis)
-    }
-
-    fn _norm_shape(&self, ndim: usize) -> Vec<crate::uop::sint::SVal> {
-        (0..ndim).map(|i| {
-            if i == 1 {
-                crate::uop::sint::SVal::I(1)
-            } else {
-                crate::uop::sint::SVal::I(1) // simplified
+        let batch = x_shape[0].clone();
+        let x = x
+            .reshape(ctx, vec![batch, SVal::I(self.num_groups as i128), SVal::I(-1)])
+            .layernorm(ctx, -1, self.eps)
+            .reshape(ctx, x_shape);
+        match (&self.weight, &self.bias) {
+            (Some(w), Some(b)) => {
+                let mut aff_shape: Vec<SVal> = vec![SVal::I(1), SVal::I(-1)];
+                aff_shape.extend(std::iter::repeat_n(SVal::I(1), ndim - 2));
+                let w_r = w.reshape(ctx, aff_shape.clone());
+                let b_r = b.reshape(ctx, aff_shape);
+                x.mul(ctx, &w_r).add(ctx, &b_r)
             }
-        }).collect()
+            _ => x,
+        }
     }
 }
 

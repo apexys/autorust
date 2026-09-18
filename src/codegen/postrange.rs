@@ -119,7 +119,23 @@ impl<'a> Scheduler<'a> {
                     && AxisType::range_axis_type(ctx, u.clone()) != AxisType::Device
             })
             .collect();
-        rngs.sort_by_key(|r| (axis_to_pos(AxisType::range_axis_type(ctx, r.clone())), AxisType::range_axis_id(ctx, r.clone())));
+        // tinygrad key is `(axis_to_pos[arg[-1]],) + arg[0:-1]`. `arg[0:-1]` is
+        // `(axis,)` normally but becomes `(axis, split)` after `pm_split_ranges`,
+        // and the split discriminator is what keeps the two halves of a split
+        // range ordered (and unique) — dropping it makes the sort nondeterministic
+        // when the halves have different extents.
+        rngs.sort_by_key(|r| {
+            let at = AxisType::range_axis_type(ctx, r.clone());
+            let mut ints: Vec<i64> = Vec::new();
+            if let Arg::Seq { tuple: true, items } = ctx.arg_of(r) {
+                for a in &items[..items.len() - 1] {
+                    if let Arg::Int(i) = a {
+                        ints.push(*i);
+                    }
+                }
+            }
+            (axis_to_pos(at), ints)
+        });
         rngs
     }
 

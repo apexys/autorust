@@ -366,11 +366,3 @@ pub fn cumsum(ctx: &mut UOpCtx, x: UopId, axis: i64) -> UopId {
     cumalu(ctx, x, axis, Ops::Add)
 }
 
-/// `OpMixin.argmax(axis=None, keepdim=False)` (op.py:866+): `x.max(axis).where(x == max, 0).argmax`-style
-/// two-step; ported exactly when the differential suite reaches it.
-pub fn argmax(ctx: &mut UOpCtx, x: UopId, axis: Option<i64>, keepdim: bool) -> UopId {
-    // idx = (x == x.max(axis, keepdim=True)).cast(default_int) * arange-like
-    // see op.py:866-891 — ported in the next step with the oracle in place
-    let _ = (ctx, x, axis, keepdim);
-    panic!("TGERR: argmax lands with the M3 differential suite")
-}

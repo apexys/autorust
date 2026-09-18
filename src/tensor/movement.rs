@@ -133,17 +133,17 @@ pub(crate) fn reshape_internal(ctx: &mut UOpCtx, x: UopId, shape: &[SVal]) -> Uo
     let c = new_shape.iter().filter(|s| **s == SVal::I(-1)).count();
     assert!(c <= 1, "TGERR: only one dimension can be inferred using -1");
     if c == 1 {
-        let n = new_shape.len();
+        // tinygrad: `-prod(self.shape) // prod(new_shape)` where `prod(new_shape)`
+        // still contains the `-1`, i.e. is `-prod(known dims)`. Python floor
+        // division of two negatives gives the positive inferred size.
         let prod_self = prod_sval(ctx, &self_shape);
-        let prod_rest = prod_sval(ctx, &new_shape.iter().filter(|s| **s != SVal::I(-1)).cloned().collect::<Vec<_>>());
-        // -prod(self.shape) // prod(rest)
+        let prod_new = prod_sval(ctx, &new_shape);
         let neg_prod = match prod_self {
             SVal::I(v) => SVal::I(-v),
             SVal::U(u) => SVal::U(ctx.alu1(Ops::Neg, u)),
         };
-        let dim = ctx.sval_div_floor(neg_prod, prod_rest);
+        let dim = ctx.sval_div_floor(neg_prod, prod_new);
         new_shape = new_shape.iter().map(|s| if *s == SVal::I(-1) { dim.clone() } else { s.clone() }).collect();
-        let _ = n;
     }
     // prod check (only when all-int; symbolic prods compare structurally in Python)
     if self_shape.iter().all(|s| matches!(s, SVal::I(_))) && new_shape.iter().all(|s| matches!(s, SVal::I(_))) {
@@ -520,14 +520,19 @@ pub fn transpose(ctx: &mut UOpCtx, x: UopId, dim0: i64, dim1: i64) -> UopId {
 pub fn flatten(ctx: &mut UOpCtx, x: UopId, start_dim: i64, end_dim: i64) -> UopId {
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let n = shape.len() as i64;
-    // python slices clamp; negative dims resolve against ndim (0-dim -> (1,))
-    let res = |d: i64| (if d < 0 { d + n } else { d }).clamp(0, n) as usize;
+    // tinygrad's `_resolve_dim` maps a 0-dim's `-1` to `-1`, and the Python
+    // slices then produce `(1,)`; match that directly.
+    if n == 0 {
+        return reshape_internal(ctx, x, &[SVal::I(1)]);
+    }
+    let res = |d: i64| (if d < 0 { d + n } else { d }).clamp(0, n - 1) as usize;
     let start = res(start_dim);
     let end = res(end_dim);
-    let mid = prod_sval(ctx, &shape[start..end.max(start)]);
+    // python: `shape[:start] + (prod(shape[start:end+1]),) + shape[end+1:]`
+    let mid = if end + 1 > start { prod_sval(ctx, &shape[start..end + 1]) } else { SVal::I(1) };
     let mut new_shape: Vec<SVal> = shape[..start].to_vec();
     new_shape.push(mid);
-    new_shape.extend_from_slice(&shape[end..]);
+    new_shape.extend_from_slice(&shape[end + 1..]);
     reshape_internal(ctx, x, &new_shape)
 }
 

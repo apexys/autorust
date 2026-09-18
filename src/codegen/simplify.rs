@@ -652,7 +652,7 @@ fn build_pm_reduce_load_collapse() -> PatternMatcher {
     let r_rng = UPat::op_var(vec![Ops::Range]).named("r");
     rules.push((
         var("idx")
-            .ne(r_rng.or_casted(Some("r")))
+            .ne(r_rng.or_casted(None))
             .where_(UPatOrConst::Val(ConstVal::Int(0)), UPatOrConst::Pat(var("expr")))
             .reduce(vec![var("r")], Some(red_add_arg()), false),
         r(|ctx, st, _| {
@@ -780,14 +780,66 @@ fn reduce_op_and_axes(ctx: &UOpCtx, r: UopId) -> (Ops, i64) {
     }
 }
 
-/// `fix_group_for_reduce` (codegen/__init__.py:170-184) — corpus subset: GROUP
-/// (LOCAL shared-memory) reduces are not exercised; only the early-return path.
-pub fn fix_group_for_reduce(ctx: &UOpCtx, x: UopId) -> Option<UopId> {
-    let has_gfr = ctx.srcs(&x)[1..].iter().any(|u| ctx.op_of(u) == Ops::Range && AxisType::range_axis_type(ctx, u.clone()) == AxisType::GroupReduce);
-    if has_gfr {
-        panic!("TGERR: GROUP_REDUCE reduces are not supported in the M6 corpus");
+/// `fix_group_for_reduce` (codegen/__init__.py:170-184): split a REDUCE with
+/// `GROUP_REDUCE` axes into an early reduce, a LOCAL (shared) STAGE, and a final
+/// reduce over the re-typed GROUP_REDUCE axes.
+pub fn fix_group_for_reduce(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
+    let (op, dt, srcs, arg, tag) = ctx.snapshot(&x);
+    let mut reduce_gfr: Vec<UopId> = Vec::new();
+    let mut reduce_r: Vec<UopId> = Vec::new();
+    for u in &srcs[1..] {
+        if ctx.op_of(u) == Ops::Range && AxisType::range_axis_type(ctx, u.clone()) == AxisType::GroupReduce {
+            reduce_gfr.push(u.clone());
+        } else {
+            reduce_r.push(u.clone());
+        }
     }
-    None
+    if reduce_gfr.is_empty() {
+        return None;
+    }
+
+    // NOTE: if there's other locals here, we need them in the buffer too
+    let upstream_locals: Vec<UopId> = ctx
+        .toposort(&x)
+        .iter()
+        .filter(|u| ctx.op_of(u) == Ops::Range && AxisType::range_axis_type(ctx, (*u).clone()) == AxisType::Local)
+        .cloned()
+        .collect();
+
+    // do only the non grouped reduces early
+    let mut ret_srcs = vec![srcs[0].clone()];
+    ret_srcs.extend(reduce_r);
+    let ret = ctx.uop_tag(op, Some(dt), ret_srcs, arg.clone(), tag);
+
+    // reduce_loop = [x.replace(arg=(x.arg[0]+100, AxisType.REDUCE)) for x in reduce_gfr]
+    let mut reduce_loop: Vec<UopId> = Vec::new();
+    for r in &reduce_gfr {
+        let rsrcs = ctx.srcs(r).to_vec();
+        let rdt = ctx.dt_of(r);
+        let ax = AxisType::range_axis_id(ctx, r.clone());
+        let new_arg = Arg::Seq { tuple: true, items: vec![Arg::Int(ax + 100), Arg::Enum(AxisType::Reduce.to_enum_val())] };
+        reduce_loop.push(ctx.uop(Ops::Range, Some(rdt), rsrcs, new_arg));
+    }
+
+    // buf = ret.bufferize(*upstream_locals, *reduce_gfr, arg=BufferizeOpts(axis, LOCAL))
+    //       .index(*upstream_locals, *reduce_loop)
+    let gfr0_axis = AxisType::range_axis_id(ctx, reduce_gfr[0].clone());
+    let bopts = crate::uop::arg::bufferize_opts(Arg::Int(gfr0_axis), Some(dtype::AddrSpace::Local), true);
+    let mut stage_srcs = upstream_locals.clone();
+    stage_srcs.extend(reduce_gfr.iter().cloned());
+    let staged = ctx.stage(ret, stage_srcs, Arg::Data(bopts));
+    let mut index_srcs = upstream_locals;
+    index_srcs.extend(reduce_loop.iter().cloned());
+    let buf = ctx.index(staged, index_srcs);
+
+    // do the final reduce
+    let rop = match &arg {
+        Arg::Seq { tuple: true, items } => items[0].clone(),
+        _ => Arg::None,
+    };
+    let mut red_srcs = vec![buf];
+    red_srcs.extend(reduce_loop);
+    Some(ctx.uop(Ops::Reduce, Some(dt), red_srcs, Arg::Seq { tuple: true, items: vec![rop, Arg::Int(0)] }))
 }
 
 /// `reduce_ranges_to_acc` (codegen/__init__.py:210-222).

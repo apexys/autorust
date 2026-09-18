@@ -18,6 +18,7 @@ use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
+use crate::uop::sint::SVal;
 
 use super::movement;
 use super::reduce;
@@ -251,6 +252,34 @@ fn grad_of_op(ctx: &mut UOpCtx, ret: UopId, g: UopId) -> Option<Vec<Option<UopId
             let axes = seq_trues(ctx.arg_of(&ret));
             let gr = movement::flip(ctx, g, &axes);
             Some(vec![Some(gr)])
+        }
+        // `mixin/gradient.py`: PAD's grad is a SHRINK of the incoming grad to
+        // the input region; SHRINK's grad is a zero PAD back to the input shape.
+        Ops::Pad => {
+            let in_shape = ctx.shape_of(&srcs[0]).unwrap();
+            let pairs = ctx.marg_pairs_svals(ret.clone()).unwrap_or_default();
+            let shr: Vec<(SVal, SVal)> = in_shape
+                .iter()
+                .zip(pairs.iter())
+                .map(|(s, (lo, _hi))| (lo.clone(), ctx.sval_add(lo.clone(), s.clone())))
+                .collect();
+            let gr = movement::shrink(ctx, g, &shr);
+            Some(vec![Some(gr), None, None])
+        }
+        Ops::Shrink => {
+            let in_shape = ctx.shape_of(&srcs[0]).unwrap();
+            let pairs = ctx.marg_pairs_svals(ret.clone()).unwrap_or_default();
+            let pads: Vec<(SVal, SVal)> = in_shape
+                .iter()
+                .zip(pairs.iter())
+                .map(|(s, (a, b))| {
+                    let sa = ctx.sval_sub(s.clone(), a.clone());
+                    let tail = ctx.sval_sub(sa, b.clone());
+                    (a.clone(), tail)
+                })
+                .collect();
+            let gr = movement::pad(ctx, g, &pads);
+            Some(vec![Some(gr), None, None])
         }
         Ops::Bitcast => Some(vec![None]),
         _ => None,

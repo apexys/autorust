@@ -9,6 +9,7 @@ use autorust::uop::ctx::UOpCtx;
 
 mod nn_golden;
 use nn_golden::{CONV_GOLDEN, CE_GOLDEN, ONE_HOT_GOLDEN, POOL_GOLDEN};
+use nn_golden::ARGMAX_GOLDEN;
 
 fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
     assert_eq!(got.len(), want.len(), "{name}: length {} != {}", got.len(), want.len());
@@ -65,6 +66,19 @@ fn sparse_categorical_crossentropy_matches_tinygrad() {
         let out = logits.sparse_categorical_crossentropy(&mut ctx, &y, c.ignore_index, c.label_smoothing, c.reduction);
         let got = out.to_list::<f32>(&mut ctx, &mut sess);
         close(&got, c.out, 1e-4, c.name);
+    }
+}
+
+#[test]
+fn argmax_matches_tinygrad() {
+    for a in ARGMAX_GOLDEN {
+        let mut ctx = UOpCtx::new();
+        let mut sess = autorust::engine::session::Session::new();
+        let x = Tensor::from_slice(&mut ctx, a.x, None, None).reshape(&mut ctx, a.x_shape);
+        let out = x.argmax(&mut ctx, a.axis, a.keepdim);
+        let got_shape: Vec<usize> = out.shape(&mut ctx).as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect();
+        assert_eq!(got_shape, a.out_shape.to_vec(), "{}: shape", a.name);
+        assert_eq!(out.to_list::<i32>(&mut ctx, &mut sess), a.out.to_vec(), "{}", a.name);
     }
 }
 
