@@ -342,7 +342,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **71 passed, 6 ignored, 0 failed**. The 6 ignored = 1 `backend_harness`
+- `cargo test` → **78 passed, 6 ignored, 0 failed**. The 6 ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 4 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
@@ -423,10 +423,16 @@ those nodes).
   `Box<dyn Iterator>` keeps `Module` object-safe; names live in the trait, never on
   `Tensor`.
 - `src/tensor/optim.rs`: `Optim` trait + `SGD` owning its `params` (`SGD::new(params, lr)`,
-  tinygrad `optim.SGD([w,b], lr)`; `w -= lr*grad`, missing grad leaves the param untouched).
-  `step(&mut ctx, &mut sess)` is tinygrad's in-place `Optimizer.step`; `step_graph(&mut ctx)`
-  returns updated tensors (parity tests); `zero_grad(&ctx)` uses the owned params.
-  **No Adam/momentum/weight-decay.**
+  tinygrad `optim.SGD([w,b], lr)`). `schedule_step(&mut ctx, &mut sess, roots)` mirrors
+  `Optimizer.schedule_step`: `_step` may `assign` state buffers and returns
+  `(updates, extra)`, the applied values `t.detach() - update` are co-realized with the
+  caller's `roots` (the loss) and `extra` in **one** schedule (`Tensor::realize_many`), then
+  assigned back into the params. `step` = `schedule_step(roots=[])`. `_apply_update` and
+  `zero_grad` match tinygrad. **LARS/LAMB ported** (`SGD = LARS(tcoef=0, momentum=0, wd=0)`,
+  `Adam`/`AdamW = LAMB(adam=true)`); Muon newton-schulz intentionally not ported.
+  Optimizer state is `Tensor::zeros_param` (a pure BUFFER leaf; see §9.5). Gate:
+  `tests/nn_optim.rs` (3/3) diffs one- and multi-step SGD/LARS/Adam/AdamW against tinygrad
+  goldens (`py/dump_optim_golden.py`).
 - No `nn/state.py` equivalent (`state_dict`/`load_state_dict`/safetensors), no
   `fetch`/`from_url`, no Embedding/LSTM/InstanceNorm/RMSNorm.
 - Tensor helpers added for nn: `dot`, `linear`, `batchnorm`, `layernorm`, `pool`, `uniform`,
@@ -622,20 +628,10 @@ default-suite test; INTERP training is slow), mirroring
 `tinygrad/examples/beautiful_mnist.py`. Work order:
 
 1. **Optimizers (LARS/SGD/Adam/AdamW/LAMB)** — port `nn/optim.py` one-for-one.
-   - `Tensor::zeros_param` via the existing `to_param` (a pure `empty` leaf with
-     `initial_data`, **no in-graph STORE**) is how optimizer state must be created:
-     `Tensor::zeros` yields `AFTER(empty, STORE)`, and since there is no session-wide
-     realized memo the STORE would re-run and reset the state each step. `realize()`
-     alone does not fix this. Pin with a re-realize regression test.
-   - `Optim::step` becomes tinygrad's `_step` shape: it may `assign` state buffers
-     (with `sess`) and returns the parameter updates; add `Optim::schedule_step`
-     returning `extra_state + params + buffers`.
-   - **Co-realization**: add `Session::realize_many` (mirroring `Tensor.realize(*tensors)`;
-     `sink`/`create_linear_with_vars` already accept multiple roots) and have the training
-     loop realize `[loss] + opt.schedule_step(...)` in one schedule. Full kernel fusion of
-     the param write needs tinygrad's buffer-identity `STORE`/`AFTER` assign (tensor.py:455;
-     not ported — follow-up, not this session).
-   - Optimizer order: state assigns first, then updates read the updated state.
+   **DONE**: `LARS`/`LAMB`/`Adam`/`AdamW` + reworked `Optim` trait
+   (`_step`/`schedule_step`/`step`), `Tensor::zeros_param`, `Session::realize_many`,
+   `Tensor::{gt,lt,ne,where_}`, and `tests/nn_optim.rs` goldens. `step_graph` is kept
+   for the stateless parity tests. Remaining: none (Muon/newton-schulz descoped).
 2. **conv2d + pooling/loss** — full ports of `Tensor.conv2d`
    (`mixin/op.py:1595-1607`) incl. `_pad_constant`/`flat_to_grouped`/`resolve_pool_pads`,
    `Tensor.max_pool2d` (`return_indices`+`ceil_mode` included), `Tensor.sequential`,

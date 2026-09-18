@@ -9,8 +9,9 @@
 //! ```
 //!
 //! The layers are created once; their parameters are buffer-backed leaves that
-//! the optimizer updates in place (`into_params` + `Optim::step`), so the
-//! per-step graph stays identical and bounded and every step after the first is a
+//! the optimizer updates in place (`into_params` + `Optim::schedule_step`), and
+//! the loss is co-realized with the update in one schedule, so the per-step
+//! graph stays identical and bounded and every step after the first is a
 //! compiled-program cache hit.
 
 use autorust::engine::session::Session;
@@ -61,7 +62,9 @@ fn main() {
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
 
         loss.backward(&mut ctx, &params, None);
-        sgd.step(&mut ctx, &mut sess);
+        // Co-realize the loss with the optimizer update in one schedule
+        // (`loss.realize(*opt.schedule_step())` in tinygrad), then clear grads.
+        sgd.schedule_step(&mut ctx, &mut sess, &[loss.clone()]);
         sgd.zero_grad(&ctx);
 
         pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);

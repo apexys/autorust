@@ -67,9 +67,10 @@ fn xor_trains_to_convergence() {
         let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
 
         loss.backward(&mut ctx, &params, None);
-        // `step` assigns into the parameter buffers; the leaves are unchanged,
-        // so the next step's graph is identical.
-        sgd.step(&mut ctx, &mut sess);
+        // `loss.realize(*opt.schedule_step())`: co-realize the loss and the
+        // optimizer update in one schedule; the leaves are unchanged, so the
+        // next step's graph is identical.
+        sgd.schedule_step(&mut ctx, &mut sess, &[loss.clone()]);
         sgd.zero_grad(&ctx);
 
         pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);

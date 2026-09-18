@@ -197,7 +197,12 @@ impl Tensor {
     pub fn assign(&self, ctx: &mut UOpCtx, sess: &mut Session, value: &Tensor) {
         assert_eq!(self.dtype(ctx), value.dtype(ctx), "TGERR: assign dtype mismatch");
         // Realize the value first: its graph reads the parameter's current bytes.
-        let src = sess.realize_tensor(ctx, value.uop.clone());
+        // If the value was already co-realized (e.g. via `Tensor::realize_many`
+        // in `Optimizer.step`), reuse that buffer instead of scheduling again.
+        let src = match value.realized_buffer() {
+            Some(b) => b,
+            None => sess.realize_tensor(ctx, value.uop.clone()),
+        };
         // Destination is this tensor's storage *by buffer identity* — the same
         // base the forward pass resolves through `buffer_of`, so the write is
         // visible to subsequent realizes.
@@ -237,6 +242,20 @@ impl Tensor {
     pub fn realize_fresh(&self, ctx: &mut UOpCtx) -> &Tensor {
         let _ = self.to_bytes_fresh(ctx);
         self
+    }
+
+    /// `Tensor.realize(*tensors)` (tensor.py) — co-realize all listed tensors in
+    /// a **single** schedule, caching each one's realized buffer. This is the
+    /// tinygrad co-realization the optimizer relies on to fold the loss and its
+    /// updates into one schedule (`Optimizer.schedule_step`).
+    pub fn realize_many<'a>(ctx: &mut UOpCtx, sess: &mut Session, tensors: impl IntoIterator<Item = &'a Tensor>) -> Vec<Buffer> {
+        let ts: Vec<&Tensor> = tensors.into_iter().collect();
+        let uops: Vec<UopId> = ts.iter().map(|t| t.uop.clone()).collect();
+        let bufs = sess.realize_many(ctx, &uops);
+        for (t, b) in ts.iter().zip(bufs.iter()) {
+            t.set_realized_buffer(b.clone());
+        }
+        bufs
     }
 
     /// Reserve the graph cast that reads this tensor as `T::DTYPE`, asserting
@@ -445,6 +464,16 @@ impl Tensor {
         creation::ones(ctx, &shape.into_shape_vec(), None, None)
     }
 
+    /// `Tensor.zeros(*shape)` as a persistent optimizer-state leaf: a pure
+    /// BUFFER with `initial_data` and **no in-graph STORE**, so [`Tensor::assign`]
+    /// can update it in place without the zero-store re-running on a later
+    /// realize (see CURRENT_STATE §9.5). Use this (not [`Tensor::zeros`]) for
+    /// optimizer momentum / Adam moments.
+    pub fn zeros_param(ctx: &mut UOpCtx, shape: impl ShapeArg, dtype: Option<DTypeId>, device: Option<&str>) -> Tensor {
+        let t = creation::zeros(ctx, &shape.into_shape_vec(), dtype, device);
+        t.to_param(ctx)
+    }
+
     /// `Tensor.arange(start, stop, step, dtype)`.
     pub fn arange(ctx: &mut UOpCtx, start: f64, stop: Option<f64>, step: f64, dtype: Option<DTypeId>) -> Tensor {
         creation::arange(ctx, start, stop, step, dtype)
@@ -608,6 +637,41 @@ impl Tensor {
                 let mx = self.maximum(ctx, TensorAddArg::C(c));
                 sum.sub(ctx, mx)
             }
+        }
+    }
+
+    /// `Tensor.__gt__` — elementwise `self > other` (tinygrad `gt`).
+    pub fn gt(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        let o = self.cmp_operand(ctx, other);
+        { let __u = elementwise::gt(ctx, self.uop.clone(), o); Tensor::from_uop(ctx, __u) }
+    }
+
+    /// `Tensor.__lt__` — elementwise `self < other`.
+    pub fn lt(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        let o = self.cmp_operand(ctx, other);
+        { let __u = elementwise::lt(ctx, self.uop.clone(), o); Tensor::from_uop(ctx, __u) }
+    }
+
+    /// `Tensor.__ne__` — elementwise `self != other`.
+    pub fn ne(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        let o = self.cmp_operand(ctx, other);
+        { let __u = elementwise::ne(ctx, self.uop.clone(), o); Tensor::from_uop(ctx, __u) }
+    }
+
+    /// `cond.where(x, y)` — elementwise select using `self` as the condition
+    /// (tinygrad `Tensor.where`). Scalars are promoted to `self`'s shape.
+    pub fn where_(&self, ctx: &mut UOpCtx, x: impl Into<TensorAddArg>, y: impl Into<TensorAddArg>) -> Tensor {
+        let xu = self.cmp_operand(ctx, x);
+        let yu = self.cmp_operand(ctx, y);
+        { let __u = elementwise::where_(ctx, self.uop.clone(), xu, yu); Tensor::from_uop(ctx, __u) }
+    }
+
+    /// UOp for a binop operand: tensor passes through, python scalar becomes a
+    /// same-shaped const so the binop broadcasts.
+    fn cmp_operand(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> UopId {
+        match other.into() {
+            TensorAddArg::T(o) => o.uop,
+            TensorAddArg::C(c) => ctx.const_like_dt(self.uop.clone(), c, None),
         }
     }
 

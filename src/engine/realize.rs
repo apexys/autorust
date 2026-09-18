@@ -443,28 +443,65 @@ pub fn run_linear(ctx: &mut UOpCtx, linear: UopId, t: &mut BufTable, var_vals: &
 
 // ---------------- Tensor-level realize ----------------
 
-/// Schedule + run one tensor (python `Tensor.realize` path). Returns the
-/// tensor's realized base buffer (the held buffer the kernel wrote).
-pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> crate::runtime::buffer::Buffer {
-    // Drop buffers no live caller still references (bounded across repeated steps).
-    t.prune();
-    // python `_buffer()`: a device-less (virtual) tensor is made real via
-    // contiguous + clone to the default device before realizing.
-    let mut target = tensor_uop;
-    let is_view = crate::uop::group::in_(crate::uop::group::MOVEMENT, ctx.op_of(&target));
-    if crate::schedule::indexing::device_of(ctx, target.clone()).is_none()
-        || crate::dtype::is_weak(ctx.dt_of(&target))
+/// python `_buffer()` target normalization: a device-less (virtual) or view
+/// tensor is made real via contiguous + clone to the default device before
+/// realizing. Shared by the single- and multi-root paths.
+fn materialize_target(ctx: &mut UOpCtx, tensor_uop: UopId) -> UopId {
+    let is_view = crate::uop::group::in_(crate::uop::group::MOVEMENT, ctx.op_of(&tensor_uop));
+    if crate::schedule::indexing::device_of(ctx, tensor_uop.clone()).is_none()
+        || crate::dtype::is_weak(ctx.dt_of(&tensor_uop))
         || is_view
     {
-        let dev = crate::schedule::indexing::device_of(ctx, target.clone())
+        let dev = crate::schedule::indexing::device_of(ctx, tensor_uop.clone())
             .map(|d| match d {
                 crate::uop::arg::DeviceSpec::Single(s) => s,
                 crate::uop::arg::DeviceSpec::Multi(v) => v[0].clone(),
             })
             .unwrap_or_else(|| "PYTHON".to_string());
-        let cont = ctx.uop(Ops::Contiguous, Some(ctx.dt_of(&target)), vec![target], Arg::None);
-        target = crate::tensor::creation::copy_to_device(ctx, cont, &dev);
+        let cont = ctx.uop(Ops::Contiguous, Some(ctx.dt_of(&tensor_uop)), vec![tensor_uop], Arg::None);
+        crate::tensor::creation::copy_to_device(ctx, cont, &dev)
+    } else {
+        tensor_uop
     }
+}
+
+/// `Tensor.realize(*tensors)` (tensor.py): schedule every root into **one** SINK,
+/// run the resulting linear once, and return each root's final storage buffer.
+/// This is the co-realization tinygrad uses to fold a loss and its optimizer
+/// updates into a single schedule/launch (see `Optimizer.schedule_step`).
+pub fn realize_many(ctx: &mut UOpCtx, tensor_uops: &[UopId], t: &mut BufTable, cache: &mut ProgCache) -> Vec<crate::runtime::buffer::Buffer> {
+    // Drop buffers no live caller still references (bounded across repeated steps).
+    t.prune();
+    let targets: Vec<UopId> = tensor_uops.iter().map(|u| materialize_target(ctx, u.clone())).collect();
+    if targets.len() == 1 {
+        return vec![realize_tensor(ctx, targets.into_iter().next().unwrap(), t, cache)];
+    }
+    let sink = crate::tensor::sink(ctx, targets.clone());
+    let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
+    let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
+    let _ = linear;
+    run_linear(ctx, planned, t, &HashMap::new(), cache);
+    // python `_apply_map_to_tensors`: each tensor's uop becomes its final storage
+    // form after the schedule — that is the buffer the kernel wrote.
+    targets
+        .iter()
+        .map(|target| {
+            let final_uop = buffer_map
+                .iter()
+                .find(|(a, _)| a == target)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(target.clone());
+            buffer_of(ctx, t, final_uop)
+        })
+        .collect()
+}
+
+/// Schedule + run one tensor (python `Tensor.realize` path). Returns the
+/// tensor's realized base buffer (the held buffer the kernel wrote).
+pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> crate::runtime::buffer::Buffer {
+    // Drop buffers no live caller still references (bounded across repeated steps).
+    t.prune();
+    let target = materialize_target(ctx, tensor_uop);
     let sink = crate::tensor::sink(ctx, vec![target.clone()]);
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);

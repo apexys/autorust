@@ -63,6 +63,12 @@ impl Session {
         realize::realize_tensor(ctx, tensor_uop, &mut self.buffers, &mut self.cache)
     }
 
+    /// `Tensor.realize(*tensors)`: co-realize every root in one schedule and
+    /// return their realized buffers (optimizer co-realization, `schedule_step`).
+    pub fn realize_many(&mut self, ctx: &mut UOpCtx, tensor_uops: &[UopId]) -> Vec<Buffer> {
+        realize::realize_many(ctx, tensor_uops, &mut self.buffers, &mut self.cache)
+    }
+
     /// `Tensor.to_bytes` against this session (realize + copyout).
     pub fn tensor_bytes(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> Vec<u8> {
         realize::buffer_bytes(&self.realize_tensor(ctx, tensor_uop))
