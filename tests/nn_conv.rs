@@ -34,6 +34,31 @@ fn conv2d_matches_tinygrad() {
     }
 }
 
+/// Regression: the conv/pool im2col `repeat` must only repeat the trailing
+/// (spatial) dims. `movement::pool` built its repeat vector from each dim's
+/// *size* for the passthrough dims, so a `[64,32,24,24]` conv input was
+/// repeated by `[64,32,6,6]` instead of `[1,1,6,6]` — a batch×channels blow-up
+/// of the window tensor that made the conv-backward reduction ~2000x larger
+/// than tinygrad's (the CL kernel ran ~9s instead of ~20ms). The forward stays
+/// numerically correct, so only a graph-size assertion catches it.
+#[test]
+fn conv_pool_window_is_not_repeated_over_batch_or_channels() {
+    let mut ctx = UOpCtx::new();
+    let x = Tensor::from_slice(&mut ctx, &vec![1.0f32; 4 * 2 * 8 * 8], None, None).reshape(&mut ctx, [4, 2, 8, 8]);
+    let w = Tensor::from_slice(&mut ctx, &vec![1.0f32; 3 * 2 * 3 * 3], None, None).reshape(&mut ctx, [3, 2, 3, 3]);
+    let out = x.conv2d(&mut ctx, &w, None, 1, 1, 1, &[0, 0], None);
+    let mut max_numel: i64 = 0;
+    for u in ctx.toposort(&out.uop) {
+        if let Ok(Some(s)) = ctx.shape(&u) {
+            let n: i64 = s.iter().map(|v| v.clone().as_i64_or_panic()).product();
+            max_numel = max_numel.max(n);
+        }
+    }
+    // Correct repeat: window `[4,2,4,8,4,8]` = 32768. The bug multiplies the
+    // leading (batch, channel) dims too -> 65536. Bound between the two.
+    assert!(max_numel <= 40_000, "conv/pool window tensor oversized: {max_numel} elements");
+}
+
 #[test]
 fn max_pool2d_matches_tinygrad() {
     for p in POOL_GOLDEN {

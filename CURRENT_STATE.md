@@ -792,6 +792,27 @@ match the interpreter (CL included). `cargo test` 110 passed / 0 failed / 7 igno
 **Still open (unchanged):** sub-dword vectorized coalescing bitcasts; the Clang
 `supported_dtypes` bf16 arch gate. Tracked in §9.6.
 
+### 8.19 Conv `pool` im2col blow-up — the real MNIST bottleneck (DONE)
+The "TF32/GQ" hunt for a slow conv-backward kernel (§8.17/§9.6) found a bug in
+`movement::pool` (`src/tensor/movement.rs`). tinygrad's `_pool` repeats only the
+spatial dims: `self.repeat([1] * len(noop) + [ceildiv(k*(i*f+d), i)])`. The port
+used each dim's **size** for the passthrough (noop) dims, so a `[64,32,24,24]`
+conv input got `repeat([64,32,6,6])` instead of `repeat([1,1,6,6])`. That expanded
+the im2col window tensor by `batch × channels` (2048x for BS=64), and the
+conv-backward reduction over the (now-extra) batch/channel axes ran **~9.3 s per
+kernel** instead of ~20 ms — a ~550x gap vs tinygrad measured on the same conv.
+
+- **Impact:** f32 MNIST `BS=64` went from ~13 s/step to ~1.4 s/step; 20 steps
+  (TRAIN_N=1024) run in **27.7 s** (67% test acc) vs >260 s before. bf16: 31.6 s.
+- **Detection:** the forward is numerically correct, so the golden tests never
+  caught it — only a graph-size assertion does. Added
+  `conv_pool_window_is_not_repeated_over_batch_or_channels`
+  (`tests/nn_conv.rs`): a small conv's max intermediate numel must stay ≤ 40000
+  (correct 32768; the bug gave 65536).
+- The earlier "extra `[64,32]` reduce axes with `valid<1`" seen in the codegen
+  AST (§8.18 investigation) was this bug's downstream shadow: the gradient summed
+  the spuriously-broadcast batch/channel axes.
+
 ---
 
 ## 9. Next steps

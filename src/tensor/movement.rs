@@ -302,10 +302,12 @@ pub fn pool(ctx: &mut UOpCtx, x: UopId, k: &[i64], stride: &[i64], dilation: &[i
             std::cmp::max(1, val)
         }).collect();
 
-    // Calculate repeat sizes
-    let repeat_sizes: Vec<i64> = shape.iter().enumerate().map(|(idx, s)| {
+    // Calculate repeat sizes. Non-spatial (noop) dims repeat **once** (tinygrad:
+    // `self.repeat([1] * len(noop) + [ceildiv(...)])`); using the dim size here
+    // expands batch/channels by themselves and is catastrophically slow.
+    let repeat_sizes: Vec<i64> = shape.iter().enumerate().map(|(idx, _s)| {
         if idx < noop_len {
-            s.clone().as_i64().unwrap_or(0)
+            1
         } else {
             let spatial_idx = idx - noop_len;
             let k_val = k[spatial_idx];
