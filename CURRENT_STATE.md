@@ -210,14 +210,19 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
 - `TinyJit` (capture LINEAR, replay with fresh buffers). ⬜
 - autograd (`mixin/gradient.py`) — ✅ done early, see §8.4.
 - `rand` (`mixin/rand.py`) — ✅ done early, see §8.3.
-- half/bf16 emulation — ✅ (M8.2/M5 `decomp_dtype.rs`).
+- half/bf16 emulation — 🚧 INTERP computes bf16/f16/fp8; the cstyle/CL renderers still need
+  the `extra_matcher` (`create_non_native_float_pats` + `pm_manual_bf16_cast`) before bf16
+  compute works on a GPU backend. See §8.17 and §9.6.
 - WMMA arm + first tensor-core layouts, BEAM search driver, DISK device. ⬜
+  (BEAM tracked in §9.6; GPU-native features motivate the native-backend item there.)
 - **nn core** (`nn/__init__.py` + `nn/state.py` + `nn/optim.py`): BatchNorm, Conv1d/2d,
   ConvTranspose1d/2d, Linear, GroupNorm, InstanceNorm, LayerNorm(+2d), RMSNorm, Embedding,
   LSTMCell; `State`; Optimizer + SGD/Adam(+W)/LARS/LAMB. **Proof: MNIST e2e** (MLP train
   step + Conv inference, weights via `State`, optimizer numerics diffed). Dataset via the
   std-only `fetch`/`from_url` shim. **MNIST example + ignored e2e gate DONE (§8.16)**;
-  Embedding/LSTM/State/safetensors remain. 🚧
+  ported layers: BatchNorm/Conv2d/Linear/GroupNorm/LayerNorm. Remaining: ConvTranspose2d,
+  Conv1d/ConvTranspose1d, InstanceNorm, LayerNorm2d, RMSNorm, Embedding, LSTMCell, plus
+  `State`/safetensors (§9.6). 🚧
 
 ### M8 — first additional backend: OpenCL — DONE
 - `runtime/` + `renderer/` backend seams: `OpaqueT`/`BackendAllocator`/`Comp`/`Prog`/
@@ -231,10 +236,12 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   dtype battery, casts, goldens. Fixed interp bf16/f16/fp8 truncation, from/to storage
   scalar, unary/ternary ALU, store-at-dest-dtype, LOCAL-window shrink shape, cstyle
   `code_for_op` completion. ✅
-- M8.2 open gaps: (a) weak-const commit / `pm_lower_weak`; (b) non-native-float decomp
-  (done in M5, superceded); (c) arange realize — FIXED; (c') reduce-over-reduce — FIXED
-  (rangeify `PCONTIG` realize arm; see §8.11); (d) sub-dword vectorized coalescing bitcasts;
-  (e) XOR training gate — now ✅ (see §8.7).
+- M8.2 open gaps: (a) weak-const commit / `pm_lower_weak` — **FIXED** (§8.17: comparisons
+  must commit weak operands); (b) non-native-float decomp (done in M5, superceded);
+  (c) arange realize — FIXED; (c') reduce-over-reduce — FIXED (rangeify `PCONTIG` realize
+  arm; see §8.11); (d) sub-dword vectorized coalescing bitcasts; (e) XOR training gate — now
+  ✅ (see §8.7); (f) cstyle `extra_matcher` for bf16 (`create_non_native_float_pats` +
+  `pm_manual_bf16_cast`) — see §9.6.
 
 ---
 
@@ -705,6 +712,33 @@ that includes the example as a module and checks one train step + eval.
 extent serially, so a CNN backward step is ~1e9 interpreted ops (minutes). The example
 targets `DEFAULT_DEVICE=CL`; the ignored gate runs a 4-image step.
 
+### 8.17 OpenCL MNIST end-to-end + host-side performance findings (DONE)
+Commit `84edf80` made the `DEFAULT_DEVICE=CL` training run complete a step and print a
+finite loss. Two CL-only bugs, both now pinned by tests:
+- **Weak-dtype comparison lowering** (`src/uop/weak.rs`, `tests/weak.rs`): a comparison
+  whose operand is a weak int/float must be committed to a concrete dtype before codegen
+  (`GroupOp.Binary` includes `CMPLT`/`CMPNE`/`CMPEQ`), and `lower_weak_node` must re-derive
+  the rebuilt node's dtype (comparison → `bool`). Missing this rendered `weakint` and CL
+  failed with `use of undeclared identifier 'weakint'`.
+- **cstyle const rendering** (`src/renderer/cstyle.rs`): the uint8/uint16/int8/int16
+  branches emitted `(uchar(0u))` (a malformed call) instead of tinygrad's `((uchar)(0u))`
+  (cstyle.py `f"({ctx.render_cast(x, ...)})"`), which CL rejected with
+  `CL_BUILD_PROGRAM_FAILURE`. Also fixed: the bf16/f16/fp8 const branch was dead code (the
+  f64 fallthrough returned the plain float first), and non-finite float consts lacked the
+  cast wrapper. Unit tests in `src/renderer/cstyle.rs` pin all of these.
+
+**Performance — measured, not guessed** (`BS=2`, `STEPS=1..3`, CL/RTX 3060):
+- `to_program` misses stay fixed at **115** across steps; hits grow ~195/step. The
+  content-keyed `ProgCache` works: kernels are **not** recompiled.
+- ~1 s/step. btop showed the **GPU at 100% and one CPU core pegged**: the host is
+  single-threaded and every `realize` rebuilds the schedule (rangeify / kernel-graph /
+  memory-plan `graph_rewrite`), and the optimizer realizes several roots per step. There is
+  no `TinyJit`-style capture, so host graph rewriting is a co-bottleneck between dispatches.
+
+**Backend-level gaps surfaced by this** (tracked in §9.6): BF16 on CL needs the renderer
+`extra_matcher`; BEAM is absent; and the engine's `Rc`/`RefCell` design keeps all host work
+on one thread.
+
 ---
 
 ## 9. Next steps
@@ -816,3 +850,34 @@ registry), so a threaded interpreter needs an owned `Send` kernel representation
 `Arc`-based storage; `rayon` would also break the std-only policy (`std::thread::scope`
 would not). A cstyle→`cc -shared` native backend is the alternative. Tracked as a future
 option, not worked this session.
+
+### 9.6 Post-MNIST backlog (2026-10)
+Discovered while getting the CL MNIST run working (§8.17). Roughly ordered by leverage on
+GPU training throughput; items are independent.
+
+1. **BF16 end-to-end on the cstyle/CL backends.** The dtype, the INTERP path, and the
+   `pm_float_decomp` widening machinery exist, but the renderer-side `extra_matcher`
+   (`tinygrad/renderer/cstyle.py:319`: `create_non_native_float_pats((bfloat16,)) +
+   pm_manual_bf16_cast`) is **not ported** — there is no `extra_matcher` on the renderer
+   seam and the "final rewrite" stage omits it. Because OpenCL lists bf16 as supported,
+   `pm_float_decomp` never triggers for it, so bf16 ALU would render as `ushort`. Also
+   missing: the OpenCL bf16 **const** render (emit the bit pattern `{bits}u`), and the Clang
+   `supported_dtypes` rule that excludes bf16 unless arch is x86/arm. The dtype-battery
+   harness currently skips bf16 on non-INTERP backends. Unlocks ~2× memory bandwidth on
+   most modern GPUs.
+2. **BEAM search** (`codegen/opt/beam` + the `Estimates` cost model + `kernel_optimize`).
+   Not ported at all: `beam` is an inert `KernelInfo` field hardcoded to 0, `apply_opts`
+   runs only `hand_coded_optimizations`, and the `BEAM` env var is never read. In tinygrad
+   `BEAM=2..8` often gives large speedups.
+3. **`TinyJit`** (capture the LINEAR schedule + buffers, replay with fresh inputs). Removes
+   the per-step `graph_rewrite`/rangeify host cost measured in §8.17.
+4. **Complete the `nn` layer types** (`nn/__init__.py`): missing `ConvTranspose2d`,
+   the `Conv1d`/`ConvTranspose1d` helpers, `InstanceNorm`, `LayerNorm2d`, `RMSNorm`,
+   `Embedding`, `LSTMCell`. Ported so far: `BatchNorm`, `Conv2d`, `Linear`, `GroupNorm`,
+   `LayerNorm`.
+5. **`nn/state.py` + safetensors** (later): `State`/`state_dict`/`load_state_dict`, a
+   std-only safetensors reader/writer, `init_weight`/`fetch`. Today only
+   `Module`/`named_params`/`into_params` exist.
+6. **Native GPU backend (later).** OpenCL lacks GPU-native features (WMMA/tensor cores,
+   native bf16/fp16 compute). A future `autorust-nv` crate porting tinygrad's NV/CUDA path
+   is the likely direction once items 1–4 land. Tracked as a design direction, not started.
