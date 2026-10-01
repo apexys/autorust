@@ -49,6 +49,12 @@ pub struct CStyleLang {
     vector_defines: bool,
     /// `float4_style` — Stack literal delimiters.
     float4_style: (&'static str, &'static str),
+    /// OpenCL stores bf16 as `ushort`, so bf16 constants render as their
+    /// 16-bit bit pattern (`{bits}u`) instead of a float cast (cstyle.py:325).
+    bf16_const_bits: bool,
+    /// ALU `BITCAST` rendering: clang uses `__builtin_bit_cast`, OpenCL uses
+    /// `as_<type>(...)` (cstyle.py:41 vs the OpenCL `string_rewrite` at :322).
+    bitcast_builtin: bool,
 }
 
 impl CStyleLang {
@@ -72,6 +78,8 @@ impl CStyleLang {
             vector_defines: true,
             kernel_typedef: "void",
             float4_style: ("{", "}"),
+            bf16_const_bits: false,
+            bitcast_builtin: true,
         }
     }
 
@@ -102,6 +110,8 @@ impl CStyleLang {
             vector_defines: false,
             kernel_typedef: "__kernel void",
             float4_style: ("(", ")"),
+            bf16_const_bits: true,
+            bitcast_builtin: false,
         }
     }
 
@@ -431,8 +441,13 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             Ops::Bitcast => {
                 if matches!(i.addrspace, Some(AddrSpace::Global) | Some(AddrSpace::Local)) {
                     format!("(({})({}))", lang.render_dtype(i.dt, 1, i.addrspace, false), g(&r, &i.srcs[0]))
-                } else {
+                } else if lang.bitcast_builtin {
                     format!("__builtin_bit_cast({}, ({})({}))", lang.render_type(&i), lang.render_type(&info[&i.srcs[0]]), g(&r, &i.srcs[0]))
+                } else {
+                    // OpenCL (cstyle.py:322): as_<type>((<src_type>)(src))
+                    let dst = lang.render_dtype(i.dt, 1, None, false);
+                    let src = lang.render_dtype(info[&i.srcs[0]].dt, 1, None, false);
+                    format!("as_{dst}(({src})({}))", g(&r, &i.srcs[0]))
                 }
             }
             Ops::Special => {
@@ -653,6 +668,12 @@ fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId, lang: &CStyleLang) -> Str
         other => panic!("TGERR: cstyle const {other:?}"),
     };
     if dtype::is_float(dt) {
+        // OpenCL stores bf16 as `ushort`, so a bf16 const renders as its bit
+        // pattern, not a float cast (cstyle.py:325). Applies to any value.
+        if dt == dtype::BFLOAT16 && lang.bf16_const_bits {
+            let bits = (dtype::float_to_bf16(vfloat) as f32).to_bits() >> 16;
+            return format!("{}u", bits);
+        }
         if !vfloat.is_finite() {
             let inf = lang.infinity;
             let nan = lang.nan;
@@ -710,9 +731,25 @@ fn py_float(v: f64) -> String {
 
 /// int truncation to the dtype's range.
 fn trunc_int(v: i128, dt: DTypeId) -> i128 {
-    match (dtype::dtype_min(dt), dtype::dtype_max(dt)) {
-        (ConstVal::Int(l), ConstVal::Int(h)) => v.clamp(l, h),
-        _ => v,
+    // `truncate[dt]` for ints is the C cast to the dtype width — it wraps, it
+    // does not clamp (dtype.py:289-293, `ctypes.c_<n>(x).value`). Clamping made
+    // `-1` render as `0u`, which broke `-x` on uint (bf16 bit math).
+    if dtype::in_set(dtype::UINTS, dt) {
+        match dt.bitsize() {
+            8 => (v as u8) as i128,
+            16 => (v as u16) as i128,
+            32 => (v as u32) as i128,
+            64 => (v as u64) as i128,
+            _ => v,
+        }
+    } else {
+        match dt.bitsize() {
+            8 => v as i8 as i128,
+            16 => v as i16 as i128,
+            32 => v as i32 as i128,
+            64 => v as i64 as i128,
+            _ => v,
+        }
     }
 }
 

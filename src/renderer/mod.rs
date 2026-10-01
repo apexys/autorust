@@ -4,6 +4,7 @@
 
 pub mod cstyle;
 pub mod expr;
+pub mod extra;
 
 use crate::uop::Ops;
 
@@ -52,6 +53,10 @@ pub struct Renderer {
     pub code_for_op: Vec<crate::uop::Ops>,
     /// `supported_dtypes()` — the dtype set the backend computes in.
     pub supported_dtypes: Vec<crate::dtype::DTypeId>,
+    /// `renderer.extra_matcher` (codegen/__init__.py:377) — renderer-specific
+    /// rewrites run in the pipeline's "final rewrite" stage (e.g. bf16
+    /// compute-through-f32). Empty for the interpreter.
+    pub extra_matcher: crate::uop::upat::PatternMatcher,
 }
 
 impl Renderer {
@@ -68,6 +73,8 @@ impl Renderer {
             code_for_op: python_alu_keys(),
             // ops_python.py:235 — 3.12+ keeps half, everything else stays.
             supported_dtypes: crate::dtype::ALL.to_vec(),
+            // PythonRenderer.extra_matcher is None (empty).
+            extra_matcher: Default::default(),
         }
     }
 
@@ -84,6 +91,7 @@ impl Renderer {
             code_for_op: cstyle_alu_keys_clang(),
             // cstyle.py:300 — fp8s excluded everywhere; bf16 only on x86/arm arch.
             supported_dtypes: crate::dtype::ALL.iter().cloned().filter(|&d| !in_fp8s(d)).collect(),
+            extra_matcher: extra::clang_extra_matcher(),
         }
     }
 
@@ -99,6 +107,9 @@ impl Renderer {
             shared_max: 32768,
             code_for_op: cstyle_alu_keys(),
             supported_dtypes: opencl_supported_dtypes(""),
+            // cstyle.py:319 — bf16 compute-through-f32 + manual bit casts.
+            extra_matcher: extra::create_non_native_float_pats(&[crate::dtype::BFLOAT16], true)
+                .add(&extra::pm_manual_bf16_cast()),
         }
     }
 

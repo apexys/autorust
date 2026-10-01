@@ -210,9 +210,10 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
 - `TinyJit` (capture LINEAR, replay with fresh buffers). ⬜
 - autograd (`mixin/gradient.py`) — ✅ done early, see §8.4.
 - `rand` (`mixin/rand.py`) — ✅ done early, see §8.3.
-- half/bf16 emulation — 🚧 INTERP computes bf16/f16/fp8; the cstyle/CL renderers still need
-  the `extra_matcher` (`create_non_native_float_pats` + `pm_manual_bf16_cast`) before bf16
-  compute works on a GPU backend. See §8.17 and §9.6.
+- half/bf16 emulation — 🚧 core DONE (§8.18): the cstyle/CL `extra_matcher`
+  (`create_non_native_float_pats` + `pm_manual_bf16_cast`), OpenCL `as_*` bitcasts and
+  bf16-const bit patterns, and sub-word `rand` are ported; `tests/bf16.rs` is a CL↔INTERP
+  differential. Remaining: a full CNN train step still hangs in codegen (see §9.6).
 - WMMA arm + first tensor-core layouts, BEAM search driver, DISK device. ⬜
   (BEAM tracked in §9.6; GPU-native features motivate the native-backend item there.)
 - **nn core** (`nn/__init__.py` + `nn/state.py` + `nn/optim.py`): BatchNorm, Conv1d/2d,
@@ -739,6 +740,38 @@ finite loss. Two CL-only bugs, both now pinned by tests:
 `extra_matcher`; BEAM is absent; and the engine's `Rc`/`RefCell` design keeps all host work
 on one thread.
 
+### 8.18 BF16 on cstyle/CL (CORE DONE) + the bugs it uncovered
+BF16 now computes on CL via tinygrad's renderer-side emulation:
+- **`renderer.extra_matcher`** — added to the `Renderer` facts and run in the pipeline's
+  "final rewrite" stage (`renderer/extra.rs`): `create_non_native_float_pats((bf16,))`
+  computes bf16 ALU/WHERE/casts through f32, and `pm_manual_bf16_cast` does the f32↔bf16
+  bit math (cstyle.py:76-102,319). The interpreter's matcher is empty.
+- **OpenCL `BITCAST`** (`cstyle.rs`): was always emitting clang's `__builtin_bit_cast`;
+  now `as_<type>(...)` for ALU (cstyle.py:322) and the pointer cast for GLOBAL/LOCAL,
+  switched by a new `CStyleLang.bitcast_builtin`.
+- **OpenCL bf16 consts** render as their 16-bit pattern `{bits}u` (cstyle.py:325) via
+  `CStyleLang.bf16_const_bits`.
+- **sub-word `rand`/`uniform`** (`rand.rs`): tinygrad's `_bits_to_rand` is generic over
+  itemsize; the port only had f32/f64 and indexed out of bounds for f16/bf16. Added the
+  2-byte path (`bits_to_rand_f16`).
+
+Two latent engine bugs surfaced (both fixed):
+- `cstyle::trunc_int` **clamped** instead of truncating/wrapping (dtype.py:289-293:
+  `ctypes.c_<n>(x).value`), so `-1` rendered as `0u` and `-x` on a uint (bf16 bit math) was
+  wrong.
+- `pm_lower_index_dtype` rule order (`weak.rs`): tinygrad is
+  `pm_commit_weak + pm_cast_weak + [lower_weak_srcs]`; the port put the driver first, so a
+  weak const on a bf16 op was lowered to **default_float (f32)** and widened the consumer
+  (`Mul(bf16,weakfloat) -> Mul(f32,[bf16,f32])`) instead of committing to bf16.
+
+**Gate:** `tests/bf16.rs` — bf16 mul/add/compare/where on every registered backend must
+match the interpreter (CL included). `cargo test` 110 passed / 0 failed / 7 ignored.
+
+**Known gap:** a full bf16 *CNN* train step (`DTYPE=bfloat16`) still hangs in codegen
+(after the second BatchNorm). bf16 reduce and a standalone 64-channel BatchNorm pass in
+isolation, so it is a large-graph codegen issue, not the reduction or BN itself. Tracked in
+§9.6.
+
 ---
 
 ## 9. Next steps
@@ -855,16 +888,15 @@ option, not worked this session.
 Discovered while getting the CL MNIST run working (§8.17). Roughly ordered by leverage on
 GPU training throughput; items are independent.
 
-1. **BF16 end-to-end on the cstyle/CL backends.** The dtype, the INTERP path, and the
-   `pm_float_decomp` widening machinery exist, but the renderer-side `extra_matcher`
-   (`tinygrad/renderer/cstyle.py:319`: `create_non_native_float_pats((bfloat16,)) +
-   pm_manual_bf16_cast`) is **not ported** — there is no `extra_matcher` on the renderer
-   seam and the "final rewrite" stage omits it. Because OpenCL lists bf16 as supported,
-   `pm_float_decomp` never triggers for it, so bf16 ALU would render as `ushort`. Also
-   missing: the OpenCL bf16 **const** render (emit the bit pattern `{bits}u`), and the Clang
-   `supported_dtypes` rule that excludes bf16 unless arch is x86/arm. The dtype-battery
-   harness currently skips bf16 on non-INTERP backends. Unlocks ~2× memory bandwidth on
-   most modern GPUs.
+1. **BF16 on cstyle/CL — core DONE (§8.18); one gap left.** `extra_matcher`
+   (`create_non_native_float_pats` + `pm_manual_bf16_cast`), OpenCL `as_*` bitcasts, bf16
+   const bit patterns, and sub-word `rand` are ported; `tests/bf16.rs` passes on CL.
+   Remaining: a full CNN train step with `DTYPE=bfloat16` hangs in codegen (large graph; a
+   bf16 reduce and a 64-channel BatchNorm pass in isolation). Also still open: sub-dword
+   vectorized coalescing bitcasts — the backend harness skips sub-dword outputs on cstyle
+   backends and `dtype_battery_all_backends`/`alu_code_for_op_all_backends` fail on CL for
+   bool vectors (pre-existing). The Clang `supported_dtypes` bf16 arch gate is not ported
+   (bf16 stays "supported" on clang regardless of arch).
 2. **BEAM search** (`codegen/opt/beam` + the `Estimates` cost model + `kernel_optimize`).
    Not ported at all: `beam` is an inert `KernelInfo` field hardcoded to 0, `apply_opts`
    runs only `hand_coded_optimizations`, and the `BEAM` env var is never read. In tinygrad

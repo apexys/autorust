@@ -8,7 +8,8 @@
 //! ```sh
 //! cargo run --release --example mnist
 //! DEFAULT_DEVICE=CL STEPS=70 cargo run --release --example mnist
-//! STEPS=5 BS=32 TRAIN_N=256 TEST_N=128 cargo run --release --example mnist
+//! FAST=1 cargo run --release --example mnist              # ~1 minute preset
+//! DTYPE=bfloat16 FAST=1 cargo run --release --example mnist --features backend_cl
 //! ```
 //!
 //! Port conveniences (not in tinygrad): `TRAIN_N`/`TEST_N` limit the dataset to a
@@ -136,15 +137,27 @@ pub fn load_labels(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
 }
 
 fn main() {
-    let bs: i64 = env_or("BS", 512);
-    let steps: i64 = env_or("STEPS", 70);
-    let train_n: i64 = env_or("TRAIN_N", 60_000);
-    let test_n: i64 = env_or("TEST_N", 10_000);
+    // `DTYPE` selects the compute dtype through tinygrad's `DEFAULT_FLOAT`
+    // (a synonym: setting `DEFAULT_FLOAT` directly works too). It must be set
+    // before any layer/`rand` is built. NOTE: bf16 is ported (renderer +
+    // codegen) and passes the `tests/bf16.rs` differential, but a full CNN train
+    // step still hangs in codegen, so f32 remains the default.
+    if let Ok(dt) = std::env::var("DTYPE") {
+        // SAFETY: single-threaded; set before any `default_float()` read.
+        unsafe { std::env::set_var("DEFAULT_FLOAT", dt) };
+    }
+    // `FAST=1` presets a run that finishes in roughly a minute.
+    let fast = std::env::var("FAST").is_ok();
+
+    let bs: i64 = env_or("BS", if fast { 32 } else { 512 });
+    let steps: i64 = env_or("STEPS", if fast { 3 } else { 70 });
+    let train_n: i64 = env_or("TRAIN_N", if fast { 256 } else { 60_000 });
+    let test_n: i64 = env_or("TEST_N", if fast { 128 } else { 10_000 });
     let lr: f32 = env_or("LR", 0.001);
     let seed: i64 = env_or("SEED", 42);
     let target: f32 = env_or("TARGET_EVAL_ACC_PCT", 0.0);
 
-    println!("MNIST: BS={bs} STEPS={steps} TRAIN_N={train_n} TEST_N={test_n} lr={lr}");
+    println!("MNIST: BS={bs} STEPS={steps} TRAIN_N={train_n} TEST_N={test_n} lr={lr} dtype={}", dtype::default_float().attr());
 
     let dir = mnist_dir();
     let base = "https://storage.googleapis.com/cvdf-datasets/mnist/";

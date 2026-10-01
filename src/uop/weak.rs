@@ -294,10 +294,14 @@ fn lower_weak_srcs(ctx: &mut UOpCtx, memo: &mut HashMap<UopId, UopId>, u: UopId)
     }
 }
 
-/// `pm_lower_index_dtype` (weak.py:81) — commit_weak+cast_weak+lower driver.
+/// `pm_lower_index_dtype` (weak.py:81) — `pm_commit_weak+pm_cast_weak+[...]`.
+/// Rule order matters: `commit_weak` must see the weak src *before* the
+/// `lower_weak_srcs` driver, which would otherwise resolve a weak const at its
+/// default dtype (f32) and widen the consumer (bf16 → f32) instead of
+/// committing it to the consumer's dtype.
 pub fn pm_lower_index_dtype() -> PatternMatcher {
     let all_pat = UPat::op_var((0..=79u16).filter_map(Ops::from_u16).collect()).named("u");
-    PatternMatcher::new(vec![(
+    let lower_rule = PatternMatcher::new(vec![(
         all_pat,
         r(|ctx, st, _| {
             let u = sget(st, "u");
@@ -317,7 +321,6 @@ pub fn pm_lower_index_dtype() -> PatternMatcher {
                 Some(ret)
             }
         }),
-    )])
-    .add(&pm_commit_weak())
-    .add(&pm_cast_weak())
+    )]);
+    pm_commit_weak().add(&pm_cast_weak()).add(&lower_rule)
 }

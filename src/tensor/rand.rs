@@ -139,6 +139,23 @@ fn bits_to_rand_f32(bits: &[u32], numel: usize) -> Vec<f32> {
         .collect()
 }
 
+/// `_bits_to_rand` for 2-byte floats (f16/bf16): reinterpret the uint32 words as
+/// uint16 (little-endian), `>> (bitsize-nmant) | float_one_bits`, bitcast to the
+/// float and subtract 1 (rand.py:31).
+fn bits_to_rand_f16(bits: &[u32], numel: usize, dt: DTypeId) -> Vec<f64> {
+    let (nmant, one): (u32, u16) = if dt == dtype::FLOAT16 { (10, 0x3C00) } else { (7, 0x3F80) };
+    let shift = 16 - nmant;
+    (0..numel)
+        .map(|i| {
+            let w = bits[i / 2];
+            let u = if i % 2 == 0 { (w & 0xffff) as u16 } else { (w >> 16) as u16 };
+            let m = (u >> shift) | one;
+            let f = if dt == dtype::FLOAT16 { dtype::f16_bits_to_f64(m) } else { f32::from_bits((m as u32) << 16) as f64 };
+            f - 1.0
+        })
+        .collect()
+}
+
 fn bits_to_rand_f64(bits: &[u32], numel: usize) -> Vec<f64> {
     let float_one: u64 = 1.0f64.to_bits();
     (0..numel)
@@ -167,6 +184,9 @@ pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device
     let bits = random_bits(key, counter, num as u32);
     let out = if dt == dtype::FLOAT64 {
         let vals = bits_to_rand_f64(&bits, numel as usize);
+        Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
+    } else if dt == dtype::FLOAT16 || dt == dtype::BFLOAT16 {
+        let vals = bits_to_rand_f16(&bits, numel as usize, dt);
         Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
     } else {
         let vals = bits_to_rand_f32(&bits, numel as usize);

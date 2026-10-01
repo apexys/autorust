@@ -80,7 +80,7 @@ fn post_stages(ren: &Renderer) -> Vec<Stage> {
         Stage { name: "decomp dtypes", pm: crate::codegen::decomp_dtype::pm_dtype_decomps().add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
         Stage { name: "late decompositions", pm: decomp, bottom_up: false },
         Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },
-        Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&pm_remove_invalid()), bottom_up: false },
+        Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&ren.extra_matcher).add(&pm_remove_invalid()), bottom_up: false },
         Stage { name: "casted consts", pm: pm_casted_consts(), bottom_up: false,  },
         Stage { name: "add implicit barriers", pm: pm_implicit_barriers(), bottom_up: false },
         Stage { name: "add control flow", pm: PatternMatcher::new(vec![]), bottom_up: true },
