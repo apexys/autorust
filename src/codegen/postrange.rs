@@ -370,6 +370,86 @@ impl<'a> Scheduler<'a> {
         }));
     }
 
+    /// `Scheduler.copy` (search.py) — clone for BEAM candidates.
+    pub fn copy(&self) -> Scheduler<'a> {
+        Scheduler {
+            ast: self.ast.clone(),
+            ren: self.ren,
+            dont_use_locals: self.dont_use_locals,
+            applied_opts: self.applied_opts.clone(),
+            opt_range: self.opt_range,
+        }
+    }
+
+    /// The `Opt` list applied to this scheduler (BEAM result / KernelInfo).
+    pub fn applied_opts(&self) -> &[Arg] {
+        &self.applied_opts
+    }
+
+    /// `Scheduler.real_axis` (postrange.py:88) — map an opt-relative axis to the
+    /// real axis index in `rngs`.
+    pub fn real_axis(&self, ctx: &mut UOpCtx, op: OptOp, axis: usize) -> Option<usize> {
+        match op {
+            OptOp::Unroll => self.unrollable_dims(ctx).get(axis).copied(),
+            OptOp::Group | OptOp::GroupTop => self.axes_of(ctx, &[AxisType::Reduce]).get(axis).copied(),
+            _ => if axis < self.shape_len(ctx) { Some(axis) } else { None },
+        }
+    }
+
+    /// `apply_opt` returning `Err` instead of panicking on an invalid opt
+    /// (python raises `KernelOptError`). Mirrors the asserts in `apply_opt`.
+    pub fn try_apply_opt(&mut self, ctx: &mut UOpCtx, op: OptOp, axis: Option<usize>, arg: Option<i64>) -> Result<(), String> {
+        if matches!(op, OptOp::Local | OptOp::Group | OptOp::GroupTop) && !self.ren.has_local {
+            return Err("no locals".into());
+        }
+        let real_axis = self.real_axis(ctx, op, axis.unwrap_or(0)).ok_or("bad axis")?;
+        let rng = self.rngs(ctx).get(real_axis).cloned().ok_or("axis oob")?;
+        let amt = match arg {
+            Some(0) | None => self.rng_vmax(ctx, rng.clone()) + 1,
+            Some(a) => a,
+        };
+        let rtype = AxisType::range_axis_type(ctx, rng.clone());
+        match op {
+            OptOp::Unroll => {
+                if amt > 32 { return Err("unroll > 32".into()); }
+                if !matches!(rtype, AxisType::GroupReduce | AxisType::Reduce) { return Err("unroll axis type".into()); }
+            }
+            OptOp::Upcast => {
+                if amt > 16 { return Err("upcast > 16".into()); }
+                if !matches!(rtype, AxisType::Global | AxisType::Local | AxisType::Weak) { return Err("upcast axis type".into()); }
+            }
+            OptOp::Local => {
+                if self.dont_use_locals { return Err("no locals".into()); }
+                if !matches!(rtype, AxisType::Global | AxisType::Weak) { return Err("local axis type".into()); }
+            }
+            OptOp::Group | OptOp::GroupTop => {
+                if self.dont_use_locals { return Err("no locals".into()); }
+                if rtype != AxisType::Reduce { return Err("group axis type".into()); }
+            }
+        }
+        // `shift_to` panics unless the extent divides evenly.
+        let ext = ctx.srcs(&rng)[0].clone();
+        if ctx.divides(ext, amt as i128).is_none() {
+            return Err("extent not divisible".into());
+        }
+        let at = match op {
+            OptOp::Local => AxisType::Local,
+            OptOp::Upcast => AxisType::Upcast,
+            OptOp::Unroll => AxisType::Unroll,
+            OptOp::Group | OptOp::GroupTop => AxisType::GroupReduce,
+        };
+        self.shift_to(ctx, rng, amt, at, matches!(op, OptOp::GroupTop));
+        self.applied_opts.push(Arg::Data(DataArg {
+            tag: "Opt".into(),
+            fields: vec![
+                ("op".into(), Arg::Str(format!("{op:?}").to_uppercase())),
+                ("axis".into(), Arg::Int(real_axis as i64)),
+                ("arg".into(), Arg::Int(amt)),
+            ],
+        }));
+        Ok(())
+    }
+
     /// `shape_str` — strings like ['g0', 'u0'].
     pub fn shape_str(&self, ctx: &mut UOpCtx) -> Vec<String> {
         let mut ret = Vec::new();
@@ -682,7 +762,7 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
 }
 
 /// `apply_opts` (postrange.py:334).
-pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
+pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, beam: usize) -> UopId {
     // ast.tag is not None → already applied (replay)
     if !matches!(ctx.tag_of(&ast), Arg::None) {
         return ast;
@@ -703,6 +783,9 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
     }
     match opts_to_apply {
         Some(_) => panic!("TGERR: opts_to_apply path not ported for corpus"),
+        None if beam >= 1 => {
+            k = crate::codegen::opt_search::beam_search(ctx, k, beam);
+        }
         None => hand_coded_optimizations(&mut k, ctx),
     }
 

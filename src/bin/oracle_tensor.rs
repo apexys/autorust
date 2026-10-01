@@ -248,7 +248,7 @@ fn render_calls_opencl(ctx: &mut UOpCtx, planned: UopId) {
             outs.push("null".to_string());
             continue;
         }
-        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body.clone(), &ren);
+        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body.clone(), &ren, true);
         let lst = autorust::codegen::linearize::linearize(ctx, sunk);
         let text = autorust::renderer::cstyle::render_opencl(ctx, &lst);
         let mut j = String::from("\"");
@@ -282,7 +282,7 @@ fn render_calls(ctx: &mut UOpCtx, planned: UopId) {
             outs.push("null".to_string());
             continue;
         }
-        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body.clone(), &ren);
+        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body.clone(), &ren, true);
         let lst = autorust::codegen::linearize::linearize(ctx, sunk);
         let text = autorust::renderer::cstyle::render_clang(ctx, &lst);
         let mut j = String::from("\"");

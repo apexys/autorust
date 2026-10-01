@@ -221,6 +221,13 @@ impl Compiled {
         rt
     }
 
+    /// Construct a runtime **without** caching it. BEAM search builds thousands
+    /// of throwaway programs; caching each would leak backends (CL programs) and
+    /// exhaust the driver. The caller drops the returned runtime to release it.
+    pub fn runtime_nocache(&self, elf: &TinyElf) -> Rc<RefCell<dyn Prog>> {
+        (self.runtime_ctor)(elf)
+    }
+
     pub fn compile_count(&self) -> usize {
         self.compiles.get()
     }

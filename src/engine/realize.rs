@@ -285,7 +285,8 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
         return Rc::new(CompiledProg { uop: prg, pi: p.pi.clone(), elf: p.elf.clone() });
     }
     // 1. full_rewrite_to_sink
-    let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts());
+    let optimize = matches!(ctx.tag_of(&ast), Arg::None);
+    let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts(), optimize);
     #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_IDX").is_ok() {
         crate::codegen::postrange::dump_index_exprs(ctx, sunk.clone(), "SUNK");

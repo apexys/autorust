@@ -778,7 +778,7 @@ fn pm_add_loads() -> PatternMatcher {
 /// `full_rewrite_to_sink` (codegen/__init__.py:288) — partial: the opening
 /// mops/symbolic block. Returns the rewritten SINK.
 pub fn full_rewrite_to_sink(ctx: &mut UOpCtx, ast: UopId) -> UopId {
-    full_rewrite_to_sink_with(ctx, ast, &Renderer::cpu_interp())
+    full_rewrite_to_sink_with(ctx, ast, &Renderer::cpu_interp(), true)
 }
 
 /// temporary: readable one-line-per-node dump of the graph below `sink`.
@@ -804,10 +804,14 @@ fn dump_ast(ctx: &mut UOpCtx, sink: UopId) -> String {
     out
 }
 
-pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -> UopId {
+pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, optimize: bool) -> UopId {
     let limit = stage_limit();
     let mut i = 0usize;
     let mut cur = ast;
+    // `optimize` is `ast.tag is None` (codegen/__init__.py:479): a kernel AST
+    // already optimized by BEAM (`get_optimized_ast` tags it) skips the
+    // pre-optimization stages and `apply_opts` entirely.
+    if optimize {
     for st in stages() {
         if i + 1 > limit {
             return cur;
@@ -834,13 +838,15 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer) -
         return cur;
     }
     // do postrange optimization, BEAM or hand_coded_optimizations
-    cur = apply_opts(ctx, cur, ren);
+    let beam: usize = std::env::var("BEAM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    cur = apply_opts(ctx, cur, ren, beam);
     i += 1;
     #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
         eprintln!("=== after stage {} (apply_opts) ===", i);
         eprintln!("{}", dump_ast(ctx, cur.clone()));
     }
+    } // end `if optimize`
     for st in post_stages(ren) {
         if i + 1 > limit {
             return cur;

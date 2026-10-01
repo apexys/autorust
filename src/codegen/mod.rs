@@ -1,4 +1,5 @@
 pub mod pipeline;
+pub mod opt_search;
 pub mod simplify;
 pub mod postrange;
 pub mod gpudims;

@@ -813,6 +813,37 @@ kernel** instead of ~20 ms — a ~550x gap vs tinygrad measured on the same conv
   AST (§8.18 investigation) was this bug's downstream shadow: the gradient summed
   the spuriously-broadcast batch/channel axes.
 
+### 8.20 BEAM search (`codegen/opt/search.py`) — core ported (opt-in)
+`BEAM=n` (env, default 0=off) now runs beam search instead of
+`hand_coded_optimizations`. New `src/codegen/opt_search.rs`:
+- **`actions()`** — the candidate `Opt` list (UPCAST/UNROLL/LOCAL/GROUPTOP/GROUP;
+  TC/SWAP/THREAD/PADTO/NOLOCALS are not ported).
+- **`get_kernel_actions`** — one `Scheduler` per applicable action; skips
+  non-dividing/invalid opts via a new `Scheduler::try_apply_opt` (the
+  `KernelOptError` path; `apply_opt` stays panicking), plus the upcast/local
+  product caps.
+- **candidate compile + timing** — `args_from_ast` allocates dummy buffers per
+  PARAM slot (required `OpaqueT` is public via `runtime::buffer`), compiles via
+  `to_program` and times with `device.call(wait=true)` (CL event profiling).
+  Adds `Compiled::runtime_nocache` so thousands of throwaway candidate programs
+  don't leak into the device runtime cache, and caps the timing launch to
+  `BEAM_TEST_GLOBAL_MAX` (65536) with time scaling (`get_test_global_size`).
+- **search loop** — keep the fastest `amt` candidates per round; stop when the
+  best time stops improving (`BEAM_MIN_PROGRESS`).
+- Pipe: `full_rewrite_to_sink_with(..., optimize)` (`optimize = ast.tag is None`,
+  codegen/__init__.py:479); a BEAM-tagged candidate skips the pre-opt stages and
+  `apply_opts` (idempotent re-entry).
+
+**Status: works on small kernels, not yet practical at scale.** At BS=64 the
+search finds valid faster opts but the CL driver segfaults after thousands of
+throwaway programs/compile-errors (many candidates render invalid CL, and each
+failed `clBuildProgram` plus a fresh program stresses the backend). Missing vs
+tinygrad: the worker pool (parallel candidate compile), the `estimates.ops`
+compute filter + `BEAM_UOPS_MAX`, and the **disk cache of results** (so a search
+runs once, not every process). Until those land, `BEAM` is a research knob; the
+default `hand_coded_optimizations` path is unchanged and the `pool` fix (§8.19)
+is the real throughput win.
+
 ---
 
 ## 9. Next steps
@@ -938,10 +969,12 @@ GPU training throughput; items are independent.
    `dtype_battery_all_backends`/`alu_code_for_op_all_backends` fail on CL for bool vectors
    (pre-existing). The Clang `supported_dtypes` bf16 arch gate is not ported (bf16 stays
    "supported" on clang regardless of arch).
-2. **BEAM search** (`codegen/opt/beam` + the `Estimates` cost model + `kernel_optimize`).
-   Not ported at all: `beam` is an inert `KernelInfo` field hardcoded to 0, `apply_opts`
-   runs only `hand_coded_optimizations`, and the `BEAM` env var is never read. In tinygrad
-   `BEAM=2..8` often gives large speedups.
+2. **BEAM search — core ported (§8.20), still needs hardening.** `src/codegen/opt_search.rs`
+   runs under `BEAM=n`; it explores UPCAST/UNROLL/LOCAL/GROUPTOP/GROUP, compiles each
+   candidate and times it on-device. Missing: the worker pool (parallel compile), the
+   `Estimates.ops` compute filter + `BEAM_UOPS_MAX`, the TC/SWAP/THREAD/PADTO/NOLOCALS
+   actions, and the **disk cache** so a search runs once. Today a large-shape search
+   stresses the CL driver (segfault); see §8.20.
 3. **`TinyJit`** (capture the LINEAR schedule + buffers, replay with fresh inputs). Removes
    the per-step `graph_rewrite`/rangeify host cost measured in §8.17.
 4. **Complete the `nn` layer types** (`nn/__init__.py`): missing `ConvTranspose2d`,
