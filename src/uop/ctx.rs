@@ -2188,7 +2188,21 @@ impl UOpCtx {
     }
 
     /// `u.addrspace` derived property (ops.py:867) — python's full logic.
+    ///
+    /// tinygrad marks this `@recursive_property`: the walk is memoized per node
+    /// (via a gated toposort) so it is linear in the DAG. Without the cache the
+    /// naive recursion is exponential on shared subgraphs — which bf16 ALU
+    /// emulation produces in abundance (an inner value repeated N times per op).
     pub fn addrspace_derived(&self, id: UopId) -> Option<AddrSpace> {
+        if let Some(cached) = id.node.addrspace_c.borrow().clone() {
+            return cached;
+        }
+        let ret = self.addrspace_derived_uncached(id.clone());
+        *id.node.addrspace_c.borrow_mut() = Some(ret);
+        ret
+    }
+
+    fn addrspace_derived_uncached(&self, id: UopId) -> Option<AddrSpace> {
         let op = self.op_of(&id);
         if op == Ops::Param || op == Ops::Buffer {
             return self.addrspace_of(id);

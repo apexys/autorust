@@ -139,9 +139,10 @@ pub fn load_labels(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
 fn main() {
     // `DTYPE` selects the compute dtype through tinygrad's `DEFAULT_FLOAT`
     // (a synonym: setting `DEFAULT_FLOAT` directly works too). It must be set
-    // before any layer/`rand` is built. NOTE: bf16 is ported (renderer +
-    // codegen) and passes the `tests/bf16.rs` differential, but a full CNN train
-    // step still hangs in codegen, so f32 remains the default.
+    // before any layer/`rand` is built. The faithful default is f32 (tinygrad's
+    // `beautiful_mnist` sets no dtype): bf16 is fully ported and correct, but on
+    // CL it is ~2x *slower* (tinygrad emulates bf16 through f32, so every op is
+    // strictly more work), so it stays opt-in.
     if let Ok(dt) = std::env::var("DTYPE") {
         // SAFETY: single-threaded; set before any `default_float()` read.
         unsafe { std::env::set_var("DEFAULT_FLOAT", dt) };

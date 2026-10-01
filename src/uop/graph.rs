@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::arg::Arg;
 use super::ops::Ops;
-use crate::dtype::DTypeId;
+use crate::dtype::{AddrSpace, DTypeId};
 use crate::uop::sint::SVal;
 
 /// Process-wide monotonic node id. Unique across every arena ever built, so it is
@@ -64,6 +64,9 @@ pub struct Node {
     pub shape_c: RefCell<Option<Option<Rc<Shape>>>>,
     pub mm_c: RefCell<Option<Option<MinMax>>>,
     pub range_c: RefCell<Option<Option<Rc<Vec<UopId>>>>>,
+    /// `u.addrspace` derived (`recursive_property`, ops.py:866). Cached so the
+    /// recursive walk is memoized (linear, not exponential, on shared DAGs).
+    pub addrspace_c: RefCell<Option<Option<AddrSpace>>>,
     /// `Tensor(data)` staged host bytes for a base BUFFER node (python
     /// `Buffer(opaque=...)`). Lives with the node, so it is freed when the
     /// buffer is, instead of leaking in a ctx-wide side table.
@@ -198,6 +201,7 @@ impl Graph {
             shape_c: RefCell::new(None),
             mm_c: RefCell::new(None),
             range_c: RefCell::new(None),
+            addrspace_c: RefCell::new(None),
             initial_data: RefCell::new(None),
             grad: RefCell::new(None),
         });

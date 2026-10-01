@@ -210,10 +210,11 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
 - `TinyJit` (capture LINEAR, replay with fresh buffers). ⬜
 - autograd (`mixin/gradient.py`) — ✅ done early, see §8.4.
 - `rand` (`mixin/rand.py`) — ✅ done early, see §8.3.
-- half/bf16 emulation — 🚧 core DONE (§8.18): the cstyle/CL `extra_matcher`
+- half/bf16 emulation — ✅ DONE (§8.18): the cstyle/CL `extra_matcher`
   (`create_non_native_float_pats` + `pm_manual_bf16_cast`), OpenCL `as_*` bitcasts and
   bf16-const bit patterns, and sub-word `rand` are ported; `tests/bf16.rs` is a CL↔INTERP
-  differential. Remaining: a full CNN train step still hangs in codegen (see §9.6).
+  differential and a full bf16 CNN train step runs (`DTYPE=bfloat16`, ~2x slower than f32,
+  so f32 stays the default).
 - WMMA arm + first tensor-core layouts, BEAM search driver, DISK device. ⬜
   (BEAM tracked in §9.6; GPU-native features motivate the native-backend item there.)
 - **nn core** (`nn/__init__.py` + `nn/state.py` + `nn/optim.py`): BatchNorm, Conv1d/2d,
@@ -764,13 +765,32 @@ Two latent engine bugs surfaced (both fixed):
   weak const on a bf16 op was lowered to **default_float (f32)** and widened the consumer
   (`Mul(bf16,weakfloat) -> Mul(f32,[bf16,f32])`) instead of committing to bf16.
 
+**Full bf16 CNN train step: DONE** (`DTYPE=bfloat16`). Getting there fixed two more bugs,
+both of which made a large bf16 graph look like a *hang*:
+
+- **`addrspace_derived` was uncached recursive** (`uop/ctx.rs`). tinygrad marks `addrspace`
+  `@recursive_property` (ops.py:217-227, 866): a gated toposort memoizes it per node, so the
+  walk is linear. The port's naive recursion re-walked shared subgraphs and is **exponential**
+  in the DAG depth — and bf16 ALU emulation produces exactly those shared subgraphs (an inner
+  value repeated per op). The "hang" was this blowing up inside the renderer's per-op
+  `addrspace_derived` call. Fixed by adding `Node.addrspace_c` and memoizing (a per-node cache,
+  matching the other `recursive_property` caches: `shape_c`/`mm_c`/`range_c`).
+- **Adam/LAMB bias-correction scalars must be f32** (`tensor/optim.rs`). tinygrad builds
+  `b1_t`/`b2_t` as `Tensor.ones((1,), dtype=dtypes.float32)` (optim.py:157) regardless of the
+  param dtype. The port used `default_float` (bf16), where `0.999` rounds to `1.0`, so
+  `1 - b2_t == 0` and `m_hat / v_hat` divided by zero → **NaN loss from step 1**. Now pinned to
+  f32 (the moments `m`/`v` still track the param dtype; only the two 1-element accumulators and
+  the transient bias-correction arithmetic are f32).
+
+**Perf:** correct but ~2x *slower* than f32 on CL (bf16 is emulated through f32, so every op is
+strictly more nodes — measured 23s vs 12s per BS=64 step on the RTX 3060). So the MNIST example
+keeps the faithful f32 default and `DTYPE=bfloat16` stays opt-in.
+
 **Gate:** `tests/bf16.rs` — bf16 mul/add/compare/where on every registered backend must
 match the interpreter (CL included). `cargo test` 110 passed / 0 failed / 7 ignored.
 
-**Known gap:** a full bf16 *CNN* train step (`DTYPE=bfloat16`) still hangs in codegen
-(after the second BatchNorm). bf16 reduce and a standalone 64-channel BatchNorm pass in
-isolation, so it is a large-graph codegen issue, not the reduction or BN itself. Tracked in
-§9.6.
+**Still open (unchanged):** sub-dword vectorized coalescing bitcasts; the Clang
+`supported_dtypes` bf16 arch gate. Tracked in §9.6.
 
 ---
 
@@ -888,15 +908,15 @@ option, not worked this session.
 Discovered while getting the CL MNIST run working (§8.17). Roughly ordered by leverage on
 GPU training throughput; items are independent.
 
-1. **BF16 on cstyle/CL — core DONE (§8.18); one gap left.** `extra_matcher`
-   (`create_non_native_float_pats` + `pm_manual_bf16_cast`), OpenCL `as_*` bitcasts, bf16
-   const bit patterns, and sub-word `rand` are ported; `tests/bf16.rs` passes on CL.
-   Remaining: a full CNN train step with `DTYPE=bfloat16` hangs in codegen (large graph; a
-   bf16 reduce and a 64-channel BatchNorm pass in isolation). Also still open: sub-dword
-   vectorized coalescing bitcasts — the backend harness skips sub-dword outputs on cstyle
-   backends and `dtype_battery_all_backends`/`alu_code_for_op_all_backends` fail on CL for
-   bool vectors (pre-existing). The Clang `supported_dtypes` bf16 arch gate is not ported
-   (bf16 stays "supported" on clang regardless of arch).
+1. **BF16 on cstyle/CL — DONE (§8.18).** `extra_matcher` (`create_non_native_float_pats`
+   + `pm_manual_bf16_cast`), OpenCL `as_*` bitcasts, bf16 const bit patterns, and sub-word
+   `rand` are ported; `tests/bf16.rs` passes on CL and a full bf16 CNN train step now runs
+   (`DTYPE=bfloat16`). It is ~2x slower than f32 (emulated through f32), so f32 stays the
+   example default. Still open: sub-dword vectorized coalescing bitcasts — the backend
+   harness skips sub-dword outputs on cstyle backends and
+   `dtype_battery_all_backends`/`alu_code_for_op_all_backends` fail on CL for bool vectors
+   (pre-existing). The Clang `supported_dtypes` bf16 arch gate is not ported (bf16 stays
+   "supported" on clang regardless of arch).
 2. **BEAM search** (`codegen/opt/beam` + the `Estimates` cost model + `kernel_optimize`).
    Not ported at all: `beam` is an inert `KernelInfo` field hardcoded to 0, `apply_opts`
    runs only `hand_coded_optimizations`, and the `BEAM` env var is never read. In tinygrad

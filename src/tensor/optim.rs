@@ -236,10 +236,13 @@ impl LAMB {
     #[allow(clippy::too_many_arguments)]
     pub fn new(ctx: &mut UOpCtx, params: Vec<Tensor>, lr: f32, b1: f32, b2: f32, eps: f32, weight_decay: f32, adam: bool) -> Self {
         assert!(weight_decay >= 0.0, "TGERR: invalid weight_decay value: {weight_decay}");
-        // b1_t/b2_t: `Tensor.ones((1,)).is_param_(False)` — buffer leaves updated
-        // in place each step, hence `to_param`.
-        let b1_t = Tensor::ones(ctx, [1]).to_param(ctx);
-        let b2_t = Tensor::ones(ctx, [1]).to_param(ctx);
+        // b1_t/b2_t: `Tensor.ones((1,), dtype=dtypes.float32).is_param_(False)` —
+        // **explicitly f32** (optim.py:157), not the default float. Keeping the
+        // bias-correction accumulators in f32 is load-bearing: in bf16 `0.999`
+        // rounds to `1.0`, so `1 - b2_t` would be `0` and the update divides by
+        // zero (NaN). buffer leaves updated in place each step, hence `to_param`.
+        let b1_t = crate::tensor::creation::ones(ctx, &[crate::uop::sint::SVal::I(1)], Some(crate::dtype::FLOAT32), None).to_param(ctx);
+        let b2_t = crate::tensor::creation::ones(ctx, &[crate::uop::sint::SVal::I(1)], Some(crate::dtype::FLOAT32), None).to_param(ctx);
         let m = new_optim_param(ctx, &params);
         let v = new_optim_param(ctx, &params);
         LAMB { params, lr, b1, b2, eps, wd: weight_decay, adam, b1_t, b2_t, m, v }
