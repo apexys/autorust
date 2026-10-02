@@ -908,6 +908,42 @@ arena-independent — a follow-up, not needed for the dataset win.
 
 ---
 
+### 8.23 Device-graph RNG (threefry) — DONE (JIT prerequisite)
+
+tinygrad's `Tensor.rand`/`randint` are *device graphs*: uint32 Threefry +
+bit-level mantissa assembly (`mixin/rand.py`), lowered by
+`codegen::decomp::threefry2x32` (no hardware runs THREEFRY natively). That is why
+a captured/replayed TinyJit step regenerates fresh samples. The port had
+reproduced the sequence on the host and materialized it with `from_slice`, so a
+replayed graph would re-upload the *same* bytes (one fixed batch).
+
+Ported the graph route:
+- `rand_graph` / `random_bits_graph` / `bits_to_rand_graph` (rand.py:12/18/31/39),
+  built on the already-present `Ops::THREEFRY` + `Tensor::threefry` +
+  `codegen::decomp::threefry2x32`.
+- `randint` is now `uniform(low, high, dtype)` (rand.py:122) — the faithful
+  definition — so it is a pure graph on hardware rather than a host `from_slice`.
+- Two supporting fixes found by running it:
+  1. **`uop::sym` unpack rule was reversed.** The port's
+     `((y:u32<<32)|z:u64).cast(u32) -> y` named the *high* word; tinygrad
+     (symbolic.py:179) returns the *low* word (`z`). Fixed to match.
+  2. **INTERP had no `Bitcast`.** Added byte-reinterpretation via
+     `to_storage_scalar`/`from_storage_scalar` (int↔float mantissa assembly).
+
+INTERP still carries f64 lanes, so the uint64 pack `(counts1<<32)|counts0` is not
+exact there; `rand` dispatches to the host evaluator (`rand_host`) on INTERP and
+to the graph everywhere else. **`tests/rand.rs` (8 tinygrad goldens) passes on
+INTERP and on CL** (`DEFAULT_DEVICE=CL cargo test --release --features backend_cl
+--test rand`), i.e. the graph is bit-exact on hardware. `cargo test` 113 pass;
+clippy clean.
+
+**Still needed for JIT:** `_next_counter` must be device-side (tensor.py:642) —
+seed/counter as device tensors advanced by a STORE+AFTER inside the graph — so a
+replayed step moves the counter. Today `rand_graph` stages the host counter as
+constants. That, plus the session opt-in JIT (§9.6.3), is the remaining work.
+
+---
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same
@@ -1041,11 +1077,12 @@ GPU training throughput; items are independent.
    **scheduler-bound**: `create_linear_with_vars` (rangeify/kernelize) ~430 ms, device exec
    ~15 ms, copies ~0. Porting `TinyJit` (capture the LINEAR schedule + buffers, replay with
    fresh inputs) removes that per-step `graph_rewrite`/rangeify host cost, mirroring why
-   tinygrad's `beautiful_mnist` (~0.1–0.2 s/step) is ~5–8x ahead. The faithful `realize`
-   prerequisite is **done** (§8.22: `Tensor.uop` shared + replaced with the realized buffer),
-   so jit input handling has its basis. A minor follow-up: attach the realized `Buffer` to the
-   UOp (tinygrad's global `buffers` WeakKeyDictionary) to make realized storage
-   arena-independent instead of session-scoped.
+   tinygrad's `beautiful_mnist` (~0.1–0.2 s/step) is ~5–8x ahead. Prerequisites:
+   the faithful `realize` is **done** (§8.22), and the device-graph RNG is **done**
+   (§8.23) so a replay advances the sampler. Remaining: make `_next_counter` device-side
+   (§8.23) and add the session opt-in (`Session::jit(bool)`) with capture/replay; a minor
+   follow-up is attaching the realized `Buffer` to the UOp to make storage arena-independent
+   instead of session-scoped.
 4. **Complete the `nn` layer types** (`nn/__init__.py`): missing `ConvTranspose2d`,
    the `Conv1d`/`ConvTranspose1d` helpers, `InstanceNorm`, `LayerNorm2d`, `RMSNorm`,
    `Embedding`, `LSTMCell`. Ported so far: `BatchNorm`, `Conv2d`, `Linear`, `GroupNorm`,

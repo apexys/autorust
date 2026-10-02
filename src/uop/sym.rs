@@ -881,12 +881,16 @@ fn build_symbolic_simple() -> PatternMatcher {
             None
         }),
     ));
-    // unpack a uint64 packed from two uint32 (threefry)
+    // unpack a uint64 packed from two uint32 (threefry):
+    // `((x:uint64 << 32) | y:uint32.cast(uint64)).cast(uint32) -> y`.
+    // Mirror symbolic.py:179 exactly: the named uint32 operand is the *second*
+    // (low) word, so the u32 truncation returns it.
     rules.push((
-        var_dt("y", vec![crate::dtype::UINT32])
-            .cast(Some(crate::dtype::UINT64))
+        UPat::var(None, Some(vec![crate::dtype::UINT64]))
             .shl(UPatOrConst::Val(CV::Int(32)))
-            .or_(UPatOrConst::Pat(UPat::var(None, Some(vec![crate::dtype::UINT64]))))
+            .or_(UPatOrConst::Pat(
+                var_dt("y", vec![crate::dtype::UINT32]).cast(Some(crate::dtype::UINT64)),
+            ))
             .cast(Some(crate::dtype::UINT32)),
         r(|_, st, _| Some(sget(st, "y"))),
     ));

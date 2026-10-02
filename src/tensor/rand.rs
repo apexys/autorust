@@ -2,18 +2,25 @@
 //! (`tensor.py:_next_counter`).
 //!
 //! tinygrad builds `Tensor.rand` as a *graph* of uint32 Threefry + bit-level
-//! mantissa assembly. We reproduce the exact same integer sequence on the host
-//! (u32/u64 wrapping math) and materialize the result via `from_slice`: the
-//! INTERP backend stores every value as `f64`, which cannot carry a uint64
-//! bit pattern or perform `bitcast`, so the graph route cannot run there. The
-//! `codegen::decomp::threefry2x32` rule is the faithful graph lowering used by
-//! hardware backends; this module is the reference host evaluator.
+//! mantissa assembly, lowered by `codegen::decomp::threefry2x32` (no hardware
+//! does THREEFRY natively). The port mirrors that graph (`rand_graph`,
+//! `random_bits_graph`, `bits_to_rand_graph`) and uses it on hardware backends
+//! (CL): `uint64` is exact there, and the graph is what lets TinyJit capture and
+//! replay a step.
+//!
+//! INTERP carries every lane as `f64`, so the uint64 threefry pack
+//! `(counts1 << 32) | counts0` cannot be represented exactly above 2**53. On
+//! INTERP we therefore reproduce the exact same integer sequence on the host
+//! (u32/u64 wrapping math) and materialize it via `from_slice` (`rand_host`).
+//! Both routes agree with tinygrad bit-for-bit (validated by `tests/rand.rs`,
+//! run on INTERP and on CL).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::dtype::{self, DTypeId};
 use crate::dtype::ConstVal;
+use crate::tensor::ix::Ix;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::sint::SVal;
 
@@ -174,7 +181,107 @@ fn numel_int(shape: &[SVal]) -> i64 {
 }
 
 /// `RandMixin.rand(*shape, dtype, device)` (rand.py:50).
-pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+// ---------------------------------------------------------------------------
+// Device-graph RNG (`mixin/rand.py`): the faithful path, a `Ops.THREEFRY`
+// graph lowered by `codegen::decomp::threefry2x32` and folded back to uint32
+// operation by the symbolic unpack rules. This is what lets JIT capture and
+// replay a step: the RNG is a kernel, not a host-side `from_slice`.
+// ---------------------------------------------------------------------------
+
+/// `_threefry_random_bits` (rand.py:12): pack two uint32 lane tensors into a
+/// uint64, run `Ops.THREEFRY`, unpack to `[low | high]` uint32.
+fn threefry_random_bits(ctx: &mut UOpCtx, key: &Tensor, counts0: &Tensor, counts1: &Tensor) -> Tensor {
+    let u64d = dtype::UINT64;
+    let lo_key = key.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]).cast(ctx, u64d);
+    let hi_key = key.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]).cast(ctx, u64d).shl(ctx, 32);
+    let packed_key = hi_key.bitwise_or(ctx, lo_key);
+    let x_hi = counts1.cast(ctx, u64d).shl(ctx, 32);
+    let x_lo = counts0.cast(ctx, u64d);
+    let x = x_hi.bitwise_or(ctx, x_lo);
+    let r = x.threefry(ctx, &packed_key);
+    let lo = r.cast(ctx, dtype::UINT32);
+    let hi = r.rshift(ctx, 32).cast(ctx, dtype::UINT32);
+    lo.cat(ctx, &[hi])
+}
+
+/// `RandMixin.random_bits` (rand.py:18) as a device graph. `num` words fit one
+/// `range(0, num, uint32.max)` chunk (the port's tensors are far below 2**32
+/// words).
+fn random_bits_graph(ctx: &mut UOpCtx, key: &Tensor, counter: &Tensor, num: i64) -> Tensor {
+    assert!(num > 0 && num <= u32::MAX as i64, "TGERR: random_bits num {num} out of range");
+    let low = counter.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
+    let high = counter.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
+    // i == 0: c_low = low, c_high = high + (low < low == 0)
+    let new_key = threefry_random_bits(ctx, key, &low, &high);
+    let half = (num + 1) / 2;
+    let counts0 = Tensor::arange(ctx, 0.0, Some(half as f64), 1.0, Some(dtype::UINT32));
+    let counts1 = counts0.add(ctx, half);
+    let bits = threefry_random_bits(ctx, &new_key, &counts0, &counts1);
+    bits.getitem(ctx, &[Ix::slice(Some(0), Some(num), 1)])
+}
+
+/// `dtypes.finfo(dtype)` mantissa width (rand.py:33).
+fn finfo_nmant(dt: DTypeId) -> i64 {
+    if dt == dtype::FLOAT64 { 52 }
+    else if dt == dtype::FLOAT32 { 23 }
+    else if dt == dtype::FLOAT16 { 10 }
+    else if dt == dtype::BFLOAT16 { 7 }
+    else { panic!("TGERR: bits_to_rand unsupported dtype {dt:?}") }
+}
+
+fn uint_for_itemsize(dt: DTypeId) -> DTypeId {
+    match dt.itemsize() {
+        1 => dtype::UINT8,
+        2 => dtype::UINT16,
+        4 => dtype::UINT32,
+        8 => dtype::UINT64,
+        n => panic!("TGERR: bits_to_rand bad itemsize {n}"),
+    }
+}
+
+/// `bitcast(1.0, dtype, uint_dtype)` (rand.py:36) — bits of one in the target.
+fn float_one_bits(dt: DTypeId) -> i64 {
+    if dt == dtype::FLOAT64 { 0x3FF0_0000_0000_0000u64 as i64 }
+    else if dt == dtype::FLOAT32 { 0x3F80_0000 }
+    else if dt == dtype::FLOAT16 { 0x3C00 }
+    else if dt == dtype::BFLOAT16 { 0x3F80 }
+    else { panic!("TGERR: bits_to_rand unsupported dtype {dt:?}") }
+}
+
+/// `RandMixin._bits_to_rand` (rand.py:31): take the top mantissa bits and OR in
+/// the float exponent, then subtract one to land in `[0, 1)`.
+fn bits_to_rand_graph(ctx: &mut UOpCtx, bits: &Tensor, shape: &[SVal], dt: DTypeId) -> Tensor {
+    let uint_bits = bits.bitcast(ctx, uint_for_itemsize(dt));
+    let shifted = uint_bits.rshift(ctx, dt.bitsize() as i64 - finfo_nmant(dt));
+    let ored = shifted.bitwise_or(ctx, float_one_bits(dt));
+    let numel = numel_int(shape);
+    ored.bitcast(ctx, dt)
+        .getitem(ctx, &[Ix::slice(Some(0), Some(numel), 1)])
+        .sub(ctx, 1.0)
+        .reshape(ctx, shape)
+}
+
+/// `RandMixin._rand` + `rand` (rand.py:39/50) as a device graph. The seed and
+/// pre-increment counter are host u32 pairs (`_next_counter`, tensor.py:642);
+/// they are staged as small device constant tensors, exactly the values
+/// tinygrad's per-device seed/counter tensors hold.
+pub fn rand_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+    let dt = dtype_opt.unwrap_or_else(dtype::default_float);
+    let dev = creation::canonicalize_device(device);
+    let numel = numel_int(shape);
+    let num = (numel * dt.itemsize() as i64 + 3) / 4;
+    let (key, counter) = next_counter(&dev, num as u32);
+    let key_t = Tensor::from_slice(ctx, &[key.0, key.1], Some(dtype::UINT32), Some(&dev));
+    let counter_t = Tensor::from_slice(ctx, &[counter.0, counter.1], Some(dtype::UINT32), Some(&dev));
+    let bits = random_bits_graph(ctx, &key_t, &counter_t, num);
+    bits_to_rand_graph(ctx, &bits, shape, dt).contiguous(ctx)
+}
+
+/// Host evaluator (`rand.rs` reference path): INTERP carries f64 lanes and
+/// cannot represent the uint64 threefry pack exactly, so on INTERP the integer
+/// sequence is computed on the host and staged with `from_slice` (the values are
+/// identical to the graph route).
+fn rand_host(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
     let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
     let isz = dt.itemsize() as i64;
@@ -196,6 +303,17 @@ pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device
         out
     } else {
         out.reshape(ctx, shape)
+    }
+}
+
+/// `Tensor.rand` (rand.py:50): the device-graph route on hardware backends,
+/// where `uint64` is exact; the host evaluator on INTERP (see [`rand_host`]).
+pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+    let dev = creation::canonicalize_device(device);
+    if dev == "INTERP" {
+        rand_host(ctx, shape, dtype_opt, Some(&dev))
+    } else {
+        rand_graph(ctx, shape, dtype_opt, Some(&dev))
     }
 }
 
@@ -275,19 +393,10 @@ pub fn randint(
 ) -> Tensor {
     assert!(low < high, "TGERR: Tensor.randint requires low < high, got low={low}, high={high}");
     let dt = dtype_opt.unwrap_or(dtype::INT32);
-    let dev = creation::canonicalize_device(device);
-    let numel = numel_int(shape);
-    let (key, counter) = next_counter(&dev, numel as u32);
-    let bits = random_bits(key, counter, numel as u32);
-    let r = bits_to_rand_f32(&bits, numel as usize);
-    let range = (high - low) as f32;
-    let vals: Vec<i32> = r.iter().map(|&v| ((range * v) as i32) + low).collect();
-    let out = Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev));
-    if shape.len() == 1 && shape[0].clone().as_i64().unwrap_or(1) == numel {
-        out
-    } else {
-        out.reshape(ctx, shape)
-    }
+    // `randint` is `uniform(low, high, dtype)` (rand.py:122) =
+    // `((high-low) * rand()).cast(dtype) + low`, so it follows `rand`'s
+    // per-device route and is a pure graph (JIT-capturable) on hardware.
+    uniform(ctx, shape, low as f64, high as f64, Some(dt), device)
 }
 
 // ---------------------------------------------------------------------------

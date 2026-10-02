@@ -530,6 +530,28 @@ fn exec_launch(
                     _ => panic!("TGERR: interp cast src"),
                 };
             }
+            Ops::Bitcast => {
+                // reinterpret the storage bits: f64 lane -> src_dtype bytes ->
+                // dst_dtype value. Covers int<->float (threefry mantissa
+                // assembly) on the f64-valued interpreter.
+                let src_dt = ctx.dt_of(&srcs[0]);
+                let dst_dt = ctx.dt_of(u);
+                let bc = |v: f64| -> f64 {
+                    let bytes = to_storage_scalar(v, src_dt);
+                    from_storage_scalar(&bytes, dst_dt)
+                };
+                match &src_vals[0] {
+                    Val::S(vs) => {
+                        let r: Vec<f64> = vs.iter().map(|&v| bc(v)).collect();
+                        values.insert(u.clone(), Val::S(r));
+                    }
+                    Val::V(ls) => {
+                        let r: Vec<Vec<f64>> = ls.iter().map(|tv| tv.iter().map(|&v| bc(v)).collect()).collect();
+                        values.insert(u.clone(), Val::V(r));
+                    }
+                    _ => panic!("TGERR: interp bitcast src"),
+                };
+            }
             Ops::Stack => {
                 // values[u] = src_values (list of src values)
                 let mut lanes: Vec<Vec<f64>> = Vec::new();
