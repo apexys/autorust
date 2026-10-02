@@ -844,6 +844,33 @@ runs once, not every process). Until those land, `BEAM` is a research knob; the
 default `hand_coded_optimizations` path is unchanged and the `pool` fix (§8.19)
 is the real throughput win.
 
+### 8.21 Dataset re-upload — the MNIST step bottleneck (DONE)
+After the `pool` fix and the bf16 work, a steady-state step was still ~1.5 s at
+BS=512, and `time` showed `user+sys ≈ wall` — the port was **CPU-bound**, not
+GPU-bound. Instrumenting the realize path (temporary `TG_PROFILE`) split a step:
+`callify` ~18 ms, `create_linear_with_vars` (rangeify/schedule) ~410 ms,
+`run_linear` (exec) ~710 ms — and inside exec, `exec_copy` was **~700 ms** while
+all kernel launches totalled **~9 ms**. The copies were 14/step for ~282 MB, of
+which **6 × 47 MB**: the full 60000×784 uint8 train set, `PYTHON -> CL`.
+
+Cause: tinygrad's `nn.datasets.mnist` returns tensors realized on the default
+device (`Tensor.from_url` uploads the file once), so later steps index resident
+storage. The port's `load_images`/`load_labels` returned **lazy** tensors; the
+`from_slice` `PYTHON -> device` COPY is faithful (tinygrad's `Tensor(list,
+device=NV)` is the same COPY), but a lazy dataset tensor re-runs that whole-file
+COPY on every use — and the training step realizes the forward six times (the
+`BatchNorm.forward` running-stat `assign`s), so 6 × 47 MB/step.
+
+Fix (`examples/mnist.rs`): `load_images`/`load_labels` freeze each dataset once
+with `realize_fresh(...).realize_to_leaf(...)` (device-backed leaf; the precedent
+is tinygrad's realized `from_url` result / `Tensor.realize` replacing the uop with
+a BUFFER). **BS=512 steady state ~1.53 s/step -> ~0.80 s/step** (sys 10 s -> 0.8 s
+per 15 steps); FAST preset ~0.35 s/step; losses/accuracy identical.
+
+**What a step costs now** (BS=512): scheduler (`create_linear_with_vars`/rangeify)
+**~430 ms**, callify ~18 ms, device exec ~15 ms, copies ~0. The port is now
+**scheduler-bound**.
+
 ---
 
 ## 9. Next steps
@@ -975,8 +1002,15 @@ GPU training throughput; items are independent.
    `Estimates.ops` compute filter + `BEAM_UOPS_MAX`, the TC/SWAP/THREAD/PADTO/NOLOCALS
    actions, and the **disk cache** so a search runs once. Today a large-shape search
    stresses the CL driver (segfault); see §8.20.
-3. **`TinyJit`** (capture the LINEAR schedule + buffers, replay with fresh inputs). Removes
-   the per-step `graph_rewrite`/rangeify host cost measured in §8.17.
+3. **`TinyJit` — now the top throughput item.** §8.21 shows a steady-state BS=512 step is
+   **scheduler-bound**: `create_linear_with_vars` (rangeify/kernelize) ~430 ms, device exec
+   ~15 ms, copies ~0. Porting `TinyJit` (capture the LINEAR schedule + buffers, replay with
+   fresh inputs) removes that per-step `graph_rewrite`/rangeify host cost, mirroring why
+   tinygrad's `beautiful_mnist` (~0.1–0.2 s/step) is ~5–8x ahead. Prerequisite gap: tinygrad's
+   `Tensor.realize` replaces the tensor's uop with a device BUFFER; the port only sets
+   `realized_buffer`, which op construction ignores (this is why §8.21 needed
+   `realize_to_leaf`). A faithful `realize` (uop -> realized buffer) would remove the
+   `realize_to_leaf` host round-trip and is the natural basis for jit input handling.
 4. **Complete the `nn` layer types** (`nn/__init__.py`): missing `ConvTranspose2d`,
    the `Conv1d`/`ConvTranspose1d` helpers, `InstanceNorm`, `LayerNorm2d`, `RMSNorm`,
    `Embedding`, `LSTMCell`. Ported so far: `BatchNorm`, `Conv2d`, `Linear`, `GroupNorm`,
