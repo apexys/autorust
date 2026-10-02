@@ -40,7 +40,7 @@ impl Module for Net {
 /// A parameter is a buffer-backed leaf: its storage base (movement stripped) is
 /// a `PARAM`/`BUFFER` node, not a computed expression.
 fn is_leaf(ctx: &UOpCtx, t: &Tensor) -> bool {
-    matches!(ctx.op_of(&ctx.base(&t.uop)), Ops::Param | Ops::Buffer)
+    matches!(ctx.op_of(&ctx.base(&t.uop())), Ops::Param | Ops::Buffer)
 }
 
 #[test]

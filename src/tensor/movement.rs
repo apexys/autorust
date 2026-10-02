@@ -916,7 +916,7 @@ fn advanced_getitem(ctx: &mut UOpCtx, x: UopId, tops: &[(usize, super::Tensor)])
             let xr = x_t.reshape(ctx, mid_shape);
             let mut idxs: Vec<Ix> = pre.iter().map(|_| Ix::All).collect();
             idxs.push(Ix::Tensor(valid.where_(ctx, &linear_idx, 0i64)));
-            let xr_u = xr.uop.clone();
+            let xr_u = xr.uop().clone();
             let gx = getitem(ctx, xr_u, &idxs);
             let x2 = super::Tensor::from_uop(ctx, gx);
 
@@ -924,7 +924,7 @@ fn advanced_getitem(ctx: &mut UOpCtx, x: UopId, tops: &[(usize, super::Tensor)])
             vshape.extend(big_shape.iter().cloned());
             vshape.extend(vec![SVal::I(1); post.len()]);
             let v = valid.reshape(ctx, vshape);
-            return v.where_(ctx, &x2, 0i64).uop;
+            return v.where_(ctx, &x2, 0i64).uop();
         }
     }
 
@@ -964,7 +964,7 @@ fn advanced_getitem(ctx: &mut UOpCtx, x: UopId, tops: &[(usize, super::Tensor)])
             .collect();
         x_adv = x_adv.permute(ctx, &order);
     }
-    x_adv.uop
+    x_adv.uop()
 }
 
 fn size_sym_or(s: &SVal) -> bool {

@@ -9,7 +9,7 @@ fn main() {
         let mut ctx = UOpCtx::new();
         let t = Tensor::arange(&mut ctx, 0.0, Some(6.0), 1.0, None).reshape(&mut ctx, [2usize, 3]).sum(&mut ctx, None, false, None);
         let mut cache = ProgCache::default();
-        let vals = tensor_values(&mut ctx, t.uop, &mut BufTable::default(), &mut cache);
+        let vals = tensor_values(&mut ctx, t.uop(), &mut BufTable::default(), &mut cache);
         println!("VALUES: {vals:?}");
     }));
     match res {

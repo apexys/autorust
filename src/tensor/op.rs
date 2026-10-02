@@ -75,7 +75,7 @@ impl Tensor {
     /// `Tensor.eq(other)` — elementwise equality (tinygrad `__eq__`).
     pub fn eq(&self, ctx: &mut UOpCtx, other: impl Into<super::TensorAddArg>) -> Tensor {
         let o = self.cmp_operand(ctx, other);
-        { let __u = super::elementwise::eq(ctx, self.uop.clone(), o); Tensor::from_uop(ctx, __u) }
+        { let __u = super::elementwise::eq(ctx, self.uop().clone(), o); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.argmax(axis, keepdim)` (op.py:866-891): index of the max along
@@ -97,7 +97,7 @@ impl Tensor {
         let arr = ar.reshape(ctx, sh);
         let idx = m.mul(ctx, &arr);
         let mx = idx.max(ctx, Some(&[axis]), keepdim);
-        let c_u = ctx.const_like(mx.uop.clone(), ConstVal::Int(c as i128));
+        let c_u = ctx.const_like(mx.uop().clone(), ConstVal::Int(c as i128));
         let c_t = Tensor::from_uop(ctx, c_u);
         c_t.sub(ctx, &mx).cast(ctx, dtype::default_int())
     }
@@ -131,7 +131,7 @@ impl Tensor {
             return base;
         }
         // `pad(x.const_like(True, bool), pads).where(base, value)`
-        let mask_u = ctx.const_like_dt(x.uop.clone(), ConstVal::Bool(true), Some(dtype::BOOL));
+        let mask_u = ctx.const_like_dt(x.uop().clone(), ConstVal::Bool(true), Some(dtype::BOOL));
         let mask = Tensor::from_uop(ctx, mask_u).pad(ctx, &pads);
         mask.where_(ctx, base, value)
     }
@@ -306,7 +306,7 @@ impl Tensor {
         let loss_mask = if ignore_index != -1 {
             y.ne(ctx, ignore_index)
         } else {
-            let u = ctx.const_like_dt(y.uop.clone(), ConstVal::Bool(true), Some(dtype::BOOL));
+            let u = ctx.const_like_dt(y.uop().clone(), ConstVal::Bool(true), Some(dtype::BOOL));
             Tensor::from_uop(ctx, u)
         };
         let num_classes = self_shape[class_axis].clone().as_i64().unwrap_or(0);

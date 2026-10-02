@@ -1,7 +1,7 @@
 //! In-place parameter updates (`Tensor::assign`) — the faithful tinygrad path.
 //!
 //! tinygrad's `Tensor.assign` (tensor.py:436-466) builds the write as a
-//! `STORE`+`AFTER` effect — `self.uop.after(self.uop.store(x.uop))` — so the
+//! `STORE`+`AFTER` effect — `self.uop().after(self.uop().store(x.uop()))` — so the
 //! scheduler *fuses* the parameter write into the schedule and orders any read
 //! of the parameter before the store. The port used to realize the update and
 //! `buffer_copy_into` the parameter instead (a separate pass). These tests pin

@@ -55,7 +55,7 @@ fn adam_step_with_bf16_param_is_finite() {
     let mut sess = Session::new();
     let p = Tensor::from_slice(&mut ctx, &[1.0f32, -2.0, 0.5, 3.0], Some(dtype::BFLOAT16), None).to_param(&mut ctx);
     let g = Tensor::from_slice(&mut ctx, &[0.5f32, 0.25, -0.75, 1.0], Some(dtype::BFLOAT16), None);
-    ctx.set_grad(&p.uop, g.uop.clone());
+    ctx.set_grad(&p.uop(), g.uop().clone());
     let opt = Adam::new(&mut ctx, vec![p.clone()], 0.001);
     for _ in 0..3 {
         opt.step(&mut ctx, &mut sess);
@@ -77,5 +77,5 @@ fn addrspace_derived_memoizes_shared_subgraphs() {
     for _ in 0..40 {
         x = x.add(&mut ctx, TensorAddArg::T(x.clone()));
     }
-    let _ = ctx.addrspace_derived(x.uop.clone());
+    let _ = ctx.addrspace_derived(x.uop().clone());
 }

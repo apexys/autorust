@@ -74,7 +74,7 @@ pub fn full(ctx: &mut UOpCtx, shape: &[SVal], fill_value: ConstVal, dtype: Optio
     });
     let val = Tensor::const_(ctx, fill_value, Some(dt));
     let ones_shape: Vec<SVal> = vec![SVal::I(1); new_shape.len()];
-    let val = { let __u = movement::reshape(ctx, val.uop, &ones_shape); Tensor::from_uop(ctx, __u) };
+    let val = { let __u = movement::reshape(ctx, val.uop(), &ones_shape); Tensor::from_uop(ctx, __u) };
     let val = val.expand(ctx, new_shape.clone());
     if !buffer {
         return val;
@@ -83,7 +83,7 @@ pub fn full(ctx: &mut UOpCtx, shape: &[SVal], fill_value: ConstVal, dtype: Optio
     // (None)) -> the default device; dtype = strong_dtype(val.dtype)
     let dev = canonicalize_device(device);
     let ret = empty(ctx, &new_shape, dtype::strong_dtype(dt), &dev);
-    let store = super::store(ctx, ret.clone(), val.uop, None);
+    let store = super::store(ctx, ret.clone(), val.uop(), None);
     { let __u = super::after(ctx, ret, vec![store]); Tensor::from_uop(ctx, __u) }
 }
 
@@ -153,7 +153,7 @@ pub fn arange(ctx: &mut UOpCtx, start: f64, stop: Option<f64>, step: f64, dtype:
     }
     // full((output_len,), step, buffer=False)._cumalu(0, ADD) + (start - step)
     let t = full(ctx, &[SVal::I(output_len)], const_f64(step, dt), Some(dt), None, false);
-    let cum = super::reduce::cumalu(ctx, t.uop, 0, Ops::Add);
+    let cum = super::reduce::cumalu(ctx, t.uop(), 0, Ops::Add);
     let start_step = const_f64(start - step, dt);
     let added = super::elementwise::binop_c(ctx, Ops::Add, cum, start_step);
     { let __u = ctx.cast(added, dt); Tensor::from_uop(ctx, __u) }
@@ -167,7 +167,7 @@ pub fn eye(ctx: &mut UOpCtx, n: i64, m: Option<i64>, dtype: Option<DTypeId>) -> 
     let out_dtype = dtype.unwrap_or_else(dtype::default_float);
     let a = arange(ctx, n as f64, None, 1.0, None).unsqueeze(ctx, -1);
     let b = arange(ctx, m_ as f64, None, 1.0, None);
-    let eq = super::elementwise::eq(ctx, a.uop, b.uop);
+    let eq = super::elementwise::eq(ctx, a.uop(), b.uop());
     { let __u = ctx.cast(eq, out_dtype); Tensor::from_uop(ctx, __u) }
 }
 
@@ -179,8 +179,8 @@ pub fn _tri(ctx: &mut UOpCtx, r: SVal, c: SVal, diagonal: i64) -> Tensor {
     let a = arange(ctx, ri, None, 1.0, None).unsqueeze(ctx, -1);
     let b = arange(ctx, ci, None, 1.0, None);
     let diag_val = ConstVal::Int(diagonal as i128);
-    let added = super::elementwise::binop_c(ctx, Ops::Add, a.uop, diag_val);
-    let le = super::elementwise::le(ctx, added, b.uop); // a+diag <= arange(c)
+    let added = super::elementwise::binop_c(ctx, Ops::Add, a.uop(), diag_val);
+    let le = super::elementwise::le(ctx, added, b.uop()); // a+diag <= arange(c)
     { let __u = le; Tensor::from_uop(ctx, __u) }
 }
 
@@ -195,7 +195,7 @@ pub fn linspace(ctx: &mut UOpCtx, start: f64, stop: f64, steps: i64, dtype: Opti
     // (start + arange(steps, float) * ((stop - start) / (steps - 1))).cast(dtype)
     let idx = arange(ctx, steps as f64, None, 1.0, Some(dtype::default_float()));
     let scale = (stop - start) / (steps - 1) as f64;
-    let scaled = super::elementwise::binop_c(ctx, Ops::Mul, idx.uop, const_f64(scale, dtype::default_float()));
+    let scaled = super::elementwise::binop_c(ctx, Ops::Mul, idx.uop(), const_f64(scale, dtype::default_float()));
     let biased = super::elementwise::binop_c(ctx, Ops::Add, scaled, const_f64(start, dtype::default_float()));
     { let __u = ctx.cast(biased, dt); Tensor::from_uop(ctx, __u) }
 }
@@ -207,7 +207,7 @@ pub fn triu(ctx: &mut UOpCtx, x: UopId, diagonal: i64) -> Tensor {
     let (r, c) = (<SInt as Clone>::clone(&shape[shape.len() - 2]), <SInt as Clone>::clone(&shape[shape.len() - 1]));
     let tri = _tri(ctx, r, c, diagonal);
     let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), None);
-    { let __u = ctx.where_(tri.uop, x, zero); Tensor::from_uop(ctx, __u) }
+    { let __u = ctx.where_(tri.uop(), x, zero); Tensor::from_uop(ctx, __u) }
 }
 
 /// `OpMixin.tril(diagonal=0)` (op.py:259-281):
@@ -217,7 +217,7 @@ pub fn tril(ctx: &mut UOpCtx, x: UopId, diagonal: i64) -> Tensor {
     let (r, c) = (<SInt as Clone>::clone(&shape[shape.len() - 2]), <SInt as Clone>::clone(&shape[shape.len() - 1]));
     let tri = _tri(ctx, r, c, diagonal + 1);
     let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), None);
-    { let __u = ctx.where_(tri.uop, zero, x); Tensor::from_uop(ctx, __u) }
+    { let __u = ctx.where_(tri.uop(), zero, x); Tensor::from_uop(ctx, __u) }
 }
 
 /// ConstVal of the right kind for `dt` from an f64 step/start value

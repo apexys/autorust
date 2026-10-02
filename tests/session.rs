@@ -120,7 +120,7 @@ fn node_side_data_dies_with_the_node() {
     let mut ctx = UOpCtx::new();
     let t = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
     let bytes = {
-        let mut u = t.uop.clone();
+        let mut u = t.uop().clone();
         while u.op != Ops::Buffer {
             u = u.srcs[0].clone();
         }
@@ -129,10 +129,11 @@ fn node_side_data_dies_with_the_node() {
 
     {
         let g = ctx.cint(7);
-        ctx.set_grad(&t.uop, g);
+        ctx.set_grad(&t.uop(), g);
     }
     let grad_weak = {
-        let b = t.uop.node.grad.borrow();
+        let u = t.uop();
+        let b = u.node.grad.borrow();
         Rc::downgrade(&b.as_ref().expect("grad attached to the node").node)
     };
 

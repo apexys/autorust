@@ -31,7 +31,7 @@ fn run_case(init: &[f32], grad: &[f32], lr: f32, steps: usize, name: &str) -> Ve
         other => panic!("unknown optimizer {other}"),
     };
 
-    ctx.set_grad(&p.uop, g.uop.clone());
+    ctx.set_grad(&p.uop(), g.uop().clone());
     for _ in 0..steps {
         opt.step(&mut ctx, &mut sess);
     }
@@ -82,7 +82,7 @@ fn schedule_step_co_realizes_loss_and_update() {
     let mut sess = Session::new();
     let w = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0], None, None).to_param(&mut ctx);
     let g = Tensor::from_slice(&mut ctx, &[0.5f32, -0.5], None, None);
-    ctx.set_grad(&w.uop, g.uop.clone());
+    ctx.set_grad(&w.uop(), g.uop().clone());
     let opt = SGD::new(vec![w.clone()], 0.1);
 
     // A loss that reads the parameter; co-realized with the update.

@@ -156,7 +156,7 @@ fn main() {
             // tensor twice (tolist semantics); caches must prevent recompiles.
             let mut bufs = autorust::runtime::buffer::BufTable::default();
             let mut cache = autorust::engine::realize::ProgCache::default();
-            let last = &tensors.last().expect("TGERR: empty program").uop.clone();
+            let last = &tensors.last().expect("TGERR: empty program").uop().clone();
             let vals1 = autorust::engine::realize::tensor_values(&mut ctx, last.clone(), &mut bufs, &mut cache);
             let vals2 = autorust::engine::realize::tensor_values(&mut ctx, last.clone(), &mut bufs, &mut cache);
             let outs_json: Vec<String> = [&vals1, &vals2]
@@ -174,9 +174,9 @@ fn main() {
     if prog.mode.as_deref() == Some("schedule") || prog.mode.as_deref() == Some("schedule_last") {
         // full scheduler pipeline: sink all tensors, callify, schedule, resolve
         let sink_srcs: Vec<autorust::uop::UopId> = if prog.mode.as_deref() == Some("schedule_last") {
-            vec![tensors.last().expect("TGERR: empty program").uop.clone()]
+            vec![tensors.last().expect("TGERR: empty program").uop().clone()]
         } else {
-            tensors.iter().map(|t| t.uop.clone()).collect()
+            tensors.iter().map(|t| t.uop().clone()).collect()
         };
         let big_sink = autorust::tensor::sink(&mut ctx, sink_srcs);
         let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
@@ -229,7 +229,7 @@ fn main() {
         println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
         return;
     }
-    let root = tensors.last().map(|t| t.uop.clone()).unwrap_or_else(|| panic!("TGERR: empty program"));
+    let root = tensors.last().map(|t| t.uop().clone()).unwrap_or_else(|| panic!("TGERR: empty program"));
     ctx.g.roots = vec![root];
     let flat = ctx.g.to_flat();
     println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));

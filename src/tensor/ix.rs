@@ -43,7 +43,7 @@ impl PartialEq for Ix {
             (Ix::Range { start: a0, stop: a1, step: a2 }, Ix::Range { start: b0, stop: b1, step: b2 }) => {
                 a0 == b0 && a1 == b1 && a2 == b2
             }
-            (Ix::Tensor(a), Ix::Tensor(b)) => a.uop == b.uop,
+            (Ix::Tensor(a), Ix::Tensor(b)) => a.uop() == b.uop(),
             _ => false,
         }
     }

@@ -375,8 +375,8 @@ impl Tensor {
     /// `Tensor.detach`: a new tensor with the same data but cut off from the
     /// autograd graph (`elementwise.py:39`, `alu(Ops.DETACH)`).
     pub fn detach(&self, ctx: &mut UOpCtx) -> Tensor {
-        let dt = ctx.dt_of(&self.uop);
-        { let __u = ctx.uop(Ops::Detach, Some(dt), vec![self.uop.clone()], Arg::None); Tensor::from_uop(ctx, __u) }
+        let dt = ctx.dt_of(&self.uop());
+        { let __u = ctx.uop(Ops::Detach, Some(dt), vec![self.uop().clone()], Arg::None); Tensor::from_uop(ctx, __u) }
     }
 
     /// `Tensor.gradient(*targets, gradient)` (`op.py:453`): gradients of `self`
@@ -384,16 +384,16 @@ impl Tensor {
     pub fn gradient(&self, ctx: &mut UOpCtx, targets: &[Tensor], gradient: Option<Tensor>) -> Vec<Tensor> {
         assert!(self.shape(ctx).numel_int().unwrap_or(0) == 1 || gradient.is_some(), "TGERR: gradient() on a non-scalar needs an explicit gradient");
         let root_grad = match gradient {
-            Some(gt) => gt.uop,
-            None => ctx.const_like(self.uop.clone(), ConstVal::Float(1.0)),
+            Some(gt) => gt.uop(),
+            None => ctx.const_like(self.uop().clone(), ConstVal::Float(1.0)),
         };
-        let tset: HashSet<UopId> = targets.iter().map(|t| t.uop.clone()).collect();
-        let grads = compute_gradient(ctx, self.uop.clone(), root_grad, &tset);
+        let tset: HashSet<UopId> = targets.iter().map(|t| t.uop().clone()).collect();
+        let grads = compute_gradient(ctx, self.uop().clone(), root_grad, &tset);
         targets
             .iter()
-            .map(|t| match grads.get(&t.uop) {
+            .map(|t| match grads.get(&t.uop()) {
                 Some(g) => { let __u = g; Tensor::from_uop(ctx, __u.clone()) },
-                None => { let __u = ctx.const_like(t.uop.clone(), ConstVal::Float(0.0)); Tensor::from_uop(ctx, __u) },
+                None => { let __u = ctx.const_like(t.uop().clone(), ConstVal::Float(0.0)); Tensor::from_uop(ctx, __u) },
             })
             .collect()
     }
@@ -403,12 +403,12 @@ impl Tensor {
     pub fn backward(&self, ctx: &mut UOpCtx, targets: &[Tensor], gradient: Option<Tensor>) {
         let gs = self.gradient(ctx, targets, gradient);
         for (t, g) in targets.iter().zip(gs) {
-            match ctx.grad(&t.uop) {
+            match ctx.grad(&t.uop()) {
                 Some(prev) => {
-                    let sum = ctx.add(prev, g.uop);
-                    ctx.set_grad(&t.uop, sum);
+                    let sum = ctx.add(prev, g.uop());
+                    ctx.set_grad(&t.uop(), sum);
                 }
-                None => ctx.set_grad(&t.uop, g.uop),
+                None => ctx.set_grad(&t.uop(), g.uop()),
             }
         }
     }

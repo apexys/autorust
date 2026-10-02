@@ -43,12 +43,12 @@ pub trait Optim {
         let params = self.params();
         let grads: Vec<Tensor> = params
             .iter()
-            .map(|p| match ctx.grad(&p.uop) {
+            .map(|p| match ctx.grad(&p.uop()) {
                 Some(g) => Tensor::from_uop(ctx, g),
                 // Missing grad → zero, so `_apply_update` leaves the param as-is
                 // (tinygrad would `unwrap` and raise; the port stays forgiving).
                 None => {
-                    let z = ctx.const_like(p.uop.clone(), ConstVal::Float(0.0));
+                    let z = ctx.const_like(p.uop().clone(), ConstVal::Float(0.0));
                     Tensor::from_uop(ctx, z)
                 }
             })
@@ -99,7 +99,7 @@ pub trait Optim {
     /// `Optimizer.zero_grad`: clear each parameter's attached gradient.
     fn zero_grad(&self, ctx: &UOpCtx) {
         for p in self.params() {
-            ctx.clear_grad(&p.uop);
+            ctx.clear_grad(&p.uop());
         }
     }
 }
@@ -333,7 +333,7 @@ impl Optim for SGD {
         self.inner
             .params()
             .iter()
-            .map(|p| match ctx.grad(&p.uop) {
+            .map(|p| match ctx.grad(&p.uop()) {
                 Some(g) => {
                     let g = Tensor::from_uop(ctx, g);
                     let g_lr = g.mul(ctx, self.inner.lr as f64);

@@ -51,8 +51,8 @@ fn run_prog(name: &str, dev: Dev, build: impl FnOnce(&mut UOpCtx, Dev) -> Tensor
     let mut ctx = UOpCtx::new();
     let t = build(&mut ctx, dev);
     let mut cache = ProgCache::default();
-    let vals = tensor_values(&mut ctx, t.uop.clone(), &mut BufTable::default(), &mut cache);
-    let shape: Vec<usize> = ctx.shape_of(&t.uop).expect("shape").iter().map(|s| s.clone().as_usize().expect("static shape")).collect();
+    let vals = tensor_values(&mut ctx, t.uop().clone(), &mut BufTable::default(), &mut cache);
+    let shape: Vec<usize> = ctx.shape_of(&t.uop()).expect("shape").iter().map(|s| s.clone().as_usize().expect("static shape")).collect();
     let _ = name;
     (vals, shape)
 }
@@ -65,31 +65,31 @@ fn op_program(ctx: &mut UOpCtx, dev: Dev, op: Ops) -> (Tensor, &'static str) {
         Ops::Neg => (fx(ctx, dev).neg(ctx), "op_neg"),
         Ops::Exp2 => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::exp2(ctx, x.uop); Tensor::from_uop(ctx, __u) }, "op_exp2")
+            ({ let __u = elementwise::exp2(ctx, x.uop()); Tensor::from_uop(ctx, __u) }, "op_exp2")
         }
         Ops::Log2 => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::log2(ctx, x.uop); Tensor::from_uop(ctx, __u) }, "op_log2")
+            ({ let __u = elementwise::log2(ctx, x.uop()); Tensor::from_uop(ctx, __u) }, "op_log2")
         }
         Ops::Sqrt => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::sqrt(ctx, x.uop); Tensor::from_uop(ctx, __u) }, "op_sqrt")
+            ({ let __u = elementwise::sqrt(ctx, x.uop()); Tensor::from_uop(ctx, __u) }, "op_sqrt")
         }
         Ops::Sin => {
             let x = fx(ctx, dev);
-            ({ let __u = elementwise::sin(ctx, x.uop); Tensor::from_uop(ctx, __u) }, "op_sin")
+            ({ let __u = elementwise::sin(ctx, x.uop()); Tensor::from_uop(ctx, __u) }, "op_sin")
         }
         Ops::Trunc => {
             let x = fx(ctx, dev);
-            ({ let __u = elementwise::trunc(ctx, x.uop); Tensor::from_uop(ctx, __u) }, "op_trunc")
+            ({ let __u = elementwise::trunc(ctx, x.uop()); Tensor::from_uop(ctx, __u) }, "op_trunc")
         }
         Ops::Reciprocal => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::reciprocal(ctx, x.uop); Tensor::from_uop(ctx, __u) }, "op_reciprocal")
+            ({ let __u = elementwise::reciprocal(ctx, x.uop()); Tensor::from_uop(ctx, __u) }, "op_reciprocal")
         }
         Ops::Pow => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::pow_c(ctx, x.uop, ConstVal::Float(1.5)); Tensor::from_uop(ctx, __u) }, "op_pow")
+            ({ let __u = elementwise::pow_c(ctx, x.uop(), ConstVal::Float(1.5)); Tensor::from_uop(ctx, __u) }, "op_pow")
         }
         Ops::Add => {
             let b = fx2(ctx, dev);
@@ -98,7 +98,7 @@ fn op_program(ctx: &mut UOpCtx, dev: Dev, op: Ops) -> (Tensor, &'static str) {
         Ops::Sub => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::sub(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_sub")
+            ({ let __u = elementwise::sub(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_sub")
         }
         Ops::Mul => {
             let b = fx2(ctx, dev);
@@ -107,70 +107,70 @@ fn op_program(ctx: &mut UOpCtx, dev: Dev, op: Ops) -> (Tensor, &'static str) {
         Ops::Fdiv => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::div(ctx, a.uop, b.uop, None); Tensor::from_uop(ctx, __u) }, "op_fdiv")
+            ({ let __u = elementwise::div(ctx, a.uop(), b.uop(), None); Tensor::from_uop(ctx, __u) }, "op_fdiv")
         }
         Ops::Cmplt => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::lt(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_cmplt")
+            ({ let __u = elementwise::lt(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_cmplt")
         }
         Ops::Cmpeq => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::eq(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_cmpeq")
+            ({ let __u = elementwise::eq(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_cmpeq")
         }
         Ops::Cmpne => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::ne(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_cmpne")
+            ({ let __u = elementwise::ne(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_cmpne")
         }
         Ops::Max => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::maximum(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_max")
+            ({ let __u = elementwise::maximum(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_max")
         }
         Ops::Where => {
             let a = fx(ctx, dev);
             let z = elementwise::ufix(ctx, ConstVal::Float(0.0));
-            let c = elementwise::gt(ctx, a.uop, z);
+            let c = elementwise::gt(ctx, a.uop(), z);
             let x = fx2(ctx, dev);
             let y = px(ctx, dev);
-            ({ let __u = elementwise::where_(ctx, c, x.uop, y.uop); Tensor::from_uop(ctx, __u) }, "op_where")
+            ({ let __u = elementwise::where_(ctx, c, x.uop(), y.uop()); Tensor::from_uop(ctx, __u) }, "op_where")
         }
         Ops::Shl => {
             let a = ix(ctx, dev);
             let b = sh(ctx, dev);
-            ({ let __u = elementwise::binop(ctx, Ops::Shl, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_shl")
+            ({ let __u = elementwise::binop(ctx, Ops::Shl, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_shl")
         }
         Ops::Shr => {
             let a = ix(ctx, dev);
             let b = sh(ctx, dev);
-            ({ let __u = elementwise::binop(ctx, Ops::Shr, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_shr")
+            ({ let __u = elementwise::binop(ctx, Ops::Shr, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_shr")
         }
         Ops::And => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::and(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_and")
+            ({ let __u = elementwise::and(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_and")
         }
         Ops::Or => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::or(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_or")
+            ({ let __u = elementwise::or(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_or")
         }
         Ops::Xor => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::xor(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_xor")
+            ({ let __u = elementwise::xor(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_xor")
         }
         Ops::Floordiv => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::div(ctx, a.uop, b.uop, Some("floor")); Tensor::from_uop(ctx, __u) }, "op_floordiv")
+            ({ let __u = elementwise::div(ctx, a.uop(), b.uop(), Some("floor")); Tensor::from_uop(ctx, __u) }, "op_floordiv")
         }
         Ops::Floormod => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::mod_(ctx, a.uop, b.uop); Tensor::from_uop(ctx, __u) }, "op_floormod")
+            ({ let __u = elementwise::mod_(ctx, a.uop(), b.uop()); Tensor::from_uop(ctx, __u) }, "op_floormod")
         }
         Ops::Mulacc => {
             let b = fx2(ctx, dev);
@@ -203,16 +203,16 @@ fn dt_program(ctx: &mut UOpCtx, dev: Dev, dt: DTypeId, kind: &str) -> (Tensor, S
     match kind {
         "roundtrip" => {
             let x = staging(ctx, dev, dt);
-            ({ let __u = ctx.cast(x.uop, dt); Tensor::from_uop(ctx, __u) }, name(kind))
+            ({ let __u = ctx.cast(x.uop(), dt); Tensor::from_uop(ctx, __u) }, name(kind))
         }
         "ew" => {
             let x = fv(ctx, dev);
-            let t = { let __u = ctx.cast(x.uop, dt); Tensor::from_uop(ctx, __u) };
+            let t = { let __u = ctx.cast(x.uop(), dt); Tensor::from_uop(ctx, __u) };
             (t.mul(ctx, 2.0).add(ctx, 1.0), name(kind))
         }
         "sum" => {
             let x = fv(ctx, dev);
-            let t = { let __u = ctx.cast(x.uop, dt); Tensor::from_uop(ctx, __u) };
+            let t = { let __u = ctx.cast(x.uop(), dt); Tensor::from_uop(ctx, __u) };
             (t.sum(ctx, None, false, None), name(kind))
         }
         other => panic!("unknown dtype program kind {other}"),
@@ -347,37 +347,37 @@ fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>,
             }
             "cast_f2i" => {
                 let x = Tensor::from_slice(ctx, &[-2.0f32, -1.0, 1.7, 2.5], None, dev);
-                { let __u = ctx.cast(x.uop, dtype::INT32); Tensor::from_uop(ctx, __u) }
+                { let __u = ctx.cast(x.uop(), dtype::INT32); Tensor::from_uop(ctx, __u) }
             }
             "cast_i2f" => {
                 let x = Tensor::from_slice(ctx, &[3i32, -7, 0, 12], None, dev);
-                { let __u = ctx.cast(x.uop, dtype::FLOAT32); Tensor::from_uop(ctx, __u) }
+                { let __u = ctx.cast(x.uop(), dtype::FLOAT32); Tensor::from_uop(ctx, __u) }
             }
             "cast_f2u8" => {
                 let x = Tensor::from_slice(ctx, &[-2.0f32, 3.9, 300.0], None, dev);
-                { let __u = ctx.cast(x.uop, dtype::UINT8); Tensor::from_uop(ctx, __u) }
+                { let __u = ctx.cast(x.uop(), dtype::UINT8); Tensor::from_uop(ctx, __u) }
             }
             "cast_f2i8" => {
                 let x = Tensor::from_slice(ctx, &[-300.0f32, 3.9, 127.0], None, dev);
-                { let __u = ctx.cast(x.uop, dtype::INT8); Tensor::from_uop(ctx, __u) }
+                { let __u = ctx.cast(x.uop(), dtype::INT8); Tensor::from_uop(ctx, __u) }
             }
             "cast_b2i32" => {
                 let x = Tensor::from_slice(ctx, &[1.0f32, 0.0, 2.0, 0.5], None, dev);
-                let b = { let __u = ctx.cast(x.uop, dtype::BOOL); Tensor::from_uop(ctx, __u) };
-                { let __u = ctx.cast(b.uop, dtype::INT32); Tensor::from_uop(ctx, __u) }
+                let b = { let __u = ctx.cast(x.uop(), dtype::BOOL); Tensor::from_uop(ctx, __u) };
+                { let __u = ctx.cast(b.uop(), dtype::INT32); Tensor::from_uop(ctx, __u) }
             }
             "cast_f2b" => {
                 let x = Tensor::from_slice(ctx, &[0.0f32, 1.5, -3.0], None, dev);
-                { let __u = ctx.cast(x.uop, dtype::BOOL); Tensor::from_uop(ctx, __u) }
+                { let __u = ctx.cast(x.uop(), dtype::BOOL); Tensor::from_uop(ctx, __u) }
             }
             "cast_f32_f64" => {
                 let x = fx(ctx, dev);
-                { let __u = ctx.cast(x.uop, dtype::FLOAT64); Tensor::from_uop(ctx, __u) }
+                { let __u = ctx.cast(x.uop(), dtype::FLOAT64); Tensor::from_uop(ctx, __u) }
             }
             "cast_f64_f32" => {
                 let d = Tensor::from_slice(ctx, &[1e10f64, -2.5, 3.14159265358979], Some(dtype::FLOAT64), dev);
-                let f = { let __u = ctx.cast(d.uop, dtype::FLOAT32); Tensor::from_uop(ctx, __u) };
-                { let __u = ctx.cast(f.uop, dtype::FLOAT64); Tensor::from_uop(ctx, __u) }
+                let f = { let __u = ctx.cast(d.uop(), dtype::FLOAT32); Tensor::from_uop(ctx, __u) };
+                { let __u = ctx.cast(f.uop(), dtype::FLOAT64); Tensor::from_uop(ctx, __u) }
             }
             other => panic!("harness gap: no builder for {other}"),
         });
@@ -425,7 +425,7 @@ fn alu_code_for_op_all_backends() {
             let (t, _) = op_program(&mut ctx, dev, op);
             // sub-dword outputs (bool/8/16-bit) need bitcast-based memory
             // coalescing on cstyle backends — pending with the M8.5 decomp work
-            let out_dt = ctx.dt_of(&t.uop);
+            let out_dt = ctx.dt_of(&t.uop());
             let sub_dword_out = out_dt == dtype::BOOL
                 || out_dt == dtype::FLOAT16
                 || out_dt == dtype::BFLOAT16
@@ -435,8 +435,8 @@ fn alu_code_for_op_all_backends() {
                 continue;
             }
             let mut cache = ProgCache::default();
-            let vals = tensor_values(&mut ctx, t.uop.clone(), &mut BufTable::default(), &mut cache);
-            let shape: Vec<usize> = ctx.shape_of(&t.uop).expect("shape").iter().map(|s| s.clone().as_usize().expect("static")).collect();
+            let vals = tensor_values(&mut ctx, t.uop().clone(), &mut BufTable::default(), &mut cache);
+            let shape: Vec<usize> = ctx.shape_of(&t.uop()).expect("shape").iter().map(|s| s.clone().as_usize().expect("static")).collect();
             assert_golden(&b, g, &vals, &shape);
         }
     }
@@ -560,7 +560,7 @@ fn dtype_battery_all_backends() {
                 let (t, _) = dt_program(&mut ctx, dev, dt, kind);
                 // sub-dword OUTPUTS (the cast result) need bitcast-based
                 // coalescing on cstyle backends (pending M8.5)
-                let out_dt = ctx.dt_of(&t.uop);
+                let out_dt = ctx.dt_of(&t.uop());
                 let sub_dword_out = out_dt == dtype::BOOL
                     || out_dt == dtype::FLOAT16
                     || out_dt == dtype::BFLOAT16
@@ -570,8 +570,8 @@ fn dtype_battery_all_backends() {
                     continue;
                 }
                 let mut cache = ProgCache::default();
-                let vals = tensor_values(&mut ctx, t.uop.clone(), &mut BufTable::default(), &mut cache);
-                let shape: Vec<usize> = ctx.shape_of(&t.uop).expect("shape").iter().map(|s| s.clone().as_usize().expect("static")).collect();
+                let vals = tensor_values(&mut ctx, t.uop().clone(), &mut BufTable::default(), &mut cache);
+                let shape: Vec<usize> = ctx.shape_of(&t.uop()).expect("shape").iter().map(|s| s.clone().as_usize().expect("static")).collect();
                 assert_golden(&b, g, &vals, &shape);
             }
         }

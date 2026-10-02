@@ -48,7 +48,7 @@ fn conv_pool_window_is_not_repeated_over_batch_or_channels() {
     let w = Tensor::from_slice(&mut ctx, &vec![1.0f32; 3 * 2 * 3 * 3], None, None).reshape(&mut ctx, [3, 2, 3, 3]);
     let out = x.conv2d(&mut ctx, &w, None, 1, 1, 1, &[0, 0], None);
     let mut max_numel: i64 = 0;
-    for u in ctx.toposort(&out.uop) {
+    for u in ctx.toposort(&out.uop()) {
         if let Ok(Some(s)) = ctx.shape(&u) {
             let n: i64 = s.iter().map(|v| v.clone().as_i64_or_panic()).product();
             max_numel = max_numel.max(n);
