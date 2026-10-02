@@ -114,26 +114,36 @@ pub fn fetch(url: &str, path: &Path) {
     assert!(status.success(), "download failed: {url}");
 }
 
-/// `nn.datasets.mnist`: `Tensor.from_url(file, gunzip=True)[0x10:].reshape(-1,1,28,28)`
+/// `nn.datasets.mnist`: `Tensor.from_url(file, gunzip=True)[0x10:].reshape(-1,1,28,28)`.
+///
+/// tinygrad's `from_url` realizes the dataset on the default device, so the raw
+/// file is uploaded once and every later step indexes resident storage. The port's
+/// `from_slice` is faithful (a lazy `PYTHON -> device` COPY), but a *lazy* dataset
+/// tensor re-runs that whole-file COPY on every use (and, worse, on every realize
+/// inside a step). Freeze each dataset into a device-backed leaf once here, so
+/// training reads a plain buffer. [`Tensor::realize_fresh`] runs the upload in a
+/// throwaway session; [`Tensor::realize_to_leaf`] re-stages the bytes as a leaf.
 pub fn load_images(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx images");
     let x = Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape(ctx, [-1, 1, 28, 28]);
-    if n < 60_000 {
+    let x = if n < 60_000 {
         x.getitem(ctx, &[Ix::slice(Some(0), Some(n), 1)])
     } else {
         x
-    }
+    };
+    x.realize_fresh(ctx).realize_to_leaf(ctx)
 }
 
-/// `Tensor.from_url(file, gunzip=True)[8:]`
+/// `Tensor.from_url(file, gunzip=True)[8:]` (see [`load_images`] on realization).
 pub fn load_labels(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx labels");
     let y = Tensor::from_slice(ctx, &bytes[8..], Some(dtype::UINT8), None);
-    if n < 60_000 {
+    let y = if n < 60_000 {
         y.getitem(ctx, &[Ix::slice(Some(0), Some(n), 1)])
     } else {
         y
-    }
+    };
+    y.realize_fresh(ctx).realize_to_leaf(ctx)
 }
 
 fn main() {
