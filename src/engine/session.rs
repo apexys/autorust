@@ -48,6 +48,11 @@ pub struct Session {
     pub cache: ProgCache,
     /// Values for symbolic `Variable`s (empty on the concrete corpus).
     pub var_vals: HashMap<String, i64>,
+    /// When `Some`, each realize appends its planned LINEAR here (JIT capture,
+    /// `engine/jit.py:capturing`).
+    pub capturing: Option<Vec<UopId>>,
+    /// `JIT`: whether [`Jit`](crate::engine::jit::Jit) capture/replay is active.
+    pub jit: bool,
 }
 
 impl Session {
@@ -55,18 +60,49 @@ impl Session {
         Session::default()
     }
 
+    /// `sess.jit(true)` / `sess.jit(false)`: enable/disable JIT capture+replay.
+    pub fn jit(&mut self, on: bool) {
+        self.jit = on;
+        crate::tensor::rand::set_jit(on);
+    }
+
+    pub fn enable_jit(&mut self) {
+        self.jit(true);
+    }
+
+    pub fn jit_enabled(&self) -> bool {
+        self.jit
+    }
+
+    /// `capturing.append(jit)` / `capturing.clear()` (jit.py:255) — start
+    /// collecting the planned LINEARS of every realize in a step.
+    pub fn begin_capture(&mut self) {
+        self.capturing = Some(Vec::new());
+    }
+
+    /// Stop collecting and return the captured planned linears (in order).
+    pub fn end_capture(&mut self) -> Vec<UopId> {
+        self.capturing.take().unwrap_or_default()
+    }
+
     /// Schedule + execute `tensor_uop`, returning its realized buffer, reusing
     /// every buffer/compiled program already in the session. A tensor that has
     /// already realized caches its buffer on itself, so repeat reads hit that
     /// (see [`Tensor::to_list`](crate::tensor::Tensor::to_list)).
     pub fn realize_tensor(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> (Buffer, UopId) {
-        realize::realize_tensor(ctx, tensor_uop, &mut self.buffers, &mut self.cache)
+        let mut cap = self.capturing.take();
+        let r = realize::realize_tensor(ctx, tensor_uop, &mut self.buffers, &mut self.cache, cap.as_mut());
+        self.capturing = cap;
+        r
     }
 
     /// `Tensor.realize(*tensors)`: co-realize every root in one schedule and
     /// return their realized buffers (optimizer co-realization, `schedule_step`).
     pub fn realize_many(&mut self, ctx: &mut UOpCtx, tensor_uops: &[UopId]) -> (Vec<Buffer>, Vec<UopId>) {
-        realize::realize_many(ctx, tensor_uops, &mut self.buffers, &mut self.cache)
+        let mut cap = self.capturing.take();
+        let r = realize::realize_many(ctx, tensor_uops, &mut self.buffers, &mut self.cache, cap.as_mut());
+        self.capturing = cap;
+        r
     }
 
     /// `Tensor.to_bytes` against this session (realize + copyout).

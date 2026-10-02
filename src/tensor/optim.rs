@@ -54,11 +54,10 @@ pub trait Optim {
             })
             .collect();
         // Realize every gradient subgraph once, together (they share most of the
-        // backward graph), then freeze each into a buffer leaf. Without this,
-        // `_step`'s per-parameter state `assign`s each re-realize the whole
-        // backward graph (2× per parameter).
+        // backward graph). The faithful `realize_many` freezes each root into its
+        // realized buffer leaf (`_apply_map_to_tensors`), so `_step` reads those
+        // buffers directly — no host round-trip, and JIT-capturable.
         Tensor::realize_many(ctx, sess, roots.iter().chain(grads.iter()));
-        let grads: Vec<Tensor> = grads.iter().map(|g| g.realize_to_leaf(ctx)).collect();
         let (updates, extra) = self._step(ctx, sess, params, &grads);
         // `tt.assign(self._apply_update(tt, updates[i]))`: build the applied
         // value (`t.detach() - up`) and its STORE+AFTER write effect, co-realize

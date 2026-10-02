@@ -937,10 +937,54 @@ INTERP and on CL** (`DEFAULT_DEVICE=CL cargo test --release --features backend_c
 --test rand`), i.e. the graph is bit-exact on hardware. `cargo test` 113 pass;
 clippy clean.
 
-**Still needed for JIT:** `_next_counter` must be device-side (tensor.py:642) —
-seed/counter as device tensors advanced by a STORE+AFTER inside the graph — so a
-replayed step moves the counter. Today `rand_graph` stages the host counter as
-constants. That, plus the session opt-in JIT (§9.6.3), is the remaining work.
+Device counter: with JIT on, `_next_counter` is the device-side version
+(tensor.py:642) — seed/counter are device buffer leaves and the counter is
+advanced by a `STORE+AFTER` inside the using graph, so replay moves it. With JIT
+off, `rand_graph` stages the same values as host constants (no per-step
+`After`-chain growth). A known divergence: the device counter starts at 0 when
+JIT is enabled (after init already advanced the host counter), so a JIT run's
+sample sequence differs from a non-JIT run's; values are still valid draws.
+
+---
+
+### 8.24 Session opt-in JIT (TinyJit) — DONE
+
+`engine/jit.rs` ports the core of `engine/jit.py`: `Jit::call(ctx, sess, f)` runs
+`f` once to **capture** every planned LINEAR the step realizes (the session's
+`capturing` hook, jit.py:255), holds all touched buffers, then **replays** those
+linears instead of rebuilding the graph. `Jit::reset` recaptures. Public API:
+`Session::jit(bool)` / `enable_jit()` / `jit_enabled()` (the user-requested knob),
+plus a `JIT=1` preset in the MNIST example. With `jit(false)` the wrapper runs `f`
+directly (`if not JIT`, jit.py:244).
+
+Why a wrapper and not only session-level: tinygrad JITs a *function* because the
+step boundary and the input set come from the decorated call — the MNIST example
+has two independently-jitted functions (`train_step`, `get_test_acc`), which a
+single session flag cannot distinguish.
+
+Supporting changes:
+- `Session.capturing: Option<Vec<UopId>>` + `begin/end_capture`; the realize
+  functions take a `capture` out-param and push each planned linear.
+- `Jit::call` realizes the captured return (`get_parameters`/`Tensor.realize`,
+  jit.py:258) so a lazy eval graph captures rather than erroring.
+- `optim::schedule_step` no longer `realize_to_leaf`s grads (that read grad bytes
+  to the host and baked them into the capture — forbidden during JIT, and
+  redundant now that `realize_many` freezes each root to its buffer leaf).
+
+Validation (CL, BS=512, TRAIN_N=1024, TEST_N=256, 21 steps):
+| | wall | test acc |
+|---|---|---|
+| JIT off | 18.01 s (~0.86 s/step) | 82.81% |
+| JIT on  | 8.84 s (~0.42 s/step)  | 83.20% |
+
+`tests/jit.rs` covers capture/replay param updates on INTERP and the device-RNG
+advance on CL. `cargo test` 116 pass; 41 py gates pass; `--features backend_cl`
+unchanged (2 pre-existing bool-vector failures, §9.6.1).
+
+Known gaps / next: replay re-runs `compile_linear` (AST-cache hits) each step —
+storing the compiled linear would trim sys time further; `prune` is still bypassed
+via `Jit`-held buffers rather than a session-owned arena; and the device-counter
+seed parity noted above.
 
 ---
 
@@ -1073,16 +1117,12 @@ GPU training throughput; items are independent.
    `Estimates.ops` compute filter + `BEAM_UOPS_MAX`, the TC/SWAP/THREAD/PADTO/NOLOCALS
    actions, and the **disk cache** so a search runs once. Today a large-shape search
    stresses the CL driver (segfault); see §8.20.
-3. **`TinyJit` — now the top throughput item.** §8.21 shows a steady-state BS=512 step is
-   **scheduler-bound**: `create_linear_with_vars` (rangeify/kernelize) ~430 ms, device exec
-   ~15 ms, copies ~0. Porting `TinyJit` (capture the LINEAR schedule + buffers, replay with
-   fresh inputs) removes that per-step `graph_rewrite`/rangeify host cost, mirroring why
-   tinygrad's `beautiful_mnist` (~0.1–0.2 s/step) is ~5–8x ahead. Prerequisites:
-   the faithful `realize` is **done** (§8.22), and the device-graph RNG is **done**
-   (§8.23) so a replay advances the sampler. Remaining: make `_next_counter` device-side
-   (§8.23) and add the session opt-in (`Session::jit(bool)`) with capture/replay; a minor
-   follow-up is attaching the realized `Buffer` to the UOp to make storage arena-independent
-   instead of session-scoped.
+3. **`TinyJit` — DONE (§8.24).** `Session::jit(bool)` + `engine/jit.rs` capture/replay the
+   planned LINEARS of a step; the device-graph RNG (§8.23) advances the sampler on replay.
+   CL BS=512 went ~0.86 → ~0.42 s/step (21 steps: 18.0 → 8.8 s, acc unchanged). Follow-ups:
+   store the compiled linear (trim per-replay `compile_linear` lookups), move buffer
+   `prune` into the session-owned arena, and reconcile the device-counter seed with the
+   pre-JIT host counter.
 4. **Complete the `nn` layer types** (`nn/__init__.py`): missing `ConvTranspose2d`,
    the `Conv1d`/`ConvTranspose1d` helpers, `InstanceNorm`, `LayerNorm2d`, `RMSNorm`,
    `Embedding`, `LSTMCell`. Ported so far: `BatchNorm`, `Conv2d`, `Linear`, `GroupNorm`,

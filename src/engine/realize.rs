@@ -470,18 +470,21 @@ fn materialize_target(ctx: &mut UOpCtx, tensor_uop: UopId) -> UopId {
 /// run the resulting linear once, and return each root's final storage buffer.
 /// This is the co-realization tinygrad uses to fold a loss and its optimizer
 /// updates into a single schedule/launch (see `Optimizer.schedule_step`).
-pub fn realize_many(ctx: &mut UOpCtx, tensor_uops: &[UopId], t: &mut BufTable, cache: &mut ProgCache) -> (Vec<crate::runtime::buffer::Buffer>, Vec<UopId>) {
+pub fn realize_many(ctx: &mut UOpCtx, tensor_uops: &[UopId], t: &mut BufTable, cache: &mut ProgCache, mut capture: Option<&mut Vec<UopId>>) -> (Vec<crate::runtime::buffer::Buffer>, Vec<UopId>) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
     let targets: Vec<UopId> = tensor_uops.iter().map(|u| materialize_target(ctx, u.clone())).collect();
     if targets.len() == 1 {
-        let (b, u) = realize_tensor(ctx, targets.into_iter().next().unwrap(), t, cache);
+        let (b, u) = realize_tensor(ctx, targets.into_iter().next().unwrap(), t, cache, capture);
         return (vec![b], vec![u]);
     }
     let sink = crate::tensor::sink(ctx, targets.clone());
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
     let _ = linear;
+    if let Some(c) = capture.as_mut() {
+        c.push(planned.clone());
+    }
     run_linear(ctx, planned, t, &HashMap::new(), cache);
     // python `_apply_map_to_tensors`: each tensor's uop becomes its final storage
     // form after the schedule — a leaf aliasing that allocation.
@@ -504,7 +507,7 @@ pub fn realize_many(ctx: &mut UOpCtx, tensor_uops: &[UopId], t: &mut BufTable, c
 /// Build a plain device-buffer leaf that aliases the realized `b`, for the tensor
 /// `like` (its shape/dtype) — tinygrad's realized tensor uop is a
 /// `RESHAPE(BUFFER)` reading the allocation. No data moves.
-fn buffer_leaf(ctx: &mut UOpCtx, t: &mut BufTable, b: &crate::runtime::buffer::Buffer, like: &UopId) -> UopId {
+pub(crate) fn buffer_leaf(ctx: &mut UOpCtx, t: &mut BufTable, b: &crate::runtime::buffer::Buffer, like: &UopId) -> UopId {
     let shape = ctx.shape(like).ok().flatten().unwrap_or_default();
     let dt = ctx.dt_of(like);
     let dev = b.device().to_string();
@@ -516,7 +519,7 @@ fn buffer_leaf(ctx: &mut UOpCtx, t: &mut BufTable, b: &crate::runtime::buffer::B
 
 /// Schedule + run one tensor (python `Tensor.realize` path). Returns the
 /// tensor's realized buffer and the storage uop the tensor becomes.
-pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> (crate::runtime::buffer::Buffer, UopId) {
+pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache, capture: Option<&mut Vec<UopId>>) -> (crate::runtime::buffer::Buffer, UopId) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
     let target = materialize_target(ctx, tensor_uop.clone());
@@ -524,6 +527,9 @@ pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cac
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
     let _ = linear;
+    if let Some(c) = capture {
+        c.push(planned.clone());
+    }
     run_linear(ctx, planned, t, &HashMap::new(), cache);
     // python `_apply_map_to_tensors`: the tensor's uop becomes its final
     // storage form after the schedule — that is the buffer the kernel wrote.
@@ -590,12 +596,12 @@ pub fn buffer_copy_into(dst: &crate::runtime::buffer::Buffer, src: &crate::runti
 
 /// Read a realized tensor's flat values (python `_buffer().as_memoryview()`).
 pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<f64> {
-    buffer_values(&realize_tensor(ctx, tensor_uop, t, cache).0)
+    buffer_values(&realize_tensor(ctx, tensor_uop, t, cache, None).0)
 }
 
 /// Read a realized tensor's raw storage bytes at its own dtype (python
 /// `_buffer()` copyout). `Tensor::to_bytes`/`to_list` build on this so typed
 /// read-out never round-trips through `f64`.
 pub fn tensor_bytes(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<u8> {
-    buffer_bytes(&realize_tensor(ctx, tensor_uop, t, cache).0)
+    buffer_bytes(&realize_tensor(ctx, tensor_uop, t, cache, None).0)
 }

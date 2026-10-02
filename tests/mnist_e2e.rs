@@ -60,6 +60,6 @@ fn mnist_one_step_and_eval() {
     let after = params[0].to_list::<f32>(&mut ctx, &mut sess);
     assert_ne!(before, after, "the first parameter was not updated by the optimizer");
 
-    let acc = get_test_acc(&model, &x, &y, &mut ctx, &mut sess);
+    let acc = get_test_acc(&model, &x, &y, &mut ctx, &mut sess).item::<f32>(&mut ctx, &mut sess);
     assert!((0.0..=100.0).contains(&acc), "accuracy out of range: {acc}");
 }

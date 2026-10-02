@@ -36,6 +36,11 @@ struct RngState {
     seed: i64,
     device_seeds: HashMap<String, (u32, u32)>,
     counters: HashMap<String, (u32, u32)>,
+    /// Device-tensor seed/counter (graph route), mirroring tinygrad's
+    /// `_device_seeds` / `_device_rng_counters` (tensor.py:622). The counter is
+    /// advanced by a STORE+AFTER inside the graph so a replayed JIT step moves it.
+    dev_seeds: HashMap<String, Tensor>,
+    dev_counters: HashMap<String, Tensor>,
 }
 
 thread_local! {
@@ -49,6 +54,8 @@ pub fn manual_seed(seed: i64) {
         r.seed = seed;
         r.device_seeds.clear();
         r.counters.clear();
+        r.dev_seeds.clear();
+        r.dev_counters.clear();
     });
 }
 
@@ -261,20 +268,91 @@ fn bits_to_rand_graph(ctx: &mut UOpCtx, bits: &Tensor, shape: &[SVal], dt: DType
         .reshape(ctx, shape)
 }
 
-/// `RandMixin._rand` + `rand` (rand.py:39/50) as a device graph. The seed and
-/// pre-increment counter are host u32 pairs (`_next_counter`, tensor.py:642);
-/// they are staged as small device constant tensors, exactly the values
-/// tinygrad's per-device seed/counter tensors hold.
+thread_local! {
+    /// `JIT`: when set, `rand` uses the device-side counter (§8.23) so a captured
+    /// step advances it on replay. Off (default) uses host constants, which avoids
+    /// growing the counter's `STORE+AFTER` chain every non-JIT step.
+    static JIT_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `sess.jit(on)` hook: select the device-counter RNG route.
+pub fn set_jit(on: bool) {
+    JIT_ON.with(|c| c.set(on));
+}
+
+pub fn jit_on() -> bool {
+    JIT_ON.with(|c| c.get())
+}
+
+/// `RandMixin._rand` + `rand` (rand.py:39/50) as a device graph. Under JIT the
+/// seed/counter are device tensors (`_next_counter`, tensor.py:642) so the
+/// captured step advances them on replay; otherwise they are staged as host
+/// constant tensors (same values, no per-step graph growth).
 pub fn rand_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
     let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
     let numel = numel_int(shape);
     let num = (numel * dt.itemsize() as i64 + 3) / 4;
-    let (key, counter) = next_counter(&dev, num as u32);
-    let key_t = Tensor::from_slice(ctx, &[key.0, key.1], Some(dtype::UINT32), Some(&dev));
-    let counter_t = Tensor::from_slice(ctx, &[counter.0, counter.1], Some(dtype::UINT32), Some(&dev));
+    let (key_t, counter_t) = if jit_on() {
+        next_counter_graph(ctx, &dev, num as u32)
+    } else {
+        let (key, counter) = next_counter(&dev, num as u32);
+        let key_t = Tensor::from_slice(ctx, &[key.0, key.1], Some(dtype::UINT32), Some(&dev));
+        let counter_t = Tensor::from_slice(ctx, &[counter.0, counter.1], Some(dtype::UINT32), Some(&dev));
+        (key_t, counter_t)
+    };
     let bits = random_bits_graph(ctx, &key_t, &counter_t, num);
     bits_to_rand_graph(ctx, &bits, shape, dt).contiguous(ctx)
+}
+
+/// `Tensor._next_counter(device, num)` (tensor.py:642) with device seed/counter
+/// tensors. Advancing the counter is a `STORE+AFTER` inside the using graph, so
+/// a captured/replayed JIT step moves it; the returned counter is the
+/// *pre-increment* value, read through the AFTER (tensor.py:651).
+fn next_counter_graph(ctx: &mut UOpCtx, dev: &str, num: u32) -> (Tensor, Tensor) {
+    let (seed, counter) = RNG.with(|r| {
+        let mut r = r.borrow_mut();
+        if !r.dev_seeds.contains_key(dev) {
+            let n = r.dev_seeds.len() as u32;
+            let digest = sha256(&n.to_be_bytes());
+            let s0 = u32::from_be_bytes(digest[28..32].try_into().unwrap());
+            let s1 = r.seed as u32;
+            // Device buffers directly (an `empty` leaf + initial bytes, like a
+            // param) — `from_slice` would go through a PYTHON COPY whose
+            // `buffer_of` aliases back to PYTHON, breaking multi-device schedules.
+            let mk = |ctx: &mut UOpCtx, vals: [u32; 2]| -> Tensor {
+                let u = creation::empty(ctx, &[SVal::I(2)], dtype::UINT32, dev);
+                let mut bytes = Vec::with_capacity(8);
+                bytes.extend_from_slice(&vals[0].to_le_bytes());
+                bytes.extend_from_slice(&vals[1].to_le_bytes());
+                creation::register_initial(ctx, u.clone(), bytes);
+                Tensor::from_uop(ctx, u)
+            };
+            let seed = mk(ctx, [s0, s1]);
+            let counter = mk(ctx, [0, 0]);
+            r.dev_seeds.insert(dev.to_string(), seed.clone());
+            r.dev_counters.insert(dev.to_string(), counter.clone());
+        }
+        (r.dev_seeds[dev].clone(), r.dev_counters[dev].clone())
+    });
+    let num_low = num as i64;
+    let num_high = 0i64; // num is a u32 word count, so `num >> 32` is always 0
+    let c0 = counter.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
+    let c1 = counter.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
+    let new_low = c0.add(ctx, num_low);
+    let carry = new_low.lt(ctx, &c0).cast(ctx, dtype::UINT32);
+    let new_high = c1.add(ctx, num_high).add(ctx, &carry);
+    let new_counter = new_low.cat(ctx, &[new_high]);
+    let eff = counter.assign_effect(ctx, &new_counter);
+    counter.set_uop(eff.uop());
+    // tensor.py:651: low = counter[0:1] - num, high = counter[1:2] - num_high
+    //   - (counter[0:1] < num). Reading the AFTER makes the store a dependency.
+    let a0 = counter.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
+    let a1 = counter.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
+    let borrow = a0.lt(ctx, num_low).cast(ctx, dtype::UINT32);
+    let low = a0.sub(ctx, num_low);
+    let high = a1.sub(ctx, num_high).sub(ctx, &borrow);
+    (seed, low.cat(ctx, &[high]))
 }
 
 /// Host evaluator (`rand.rs` reference path): INTERP carries f64 lanes and
@@ -343,7 +421,7 @@ pub fn uniform(
 /// a single `rand` over `[2, *shape]` in float32 feeds the polar Box–Muller
 /// transform `cos(2*pi*u0) * sqrt(-2*ln(1-u1))`, computed on the host (the
 /// graph route can't run under INTERP) and materialized with `from_slice`.
-pub fn randn(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+fn randn_host(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
     let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
     let mut s2 = shape.to_vec();
@@ -376,6 +454,34 @@ pub fn randn(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, devic
         out
     } else {
         out.reshape(ctx, shape)
+    }
+}
+
+/// `RandMixin.randn` (rand.py:106) as a device graph via `randn_like`
+/// (rand.py:88): a `[2, *shape]` float32 `rand`, then the Box–Muller transform
+/// `cos(2*pi*u0) * sqrt(-2*ln(1-u1))`.
+fn randn_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+    let dt = dtype_opt.unwrap_or_else(dtype::default_float);
+    let dev = creation::canonicalize_device(device);
+    let mut s2 = shape.to_vec();
+    s2.insert(0, SVal::I(2));
+    let src = rand(ctx, &s2, Some(dtype::FLOAT32), Some(&dev));
+    let u0 = src.getitem(ctx, &[Ix::Index(0)]);
+    let u1 = src.getitem(ctx, &[Ix::Index(1)]);
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let a = crate::tensor::nn::cos(&u0.mul(ctx, two_pi), ctx);
+    let one_minus = u1.neg(ctx).add(ctx, 1.0);
+    let b = one_minus.log(ctx).mul(ctx, -2.0).sqrt(ctx);
+    a.mul(ctx, &b).cast(ctx, dt).reshape(ctx, shape)
+}
+
+/// `Tensor.randn` (rand.py:106): graph route on hardware, host on INTERP.
+pub fn randn(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+    let dev = creation::canonicalize_device(device);
+    if dev == "INTERP" {
+        randn_host(ctx, shape, dtype_opt, Some(&dev))
+    } else {
+        randn_graph(ctx, shape, dtype_opt, Some(&dev))
     }
 }
 

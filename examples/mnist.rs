@@ -9,6 +9,7 @@
 //! cargo run --release --example mnist
 //! DEFAULT_DEVICE=CL STEPS=70 cargo run --release --example mnist
 //! FAST=1 cargo run --release --example mnist              # ~1 minute preset
+//! DEFAULT_DEVICE=CL JIT=1 cargo run --release --example mnist  # capture/replay (~2x)
 //! DTYPE=bfloat16 FAST=1 cargo run --release --example mnist --features backend_cl
 //! ```
 //!
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use autorust::dtype;
+use autorust::engine::jit::Jit;
 use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, BatchNorm, Conv2d, Linear, Module};
 use autorust::tensor::optim::{Adam, Optim};
@@ -194,26 +196,40 @@ fn main() {
     let params: Vec<Tensor> = model.params().collect();
     let opt = Adam::new(&mut ctx, params.clone(), lr);
 
+    // `JIT=1` (or `sess.enable_jit()`) captures each step's schedule once and
+    // replays it — tinygrad's `@TinyJit` (`beautiful_mnist.py:21`). Off by default.
+    let mut train_jit = Jit::new();
+    let mut test_jit = Jit::new();
+    if std::env::var("JIT").is_ok() {
+        sess.enable_jit();
+    }
+
     let mut test_acc = f32::NAN;
     for step in 0..steps {
-        let samples = Tensor::randint(&mut ctx, &[bs], 0, train_n as i32, None, None);
-        let xb = x_train.getitem(&mut ctx, &[Ix::Tensor(samples.clone())]);
-        let yb = y_train.getitem(&mut ctx, &[Ix::Tensor(samples)]);
+        let loss = train_jit.call(&mut ctx, &mut sess, |ctx, sess| {
+            let samples = Tensor::randint(ctx, &[bs], 0, train_n as i32, None, None);
+            let xb = x_train.getitem(ctx, &[Ix::Tensor(samples.clone())]);
+            let yb = y_train.getitem(ctx, &[Ix::Tensor(samples)]);
 
-        let out = model.forward(&xb, &mut ctx, &mut sess, true);
-        let loss = out.sparse_categorical_crossentropy(&mut ctx, &yb, -1, 0.0, "mean");
-        loss.backward(&mut ctx, &params, None);
-        opt.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
-        opt.zero_grad(&ctx);
+            let out = model.forward(&xb, ctx, sess, true);
+            let loss = out.sparse_categorical_crossentropy(ctx, &yb, -1, 0.0, "mean");
+            loss.backward(ctx, &params, None);
+            opt.schedule_step(ctx, sess, std::slice::from_ref(&loss));
+            opt.zero_grad(ctx);
+            loss
+        });
 
         if step % 10 == 9 || step == steps - 1 {
-            test_acc = get_test_acc(&model, &x_test, &y_test, &mut ctx, &mut sess);
+            test_acc = test_jit
+                .call(&mut ctx, &mut sess, |ctx, sess| get_test_acc(&model, &x_test, &y_test, ctx, sess))
+                .item::<f32>(&mut ctx, &mut sess);
             let l = loss.item::<f32>(&mut ctx, &mut sess);
             println!("step {:>4}: loss {l:6.3}  test_accuracy {test_acc:5.2}%", step + 1);
         }
     }
 
     println!("to_program: {} misses / {} hits", sess.cache.misses, sess.cache.hits);
+    println!("jit: train {} linears, test {} linears", train_jit.n_linears(), test_jit.n_linears());
     if target > 0.0 {
         if test_acc >= target && test_acc != 100.0 {
             println!("{test_acc} >= {target}: PASS");
@@ -225,9 +241,11 @@ fn main() {
 }
 
 /// `Model.get_test_acc`: `(self(X).argmax(axis=1) == Y).mean()*100`.
-pub fn get_test_acc(model: &Model, x: &Tensor, y: &Tensor, ctx: &mut UOpCtx, sess: &mut Session) -> f32 {
+/// Returns the (lazy) accuracy tensor so a `Jit` can capture/replay it; call
+/// `.item()` on the result to read it.
+pub fn get_test_acc(model: &Model, x: &Tensor, y: &Tensor, ctx: &mut UOpCtx, sess: &mut Session) -> Tensor {
     let out = model.forward(x, ctx, sess, false);
     let pred = out.argmax(ctx, Some(1), false);
     let correct = pred.eq(ctx, y).cast(ctx, dtype::FLOAT32).mean(ctx, None, false);
-    correct.mul(ctx, 100.0).item::<f32>(ctx, sess)
+    correct.mul(ctx, 100.0)
 }
