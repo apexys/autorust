@@ -59,23 +59,23 @@ impl Session {
     /// every buffer/compiled program already in the session. A tensor that has
     /// already realized caches its buffer on itself, so repeat reads hit that
     /// (see [`Tensor::to_list`](crate::tensor::Tensor::to_list)).
-    pub fn realize_tensor(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> Buffer {
+    pub fn realize_tensor(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> (Buffer, UopId) {
         realize::realize_tensor(ctx, tensor_uop, &mut self.buffers, &mut self.cache)
     }
 
     /// `Tensor.realize(*tensors)`: co-realize every root in one schedule and
     /// return their realized buffers (optimizer co-realization, `schedule_step`).
-    pub fn realize_many(&mut self, ctx: &mut UOpCtx, tensor_uops: &[UopId]) -> Vec<Buffer> {
+    pub fn realize_many(&mut self, ctx: &mut UOpCtx, tensor_uops: &[UopId]) -> (Vec<Buffer>, Vec<UopId>) {
         realize::realize_many(ctx, tensor_uops, &mut self.buffers, &mut self.cache)
     }
 
     /// `Tensor.to_bytes` against this session (realize + copyout).
     pub fn tensor_bytes(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> Vec<u8> {
-        realize::buffer_bytes(&self.realize_tensor(ctx, tensor_uop))
+        realize::buffer_bytes(&self.realize_tensor(ctx, tensor_uop).0)
     }
 
     /// `Tensor.to_list` (f64 decode) against this session.
     pub fn tensor_values(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> Vec<f64> {
-        realize::buffer_values(&self.realize_tensor(ctx, tensor_uop))
+        realize::buffer_values(&self.realize_tensor(ctx, tensor_uop).0)
     }
 }

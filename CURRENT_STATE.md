@@ -862,46 +862,49 @@ COPY on every use — and the training step realizes the forward six times (the
 `BatchNorm.forward` running-stat `assign`s), so 6 × 47 MB/step.
 
 Fix (`examples/mnist.rs`): `load_images`/`load_labels` freeze each dataset once
-with `realize_fresh(...).realize_to_leaf(...)` (device-backed leaf; the precedent
-is tinygrad's realized `from_url` result / `Tensor.realize` replacing the uop with
-a BUFFER). **BS=512 steady state ~1.53 s/step -> ~0.80 s/step** (sys 10 s -> 0.8 s
+with a device-backed leaf. First done as `realize_fresh(...).realize_to_leaf(...)`
+(§8.21 commit `9b99220`); §8.22 replaces that with the faithful `realize`, which
+now uploads into the realized buffer without the host round-trip. **BS=512 steady
+state ~1.53 s/step -> ~0.80 s/step** (sys 10 s -> 0.8 s
 per 15 steps); FAST preset ~0.35 s/step; losses/accuracy identical.
 
 **What a step costs now** (BS=512): scheduler (`create_linear_with_vars`/rangeify)
 **~430 ms**, callify ~18 ms, device exec ~15 ms, copies ~0. The port is now
 **scheduler-bound**.
 
-### 8.22 Faithful `realize` (uop → realized buffer) — refactor done, wiring blocked
-Goal: `Tensor.realize` should replace the tensor's uop with its realized-storage
-form (tinygrad `_apply_map_to_tensors`, tensor.py:248), so reads use the buffer
-directly — no per-step re-run and **no `realize_to_leaf` host round-trip** (which
-matters for large datasets).
+### 8.22 Faithful `realize` (uop → realized buffer) — DONE
+`Tensor.realize` now replaces the tensor's uop with its realized-storage form
+(tinygrad `_apply_map_to_tensors`, tensor.py:248), so later steps read the buffer
+directly — no per-step re-run, and **no `realize_to_leaf` host round-trip**
+(important for large datasets).
 
-**Done (committed): the model.** tinygrad's `Tensor.uop` is a mutable attribute
-that every handle to the tensor sees. The port had `uop: UopId` as a plain copied
-field. It is now a shared `Rc<RefCell<UopId>>` with `Tensor::uop()` and
-`Tensor::set_uop`, so an in-place replacement is observable by all clones. This
-refactor is behavior-neutral on its own (no caller sets the uop; 113 tests pass).
+- **Model (commit `b5cee2b`).** `Tensor.uop` is now a shared `Rc<RefCell<UopId>>`
+  with `Tensor::uop()`/`set_uop`, so an in-place replacement is seen by all clones.
+- **Wiring.** `realize_tensor`/`realize_many` return `(Buffer, storage_uop)`;
+  `Tensor::realize`/`to_bytes`/`realize_many` call `set_uop` to a new leaf that
+  **aliases** the realized allocation (`BufTable::alias` — weak view only, or one
+  base leaks per realize). `load_images`/`load_labels` now just `realize`.
 
-**Attempted (reverted): the wiring.** `realize_tensor`/`realize_many` returning
-the post-schedule storage uop, and `Tensor::realize`/`to_bytes`/`realize_many`
-calling `set_uop` to a fresh leaf aliasing the realized allocation (a new
-`BufTable::alias`). Loading/reusing a dataset this way works and removes the
-`COPY` (`STEPS=0` runs clean), but a realized leaf used inside the training sink
-makes `callify::pm_early_transform` hit its **"rewrite step limit"** loop.
+**Two faithful callify fixes were needed** (both real port bugs found by the loop
+it exposed):
+1. `UOpCtx::contiguous_view` must return `None` for **CL/WEBGPU** — "CL does not
+   support views" (ops.py:891). Without the guard, `contiguous_mops_to_view` never
+   reached a fixed point on CL ("rewrite step limit").
+2. `contiguous_view` must return `b.rtag(None)` (ops.py:895) — strip the tag. The
+   port returned the tagged uop, so each `contiguous_mops_to_view` rewrite produced
+   a structurally new copy and the rewrite never converged (the CPU/INTERP loop
+   hit via `schedule_step` re-realizing a now-leaf loss).
 
-**Root cause / why it's blocked.** The port's realized storage is not attached to
-the UOp; it lives in a session side-table. `callify` only accepts a leaf buffer
-as a graph input when the leaf is `empty(...)` + `register_initial` (a
-`node.initial_data`-backed buffer, like `to_param`); a bare `new_buffer` leaf
-(no `initial_data`) loops. tinygrad has no such distinction because the realized
-`Buffer` is *in* the UOp (`Ops.BUFFER` arg holds it), so it is an ordinary buffer
-input.
+**Result (CL, BS=512):** steady state ~0.75 s/step; 15-step acc **76.56%** vs
+71.09% with the old `realize_to_leaf` (the CL view guard changes CL codegen to the
+faithful path). `realize_to_leaf` remains, but is no longer needed for datasets.
+`cargo test` 113 pass; `--features backend_cl` unchanged (the 2 bool-vector CL
+failures are pre-existing §9.6.1); all 41 py differential gates pass.
 
-**Next (dedicated change):** attach the realized `Buffer` to the buffer UOp (port
-the Buffer-in-arg model, or teach `callify`/`has_buffer_identity` to accept
-realized side-table buffers), then re-wire `set_uop`. That also makes realized
-storage survive a fresh `Session`/`UOpCtx` (today it is session-scoped).
+Remaining nuance: realized storage is still resolved through the per-session
+`BufTable` (aliased), so it is session-scoped; attaching the `Buffer` to the UOp
+(tinygrad's global `buffers` WeakKeyDictionary, ops.py:214) would make it
+arena-independent — a follow-up, not needed for the dataset win.
 
 ---
 
@@ -1038,11 +1041,11 @@ GPU training throughput; items are independent.
    **scheduler-bound**: `create_linear_with_vars` (rangeify/kernelize) ~430 ms, device exec
    ~15 ms, copies ~0. Porting `TinyJit` (capture the LINEAR schedule + buffers, replay with
    fresh inputs) removes that per-step `graph_rewrite`/rangeify host cost, mirroring why
-   tinygrad's `beautiful_mnist` (~0.1–0.2 s/step) is ~5–8x ahead. Prerequisite: a faithful
-   `realize` that replaces the tensor's uop with its realized buffer (§8.22) — the shared-uop
-   model is done, but wiring `set_uop` is blocked until realized storage is attached to the
-   UOp / accepted by `callify` (a bare realized leaf loops `pm_early_transform`). Landing that
-   removes the `realize_to_leaf` host round-trip and is the basis for jit input handling.
+   tinygrad's `beautiful_mnist` (~0.1–0.2 s/step) is ~5–8x ahead. The faithful `realize`
+   prerequisite is **done** (§8.22: `Tensor.uop` shared + replaced with the realized buffer),
+   so jit input handling has its basis. A minor follow-up: attach the realized `Buffer` to the
+   UOp (tinygrad's global `buffers` WeakKeyDictionary) to make realized storage
+   arena-independent instead of session-scoped.
 4. **Complete the `nn` layer types** (`nn/__init__.py`): missing `ConvTranspose2d`,
    the `Conv1d`/`ConvTranspose1d` helpers, `InstanceNorm`, `LayerNorm2d`, `RMSNorm`,
    `Embedding`, `LSTMCell`. Ported so far: `BatchNorm`, `Conv2d`, `Linear`, `GroupNorm`,

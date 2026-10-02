@@ -2343,6 +2343,15 @@ impl UOpCtx {
 
     /// `contiguous_view` (ops.py:890) — (tagged base buffer, offset).
     pub fn contiguous_view(&mut self, x: UopId) -> Option<(UopId, i64)> {
+        // WEBGPU and CL do not support views (ops.py:890): the CL runtime has no
+        // reliable sub-buffer alignment, so contiguous-view collapse is disabled
+        // and movement stays as kernels. Without this guard `contiguous_mops_to_view`
+        // fails to reach a fixed point on CL and loops.
+        if let Some(crate::uop::arg::DeviceSpec::Single(s)) = crate::schedule::indexing::device_of(self, x.clone()) {
+            if s.starts_with("WEBGPU") || s.starts_with("CL") {
+                return None;
+            }
+        }
         let numel = self.max_numel(x.clone());
         let flat = crate::tensor::movement::flatten(self, x, -1, -1);
         let r = self.range(SVal::I(numel as i128), 0, crate::uop::range::AxisType::Weak);
@@ -2367,7 +2376,15 @@ impl UOpCtx {
             return None;
         }
         match self.val(&osrcs[1]) {
-            ConstVal::Int(i) if i >= i64::MIN as i128 && i <= i64::MAX as i128 => Some(((osrcs[0]).clone(), i as i64)),
+            ConstVal::Int(i) if i >= i64::MIN as i128 && i <= i64::MAX as i128 => {
+                // `b.rtag(None)` (ops.py:895): strip the tag, so the returned buffer
+                // is structurally stable and `contiguous_mops_to_view` reaches a
+                // fixed point (a retained tag would make each rewrite a new uop).
+                let b = osrcs[0].clone();
+                let (op, dt, srcs, arg, _tag) = self.snapshot(&b);
+                let untagged = self.uop_tag(op, Some(dt), srcs, arg, Arg::None);
+                Some((untagged, i as i64))
+            }
             _ => None,
         }
     }

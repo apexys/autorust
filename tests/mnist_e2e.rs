@@ -38,8 +38,8 @@ fn mnist_one_step_and_eval() {
     let mut ctx = UOpCtx::new();
     let mut sess = Session::new();
     let n = 4;
-    let x = load_images(&mut ctx, &dir.join("train-images-idx3-ubyte"), n);
-    let y = load_labels(&mut ctx, &dir.join("train-labels-idx1-ubyte"), n);
+    let x = load_images(&mut ctx, &mut sess, &dir.join("train-images-idx3-ubyte"), n);
+    let y = load_labels(&mut ctx, &mut sess, &dir.join("train-labels-idx1-ubyte"), n);
     assert_eq!(x.shape(&mut ctx).iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize, 1, 28, 28]);
     assert_eq!(y.shape(&mut ctx).iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize]);
 

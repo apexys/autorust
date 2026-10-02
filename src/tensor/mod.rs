@@ -195,8 +195,11 @@ impl Tensor {
         if let Some(b) = self.realized_buffer() {
             return crate::engine::realize::buffer_bytes(&b);
         }
-        let b = sess.realize_tensor(ctx, self.uop());
+        let (b, leaf) = sess.realize_tensor(ctx, self.uop());
         let bytes = crate::engine::realize::buffer_bytes(&b);
+        // tinygrad `_apply_map_to_tensors`: the tensor's uop becomes its realized
+        // storage form, so later graphs read the buffer instead of re-running it.
+        self.set_uop(leaf);
         self.set_realized_buffer(b);
         bytes
     }
@@ -305,8 +308,9 @@ impl Tensor {
     pub fn realize_many<'a>(ctx: &mut UOpCtx, sess: &mut Session, tensors: impl IntoIterator<Item = &'a Tensor>) -> Vec<Buffer> {
         let ts: Vec<&Tensor> = tensors.into_iter().collect();
         let uops: Vec<UopId> = ts.iter().map(|t| t.uop()).collect();
-        let bufs = sess.realize_many(ctx, &uops);
-        for (t, b) in ts.iter().zip(bufs.iter()) {
+        let (bufs, leaves) = sess.realize_many(ctx, &uops);
+        for ((t, b), leaf) in ts.iter().zip(bufs.iter()).zip(leaves.iter()) {
+            t.set_uop(leaf.clone());
             t.set_realized_buffer(b.clone());
         }
         bufs

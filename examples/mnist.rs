@@ -116,14 +116,13 @@ pub fn fetch(url: &str, path: &Path) {
 
 /// `nn.datasets.mnist`: `Tensor.from_url(file, gunzip=True)[0x10:].reshape(-1,1,28,28)`.
 ///
-/// tinygrad's `from_url` realizes the dataset on the default device, so the raw
-/// file is uploaded once and every later step indexes resident storage. The port's
-/// `from_slice` is faithful (a lazy `PYTHON -> device` COPY), but a *lazy* dataset
-/// tensor re-runs that whole-file COPY on every use (and, worse, on every realize
-/// inside a step). Freeze each dataset into a device-backed leaf once here, so
-/// training reads a plain buffer. [`Tensor::realize_fresh`] runs the upload in a
-/// throwaway session; [`Tensor::realize_to_leaf`] re-stages the bytes as a leaf.
-pub fn load_images(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
+/// tinygrad's `Tensor.from_url(...)` realizes the dataset on the default device, so
+/// the raw file is uploaded once and every later step indexes resident storage.
+/// The port's `from_slice` is faithful (a lazy `PYTHON -> device` COPY), but a
+/// *lazy* dataset tensor re-runs that whole-file COPY on every use. `realize`
+/// replaces the tensor's uop with its realized storage form (`_apply_map_to_tensors`),
+/// so the per-step graph reads a buffer.
+pub fn load_images(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx images");
     let x = Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape(ctx, [-1, 1, 28, 28]);
     let x = if n < 60_000 {
@@ -131,11 +130,11 @@ pub fn load_images(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
     } else {
         x
     };
-    x.realize_fresh(ctx).realize_to_leaf(ctx)
+    x.realize(ctx, sess).clone()
 }
 
 /// `Tensor.from_url(file, gunzip=True)[8:]` (see [`load_images`] on realization).
-pub fn load_labels(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
+pub fn load_labels(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx labels");
     let y = Tensor::from_slice(ctx, &bytes[8..], Some(dtype::UINT8), None);
     let y = if n < 60_000 {
@@ -143,7 +142,7 @@ pub fn load_labels(ctx: &mut UOpCtx, path: &Path, n: i64) -> Tensor {
     } else {
         y
     };
-    y.realize_fresh(ctx).realize_to_leaf(ctx)
+    y.realize(ctx, sess).clone()
 }
 
 fn main() {
@@ -185,10 +184,10 @@ fn main() {
     let mut ctx = UOpCtx::new();
     let mut sess = Session::new();
 
-    let x_train = load_images(&mut ctx, &dir.join("train-images-idx3-ubyte"), train_n);
-    let y_train = load_labels(&mut ctx, &dir.join("train-labels-idx1-ubyte"), train_n);
-    let x_test = load_images(&mut ctx, &dir.join("t10k-images-idx3-ubyte"), test_n);
-    let y_test = load_labels(&mut ctx, &dir.join("t10k-labels-idx1-ubyte"), test_n);
+    let x_train = load_images(&mut ctx, &mut sess, &dir.join("train-images-idx3-ubyte"), train_n);
+    let y_train = load_labels(&mut ctx, &mut sess, &dir.join("train-labels-idx1-ubyte"), train_n);
+    let x_test = load_images(&mut ctx, &mut sess, &dir.join("t10k-images-idx3-ubyte"), test_n);
+    let y_test = load_labels(&mut ctx, &mut sess, &dir.join("t10k-labels-idx1-ubyte"), test_n);
 
     Tensor::manual_seed(seed);
     let model = Model::new(&mut ctx).into_params(&mut ctx);

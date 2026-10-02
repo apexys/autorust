@@ -250,6 +250,17 @@ impl BufTable {
         self.bases.retain(|_, b| Rc::strong_count(b) > 1);
         self.views.retain(|_, v| v.base.strong_count() > 0);
     }
+
+    /// Register `b` as the storage for the buffer/view uop `uop_id`, so a realized
+    /// tensor's `uop` can be a plain leaf that reads this allocation. No data moves.
+    ///
+    /// Only the (weak) view entry is inserted: the allocation is kept alive by the
+    /// tensor's own buffer cell (and the producing uop's table entry), and `prune`
+    /// can then reclaim both once the tensor dies. A strong `bases` entry here would
+    /// keep `strong_count > 1` forever and leak one base per realize.
+    pub fn alias(&mut self, uop_id: u32, b: &Buffer) {
+        self.views.insert(uop_id, WeakBuffer::of(b));
+    }
 }
 
 /// `UOp.buffer` (ops.py:922): resolve a (post-schedule) buffer-ish uop to its

@@ -23,8 +23,12 @@ fn grad_sum_square() {
     let x = f32s(&mut ctx, &[1.0, 2.0, 3.0, 4.0]);
     let sq = x.mul(&mut ctx, &x);
     let loss = sq.sum(&mut ctx, None, false, None);
-    assert_eq!(loss.to_list_fresh::<f32>(&mut ctx), vec![30.0]);
+    // Compute the gradient before any realize: `realize` replaces the tensor's uop
+    // with its realized storage (`_apply_map_to_tensors`), after which the graph no
+    // longer carries the forward expression (tinygrad's `loss.backward()` after
+    // `loss.realize()` likewise yields no grad).
     let gs = loss.gradient(&mut ctx, &[x], None);
+    assert_eq!(loss.to_list_fresh::<f32>(&mut ctx), vec![30.0]);
     almost(&gs[0].to_list_fresh::<f32>(&mut ctx), &[2.0, 4.0, 6.0, 8.0]);
 }
 
