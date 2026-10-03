@@ -10,6 +10,7 @@
 //! copyin (python retains pending_copyin instead).
 
 use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
@@ -28,6 +29,36 @@ use crate::uop::UopId;
 
 // ---------------- device inner ----------------
 
+/// Bounded source→binary cache (`CLCompiler.compile_cached`). tinygrad backs
+/// this with a *disk* cache (`CCACHE`); the port keeps it in memory but caps it
+/// with FIFO eviction so compiling many distinct kernels (BEAM search) can't
+/// grow it without bound. Repeats still hit until evicted.
+struct CompileCache {
+    map: HashMap<String, Vec<u8>>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl CompileCache {
+    fn new() -> CompileCache {
+        let cap = std::env::var("CL_COMPILE_CACHE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+        CompileCache { map: HashMap::new(), order: VecDeque::new(), cap }
+    }
+    fn get(&self, src: &str) -> Option<Vec<u8>> {
+        self.map.get(src).cloned()
+    }
+    fn put(&mut self, src: &str, lib: Vec<u8>) {
+        if self.map.insert(src.to_string(), lib).is_none() {
+            self.order.push_back(src.to_string());
+        }
+        while self.order.len() > self.cap {
+            if let Some(k) = self.order.pop_front() {
+                self.map.remove(&k);
+            }
+        }
+    }
+}
+
 /// The CL device/context/queue pair shared by allocator, compiler and
 /// programs (python: CLDevice fields).
 struct ClInner {
@@ -37,7 +68,7 @@ struct ClInner {
     device_name: String,
     driver_version: String,
     exts: String,
-    compile_cache: RefCell<std::collections::HashMap<String, Vec<u8>>>,
+    compile_cache: RefCell<CompileCache>,
 }
 
 impl ClInner {
@@ -54,7 +85,7 @@ impl ClInner {
         eprintln!("CLDevice: opening {device_name} with version {driver_version}");
         let context = check(Context::from_device(&dev), "clCreateContext");
         let queue = check(unsafe { CommandQueue::create(&context, dev.id(), CL_QUEUE_PROFILING_ENABLE) }, "clCreateCommandQueue");
-        ClInner { dev, context, queue, device_name, driver_version, exts, compile_cache: RefCell::new(Default::default()) }
+        ClInner { dev, context, queue, device_name, driver_version, exts, compile_cache: RefCell::new(CompileCache::new()) }
     }
 
     fn synchronize(&self) {
@@ -165,8 +196,14 @@ impl Comp for ClCompiler {
     }
 
     fn compile_cached(&self, src: &str) -> Vec<u8> {
-        // in-memory source cache (python: diskcache under CCACHE)
-        self.inner.compile_cache.borrow_mut().entry(src.to_string()).or_insert_with(|| self.compile(src)).clone()
+        // in-memory source cache (python: diskcache under CCACHE), FIFO-capped
+        // so a BEAM search can't grow it without bound.
+        if let Some(v) = self.inner.compile_cache.borrow().get(src) {
+            return v;
+        }
+        let lib = self.compile(src);
+        self.inner.compile_cache.borrow_mut().put(src, lib.clone());
+        lib
     }
 }
 

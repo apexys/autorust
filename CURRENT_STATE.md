@@ -834,8 +834,9 @@ kernel** instead of ~20 ms — a ~550x gap vs tinygrad measured on the same conv
   codegen/__init__.py:479); a BEAM-tagged candidate skips the pre-opt stages and
   `apply_opts` (idempotent re-entry).
 
-**Status: works on small kernels and now caches; large-model CL search still aborts
-the driver.** Hardening landed (commit follows):
+**Status: works on small kernels and now caches; large-model CL search still
+aborts the driver — root cause found (an OOB candidate kernel, below), not a
+driver limit.** Hardening landed (commit follows):
 - **Disk cache** — `engine/disk_cache.rs` (std-only, `AUTORUST_CACHE_DIR`,
   `CACHELEVEL`, `IGNORE_BEAM_CACHE`) stores the chosen `applied_opts` keyed by
   `(optimized-AST content key, beam width, device)`, mirroring `diskcache_get/put`
@@ -854,15 +855,37 @@ the driver.** Hardening landed (commit follows):
 - The `applied_opts` axis is stored **relative** (tinygrad records the original
   `Opt`), so cached opts replay correctly; `WMMA`/`TC` estimates are skipped.
 
-Still missing vs tinygrad: the **worker pool** (candidate compiles run in
-subprocesses, which is what keeps a misbehaving CL driver from taking down the
-training process — the port is single-process, so on MNIST the NVIDIA driver
-*aborts the process* on a specific kernel regardless of `BEAM_MAX_CANDIDATES`),
-the `TC/SWAP/THREAD/PADTO/NOLOCALS` actions, and the `estimates.lds/mem` fields.
-Until the worker pool lands, `BEAM` is reliable on small kernels (e.g. `xor`) and
-caches; on large CNNs use `BEAM` on INTERP or leave it off — the default
-`hand_coded_optimizations` path is unchanged and the `pool` fix (§8.19) is the
-real throughput win.
+**Root cause of the CL abort (debugged 2026-10): it is a port codegen bug, not a
+driver limit or an unfreed resource.** Evidence:
+- A minimal reproducer builds **3000 source programs** and **2000 full
+  source→binary→build→kernel(+launch)** programs in one context without error —
+  so "compile many, free unused" does work; there is no driver build cap.
+- Instrumenting the search shows the first anomaly is **not** a build: a
+  candidate *launch* fails at `clWaitForEvents` (`UNKNOWN_ERROR`). After that the
+  context is poisoned: every later `clBuildProgram` returns `UNKNOWN_ERROR`
+  (empty log), and the driver sometimes segfaults.
+- The failing candidate is a single `UPCAST axis=1 arg=2` on the RNG `stack/cat`
+  kernel. Its rendered store is **out of bounds**: `data0_25600[gidx1*12802]`
+  with `gidx1` up to 6399 (~82M), while the dummy buffer has 25600 elements. The
+  base scheduler already shows the wrong index `r0*12800 + r0` (should be
+  `r0*12800 + r1` for the `[2,12800]` stack). `hand_coded_optimizations`' multi-opt
+  restructure (`shift_to` on several axes) repairs the index, which is why
+  non-BEAM training and `tests/rand.rs` are correct; a single BEAM opt does not.
+  So the fault is a **multi-range index bug in the `stack`/reshape path** exposed
+  only by partially-optimized candidates. Fixing it needs the Python differential
+  oracle (compare `_apply_reshape`/rangeify offsets against tinygrad).
+- The in-memory `CLCompiler.compile_cache` was a genuine unbounded leak (tinygrad
+  uses a *disk* cache, `device.py Compiler.compile_cached`); it is now **FIFO-capped**
+  (`CL_COMPILE_CACHE`, default 1024) so BEAM can't grow it without bound.
+
+Still missing vs tinygrad: the **worker pool** (which in tinygrad isolates a
+faulting candidate from the training process — the single-process port has no
+such isolation, so one bad kernel takes down the run), the
+`TC/SWAP/THREAD/PADTO/NOLOCALS` actions, and the `estimates.lds/mem` fields.
+Until the index bug (or context isolation) lands, `BEAM` is reliable on small
+kernels (e.g. `xor`) and caches; on large CNNs use `BEAM` on INTERP or leave it
+off — the default `hand_coded_optimizations` path is unchanged and the `pool` fix
+(§8.19) is the real throughput win.
 
 ### 8.21 Dataset re-upload — the MNIST step bottleneck (DONE)
 After the `pool` fix and the bf16 work, a steady-state step was still ~1.5 s at

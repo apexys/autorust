@@ -239,8 +239,25 @@ fn compile_candidate<'a>(
     if strict {
         run(ctx)
     } else {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(ctx))).ok().flatten()
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(ctx)))
+            .map_err(|e| {
+                if env_flag("BEAM_VERBOSE") {
+                    eprintln!("[beam] compile skip: {}", panic_msg(&e));
+                }
+            })
+            .ok()
+            .flatten()
     }
+}
+
+/// The first line of a caught panic payload (for `BEAM_VERBOSE` diagnostics).
+fn panic_msg(e: &Box<dyn std::any::Any + Send>) -> String {
+    let s = e
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| e.downcast_ref::<&str>().copied())
+        .unwrap_or("<panic>");
+    s.lines().next().unwrap_or("").to_string()
 }
 
 /// `_time_program` (search.py:38): launch a compiled candidate with the dummy
@@ -412,7 +429,22 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
             let timed_c = if strict {
                 time_candidate(&c.cp, &rawbufs, &dev)
             } else {
+                let src = String::from_utf8_lossy(&c.cp.elf.lib).to_string();
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| time_candidate(&c.cp, &rawbufs, &dev)))
+                    .map_err(|e| {
+                        if env_flag("BEAM_VERBOSE") {
+                            eprintln!(
+                                "[beam] time skip: {} applied={:?}",
+                                panic_msg(&e),
+                                c.s.applied_opts()
+                            );
+                            if env_flag("BEAM_DUMP_SRC") {
+                                for l in src.lines().take(400) {
+                                    eprintln!("    | {l}");
+                                }
+                            }
+                        }
+                    })
                     .ok()
                     .flatten()
             };
