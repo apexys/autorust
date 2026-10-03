@@ -1010,9 +1010,12 @@ unchanged (2 pre-existing bool-vector failures, §9.6.1).
 
 Known gaps / next: **compiled-linear replay — DONE** (replay executes stored
 `CompiledLinear`s; `compile_linear` runs once at capture, `to_program` lookups
-per 21 steps fell ~4300 → ~330). Remaining: move buffer `prune` into a
-session-owned arena, and reconcile the device-counter seed with the pre-JIT host
-counter (the JIT run's samples currently restart the counter at 0).
+per 21 steps fell ~4300 → ~330). **Device-counter seed — DONE** (§8.23): the
+device counter starts from the host counter so an isolated JIT draw continues the
+non-JIT sequence; per-*step* parity still drifts because the port's eager BN
+`assign`s realize the step several times (documented in §8.23). Buffer `prune` is
+bypassed by `Jit::held` (the captured buffers are held strongly, so the session's
+`prune` keeps them) — moving that into a session-owned arena is cosmetic.
 
 ---
 
