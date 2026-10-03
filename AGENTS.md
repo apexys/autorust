@@ -49,7 +49,7 @@ src/schedule/   rangeify/indexing/memory (Seam B)
 src/codegen/    to_program pipeline, linearize, simplify, coalesce, interp exec
 src/renderer/   Renderer trait + cstyle (OpenCL under `backend_cl`)
 src/runtime/    Buffer/allocator/compiler/device traits, INTERP + CL
-src/engine/     realize, session (BufTable + ProgCache), ProgramInfo
+src/engine/     realize, session (BufTable + ProgCache), jit (TinyJit), disk_cache, ProgramInfo
 src/bin/        oracle_* cargo bins driven by pytest (JSON graph files)
 examples/       runnable demos (xor.rs, mnist.rs) — mirror tinygrad
 tests/          Rust unit/differential/golden/nn tests

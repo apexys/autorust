@@ -364,7 +364,7 @@ impl<'a> Scheduler<'a> {
             tag: "Opt".into(),
             fields: vec![
                 ("op".into(), Arg::Str(format!("{op:?}").to_uppercase())),
-                ("axis".into(), Arg::Int(real_axis as i64)),
+                ("axis".into(), Arg::Int(axis.unwrap_or(0) as i64)),
                 ("arg".into(), Arg::Int(amt)),
             ],
         }));
@@ -443,7 +443,7 @@ impl<'a> Scheduler<'a> {
             tag: "Opt".into(),
             fields: vec![
                 ("op".into(), Arg::Str(format!("{op:?}").to_uppercase())),
-                ("axis".into(), Arg::Int(real_axis as i64)),
+                ("axis".into(), Arg::Int(axis.unwrap_or(0) as i64)),
                 ("arg".into(), Arg::Int(amt)),
             ],
         }));

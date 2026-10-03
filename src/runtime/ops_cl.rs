@@ -240,7 +240,10 @@ impl Prog for ClProgram {
             "clEnqueueNDRangeKernel",
         );
         if wait {
-            self.inner.synchronize();
+            // tinygrad waits on the event (`clWaitForEvents`, ops_cl.py:72), not
+            // `clFinish` on the shared queue — the latter is prone to being
+            // invalidated after many throwaway BEAM programs.
+            check(ev.wait(), "clWaitForEvents");
             let start = check(ev.profiling_command_start(), "event start");
             let end = check(ev.profiling_command_end(), "event end");
             return Some(end.saturating_sub(start) as f64 * 1e-9);

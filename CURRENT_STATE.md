@@ -834,15 +834,35 @@ kernel** instead of ~20 ms — a ~550x gap vs tinygrad measured on the same conv
   codegen/__init__.py:479); a BEAM-tagged candidate skips the pre-opt stages and
   `apply_opts` (idempotent re-entry).
 
-**Status: works on small kernels, not yet practical at scale.** At BS=64 the
-search finds valid faster opts but the CL driver segfaults after thousands of
-throwaway programs/compile-errors (many candidates render invalid CL, and each
-failed `clBuildProgram` plus a fresh program stresses the backend). Missing vs
-tinygrad: the worker pool (parallel candidate compile), the `estimates.ops`
-compute filter + `BEAM_UOPS_MAX`, and the **disk cache of results** (so a search
-runs once, not every process). Until those land, `BEAM` is a research knob; the
-default `hand_coded_optimizations` path is unchanged and the `pool` fix (§8.19)
-is the real throughput win.
+**Status: works on small kernels and now caches; large-model CL search still aborts
+the driver.** Hardening landed (commit follows):
+- **Disk cache** — `engine/disk_cache.rs` (std-only, `AUTORUST_CACHE_DIR`,
+  `CACHELEVEL`, `IGNORE_BEAM_CACHE`) stores the chosen `applied_opts` keyed by
+  `(optimized-AST content key, beam width, device)`, mirroring `diskcache_get/put`
+  (search.py:113/176). A second process replays the cached opts instead of
+  re-searching (verified: 28-entry cache, no search rounds on the second run,
+  identical loss).
+- **`BEAM_UOPS_MAX`** (default 3000) rejects oversized candidates before rendering.
+- **`seen_libs`** dedup by optimized-AST content key (search.py:140).
+- **`Estimates.ops` filter** — a concrete `estimate_ops` (renderer/__init__.py:21,
+  `ops` only, `ignore_indexing`) drops candidates using >1000x the smallest
+  (search.py:143-146).
+- **`BEAM_STRICT_MODE`** (propagate candidate panics) and **`BEAM_VERBOSE`**
+  (keep panic messages); candidate compile *and* timing are now both caught, so
+  one invalid candidate no longer aborts the search.
+- **`BEAM_MAX_CANDIDATES`** — port-only per-round cap (default 0 = tinygrad).
+- The `applied_opts` axis is stored **relative** (tinygrad records the original
+  `Opt`), so cached opts replay correctly; `WMMA`/`TC` estimates are skipped.
+
+Still missing vs tinygrad: the **worker pool** (candidate compiles run in
+subprocesses, which is what keeps a misbehaving CL driver from taking down the
+training process — the port is single-process, so on MNIST the NVIDIA driver
+*aborts the process* on a specific kernel regardless of `BEAM_MAX_CANDIDATES`),
+the `TC/SWAP/THREAD/PADTO/NOLOCALS` actions, and the `estimates.lds/mem` fields.
+Until the worker pool lands, `BEAM` is reliable on small kernels (e.g. `xor`) and
+caches; on large CNNs use `BEAM` on INTERP or leave it off — the default
+`hand_coded_optimizations` path is unchanged and the `pool` fix (§8.19) is the
+real throughput win.
 
 ### 8.21 Dataset re-upload — the MNIST step bottleneck (DONE)
 After the `pool` fix and the bf16 work, a steady-state step was still ~1.5 s at
@@ -1119,12 +1139,16 @@ GPU training throughput; items are independent.
    `dtype_battery_all_backends`/`alu_code_for_op_all_backends` fail on CL for bool vectors
    (pre-existing). The Clang `supported_dtypes` bf16 arch gate is not ported (bf16 stays
    "supported" on clang regardless of arch).
-2. **BEAM search — core ported (§8.20), still needs hardening.** `src/codegen/opt_search.rs`
-   runs under `BEAM=n`; it explores UPCAST/UNROLL/LOCAL/GROUPTOP/GROUP, compiles each
-   candidate and times it on-device. Missing: the worker pool (parallel compile), the
-   `Estimates.ops` compute filter + `BEAM_UOPS_MAX`, the TC/SWAP/THREAD/PADTO/NOLOCALS
-   actions, and the **disk cache** so a search runs once. Today a large-shape search
-   stresses the CL driver (segfault); see §8.20.
+2. **BEAM search — core ported + hardened (§8.20); worker pool still missing.**
+   `src/codegen/opt_search.rs` runs under `BEAM=n`; it explores
+   UPCAST/UNROLL/LOCAL/GROUPTOP/GROUP, compiles each candidate and times it.
+   Hardened with a **disk cache** (search runs once per kernel/width/device),
+   `BEAM_UOPS_MAX`, `seen_libs` dedup, an `Estimates.ops` compute filter,
+   `BEAM_STRICT_MODE`/`BEAM_VERBOSE`, and a port-only `BEAM_MAX_CANDIDATES` cap.
+   Still missing: the **worker pool** (subprocess isolation of candidate
+   compiles — the actual fix for the NVIDIA driver aborting the process on a
+   large-model search), TC/SWAP/THREAD/PADTO/NOLOCALS actions, and
+   `estimates.lds/mem`. See §8.20.
 3. **`TinyJit` — DONE (§8.24).** `Session::jit(bool)` + `engine/jit.rs` capture/replay the
    planned LINEARS of a step; the device-graph RNG (§8.23) advances the sampler on replay.
    CL BS=512 went ~0.86 → ~0.42 s/step (21 steps: 18.0 → 8.8 s, acc unchanged). Follow-ups:
