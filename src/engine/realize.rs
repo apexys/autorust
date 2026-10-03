@@ -425,21 +425,41 @@ fn exec_kernel(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId, cp: &Rc<Compiled
     rt.borrow_mut().call(&bufs, gs, ls, &cp.pi.vals(var_vals), false);
 }
 
-/// `run_linear` (realize.py:315) — compile then execute every call.
-pub fn run_linear(ctx: &mut UOpCtx, linear: UopId, t: &mut BufTable, var_vals: &HashMap<String, i64>, cache: &mut ProgCache) {
-    let (compiled, progs) = compile_linear(ctx, linear, cache);
-    let calls = ctx.srcs(&compiled).to_vec();
+/// A lowered+compiled LINEAR (tinygrad `jit_lower`): every SINK-ast CALL swapped
+/// for a compiled PROGRAM, plus the per-CALL [`CompiledProg`]. The JIT stores
+/// this so a replay executes directly instead of re-running `compile_linear`
+/// (which re-hashes every call's AST on each step).
+pub struct CompiledLinear {
+    pub line: UopId,
+    pub progs: HashMap<u32, Rc<CompiledProg>>,
+}
+
+/// Lower + compile a planned LINEAR once, returning the compiled form.
+pub fn compile_linear_cached(ctx: &mut UOpCtx, linear: UopId, cache: &mut ProgCache) -> CompiledLinear {
+    let (line, progs) = compile_linear(ctx, linear, cache);
+    CompiledLinear { line, progs }
+}
+
+/// Execute an already-compiled LINEAR (the exec half of `run_linear`).
+pub fn exec_linear(ctx: &mut UOpCtx, t: &mut BufTable, c: &CompiledLinear, var_vals: &HashMap<String, i64>) {
+    let calls = ctx.srcs(&c.line).to_vec();
     for call in &calls {
         let ast = &ctx.srcs(call)[0].clone();
         match ctx.op_of(ast) {
             Ops::Copy => exec_copy(ctx, t, call.clone()),
             Ops::Program => {
-                let cp = progs.get(&call.id()).expect("TGERR: run_linear missing CompiledProg").clone();
+                let cp = c.progs.get(&call.id()).expect("TGERR: exec_linear missing CompiledProg").clone();
                 exec_kernel(ctx, t, call.clone(), &cp, var_vals);
             }
-            other => panic!("TGERR: run_linear call ast op {other:?}"),
+            other => panic!("TGERR: exec_linear call ast op {other:?}"),
         }
     }
+}
+
+/// `run_linear` (realize.py:315) — compile then execute every call.
+pub fn run_linear(ctx: &mut UOpCtx, linear: UopId, t: &mut BufTable, var_vals: &HashMap<String, i64>, cache: &mut ProgCache) {
+    let compiled = compile_linear_cached(ctx, linear, cache);
+    exec_linear(ctx, t, &compiled, var_vals);
 }
 
 // ---------------- Tensor-level realize ----------------

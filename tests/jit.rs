@@ -7,6 +7,22 @@ use autorust::engine::session::Session;
 use autorust::tensor::Tensor;
 use autorust::uop::ctx::UOpCtx;
 
+/// On replay the JIT executes the stored compiled LINEARS: it must not re-lower
+/// or re-look-up any program (`jit_lower` runs once, jit.py:263).
+#[test]
+fn jit_replay_does_not_recompile() {
+    let mut ctx = UOpCtx::new();
+    let mut sess = Session::new();
+    sess.enable_jit();
+    let w = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0], None, None).to_param(&mut ctx);
+    let x = Tensor::from_slice(&mut ctx, &[3.0f32, 4.0], None, None).to_param(&mut ctx);
+    let mut jit = Jit::new();
+    let _ = jit.call(&mut ctx, &mut sess, |ctx, sess| step(ctx, sess, &w, &x)).to_list::<f32>(&mut ctx, &mut sess);
+    let (h0, m0) = (sess.cache.hits, sess.cache.misses);
+    let _ = jit.call(&mut ctx, &mut sess, |ctx, sess| step(ctx, sess, &w, &x)).to_list::<f32>(&mut ctx, &mut sess);
+    assert_eq!((sess.cache.hits, sess.cache.misses), (h0, m0), "replay must not recompile");
+}
+
 /// One manual SGD step: `loss = sum(w*x)`, `w -= 0.1 * dloss/dw`, co-realized.
 fn step(ctx: &mut UOpCtx, sess: &mut Session, w: &Tensor, x: &Tensor) -> Tensor {
     let loss = w.mul(ctx, x).sum(ctx, None, false, None);

@@ -31,17 +31,17 @@
 
 use std::collections::HashMap;
 
+use crate::engine::realize::{compile_linear_cached, exec_linear, CompiledLinear};
 use crate::engine::session::Session;
 use crate::runtime::buffer::{buffer_of, Buffer};
 use crate::tensor::Tensor;
 use crate::uop::ctx::UOpCtx;
-use crate::uop::graph::UopId;
 
-/// `_TinyJit` (jit.py:220) — captures the planned LINEARS of one `call` and
+/// `_TinyJit` (jit.py:220) — captures the compiled LINEARS of one `call` and
 /// replays them. Owns the captured result tensor and keeps every captured buffer
 /// alive (so the session's `prune` cannot reclaim a replay's intermediates).
 pub struct Jit {
-    linears: Vec<UopId>,
+    linears: Vec<CompiledLinear>,
     ret: Option<Tensor>,
     /// Strong refs to every buffer the captured linears touch.
     held: Vec<Buffer>,
@@ -86,16 +86,21 @@ impl Jit {
             // (jit.py:258): force the return to realize inside the capture (a
             // lazy eval graph would otherwise capture nothing). Idempotent.
             ret.realize(ctx, sess);
-            self.linears = sess.end_capture();
-            assert!(!self.linears.is_empty(), "TGERR: JIT captured no linears (did the step realize anything?)");
+            let planned = sess.end_capture();
+            assert!(!planned.is_empty(), "TGERR: JIT captured no linears (did the step realize anything?)");
+            // `jit_lower`: lower + compile each linear once; replay executes these.
+            self.linears = planned
+                .into_iter()
+                .map(|l| compile_linear_cached(ctx, l, &mut sess.cache))
+                .collect();
             // hold all buffers the captured linears reference so `prune` keeps them.
             self.held = collect_buffers(ctx, sess, &self.linears);
             self.ret = Some(ret.clone());
             ret
         } else {
-            // replay: re-run the captured schedules against the live buffers.
-            for l in self.linears.clone() {
-                crate::engine::realize::run_linear(ctx, l, &mut sess.buffers, &HashMap::new(), &mut sess.cache);
+            // replay: execute the compiled schedules against the live buffers.
+            for c in &self.linears {
+                exec_linear(ctx, &mut sess.buffers, c, &HashMap::new());
             }
             self.ret.clone().expect("TGERR: JIT replay missing captured result")
         }
@@ -108,14 +113,15 @@ impl Default for Jit {
     }
 }
 
-/// Resolve every BUFFER referenced by `linears` to its session allocation, so the
-/// caller can hold them across future realizes (whose `prune` would otherwise
-/// drop an intermediate that only the table references).
-fn collect_buffers(ctx: &mut UOpCtx, sess: &mut Session, linears: &[UopId]) -> Vec<Buffer> {
+/// Resolve every BUFFER referenced by the compiled `linears` to its session
+/// allocation, so the caller can hold them across future realizes (whose `prune`
+/// would otherwise drop an intermediate that only the table references). Each
+/// CALL's args (PARAM-globals plus arena buffers) are walked.
+fn collect_buffers(ctx: &mut UOpCtx, sess: &mut Session, linears: &[CompiledLinear]) -> Vec<Buffer> {
     let mut out: Vec<Buffer> = Vec::new();
     let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for l in linears {
-        for u in ctx.toposort(l) {
+    for c in linears {
+        for u in ctx.toposort(&c.line) {
             if ctx.op_of(&u) == crate::uop::Ops::Buffer && seen.insert(u.id()) {
                 out.push(buffer_of(ctx, &mut sess.buffers, u));
             }

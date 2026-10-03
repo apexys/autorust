@@ -981,10 +981,11 @@ Validation (CL, BS=512, TRAIN_N=1024, TEST_N=256, 21 steps):
 advance on CL. `cargo test` 116 pass; 41 py gates pass; `--features backend_cl`
 unchanged (2 pre-existing bool-vector failures, §9.6.1).
 
-Known gaps / next: replay re-runs `compile_linear` (AST-cache hits) each step —
-storing the compiled linear would trim sys time further; `prune` is still bypassed
-via `Jit`-held buffers rather than a session-owned arena; and the device-counter
-seed parity noted above.
+Known gaps / next: **compiled-linear replay — DONE** (replay executes stored
+`CompiledLinear`s; `compile_linear` runs once at capture, `to_program` lookups
+per 21 steps fell ~4300 → ~330). Remaining: move buffer `prune` into a
+session-owned arena, and reconcile the device-counter seed with the pre-JIT host
+counter (the JIT run's samples currently restart the counter at 0).
 
 ---
 
