@@ -941,9 +941,16 @@ Device counter: with JIT on, `_next_counter` is the device-side version
 (tensor.py:642) — seed/counter are device buffer leaves and the counter is
 advanced by a `STORE+AFTER` inside the using graph, so replay moves it. With JIT
 off, `rand_graph` stages the same values as host constants (no per-step
-`After`-chain growth). A known divergence: the device counter starts at 0 when
-JIT is enabled (after init already advanced the host counter), so a JIT run's
-sample sequence differs from a non-JIT run's; values are still valid draws.
+`After`-chain growth). The device counter is seeded from the host seed and starts
+at the host counter's current value, so enabling JIT after model init continues
+the non-JIT sequence (pinned by `tests/jit.rs::jit_rng_continues_from_host_counter`).
+
+Residual divergence (a step, not a draw): the port's `BatchNorm` running-stat
+`assign`s realize the forward several times per step, and the in-graph RNG store
+rides along, so the device counter advances once per realize rather than once per
+step. Over a training run the JIT sequence therefore drifts from non-JIT (values
+remain valid draws). Exact parity needs tinygrad's deferred `assign` (store only,
+realized once) or a JIT input-refresh path, tracked in §9.6.3.
 
 ---
 

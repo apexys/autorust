@@ -121,3 +121,39 @@ fn jit_rng_advances_on_replay() {
     }
     assert_eq!(plain, jitted, "JIT replay must advance the device RNG like non-JIT");
 }
+
+/// Enabling JIT *after* a pre-JIT draw (model init) must continue the host
+/// counter's sequence, so a JIT run samples where a non-JIT run would.
+#[test]
+fn jit_rng_continues_from_host_counter() {
+    if autorust::tensor::creation::default_device() != "CL" {
+        return;
+    }
+    let mut ctx = UOpCtx::new();
+    let mut sess = Session::new();
+    let draw = |ctx: &mut UOpCtx, sess: &mut Session| {
+        Tensor::randint(ctx, &[6], 0, 50, None, None).to_list::<i32>(ctx, sess)
+    };
+
+    // A: one "init" draw, then three non-JIT draws.
+    Tensor::manual_seed(7);
+    let init_a = draw(&mut ctx, &mut sess);
+    let a: Vec<Vec<i32>> = (0..3).map(|_| draw(&mut ctx, &mut sess)).collect();
+
+    // B: the same init draw, then JIT for the rest.
+    Tensor::manual_seed(7);
+    let init_b = draw(&mut ctx, &mut sess);
+    assert_eq!(init_a, init_b);
+    sess.enable_jit();
+    let mut jit = Jit::new();
+    let b: Vec<Vec<i32>> = (0..3)
+        .map(|_| {
+            jit.call(&mut ctx, &mut sess, |ctx, sess| {
+                Tensor::randint(ctx, &[6], 0, 50, None, None).realize(ctx, sess).clone()
+            })
+            .to_list::<i32>(&mut ctx, &mut sess)
+        })
+        .collect();
+    sess.jit(false);
+    assert_eq!(a, b, "JIT must continue the host counter left by init");
+}

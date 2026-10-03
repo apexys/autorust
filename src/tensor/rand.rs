@@ -312,11 +312,22 @@ pub fn rand_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, 
 fn next_counter_graph(ctx: &mut UOpCtx, dev: &str, num: u32) -> (Tensor, Tensor) {
     let (seed, counter) = RNG.with(|r| {
         let mut r = r.borrow_mut();
-        if !r.dev_seeds.contains_key(dev) {
-            let n = r.dev_seeds.len() as u32;
+        // Continue the *same* sequence as the host route: derive the seed the
+        // same way and start the device counter at the host counter's current
+        // value, so a JIT run that begins after model init samples exactly where
+        // a non-JIT run would (tinygrad has one global device counter; the port's
+        // host/device routes must therefore agree at hand-off).
+        if !r.device_seeds.contains_key(dev) {
+            let n = r.device_seeds.len() as u32;
             let digest = sha256(&n.to_be_bytes());
             let s0 = u32::from_be_bytes(digest[28..32].try_into().unwrap());
-            let s1 = r.seed as u32;
+            let cur_seed = r.seed as u32;
+            r.device_seeds.insert(dev.to_string(), (s0, cur_seed));
+            r.counters.insert(dev.to_string(), (0u32, 0u32));
+        }
+        let key = r.device_seeds[dev];
+        let ctr = r.counters[dev];
+        if !r.dev_seeds.contains_key(dev) {
             // Device buffers directly (an `empty` leaf + initial bytes, like a
             // param) — `from_slice` would go through a PYTHON COPY whose
             // `buffer_of` aliases back to PYTHON, breaking multi-device schedules.
@@ -328,8 +339,8 @@ fn next_counter_graph(ctx: &mut UOpCtx, dev: &str, num: u32) -> (Tensor, Tensor)
                 creation::register_initial(ctx, u.clone(), bytes);
                 Tensor::from_uop(ctx, u)
             };
-            let seed = mk(ctx, [s0, s1]);
-            let counter = mk(ctx, [0, 0]);
+            let seed = mk(ctx, [key.0, key.1]);
+            let counter = mk(ctx, [ctr.0, ctr.1]);
             r.dev_seeds.insert(dev.to_string(), seed.clone());
             r.dev_counters.insert(dev.to_string(), counter.clone());
         }
