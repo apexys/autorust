@@ -256,6 +256,11 @@ fn time_candidate(
     }
     let var_vals: HashMap<String, i64> = HashMap::new();
     let (mut gs, ls) = cp.pi.launch_dims(&var_vals);
+    // A zero-dimension launch (`clEnqueueNDRangeKernel` with a 0 work size) can
+    // corrupt the queue on some drivers; skip such candidates.
+    if gs.contains(&0) {
+        return None;
+    }
     // `get_test_global_size`: cap the timing launch so a huge candidate can't
     // exhaust the driver; scale the measured time back up.
     let max_global: usize = std::env::var("BEAM_TEST_GLOBAL_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(65536);
@@ -328,6 +333,16 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
     // `IGNORE_BEAM_CACHE` disables both the read and the write.
     let ignore_cache = env_flag("IGNORE_BEAM_CACHE");
     let cache_key = format!("{:016x}:{}:{}", ctx.g.content_key(&base.ast), amt, base.ren.device);
+    if env_flag("BEAM_VERBOSE") {
+        let name = match ctx.arg_of(&base.ast) {
+            Arg::Data(d) => match d.get("name") {
+                Arg::Str(s) => s.clone(),
+                _ => "?".to_string(),
+            },
+            _ => "?".to_string(),
+        };
+        eprintln!("[beam] search kernel {name} ({})", &cache_key[..16]);
+    }
     if !ignore_cache
         && let Some(v) = crate::engine::disk_cache::get("beam_search", &cache_key)
     {
