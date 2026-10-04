@@ -213,6 +213,10 @@ impl Comp for ClCompiler {
 pub struct ClProgram {
     inner: Rc<ClInner>,
     kernel: Kernel,
+    /// tinygrad `CLProgram.program` — kept alive until the kernel is dropped
+    /// (`__del__` releases the kernel then the program). Field order matters:
+    /// Rust drops fields in declaration order, so `kernel` goes first.
+    program: Program,
     signature: Vec<(i64, DTypeId)>,
 }
 
@@ -229,7 +233,7 @@ impl ClProgram {
         let mut program = check(program, "clCreateProgramWithBinary");
         check(program.build(&devices, ""), "clBuildProgram");
         let kernel = check(Kernel::create(&program, &obj.name), "clCreateKernel");
-        ClProgram { inner, kernel, signature: obj.signature.clone() }
+        ClProgram { inner, kernel, program, signature: obj.signature.clone() }
     }
 }
 

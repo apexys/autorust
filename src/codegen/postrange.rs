@@ -501,6 +501,7 @@ fn sval_render(ctx: &mut UOpCtx, u: UopId) -> String {
         Ops::Const => match ctx.val(&u) {
             crate::dtype::ConstVal::Int(v) => format!("{}", v),
             crate::dtype::ConstVal::Bool(b) => (if b { "True" } else { "False" }).to_string(),
+            crate::dtype::ConstVal::Invalid => "Invalid".to_string(),
             crate::dtype::ConstVal::Float(f) => {
                 if f == f.trunc() && f.abs() < 1e15 {
                     format!("{}", f as i64)
@@ -594,7 +595,7 @@ pub fn dump_index_exprs(ctx: &mut UOpCtx, ast: UopId, label: &str) {
                     Arg::Str(s) => (s.clone(), String::from("special")),
                     _ => (String::new(), format!("{:?}", AxisType::range_axis_type(ctx, o.clone()))),
                 };
-                eprintln!("[{}] rng {} ext={} at={}", label, tag, sval_render(ctx, ext.clone()), at);
+                eprintln!("[{}] rng {} ext={} at={} arg={:?}", label, tag, sval_render(ctx, ext.clone()), at, ctx.arg_of(o));
             }
             Ops::Index => {
                 let isrcs = ctx.srcs(o).to_vec();

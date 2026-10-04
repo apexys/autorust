@@ -133,7 +133,22 @@ fn rawbufs_from_ast(ctx: &mut UOpCtx, ast: &UopId, dev: &Rc<Compiled>) -> HashMa
             .map(|s| s.iter().map(|x| x.clone().as_i64().unwrap_or(1)).product())
             .unwrap_or(1);
         let nbytes = (numel.max(1) as usize) * ctx.dt_of(&u).itemsize();
-        map.insert(p.slot, dev.allocator.alloc(nbytes));
+        if env_flag("BEAM_DUMP_BASE") {
+            eprintln!("[beam] rawbuf slot={} shape={:?} nbytes={}", p.slot, ctx.shape(&u).ok().flatten(), nbytes);
+        }
+        let buf = dev.allocator.alloc(nbytes);
+        // BEAM times candidates with dummy buffers. Upstream leaves them
+        // uninitialized (`BufferSpec.zero=False`) and tolerates a faulting
+        // candidate via its worker pool; the single-process port has no such
+        // isolation, so a candidate that uses a dummy as an *index* input
+        // (e.g. the advanced-indexing gather) would read recycled garbage and
+        // fault, poisoning the CL context. Zeroing gives benign, deterministic
+        // inputs so the timing launch is safe. `BEAM_UNINIT_BUFS=1` restores
+        // upstream's uninitialized dummies (only safe with the worker pool).
+        if !env_flag("BEAM_UNINIT_BUFS") {
+            dev.copyin_to(&*buf, &vec![0u8; nbytes]);
+        }
+        map.insert(p.slot, buf);
     }
     map
 }

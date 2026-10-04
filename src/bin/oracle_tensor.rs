@@ -60,6 +60,9 @@ fn main() {
         y: Option<usize>,
         /// `cat` sources (step indices); see the "cat" op.
         ys: Option<Vec<usize>>,
+        /// `randint` bounds.
+        low: Option<i64>,
+        high: Option<i64>,
         val: Option<f64>,
         axis: Option<Vec<i64>>,
         keepdim: Option<bool>,
@@ -162,6 +165,14 @@ fn main() {
             "randn" => autorust::tensor::rand::randn(
                 &mut ctx,
                 sv(&st.shape.clone().unwrap_or_default()).as_slice(),
+                dtype_from_name(st.dtype.clone()),
+                st.device.as_deref(),
+            ),
+            "randint" => autorust::tensor::rand::randint(
+                &mut ctx,
+                sv(&st.shape.clone().unwrap_or_default()).as_slice(),
+                st.low.unwrap_or(0) as i32,
+                st.high.unwrap_or(1) as i32,
                 dtype_from_name(st.dtype.clone()),
                 st.device.as_deref(),
             ),

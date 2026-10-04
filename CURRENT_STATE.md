@@ -889,21 +889,30 @@ driver limit or an unfreed resource.** Evidence:
   uses a *disk* cache, `device.py Compiler.compile_cached`); it is now **FIFO-capped**
   (`CL_COMPILE_CACHE`, default 1024) so BEAM can't grow it without bound.
 
-**Residual (still open):** after the gpudims fix, one more CL kernel faults — the
-advanced-indexing gather `X[samples]` (`[64,784]`), whose `UPCAST axis=0 arg=2`
-candidate aborts at `clWaitForEvents` and poisons the context. Its rendered source
-looks in-bounds (`data4_200704[(long)alu2*784+gidx0]`, `data0_50176[...]`), so the
-cause is not yet pinned (suspected launch/special or leftover state, not the
-gpudims keying). The RNG kernel and everything before it now search cleanly.
+**Second cause (fixed): uninitialized BEAM dummy buffers.** After the gpudims fix
+the advanced-indexing gather `X[samples]` (`[64,784]`) still faulted — timing-
+dependently. Its candidate is in-bounds *for valid inputs*, but `rawbufs_from_ast`
+allocates dummy buffers that upstream leaves uninitialized (`BufferSpec.zero=False`):
+the gather uses its dummy inputs (`data1/2/3`) to compute `X`'s row, so recycled
+garbage sent `data4_200704[huge*784+gidx0]` out of bounds. tinygrad tolerates this
+by running each candidate in a worker subprocess; the single-process port can't, so
+the fault poisoned the CL context. Fix: **zero the dummy buffers**
+(`opt_search::rawbufs_from_ast`); `BEAM_UNINIT_BUFS=1` restores upstream's
+uninitialized dummies (safe only with the worker pool). Also made `ClProgram` keep
+its `cl_program` alive (upstream `CLProgram.program`; the port had released it
+immediately), and `sval_render` now renders `Invalid` too.
+
+**BEAM on CL now completes:** `DEFAULT_DEVICE=CL BEAM=1 BS=64 STEPS=1 TRAIN_N=256`
+runs a full step (`loss 2.658 test_accuracy 10.94%`, 0 faults, 119 misses/94 hits).
+The worker pool remains the robust isolation for a *genuine* OOB candidate.
 
 Still missing vs tinygrad: the **worker pool** (which in tinygrad isolates a
-faulting candidate from the training process — the single-process port has no
-such isolation, so one bad kernel takes down the run), the
-`TC/SWAP/THREAD/PADTO/NOLOCALS` actions, and the `estimates.lds/mem` fields.
-Until the gather fault (or context isolation) lands, `BEAM` is reliable on small
-kernels and on graphs without advanced indexing; on full MNIST use `BEAM` on
-INTERP or leave it off — `hand_coded_optimizations` is unchanged and the `pool`
-fix (§8.19) is the real throughput win.
+faulting candidate from the training process — the single-process port now zeroes
+the dummy buffers instead, which covers index-driven faults but not a genuine OOB),
+the `TC/SWAP/THREAD/PADTO/NOLOCALS` actions, and the `estimates.lds/mem` fields.
+BEAM is now usable on CL (`xor` and full MNIST); the default
+`hand_coded_optimizations` path is unchanged and the `pool` fix (§8.19) is the real
+throughput win.
 
 ### 8.21 Dataset re-upload — the MNIST step bottleneck (DONE)
 After the `pool` fix and the bf16 work, a steady-state step was still ~1.5 s at
