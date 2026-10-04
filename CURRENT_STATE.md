@@ -1236,8 +1236,13 @@ what "unlocks bf16".
 - `NV` (`runtime/ops_nv.py`, 55 KB) — a from-scratch **userspace GPU driver**: ioctl on
   `/dev/nvidia*`, `support/hcq.py` command queues/signals/MMIO, `support/nv/nvdev.py`
   memory manager, plus the ~1.5 MB `nv_5xx` register/ioctl autogen. *Not* a dlopen
-  backend; a multi-month port. Only pursue to run without the CUDA toolkit or to match
-  the oracle's default `DEV=NV`.
+  backend; a multi-month port. Its only relevant edge is **kernel-launch latency** (QMD
+  written straight into the GPFIFO + doorbell, vs the CUDA driver's per-launch arg
+  marshalling) and low-level control (MMIO/PMA). It is **not** toolkit-free: `PTXRenderer`
+  selects `NVPTXCompiler` for the `NV` device, which needs `libnvJitLink` (a *toolkit*
+  library) — so both backends need a toolkit lib to compile (`libnvrtc` vs `libnvJitLink`).
+  For bf16 matmul/conv throughput this edge is irrelevant; it would only matter for a
+  launch-bound tiny-kernel workload.
 
 Both select `CUDARenderer` on sm_80+, so bf16 is unlocked by either. This plan is the
 CUDA driver-API path; the renderer/codegen work is shared.
@@ -1249,7 +1254,13 @@ CUDA driver-API path; the renderer/codegen work is shared.
 2. **Loader** (`src/runtime/dl.rs`): std-only `dlopen`/`dlsym`/`dlclose` wrapper
    (`extern "C"`, link `dl`) returning typed fn pointers — mirrors tinygrad's
    `support/c.py DLL`. (Alternative: the `dlopen`/`libloading` crate behind
-   `backend_cuda`, as `opencl3` sits behind `backend_cl`.)
+   `backend_cuda`, as `opencl3` sits behind `backend_cl`.) **Or use `cudarc`**
+   (`-F dynamic-loading`): it already wraps the CUDA driver + NVRTC with safe
+   `CudaContext`/`CudaSlice`/`load_module`/`launch_builder`, and ships committed
+   bindgen-generated `sys` bindings — i.e. it subsumes items 1–2 and most of 4, and
+   replaces the autogen question below. Its abstractions differ from tinygrad's
+   `device.py` seams, but the `Compiled`/`Allocator`/`Comp`/`Prog` traits already isolate
+   `opencl3` the same way. It is a heavier dep than `opencl3` but behind `backend_cuda`.
 3. **Renderer** (`renderer/cstyle.rs` + `renderer/mod.rs`): `CStyleLang::cuda()` —
    `kernel_typedef = extern "C" __global__ void __launch_bounds__(...)`,
    `blockIdx`/`threadIdx` workitems, `smem_prefix = __shared__ __align__(16)`,
@@ -1298,4 +1309,7 @@ regenerates with `REGEN=1`, never at import time. Options in Rust:
 
 **Gate:** CUDARenderer byte-diff (`oracle_codegen`), `tests/bf16.rs` on CUDA, backend
 harness parity, and a bf16 MNIST train step. **Open decision:** confirm CUDA vs the full
-`NV` ioctl driver, and the std-only `dl.rs` loader vs a `dlopen`/`libloading` dependency.
+`NV` ioctl driver, and the glue: std-only `dl.rs` + hand-written `cuda_ffi.rs`, vs the
+`cudarc` crate (behind `backend_cuda`) — the same "feature-gated heavier dep" precedent as
+`opencl3`. cudarc saves S0–S1 but not the renderer/tensor-core work that actually unlocks
+bf16.
