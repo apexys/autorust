@@ -1217,4 +1217,85 @@ GPU training throughput; items are independent.
    `Module`/`named_params`/`into_params` exist.
 6. **Native GPU backend (later).** OpenCL lacks GPU-native features (WMMA/tensor cores,
    native bf16/fp16 compute). A future `autorust-nv` crate porting tinygrad's NV/CUDA path
-   is the likely direction once items 1–4 land. Tracked as a design direction, not started.
+   is the likely direction once items 1–4 land. **Reviewed 2026-10 — see §9.7** for the
+   concrete port plan (recommended target: the CUDA driver-API backend, not the ioctl `NV`
+   driver).
+
+### 9.7 Native GPU backend (CUDA/NV) — port plan for native bf16 (2026-10)
+
+**Why.** CL computes bf16 by emulation (`pm_manual_bf16_cast` + compute-through-f32,
+§8.18) and `OpenCLRenderer.tensor_cores == []`, so bf16 is ~2x *slower* than f32. On
+NVIDIA the native path is `CUDARenderer`, which emits `nv_bfloat16` and sets
+`tensor_cores = tc.get_cuda("sm_86")` (bf16 WMMA). That renderer, not the device name, is
+what "unlocks bf16".
+
+**Which "NV".** tinygrad has two NVIDIA backends:
+- `CUDA` (`runtime/ops_cuda.py`, ~250 LOC) — the CUDA **driver API** (`libcuda.so`,
+  `cuInit`/`cuMemAlloc`/`cuLaunchKernel`), compiled by `NVRTCCompiler` (`libnvrtc` →
+  PTX → `cuModuleLoadData`). Small surface; dynamic loading. **Recommended target.**
+- `NV` (`runtime/ops_nv.py`, 55 KB) — a from-scratch **userspace GPU driver**: ioctl on
+  `/dev/nvidia*`, `support/hcq.py` command queues/signals/MMIO, `support/nv/nvdev.py`
+  memory manager, plus the ~1.5 MB `nv_5xx` register/ioctl autogen. *Not* a dlopen
+  backend; a multi-month port. Only pursue to run without the CUDA toolkit or to match
+  the oracle's default `DEV=NV`.
+
+Both select `CUDARenderer` on sm_80+, so bf16 is unlocked by either. This plan is the
+CUDA driver-API path; the renderer/codegen work is shared.
+
+**Moving parts**
+1. **Bindings** (`src/runtime/cuda_ffi.rs`): ~40 CUDA driver fns + opaque typedefs +
+   `CUresult` / `CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES` / `CU_MEMORYTYPE_DEVICE`;
+   ~11 `nvrtc*` fns. No `cuGraph*` (graph capture is SKIP).
+2. **Loader** (`src/runtime/dl.rs`): std-only `dlopen`/`dlsym`/`dlclose` wrapper
+   (`extern "C"`, link `dl`) returning typed fn pointers — mirrors tinygrad's
+   `support/c.py DLL`. (Alternative: the `dlopen`/`libloading` crate behind
+   `backend_cuda`, as `opencl3` sits behind `backend_cl`.)
+3. **Renderer** (`renderer/cstyle.rs` + `renderer/mod.rs`): `CStyleLang::cuda()` —
+   `kernel_typedef = extern "C" __global__ void __launch_bounds__(...)`,
+   `blockIdx`/`threadIdx` workitems, `smem_prefix = __shared__ __align__(16)`,
+   `__syncthreads()`, `type_map` bf16→`nv_bfloat16`, the bf16/half/fp8 includes and
+   `_nms` vector prefix, the `htrunc/hsin/...` bf16 ops, native-bf16
+   `supported_dtypes` (`ver>=80`), `global_max/local_max/shared_max`. No
+   `pm_manual_bf16_cast` (native).
+4. **Compiler** (`ops_cuda.rs`): `NvrtcCompiler` (source → PTX, cached like the CL
+   `CompileCache`), or a subprocess `nvcc`-based `NvccCompiler` (nvcc + ptxas are present
+   here). Cache key includes the device arch (`compile_cuda_sm_86`).
+5. **Runtime** (`ops_cuda.rs`): `CUDAAllocator` (`cuMemAlloc_v2`/`cuMemFree_v2`/
+   `cuMemcpyHtoDAsync_v2`/`cuMemcpyDtoH_v2`; host staging buffer for async copyin like
+   upstream), `CUDAProgram` (`cuModuleLoadData` + `cuModuleGetFunction` +
+   `cuLaunchKernel`, `encode_args` building the kernel-param struct), `CUDADevice`.
+   Register `"CUDA"` behind a `backend_cuda` feature; add `Renderer::cuda(arch)`.
+6. **Device arch**: `cuDeviceComputeCapability` → `sm_86`; both `supported_dtypes` and
+   `tc.get_cuda` key off it, so the arch must reach renderer construction (the CL path
+   already does this via `Renderer::opencl_arch(exts)`).
+7. **Tensor cores** (full bf16 throughput): port `codegen/opt/tc.py` (layouts +
+   `get_cuda`), `expand_wmma` (`pm_expand_wmma`/expander2), the `TC` opt in
+   `_apply_tc_opt`, and the WMMA asm prefix in `CUDARenderer.render_kernel`. The port's
+   pipeline currently says "no WMMA in corpus" and every renderer has empty
+   `tensor_cores`, so this is the largest sub-task. Native bf16 (no TC) lands first.
+
+**Autogen through a build script.** tinygrad's `support/autogen.py gen()` uses libclang to
+parse C headers and **commits** the generated Python (`cuda.py`, `nv_580.py`); it only
+regenerates with `REGEN=1`, never at import time. Options in Rust:
+- (a) port `gen()` to `build.rs` via `clang-sys` and emit Rust `extern "C"` decls —
+  faithful, but ~600 LOC + a libclang build-dep, overkill for CUDA's ~50 fns.
+- (b) `bindgen` in `build.rs` — standard, but a large/unstable build-dep tree and it
+  breaks the std-only policy.
+- (c) **commit generated/hand-written bindings** (`cuda_ffi.rs`), exactly as tinygrad
+  commits `cuda.py`. **Recommended for CUDA.** A `build.rs` is only needed to emit
+  `cargo:rustc-link-lib=dl`. Revisit (a)/(b) only for the 1.5 MB `nv_5xx` ioctl tables if
+  the `NV` driver is ever ported.
+
+**Staged plan**
+- **S0** `dl.rs` + `cuda_ffi.rs` + smoke test: `cuInit` → `cuDeviceGet` →
+  `cuDeviceComputeCapability` → `cuMemAlloc` → `cuMemcpyHtoD` → `cuMemcpyDtoH`.
+- **S1** NVRTC compile + `cuModuleLoadData` + `cuLaunchKernel`; run the existing f32
+  kernels; byte-diff `Renderer::cuda` against tinygrad's `CUDARenderer`.
+- **S2** port `CUDARenderer` rendering incl. native bf16; `backend_cuda` feature +
+  register `"CUDA"`; `tests/bf16.rs` + backend harness on CUDA.
+- **S3** tensor cores (`tc.py` + `expand_wmma` + TC opt + WMMA render) for bf16 matmul.
+- **S4** MNIST `DEFAULT_DEVICE=CUDA DTYPE=bfloat16` benchmark vs CL.
+
+**Gate:** CUDARenderer byte-diff (`oracle_codegen`), `tests/bf16.rs` on CUDA, backend
+harness parity, and a bf16 MNIST train step. **Open decision:** confirm CUDA vs the full
+`NV` ioctl driver, and the std-only `dl.rs` loader vs a `dlopen`/`libloading` dependency.
