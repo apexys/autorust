@@ -10,11 +10,17 @@ crate-type = ["lib", "cdylib"]
 name = "ocl_smoke"
 required-features = ["backend_cl"]
 
+[[bin]]
+name = "cuda_smoke"
+required-features = ["backend_cuda"]
+
 [features]
 default = ["capi"]
 # C ABI loaded by the Python ctypes bridge (py/bridge.py).
 capi = []
 backend_cl = ["dep:opencl3"]
+# CUDA backend (operations/codegen on the CUDA driver API via `cudarc`).
+backend_cuda = ["dep:cudarc"]
 # Debug knobs, compiled out by default so hot paths never call getenv.
 # `trace`: TG_TRACE rule-firing trace.
 # `dump`:  TG_DUMP_PRE_EXPAND/TG_DUMP_IDX/TG_DUMP_LST/TG_DUMP_INTERP/TG_DEBUG_LOAD
@@ -25,6 +31,16 @@ dump = []
 [dependencies]
 nanoserde = "0.2.1"
 opencl3 = { version = "0.9", optional = true }
+# CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
+# needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.
+cudarc = { version = "0.19", optional = true, default-features = false, features = [
+    "std",
+    "driver",
+    "nvrtc",
+    "dynamic-loading",
+    "cuda-version-from-build-system",
+    "fallback-latest",
+] }
 
 [profile.dev]
 opt-level = 1
