@@ -134,30 +134,59 @@ pub fn add_gpudims(ctx: &mut UOpCtx, s: UopId) -> Option<UopId> {
         return None;
     }
 
-    // gather ranges keyed by (axis_id,) — corpus has unique axis ids
-    let mut all_ranges: Vec<UopId> = s_topo.iter().filter(|&x| ctx.op_of(x) == Ops::Range).cloned().collect();
-    all_ranges.sort_by_key(|x| crate::uop::range::AxisType::range_axis_id(ctx, x.clone()));
-    let global_dims: Vec<UopId> = all_ranges
-        .iter().filter(|&x| matches!(AxisType::range_axis_type(ctx, x.clone()), AxisType::Global | AxisType::Thread)).cloned()
+    // get ranges: tinygrad keys each RANGE by `x.arg[0:-1]` — everything but
+    // the trailing AxisType (`all_ranges = {x.arg[0:-1]: x ...}`). The `arg[1]`
+    // split marker distinguishes the two halves of a `pm_split_ranges` split;
+    // keying on the axis id alone (as this port did) collapses them onto one
+    // gpu dim, rendering e.g. `gidx1*12800 + gidx1` instead of `*12800 + inner`.
+    let range_head = |ctx: &UOpCtx, r: UopId| -> Vec<i64> {
+        match ctx.arg_of(&r) {
+            Arg::Seq { tuple: true, items } => items[..items.len() - 1]
+                .iter()
+                .map(|a| match a {
+                    Arg::Int(i) => *i,
+                    other => panic!("TGERR: bad RANGE arg head {other:?}"),
+                })
+                .collect(),
+            other => panic!("TGERR: bad RANGE arg {other:?}"),
+        }
+    };
+    let mut all_ranges: HashMap<Vec<i64>, UopId> = HashMap::new();
+    for x in s_topo.iter() {
+        if ctx.op_of(x) == Ops::Range {
+            all_ranges.insert(range_head(ctx, x.clone()), x.clone());
+        }
+    }
+    let mut global_dims: Vec<Vec<i64>> = all_ranges
+        .iter()
+        .filter(|(_, r)| matches!(AxisType::range_axis_type(ctx, (**r).clone()), AxisType::Global | AxisType::Thread))
+        .map(|(k, _)| k.clone())
         .collect();
-    let local_dims: Vec<UopId> = all_ranges
-        .iter().filter(|&x| matches!(AxisType::range_axis_type(ctx, x.clone()), AxisType::Warp | AxisType::Local | AxisType::GroupReduce)).cloned()
+    let mut local_dims: Vec<Vec<i64>> = all_ranges
+        .iter()
+        .filter(|(_, r)| matches!(AxisType::range_axis_type(ctx, (**r).clone()), AxisType::Warp | AxisType::Local | AxisType::GroupReduce))
+        .map(|(k, _)| k.clone())
         .collect();
+    global_dims.sort();
+    local_dims.sort();
     if global_dims.is_empty() && local_dims.is_empty() {
         return None;
     }
 
-    let dim_key = |ctx: &mut UOpCtx, r: UopId| -> (i64, AxisType) {
-        (AxisType::range_axis_id(ctx, r.clone()), AxisType::range_axis_type(ctx, r))
-    };
     let extent = |ctx: &mut UOpCtx, r: UopId| -> i64 {
         match ctx.ssimplify(ctx.srcs(&r)[0].clone()) {
             Ok(SVal::I(v)) => v as i64,
             _ => panic!("TGERR: symbolic gpudims extent"),
         }
     };
-    let global_shape: Vec<i64> = global_dims.iter().map(|r| extent(ctx, r.clone())).collect();
-    let local_shape: Vec<i64> = local_dims.iter().map(|r| extent(ctx, r.clone())).collect();
+    let mut global_shape: Vec<i64> = Vec::with_capacity(global_dims.len());
+    for k in global_dims.iter() {
+        global_shape.push(extent(ctx, all_ranges[k].clone()));
+    }
+    let mut local_shape: Vec<i64> = Vec::with_capacity(local_dims.len());
+    for k in local_dims.iter() {
+        local_shape.push(extent(ctx, all_ranges[k].clone()));
+    }
 
     // gpu-like execution: local then global idxs (has_threads=false, dont_use_locals=false)
     let local_idxs = get_grouped_dims(ctx, "lidx", &local_shape, Some(&[32768, 32768, 32768]), false);
@@ -166,19 +195,18 @@ pub fn add_gpudims(ctx: &mut UOpCtx, s: UopId) -> Option<UopId> {
     idxs.extend(local_idxs);
 
     // ordered dims like python: (global_dims+local_dims) in sorted-key order
-    let mut ordered: Vec<(i64, AxisType)> = global_dims.iter().map(|r| dim_key(ctx, r.clone())).collect();
-    ordered.extend(local_dims.iter().map(|r| dim_key(ctx, r.clone())));
+    let ordered: Vec<Vec<i64>> = global_dims.iter().chain(local_dims.iter()).cloned().collect();
 
     let mut subs: HashMap<UopId, UopId> = HashMap::new();
     for r in s_topo.iter() {
         if ctx.op_of(r) != Ops::Range {
             continue;
         }
-        let key = dim_key(ctx, r.clone());
         if AxisType::range_axis_type(ctx, r.clone()) == AxisType::Reduce {
             continue;
         }
-        if let Some(ii) = ordered.iter().position(|&k| k == key) {
+        let key = range_head(ctx, r.clone());
+        if let Some(ii) = ordered.iter().position(|k| *k == key) {
             subs.insert(r.clone(), (idxs[ii]).clone());
         }
     }

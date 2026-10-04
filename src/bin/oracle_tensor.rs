@@ -58,6 +58,8 @@ fn main() {
         shape: Option<Vec<i64>>,
         x: Option<usize>,
         y: Option<usize>,
+        /// `cat` sources (step indices); see the "cat" op.
+        ys: Option<Vec<usize>>,
         val: Option<f64>,
         axis: Option<Vec<i64>>,
         keepdim: Option<bool>,
@@ -147,6 +149,22 @@ fn main() {
                 st.keepdim.unwrap_or(false),
             ),
             "contiguous" => tensors[st.x.unwrap_or(0)].clone().contiguous(&mut ctx),
+            "cat" => {
+                let others: Vec<Tensor> = st.ys.clone().unwrap_or_default().iter().map(|&i| tensors[i].clone()).collect();
+                tensors[st.x.unwrap_or(0)].clone().cat(&mut ctx, &others)
+            }
+            "rand" => autorust::tensor::rand::rand(
+                &mut ctx,
+                sv(&st.shape.clone().unwrap_or_default()).as_slice(),
+                dtype_from_name(st.dtype.clone()),
+                st.device.as_deref(),
+            ),
+            "randn" => autorust::tensor::rand::randn(
+                &mut ctx,
+                sv(&st.shape.clone().unwrap_or_default()).as_slice(),
+                dtype_from_name(st.dtype.clone()),
+                st.device.as_deref(),
+            ),
             other => panic!("TGERR: oracle_tensor: unknown op {other} (step {i})"),
         };
         tensors.push(t);

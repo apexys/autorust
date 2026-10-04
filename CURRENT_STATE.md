@@ -834,9 +834,9 @@ kernel** instead of ~20 ms — a ~550x gap vs tinygrad measured on the same conv
   codegen/__init__.py:479); a BEAM-tagged candidate skips the pre-opt stages and
   `apply_opts` (idempotent re-entry).
 
-**Status: works on small kernels and now caches; large-model CL search still
-aborts the driver — root cause found (an OOB candidate kernel, below), not a
-driver limit.** Hardening landed (commit follows):
+**Status: works on small kernels and now caches; the large-model CL abort's root
+cause was found and fixed (`add_gpudims` split-range keying, below) — not a driver
+limit.** Hardening landed:
 - **Disk cache** — `engine/disk_cache.rs` (std-only, `AUTORUST_CACHE_DIR`,
   `CACHELEVEL`, `IGNORE_BEAM_CACHE`) stores the chosen `applied_opts` keyed by
   `(optimized-AST content key, beam width, device)`, mirroring `diskcache_get/put`
@@ -864,28 +864,46 @@ driver limit or an unfreed resource.** Evidence:
   candidate *launch* fails at `clWaitForEvents` (`UNKNOWN_ERROR`). After that the
   context is poisoned: every later `clBuildProgram` returns `UNKNOWN_ERROR`
   (empty log), and the driver sometimes segfaults.
-- The failing candidate is a single `UPCAST axis=1 arg=2` on the RNG `stack/cat`
-  kernel. Its rendered store is **out of bounds**: `data0_25600[gidx1*12802]`
-  with `gidx1` up to 6399 (~82M), while the dummy buffer has 25600 elements. The
-  base scheduler already shows the wrong index `r0*12800 + r0` (should be
-  `r0*12800 + r1` for the `[2,12800]` stack). `hand_coded_optimizations`' multi-opt
-  restructure (`shift_to` on several axes) repairs the index, which is why
-  non-BEAM training and `tests/rand.rs` are correct; a single BEAM opt does not.
-  So the fault is a **multi-range index bug in the `stack`/reshape path** exposed
-  only by partially-optimized candidates. Fixing it needs the Python differential
-  oracle (compare `_apply_reshape`/rangeify offsets against tinygrad).
+- **Actual root cause (fixed): `add_gpudims` dropped the `pm_split_ranges` split
+  marker.** tinygrad keys every RANGE by `x.arg[0:-1]` (the head *excluding* the
+  trailing AxisType), so the two halves of a split range get distinct keys
+  `(axis,0)`/`(axis,1)` (`gpudims.py:47/84`). The port keyed by
+  `(range_axis_id, axis_type)`, collapsing both onto one GPU dim. For the RNG
+  `stack`/`cat` kernel (`rand` of a `[32,32,5,5]` weight init) the split
+  `[2,12800]` base rendered `data0_25600[gidx1*12800 + gidx1]` instead of
+  `[... + inner]`; a BEAM `UPCAST axis=1 arg=2` then widened the split range to
+  6400, so `gidx1` (6400) × (12800+1) reached ~82M into a 25600 buffer — the
+  illegal access that faults at `clWaitForEvents` and poisons the context.
+  `hand_coded_optimizations` happened to repair the index, which is why non-BEAM
+  training and `tests/rand.rs` were always correct. The fix keys by the
+  `arg[0:-1]` head (shapes/dims derived from those heads), matching tinygrad; the
+  RNG kernel now searches cleanly (its `[2,12800]` UPCAST candidates don't fault).
+- **Pinned by a new differential gate** `test_pm_add_gpudims`
+  (`py/tests/test_rewrite_diff.py` + `oracle_rewrite`): 300 random graphs mixing
+  unsplit and split GLOBAL ranges. Fails on the old keying (both halves map to one
+  `SPECIAL`), passes with the fix.
+- `sval_render` now renders `Const(Bool)` as `True`/`False` (as `UOp.render`
+  does); it previously panicked in the advanced-indexing gather's
+  `get_optimized_ast` name generation.
 - The in-memory `CLCompiler.compile_cache` was a genuine unbounded leak (tinygrad
   uses a *disk* cache, `device.py Compiler.compile_cached`); it is now **FIFO-capped**
   (`CL_COMPILE_CACHE`, default 1024) so BEAM can't grow it without bound.
+
+**Residual (still open):** after the gpudims fix, one more CL kernel faults — the
+advanced-indexing gather `X[samples]` (`[64,784]`), whose `UPCAST axis=0 arg=2`
+candidate aborts at `clWaitForEvents` and poisons the context. Its rendered source
+looks in-bounds (`data4_200704[(long)alu2*784+gidx0]`, `data0_50176[...]`), so the
+cause is not yet pinned (suspected launch/special or leftover state, not the
+gpudims keying). The RNG kernel and everything before it now search cleanly.
 
 Still missing vs tinygrad: the **worker pool** (which in tinygrad isolates a
 faulting candidate from the training process — the single-process port has no
 such isolation, so one bad kernel takes down the run), the
 `TC/SWAP/THREAD/PADTO/NOLOCALS` actions, and the `estimates.lds/mem` fields.
-Until the index bug (or context isolation) lands, `BEAM` is reliable on small
-kernels (e.g. `xor`) and caches; on large CNNs use `BEAM` on INTERP or leave it
-off — the default `hand_coded_optimizations` path is unchanged and the `pool` fix
-(§8.19) is the real throughput win.
+Until the gather fault (or context isolation) lands, `BEAM` is reliable on small
+kernels and on graphs without advanced indexing; on full MNIST use `BEAM` on
+INTERP or leave it off — `hand_coded_optimizations` is unchanged and the `pool`
+fix (§8.19) is the real throughput win.
 
 ### 8.21 Dataset re-upload — the MNIST step bottleneck (DONE)
 After the `pool` fix and the bf16 work, a steady-state step was still ~1.5 s at

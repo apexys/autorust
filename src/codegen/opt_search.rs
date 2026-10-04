@@ -360,6 +360,16 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
         };
         eprintln!("[beam] search kernel {name} ({})", &cache_key[..16]);
     }
+    if env_flag("BEAM_DUMP_BASE") {
+        eprintln!(
+            "[beam] BASE {} shape={:?} types={:?} opts={:?}",
+            &cache_key[..16],
+            base.full_shape(ctx),
+            base.axis_types(ctx),
+            base.applied_opts()
+        );
+        crate::codegen::postrange::dump_index_exprs(ctx, base.ast.clone(), "BASE");
+    }
     if !ignore_cache
         && let Some(v) = crate::engine::disk_cache::get("beam_search", &cache_key)
     {

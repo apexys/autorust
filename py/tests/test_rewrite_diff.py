@@ -24,7 +24,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "
 from bridge import uop_to_json, json_to_uop  # noqa: E402
 
 from tinygrad.dtype import dtypes  # noqa: E402
-from tinygrad.uop.ops import UOp, Ops, graph_rewrite  # noqa: E402
+from tinygrad.uop.ops import UOp, Ops, graph_rewrite, AxisType, KernelInfo  # noqa: E402
 from tinygrad.uop.symbolic import symbolic, symbolic_simple, commutative  # noqa: E402
 from tinygrad.uop.movement import mop_cleanup  # noqa: E402
 from tinygrad.uop.divandmod import div_and_mod_symbolic  # noqa: E402
@@ -192,6 +192,46 @@ def rand_index_graph(rng):
         except Exception:
             continue
     raise AssertionError("index generator failed 20x")
+
+
+def _gpudims_range(end, axis, at=AxisType.GLOBAL, split=None):
+    """A RANGE with an explicit `arg` head — `(axis, AxisType)` when unsplit,
+    `(axis, split, AxisType)` for one half of a `pm_split_ranges` split."""
+    arg = (axis, at) if split is None else (axis, split, at)
+    return UOp(Ops.RANGE, dtypes.weakint, (UOp.const(end, dtypes.weakint),), arg)
+
+
+def rand_gpudims_graph(rng):
+    """Graphs exercising `pm_add_gpudims` (codegen/gpudims.py:41).
+
+    Crucially includes the two halves of a `pm_split_ranges` split: they share
+    the same axis id and differ only in the leading `arg[1]` split marker, so a
+    matcher that keys ranges by axis id alone collapses them onto one gpu dim.
+    """
+    for _ in range(20):
+        try:
+            terms = []
+            for ax in range(rng.randint(1, 3)):
+                if rng.random() < 0.5:
+                    f = rng.choice([2, 3, 4, 5, 8])
+                    terms.append(_gpudims_range(f, ax, split=0) + _gpudims_range(rng.randint(2, 16), ax, split=1) * f)
+                else:
+                    terms.append(_gpudims_range(rng.randint(2, 24), ax))
+            expr = terms[0]
+            for t in terms[1:]:
+                expr = expr + t
+            return expr.sink(arg=KernelInfo(name="test"))
+        except Exception:
+            continue
+    raise AssertionError("gpudims generator failed 20x")
+
+
+class _GpuDimCtx:
+    """The gpu-like config `add_gpudims` reads (matches the Rust hardcoding)."""
+    has_threads = False
+    global_max = (0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF)
+    global_prod_max = None
+    local_max = (32768, 32768, 32768)
 
 
 def rand_split_graph(rng):
@@ -388,6 +428,12 @@ class TestRewriteDifferential(unittest.TestCase):
         rng = random.Random(49)
         graphs = [rand_split_graph(rng) for _ in range(300)]
         self._diff("pm_split_ranges", pm_split_ranges, graphs, ctx={})
+
+    def test_pm_add_gpudims(self):
+        from tinygrad.codegen.gpudims import pm_add_gpudims
+        rng = random.Random(52)
+        graphs = [rand_gpudims_graph(rng) for _ in range(300)]
+        self._diff("pm_add_gpudims", pm_add_gpudims, graphs, ctx=_GpuDimCtx())
 
     def test_pm_decomp(self):
         from tinygrad.codegen.decomp.op import get_simplifying_rewrite_patterns

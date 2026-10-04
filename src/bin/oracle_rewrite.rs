@@ -14,6 +14,7 @@ use autorust::uop::upat::{graph_rewrite, CtxVal};
 static PM_LOAD_COLLAPSE: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
 static PM_REDUCE_LOAD_COLLAPSE: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
 static PM_SPLIT_RANGES: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
+static PM_ADD_GPUDIMS: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
 static PM_DECOMP: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
 static PM_DTYPE_DECOMP: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
 
@@ -27,6 +28,7 @@ fn pm_by_name(name: &str) -> Option<&'static autorust::uop::upat::PatternMatcher
         "pm_load_collapse" => Some(PM_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_load_collapse)),
         "pm_reduce_load_collapse" => Some(PM_REDUCE_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_reduce_load_collapse)),
         "pm_split_ranges" => Some(PM_SPLIT_RANGES.get_or_init(autorust::codegen::simplify::pm_split_ranges)),
+        "pm_add_gpudims" => Some(PM_ADD_GPUDIMS.get_or_init(autorust::codegen::gpudims::pm_add_gpudims)),
         "pm_decomp" => Some(PM_DECOMP.get_or_init(|| autorust::codegen::decomp::pm_decomp(true))),
         "pm_dtype_decomps" => Some(PM_DTYPE_DECOMP.get_or_init(autorust::codegen::decomp_dtype::pm_dtype_decomps)),
         _ => None,

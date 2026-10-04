@@ -500,6 +500,7 @@ fn sval_render(ctx: &mut UOpCtx, u: UopId) -> String {
     match ctx.op_of(&u) {
         Ops::Const => match ctx.val(&u) {
             crate::dtype::ConstVal::Int(v) => format!("{}", v),
+            crate::dtype::ConstVal::Bool(b) => (if b { "True" } else { "False" }).to_string(),
             crate::dtype::ConstVal::Float(f) => {
                 if f == f.trunc() && f.abs() < 1e15 {
                     format!("{}", f as i64)
