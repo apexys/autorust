@@ -6,7 +6,7 @@
 use crate::dtype::{self, ConstVal};
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
-use crate::uop::ops::{group, Ops};
+use crate::uop::ops::Ops;
 
 use crate::uop::UopId;
 use std::collections::HashMap;
@@ -90,10 +90,16 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     // build replacements
     let mut replacements: Vec<(UopId, UopId)> = Vec::new();
     for ((op, buf, base, valid), offsets) in memory.iter() {
-        // allowed lengths (python defaults, supports_float4=true)
-        let mut lengths: Vec<i64> = vec![4, 2];
+        // allowed lengths (coalesce.py:132-146). bf16/int8/etc. are NOT in the
+        // allowed dtype set, so they never coalesce (only `length=1`).
+        let buf_dt = ctx.dt_of(buf);
+        let allowed = buf_dt == dtype::FLOAT32
+            || buf_dt == dtype::FLOAT16
+            || buf_dt == dtype::INT32
+            || buf_dt == dtype::UINT32
+            || dtype::in_set(dtype::FP8S, buf_dt);
+        let mut lengths: Vec<i64> = if allowed { vec![4, 2] } else { vec![] };
         lengths.push(1);
-        let _ = group::ELEMENTWISE;
 
         // group consecutive offsets
         let mut sorted: Vec<i64> = offsets.keys().cloned().collect();

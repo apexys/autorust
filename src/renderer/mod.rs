@@ -120,6 +120,39 @@ impl Renderer {
         r.supported_dtypes = opencl_supported_dtypes(arch);
         r
     }
+
+    /// `CUDARenderer` (cstyle.py:397) — native bf16 on sm_80+, half on sm_53+,
+    /// fp8e4m3/e5m2 on sm_89+; fp8_fnuz never.
+    pub fn cuda(arch: &str) -> Renderer {
+        Renderer {
+            device: "CUDA".to_string(),
+            has_local: true,
+            has_shared: true,
+            has_threads: false,
+            global_max: Some([2147483647, 65535, 65535]),
+            local_max: Some([1024, 1024, 64]),
+            shared_max: 49152,
+            code_for_op: cstyle_alu_keys(),
+            supported_dtypes: cuda_supported_dtypes(arch),
+            extra_matcher: extra::cuda_extra_matcher(),
+        }
+    }
+}
+
+/// cstyle.py:470 — the CUDA dtype gate over the SM version.
+fn cuda_supported_dtypes(arch: &str) -> Vec<crate::dtype::DTypeId> {
+    let ver: i64 = arch.strip_prefix("sm_").and_then(|s| s.parse().ok()).unwrap_or(0);
+    crate::dtype::ALL
+        .iter()
+        .cloned()
+        .filter(|&d| {
+            let half = d == crate::dtype::FLOAT16;
+            let bf16 = d == crate::dtype::BFLOAT16;
+            let fp8_ocp = crate::dtype::in_set(crate::dtype::FP8_OCP, d);
+            let fp8_fnuz = crate::dtype::in_set(crate::dtype::FP8_FNUZ, d);
+            !fp8_fnuz && (!half || ver >= 53) && (!bf16 || ver >= 80) && (!fp8_ocp || ver >= 89)
+        })
+        .collect()
 }
 
 fn in_fp8s(d: crate::dtype::DTypeId) -> bool {

@@ -152,6 +152,9 @@ fn main() {
                 st.keepdim.unwrap_or(false),
             ),
             "contiguous" => tensors[st.x.unwrap_or(0)].clone().contiguous(&mut ctx),
+            "cast" => tensors[st.x.unwrap_or(0)]
+                .clone()
+                .cast(&mut ctx, dtype_from_name(st.dtype.clone()).unwrap_or(dtype::FLOAT32)),
             "cat" => {
                 let others: Vec<Tensor> = st.ys.clone().unwrap_or_default().iter().map(|&i| tensors[i].clone()).collect();
                 tensors[st.x.unwrap_or(0)].clone().cat(&mut ctx, &others)
@@ -217,6 +220,10 @@ fn main() {
         }
         if std::env::var("TG_OCL_RENDER").is_ok() {
             render_calls_opencl(&mut ctx, planned);
+            return;
+        }
+        if std::env::var("TG_CUDA_RENDER").is_ok() {
+            render_calls_cuda(&mut ctx, planned);
             return;
         }
         if std::env::var("TG_M5_EXEC").is_ok() {
@@ -294,6 +301,39 @@ for ch in text.chars() {
 }
 j.push('"');
 outs.push(j);
+    }
+    println!("{{\"ok\": true, \"renders\": [{}]}}", outs.join(", "));
+}
+
+/// CUDA gate: render each compute kernel's linearized uops with the
+/// CUDA-flavored cstyle renderer and emit the text per call.
+fn render_calls_cuda(ctx: &mut UOpCtx, planned: UopId) {
+    let ren = autorust::renderer::Renderer::cuda("sm_86");
+    let calls: Vec<UopId> = ctx.srcs(&planned).to_vec();
+    let mut outs: Vec<String> = Vec::new();
+    for call in calls.iter() {
+        let body = &ctx.srcs(call)[0].clone();
+        if ctx.op_of(body) == autorust::uop::Ops::Copy {
+            outs.push("null".to_string());
+            continue;
+        }
+        let sunk = autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body.clone(), &ren, true);
+        let lst = autorust::codegen::linearize::linearize(ctx, sunk);
+        let text = autorust::renderer::cstyle::render_cuda(ctx, &lst);
+        let mut j = String::from("\"");
+        for ch in text.chars() {
+            match ch {
+                '"' => j.push_str("\\\""),
+                '\\' => j.push_str("\\\\"),
+                '\n' => j.push_str("\\n"),
+                '\t' => j.push_str("\\t"),
+                '\r' => j.push_str("\\r"),
+                c if (c as u32) < 0x20 => j.push_str(&format!("\\u{:04x}", c as u32)),
+                c => j.push(c),
+            }
+        }
+        j.push('"');
+        outs.push(j);
     }
     println!("{{\"ok\": true, \"renders\": [{}]}}", outs.join(", "));
 }

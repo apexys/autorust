@@ -21,6 +21,8 @@ struct Info {
     derived: Option<AddrSpace>,
     numel: i64,
     shape: Vec<i64>,
+    /// `u._shape is not None` — scalars have an empty-but-present shape.
+    has_shape: bool,
     volatile: bool,
 }
 
@@ -55,6 +57,13 @@ pub struct CStyleLang {
     /// ALU `BITCAST` rendering: clang uses `__builtin_bit_cast`, OpenCL uses
     /// `as_<type>(...)` (cstyle.py:41 vs the OpenCL `string_rewrite` at :322).
     bitcast_builtin: bool,
+    /// CUDA (`CUDARenderer`, cstyle.py:397) flavor: `nv_bfloat16` type map,
+    /// `__launch_bounds__` typedef, native bf16 consts, `tg_bitcast`, the
+    /// `_nms` vector prefix, and the CUDA `render_kernel` prefix block.
+    cuda: bool,
+    /// `float4` (cstyle.py:129) — the Stack literal base; `float4` is replaced by
+    /// the vector type name (`(float4)` clang/opencl, `make_float4` CUDA).
+    float4: &'static str,
 }
 
 impl CStyleLang {
@@ -80,6 +89,8 @@ impl CStyleLang {
             float4_style: ("{", "}"),
             bf16_const_bits: false,
             bitcast_builtin: true,
+            cuda: false,
+            float4: "(float4)",
         }
     }
 
@@ -112,6 +123,40 @@ impl CStyleLang {
             float4_style: ("(", ")"),
             bf16_const_bits: true,
             bitcast_builtin: false,
+            cuda: false,
+            float4: "(float4)",
+        }
+    }
+
+    /// `CUDARenderer` language options (cstyle.py:397).
+    pub fn cuda() -> CStyleLang {
+        CStyleLang {
+            clang_builtins: false,
+            buffer_prefix: "",
+            buffer_suffix: "",
+            var_prefix: "const ",
+            var_suffix: "",
+            smem_align: "",
+            smem_prefix: "__shared__ __align__(16) ",
+            smem_prefix_for_cast: false,
+            gep_arr_threshold: 8,
+            barrier: "__syncthreads();",
+            infinity: "INFINITY",
+            nan: "NAN",
+            type_map: &[
+                (dtype::UINT32, "uint"),
+                (dtype::BFLOAT16, "nv_bfloat16"),
+                (dtype::FP8E4M3, "__nv_fp8_e4m3"),
+                (dtype::FP8E5M2, "__nv_fp8_e5m2"),
+            ],
+            workitem: Some(("blockIdx", "threadIdx", "global")),
+            vector_defines: false,
+            kernel_typedef: "extern \"C\" __global__ void __launch_bounds__({launch_bounds})",
+            float4_style: ("(", ")"),
+            bf16_const_bits: false,
+            bitcast_builtin: false,
+            cuda: true,
+            float4: "make_float4",
         }
     }
 
@@ -255,6 +300,11 @@ pub fn render_opencl(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
     render_cstyle(ctx, lst, &CStyleLang::opencl())
 }
 
+/// `CUDARenderer.render(lst)`.
+pub fn render_cuda(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
+    render_cstyle(ctx, lst, &CStyleLang::cuda())
+}
+
 fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     // snapshot facts
     let mut info: HashMap<UopId, Info> = HashMap::new();
@@ -270,11 +320,12 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             }
             _ => (1, vec![]),
         };
+        let has_shape = matches!(ctx.shape(u), Ok(Some(_)));
         let volatile = match ctx.arg_of(u) {
             Arg::Param(p) => p.volatile,
             _ => false,
         };
-        info.insert(u.clone(), Info { op, dt: ctx.dt_of(u), srcs, addrspace, derived, numel, shape, volatile });
+        info.insert(u.clone(), Info { op, dt: ctx.dt_of(u), srcs, addrspace, derived, numel, shape, has_shape, volatile });
     }
     let mut child_count: HashMap<UopId, usize> = HashMap::new();
     for u in lst {
@@ -435,7 +486,9 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 } else if src0.op == Ops::Const {
                     const_text(ctx, i.dt, (i.srcs[0]).clone(), lang)
                 } else {
-                    format!("({})({})", lang.render_type(&i), g(&r, &i.srcs[0]))
+                    // base_rewrite CAST rule: `f"({render_cast(x, val)})"` and
+                    // `render_cast` is `(type)(val)` — so double parens.
+                    format!("(({})({}))", lang.render_type(&i), g(&r, &i.srcs[0]))
                 }
             }
             Ops::Bitcast => {
@@ -443,6 +496,11 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     format!("(({})({}))", lang.render_dtype(i.dt, 1, i.addrspace, false), g(&r, &i.srcs[0]))
                 } else if lang.bitcast_builtin {
                     format!("__builtin_bit_cast({}, ({})({}))", lang.render_type(&i), lang.render_type(&info[&i.srcs[0]]), g(&r, &i.srcs[0]))
+                } else if lang.cuda {
+                    // CUDARenderer string_rewrite (cstyle.py:434): tg_bitcast<dst>((src)(x))
+                    let dst = lang.render_dtype(i.dt, 1, None, false);
+                    let src = lang.render_dtype(info[&i.srcs[0]].dt, 1, None, false);
+                    format!("tg_bitcast<{dst}>(({src})({}))", g(&r, &i.srcs[0]))
                 } else {
                     // OpenCL (cstyle.py:322): as_<type>((<src_type>)(src))
                     let dst = lang.render_dtype(i.dt, 1, None, false);
@@ -465,7 +523,22 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 };
                 // the extent comment: src[0].render() (expr, simplified)
                 let ext = crate::renderer::expr::expr_render(ctx, (i.srcs[0]).clone());
-                format!("{f}({dim}); /* {ext} */")
+                if lang.cuda {
+                    // CUDARenderer.code_for_workitem (cstyle.py:407): `blockIdx.x` etc.
+                    let ch = match dim {
+                        0 => 'x',
+                        1 => 'y',
+                        _ => 'z',
+                    };
+                    let s = match kind {
+                        b'g' => format!("blockIdx.{ch}"),
+                        b'l' => format!("threadIdx.{ch}"),
+                        _ => format!("(blockIdx.{ch}*blockDim.{ch}+threadIdx.{ch})"),
+                    };
+                    format!("{s}; /* {ext} */")
+                } else {
+                    format!("{f}({dim}); /* {ext} */")
+                }
             }
             Ops::Index | Ops::Shrink => {
                 let buf = &info[&i.srcs[0]];
@@ -494,7 +567,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             }
             Ops::Stack => {
                 let sty = lang.render_type(&i);
-                let float4 = "(float4)".replace("float4", &sty);
+                let float4 = lang.float4.replace("float4", &sty);
                 let inner: Vec<String> = i.srcs.iter().map(|s| g(&r, s)).collect();
                 let (open, close) = lang.float4_style;
                 format!("{float4}{open}{}{close}", inner.join(","))
@@ -542,7 +615,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                         }
                     })
                     .collect();
-                code_for_op(i.op, &args, lang.clang_builtins, i.dt)
+                code_for_op(i.op, &args, lang.clang_builtins, lang.cuda, i.dt)
             }
             other => panic!("TGERR: cstyle op {other:?} not ported"),
         };
@@ -583,10 +656,10 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
 
     // defines: vector typedefs for (dtype, numel>1) uops with raw addrspace ALU/None
     let mut seen_dts: Vec<(DTypeId, i64)> = Vec::new();
-    if lang.vector_defines {
+    if lang.vector_defines || lang.cuda {
         for u in lst {
             let i = &info[u];
-            if matches!(i.addrspace, None | Some(AddrSpace::Alu)) && i.dt != dtype::VOID && !i.shape.is_empty() {
+            if matches!(i.addrspace, None | Some(AddrSpace::Alu)) && i.dt != dtype::VOID && i.has_shape {
                 let key = (i.dt, i.numel);
                 if !seen_dts.contains(&key) {
                     seen_dts.push(key);
@@ -595,17 +668,19 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         }
     }
     let mut define_lines: Vec<String> = Vec::new();
-    for (dt, count) in &seen_dts {
-        if *count > 1 {
-            let alignment = if *dt == dtype::BOOL { 1 } else { 2u64.pow((dt.itemsize() as u32 * *count as u32).ilog2()) };
-            let vec = format!("{}{}", lang.type_name(*dt), count);
-            define_lines.push(format!(
-                "typedef {} {} __attribute__((aligned({}),ext_vector_type({})));",
-                lang.type_name(*dt),
-                vec,
-                alignment,
-                count
-            ));
+    if lang.vector_defines {
+        for (dt, count) in &seen_dts {
+            if *count > 1 {
+                let alignment = if *dt == dtype::BOOL { 1 } else { 2u64.pow((dt.itemsize() as u32 * *count as u32).ilog2()) };
+                let vec = format!("{}{}", lang.type_name(*dt), count);
+                define_lines.push(format!(
+                    "typedef {} {} __attribute__((aligned({}),ext_vector_type({})));",
+                    lang.type_name(*dt),
+                    vec,
+                    alignment,
+                    count
+                ));
+            }
         }
     }
     // buftypes
@@ -622,14 +697,47 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             format!("{vol}{pre}{}{suf} {nm}", lang.render_dtype(i.dt, 1, as_, false))
         })
         .collect();
-    // launch_bounds: product of local SPECIAL vmaxs — corpus: no SPECIALs → 1
-    let prg = format!(
-        "{} {}({}) {{\n{}\n}}",
-        lang.kernel_typedef,
-        name,
-        buftypes.join(", "),
-        kernel.join("\n")
-    );
+    // launch_bounds: product of the local SPECIAL ranges' extents (cstyle.py:158).
+    let mut launch_bounds: i64 = 1;
+    for u in lst {
+        if info[u].op == Ops::Special
+            && let Arg::Str(s) = ctx.arg_of(u)
+            && s.starts_with('l')
+        {
+            let rng = info[u].srcs[0].clone();
+            if let Some(ext) = info.get(&rng).and_then(|ri| ri.srcs.first()).and_then(|e| const_int(ctx, e.clone())) {
+                launch_bounds *= ext as i64;
+            }
+        }
+    }
+    let ktypedef = lang.kernel_typedef.replace("{launch_bounds}", &launch_bounds.to_string());
+    let prg = format!("{} {}({}) {{\n{}\n}}", ktypedef, name, buftypes.join(", "), kernel.join("\n"));
+    if lang.cuda {
+        // CUDARenderer.render_kernel prefix (cstyle.py:436-455).
+        let mut prefix: Vec<String> = vec![
+            "typedef unsigned int uint;".to_string(),
+            "#define INFINITY (__int_as_float(0x7f800000))".to_string(),
+            "#define NAN (__int_as_float(0x7fffffff))".to_string(),
+            "template <class T, class F> __device__ __forceinline__ T tg_bitcast(F v) { union U { F f; T t; }; U u; u.f = v; return u.t; }".to_string(),
+        ];
+        if seen_dts.iter().any(|(d, _)| dtype::in_set(dtype::FP8S, *d)) {
+            prefix.push("#include <cuda_fp8.h>".to_string());
+        }
+        if seen_dts.iter().any(|(d, _)| *d == dtype::FLOAT16) {
+            prefix.push("#include <cuda_fp16.h>".to_string());
+        }
+        if seen_dts.iter().any(|(d, _)| *d == dtype::BFLOAT16) {
+            prefix.push("#include <cuda_bf16.h>".to_string());
+        }
+        for (dt, count) in &seen_dts {
+            let fp8 = dtype::in_set(dtype::FP8S, *dt);
+            let halfbf = *dt == dtype::FLOAT16 || *dt == dtype::BFLOAT16;
+            if (halfbf && (*count == 4 || *count == 8)) || (fp8 && matches!(*count, 2 | 4 | 8 | 16)) {
+                prefix.push(cuda_vector_prefix(lang, *dt, *count));
+            }
+        }
+        return format!("{}\n{prg}", prefix.join("\n"));
+    }
     if lang.vector_defines {
         let defines = define_lines.join("\n");
         format!("{defines}\n{prg}\n")
@@ -643,6 +751,22 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         };
         format!("{pragma}{prg}")
     }
+}
+
+/// CUDARenderer.`render_vector_prefix` (cstyle.py:438-442) — the `_nms` struct
+/// plus a `make_<vec>` constructor.
+fn cuda_vector_prefix(lang: &CStyleLang, dt: DTypeId, count: i64) -> String {
+    let vec = lang.render_dtype(dt, count, Some(AddrSpace::Reg), false);
+    let scal = lang.render_dtype(dt, 1, None, false);
+    let nms: Vec<String> = "xyzwabcdefghijkl".chars().map(|c| c.to_string()).chain((16..32).map(|i| format!("v{i}"))).collect();
+    let elems: Vec<String> = nms[..count as usize].to_vec();
+    let elems_join = elems.join(", ");
+    let header: Vec<String> = elems.iter().map(|e| format!("{scal} {e}")).collect();
+    format!(
+        "struct __align__({}) {vec} {{ {scal} {elems_join}; }}; __device__ {vec} make_{vec}({}) {{ {vec} r={{{elems_join}}}; return r; }}",
+        dt.itemsize() * count as usize,
+        header.join(", ")
+    )
 }
 
 fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
@@ -771,27 +895,41 @@ fn wmma_name(ctx: &mut UOpCtx, u: UopId) -> String {
     }
 }
 
-/// `CStyleLanguage.code_for_op` (clang subset).
-fn code_for_op(op: Ops, a: &[String], clang: bool, dt: crate::dtype::DTypeId) -> String {
+/// `CStyleLanguage.code_for_op` (clang subset + CUDARenderer overrides).
+fn code_for_op(op: Ops, a: &[String], clang: bool, cuda: bool, dt: crate::dtype::DTypeId) -> String {
+    // CUDARenderer (cstyle.py:413): half/bf16 use the `h*` intrinsics.
+    let h = cuda && (dt == crate::dtype::FLOAT16 || dt == crate::dtype::BFLOAT16);
     match op {
         Ops::Sqrt => {
-            if clang {
+            if h {
+                format!("hsqrt({})", a[0])
+            } else if clang {
                 if dt == crate::dtype::FLOAT64 { format!("__builtin_sqrt({})", a[0]) } else { format!("__builtin_sqrtf({})", a[0]) }
             } else {
                 format!("sqrt({})", a[0])
             }
         }
-        Ops::Exp2 => format!("exp2({})", a[0]),
-        Ops::Log2 => format!("log2({})", a[0]),
-        Ops::Sin => format!("sin({})", a[0]),
+        Ops::Exp2 => {
+            if h { format!("hexp2({})", a[0]) } else { format!("exp2({})", a[0]) }
+        }
+        Ops::Log2 => {
+            if h { format!("hlog2({})", a[0]) } else { format!("log2({})", a[0]) }
+        }
+        Ops::Sin => {
+            if h { format!("hsin({})", a[0]) } else { format!("sin({})", a[0]) }
+        }
         Ops::Trunc => {
-            if clang {
+            if h {
+                format!("htrunc({})", a[0])
+            } else if clang {
                 if dt == crate::dtype::FLOAT64 { format!("__builtin_trunc({})", a[0]) } else { format!("__builtin_truncf({})", a[0]) }
             } else {
                 format!("trunc({})", a[0])
             }
         }
-        Ops::Reciprocal => format!("(1/{})", a[0]),
+        Ops::Reciprocal => {
+            if h { format!("hrcp({})", a[0]) } else { format!("(1/{})", a[0]) }
+        }
         Ops::Neg => format!("-{}", a[0]),
         Ops::And => format!("({}&{})", a[0], a[1]),
         Ops::Xor => format!("({}^{})", a[0], a[1]),

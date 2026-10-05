@@ -182,6 +182,29 @@ pub fn pm_manual_bf16_cast() -> PatternMatcher {
     ])
 }
 
+/// `CUDARenderer.extra_matcher` (cstyle.py:427-429) — fp8 compute-through-f32
+/// (no casting fixups) plus the fp8→fp8 cast widening.
+pub fn cuda_extra_matcher() -> PatternMatcher {
+    let dts = dtype::FP8S.to_vec();
+    let fp8_cast = (
+        UPat::ops1(Ops::Cast)
+            .with_dtype(Some(dts.clone()))
+            .with_src_tup(vec![UPat::var(Some("x"), Some(dts.clone()))])
+            .named("y"),
+        r(|ctx, st, _| {
+            let y = sget(st, "y");
+            let x = sget(st, "x");
+            if ctx.dt_of(&x) == ctx.dt_of(&y) {
+                return None;
+            }
+            let dt = ctx.dt_of(&y);
+            let cx = ctx.cast(x, f32());
+            Some(ctx.cast(cx, dt))
+        }) as RuleFn,
+    );
+    create_non_native_float_pats(&dts, false).add(&PatternMatcher::new(vec![fp8_cast]))
+}
+
 /// `ClangRenderer.extra_matcher` (cstyle.py:278-281) — the f64/f16/bf16
 /// conversion fixups LLVM needs on systems without native support, plus bf16.
 pub fn clang_extra_matcher() -> PatternMatcher {
