@@ -9,3 +9,5 @@ pub mod interp;
 pub mod ops_interp;
 #[cfg(feature = "backend_cl")]
 pub mod ops_cl;
+#[cfg(feature = "backend_cuda")]
+pub mod ops_cuda;
