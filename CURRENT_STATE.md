@@ -1215,11 +1215,10 @@ GPU training throughput; items are independent.
 5. **`nn/state.py` + safetensors** (later): `State`/`state_dict`/`load_state_dict`, a
    std-only safetensors reader/writer, `init_weight`/`fetch`. Today only
    `Module`/`named_params`/`into_params` exist.
-6. **Native GPU backend (later).** OpenCL lacks GPU-native features (WMMA/tensor cores,
-   native bf16/fp16 compute). A future `autorust-nv` crate porting tinygrad's NV/CUDA path
-   is the likely direction once items 1–4 land. **Reviewed 2026-10 — see §9.7** for the
-   concrete port plan (recommended target: the CUDA driver-API backend, not the ioctl `NV`
-   driver).
+6. **Native GPU backend — CUDA DONE (2026-10); WMMA next.** `backend_cuda` uses
+   `cudarc` (dynamic-loaded libcuda/NVRTC) for `ops_cuda.py` + the CUDARenderer;
+   native bf16 MNIST runs (`DEFAULT_DEVICE=CUDA DTYPE=bfloat16`). See §9.7 for the
+   design and the remaining **WMMA/tensor-core** work (the current perf gap).
 
 ### 9.7 Native GPU backend (CUDA/NV) — port plan for native bf16 (2026-10)
 
@@ -1313,3 +1312,31 @@ harness parity, and a bf16 MNIST train step. **Open decision:** confirm CUDA vs 
 `cudarc` crate (behind `backend_cuda`) — the same "feature-gated heavier dep" precedent as
 `opencl3`. cudarc saves S0–S1 but not the renderer/tensor-core work that actually unlocks
 bf16.
+
+**Status (2026-10): S0-S2 DONE.** cudarc + smoke (S0); CUDARenderer facts/cstyle
++ `test_cuda_render_diff.py` byte gate (S1); `ops_cuda` runtime + `"CUDA"`
+registration, native bf16/f16, and the MNIST example on CUDA (S2):
+
+```
+DEFAULT_DEVICE=CUDA DTYPE=bfloat16 BS=64 STEPS=1 TRAIN_N=256 TEST_N=64
+  step 1: loss 2.875  test_accuracy 12.50%   (matches CL)
+```
+
+Bugs fixed along the way: cstyle `type_name` space-normalization (vector only),
+`CAST` double parens, `memory_coalescing` allowed-dtype gate, and the
+shape-changing `expand_bitcast` (uint32→uint16 sub-word rand) — the last was
+masked on OpenCL but fatal on CUDA. NVRTC PTX is disk-cached (`cuda_ptx`).
+
+**WMMA (S3, next).** Required for bf16 matmul/conv throughput. Missing pieces,
+in dependency order:
+1. `Renderer.tensor_cores` + port `codegen/opt/tc.py` (at least `cuda_sm80`:
+   `cuda_81616` bf16/f16 + `cuda_8168_f16` + `cuda_8168_tf32`; `get_cuda(arch)`).
+2. `OptOp::Tc` + `_apply_tc_opt` in `codegen/postrange.rs` (reduceops tracking,
+   `shape_str_to_axis`, `PADTO`, and `shift_to(..., input_new_rng)` — the port's
+   `shift_to` lacks `input_new_rng`); `hand_coded_optimizations` tries TC first.
+3. `expand_wmma` + `contract_axis` + `unroll_axis` in the expander (the port's
+   `expander2`/`pm_expand_broadcast` currently say "no WMMA").
+4. CUDARenderer's WMMA asm prefix (`tc.cuda_sm80` `mma.sync.aligned...`) + the
+   `Ops::WMMA` render (the `wmma_name`/`_wmma_name` helper already exists).
+This is the port's largest remaining codegen gap; it is isolated to renderers
+with non-empty `tensor_cores`, so CL/clang are unaffected.
