@@ -12,6 +12,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -202,7 +203,20 @@ impl Comp for CudaCompiler {
         if let Some(v) = self.inner.compile_cache.borrow().get(src) {
             return v;
         }
+        // NVRTC is slow; cache the PTX on disk like tinygrad's CCACHE so a
+        // second process doesn't recompile all ~100 MNIST kernels (minutes).
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        src.hash(&mut h);
+        let key = format!("{}:{:016x}:{}", self.inner.arch, h.finish(), src.len());
+        if let Some(s) = crate::engine::disk_cache::get("cuda_ptx", &key) {
+            let lib = s.into_bytes();
+            self.inner.compile_cache.borrow_mut().put(src, lib.clone());
+            return lib;
+        }
         let lib = self.compile(src);
+        if let Ok(text) = std::str::from_utf8(&lib) {
+            crate::engine::disk_cache::put("cuda_ptx", &key, text);
+        }
         self.inner.compile_cache.borrow_mut().put(src, lib.clone());
         lib
     }
