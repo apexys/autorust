@@ -63,6 +63,7 @@ struct CudaInner {
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     arch: String,
+    #[allow(dead_code)]
     device_name: String,
     compile_cache: RefCell<CompileCache>,
 }

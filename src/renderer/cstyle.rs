@@ -174,7 +174,7 @@ impl CStyleLang {
             }
         }
         let suffix = if matches!(as_, AddrSpace::Local | AddrSpace::Global) || override_ptr { "*" } else { "" };
-        let base = self.type_name(dt);
+        let base = if sz > 1 { self.type_name(dt).replace(' ', "_") } else { self.type_name(dt) };
         if sz > 1 {
             format!("{prefix}{base}{sz}{suffix}")
         } else {
@@ -182,14 +182,15 @@ impl CStyleLang {
         }
     }
 
-    /// `type_map.get(dtype, dtype.name).replace(" ", "_")`.
+    /// `type_map.get(dtype, dtype.name)` — the space normalization happens in
+    /// `render_dtype` only for `sz > 1` (cstyle.py:184).
     fn type_name(&self, dt: DTypeId) -> String {
         for (d, name) in self.type_map {
             if *d == dt {
                 return name.to_string();
             }
         }
-        dt.name().replace(' ', "_")
+        dt.name().to_string()
     }
 
     fn render_type(&self, i: &Info) -> String {
@@ -672,10 +673,11 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         for (dt, count) in &seen_dts {
             if *count > 1 {
                 let alignment = if *dt == dtype::BOOL { 1 } else { 2u64.pow((dt.itemsize() as u32 * *count as u32).ilog2()) };
-                let vec = format!("{}{}", lang.type_name(*dt), count);
+                let scal = lang.render_dtype(*dt, 1, Some(AddrSpace::Reg), false);
+                let vec = lang.render_dtype(*dt, *count, Some(AddrSpace::Reg), false);
                 define_lines.push(format!(
                     "typedef {} {} __attribute__((aligned({}),ext_vector_type({})));",
-                    lang.type_name(*dt),
+                    scal,
                     vec,
                     alignment,
                     count

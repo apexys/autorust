@@ -252,10 +252,80 @@ fn reduce_op_of(arg: &Arg) -> Ops {
     }
 }
 
-/// `expand_bitcast` (rangeify.py:116) — shape-changing bitcast (rare; corpus has none).
-fn expand_bitcast(_ctx: &mut UOpCtx, _bc: UopId) -> Option<UopId> {
-    // TODO(M5): port when BITCAST corpus coverage arrives
-    None
+/// `expand_bitcast` (rangeify.py:116) — rewrite a shape-changing BITCAST into
+/// per-lane shifts/stack (the sub-word `_bits_to_rand` path). Without this a
+/// uint32→uint16 reinterpret stays a vector BITCAST that only OpenCL's `as_*`
+/// can render; CUDA's scalar `tg_bitcast` cannot.
+fn expand_bitcast(ctx: &mut UOpCtx, bc: UopId) -> Option<UopId> {
+    use crate::tensor::movement;
+    let x = ctx.srcs(&bc)[0].clone();
+    let bc_dt = ctx.dt_of(&bc);
+    let ns = bc_dt.itemsize();
+    let os = ctx.dt_of(&x).itemsize();
+    if ns == os {
+        return None;
+    }
+    let new_uint = uint_dtype_for_itemsize(ns)?;
+    let old_uint = uint_dtype_for_itemsize(os)?;
+    let x_shape: Vec<i64> = ctx
+        .shape(&x)
+        .ok()
+        .flatten()
+        .map(|s| s.iter().map(|v| v.clone().as_i64_or_panic()).collect())
+        .unwrap_or_default();
+    // tmp = x.bitcast(uint{8*os})
+    let tmp = if ctx.dt_of(&x) == old_uint { x.clone() } else { ctx.bitcast(x.clone(), old_uint) };
+    if ns > os {
+        let rate = (ns / os) as i64;
+        let last = *x_shape.last()?;
+        let mut new_shape: Vec<i64> = x_shape[..x_shape.len() - 1].to_vec();
+        new_shape.push(last / rate);
+        new_shape.push(rate);
+        let shape_svals: Vec<SVal> = new_shape.iter().map(|&d| SVal::I(d as i128)).collect();
+        let reshaped = movement::reshape(ctx, tmp, &shape_svals);
+        let mut parts: Vec<UopId> = Vec::new();
+        for i in 0..rate {
+            let mut bounds: Vec<(SVal, SVal)> = new_shape.iter().map(|&d| (SVal::I(0), SVal::I(d as i128))).collect();
+            bounds[new_shape.len() - 1] = (SVal::I(i as i128), SVal::I(i as i128 + 1));
+            let part = movement::shrink(ctx, reshaped.clone(), &bounds);
+            let part = ctx.cast(part, new_uint);
+            let shift = ctx.const_py(ConstVal::Int((8 * i * os as i64) as i128), None);
+            parts.push(ctx.shl(part, shift));
+        }
+        let mut sum = parts[0].clone();
+        for p in &parts[1..] {
+            sum = ctx.add(sum, p.clone());
+        }
+        let squeezed = movement::squeeze(ctx, sum, Some(-1));
+        return Some(ctx.bitcast(squeezed, bc_dt));
+    }
+    // ns < os: extract `rate` sub-words, stack over the last dim, flatten, cast.
+    let rate = (os / ns) as i64;
+    let mut parts: Vec<UopId> = Vec::new();
+    for i in 0..rate {
+        let p = if i == 0 {
+            tmp.clone()
+        } else {
+            let shift = ctx.const_py(ConstVal::Int((8 * i * ns as i64) as i128), None);
+            ctx.shr(tmp.clone(), shift)
+        };
+        parts.push(p);
+    }
+    let stacked = movement::stack_tensors(ctx, &parts, -1);
+    let flat = movement::flatten(ctx, stacked, -2, -1);
+    let casted = ctx.cast(flat, new_uint);
+    Some(ctx.bitcast(casted, bc_dt))
+}
+
+/// `to_dtype(f"uint{8*n}")` for an itemsize.
+fn uint_dtype_for_itemsize(n: usize) -> Option<crate::dtype::DTypeId> {
+    match n {
+        1 => Some(crate::dtype::UINT8),
+        2 => Some(crate::dtype::UINT16),
+        4 => Some(crate::dtype::UINT32),
+        8 => Some(crate::dtype::UINT64),
+        _ => None,
+    }
 }
 
 /// `fix_store_hazard` (rangeify.py:62).
