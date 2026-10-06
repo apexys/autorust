@@ -1215,10 +1215,11 @@ GPU training throughput; items are independent.
 5. **`nn/state.py` + safetensors** (later): `State`/`state_dict`/`load_state_dict`, a
    std-only safetensors reader/writer, `init_weight`/`fetch`. Today only
    `Module`/`named_params`/`into_params` exist.
-6. **Native GPU backend — CUDA DONE (2026-10); WMMA next.** `backend_cuda` uses
+6. **Native GPU backend — CUDA + WMMA DONE (2026-10).** `backend_cuda` uses
    `cudarc` (dynamic-loaded libcuda/NVRTC) for `ops_cuda.py` + the CUDARenderer;
-   native bf16 MNIST runs (`DEFAULT_DEVICE=CUDA DTYPE=bfloat16`). See §9.7 for the
-   design and the remaining **WMMA/tensor-core** work (the current perf gap).
+   native bf16 MNIST runs (`DEFAULT_DEVICE=CUDA DTYPE=bfloat16`) and the WMMA
+   tensor-core path is ported (a 16x16x16 bf16 matmul matches tinygrad's CUDA
+   output exactly). See §9.7 for the design and the MNIST timing table.
 
 ### 9.7 Native GPU backend (CUDA/NV) — port plan for native bf16 (2026-10)
 
@@ -1327,16 +1328,38 @@ Bugs fixed along the way: cstyle `type_name` space-normalization (vector only),
 shape-changing `expand_bitcast` (uint32→uint16 sub-word rand) — the last was
 masked on OpenCL but fatal on CUDA. NVRTC PTX is disk-cached (`cuda_ptx`).
 
-**WMMA (S3, next).** Required for bf16 matmul/conv throughput. Missing pieces,
-in dependency order:
-1. `Renderer.tensor_cores` + port `codegen/opt/tc.py` (at least `cuda_sm80`:
-   `cuda_81616` bf16/f16 + `cuda_8168_f16` + `cuda_8168_tf32`; `get_cuda(arch)`).
-2. `OptOp::Tc` + `_apply_tc_opt` in `codegen/postrange.rs` (reduceops tracking,
-   `shape_str_to_axis`, `PADTO`, and `shift_to(..., input_new_rng)` — the port's
-   `shift_to` lacks `input_new_rng`); `hand_coded_optimizations` tries TC first.
-3. `expand_wmma` + `contract_axis` + `unroll_axis` in the expander (the port's
-   `expander2`/`pm_expand_broadcast` currently say "no WMMA").
-4. CUDARenderer's WMMA asm prefix (`tc.cuda_sm80` `mma.sync.aligned...`) + the
-   `Ops::WMMA` render (the `wmma_name`/`_wmma_name` helper already exists).
-This is the port's largest remaining codegen gap; it is isolated to renderers
-with non-empty `tensor_cores`, so CL/clang are unaffected.
+**WMMA (S3) DONE (2026-10).** `Renderer::cuda` sets `tensor_cores =
+tc::get_cuda("sm_86")` (others empty, so CL/clang/interp are unaffected); the
+TC opt is applied first in `hand_coded_optimizations` (faithful `USE_TC=1`,
+`TC_OPT=0`, `TC_SELECT=-1`); `expand_wmma`+`contract_axis`/`unroll_axis` run in
+the expander; `broadcast_and_devec_wmma` + `do_stack_wmma` lower the WMMA; and
+`CUDARenderer` emits the `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`
+asm. Gated by a semantic CUDA render case and a numerical check: a 16x16x16
+bf16 matmul on CUDA matches tinygrad's CUDA-TC output exactly (0/256 diffs).
+
+Two symbolic bugs surfaced by the swizzled TC index were fixed in
+`fold_add_divmod_recombine`/`quotient_base` (`sym.rs`):
+`(b % (div*d))*mul` (the port had `d*mul`), and `k = t//D - s` on the raw value
+(the port applied `rem_euclid` first, collapsing the quotient). A
+`reduce_mul_chain` pattern was also narrowed to `REDUCE(MUL)` so it no longer
+fires on `REDUCE(WMMA)`.
+
+**MNIST benchmark (bf16, BS=256, TRAIN_N=20000, TEST_N=2000, 40 steps, RTX 3060,
+all warm):**
+
+| backend | wall time | final test acc |
+|---|---|---|
+| CL (OpenCL) | 31.0 s | 78.55 % |
+| CUDA, bf16 (no TC, default) | 21.9 s | 78.55 % |
+| CUDA, bf16, TC (`TC_OPT=1`) | 24.0 s | 79.20 % |
+
+At the faithful default `TC_OPT=0` tensor cores only apply to kernels with a
+single reduce axis; `beautiful_mnist`'s convs reduce over `C*kh*kw`, so MNIST
+does **not** use WMMA by default (CUDA-TC == CUDA-no-TC). `TC_OPT=1` (multi-axis)
+does engage the convs (4 `mma.sync` kernels) and is ~9 % slower here - the bf16
+packing/swizzle overhead is not amortised on these small tiles.
+
+**Known gap:** `TC_OPT=2` (BEAM only; allows padding) panics on the `PADTO`
+"quadruple the work" guard; tinygrad raises/catches that as a `KernelOptError`
+and skips the candidate, so `apply_padto` should propagate a `Result` instead of
+asserting.
