@@ -244,6 +244,91 @@ impl Tensor {
         }
     }
 
+
+    /// `Tensor.conv_transpose2d(weight, bias, groups, stride, dilation, padding,
+    /// output_padding)` (op.py:1607-1650). Works for any number of spatial dims.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_transpose2d(
+        &self,
+        ctx: &mut UOpCtx,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        groups: i64,
+        stride: i64,
+        dilation: i64,
+        padding: &[i64],
+        output_padding: i64,
+    ) -> Tensor {
+        // x, w = self, weight.unflatten(0, (groups, -1)).transpose(1, 2).flip(*range(3, len+1))
+        let w = weight.unflatten(ctx, 0, &[groups, -1]).transpose(ctx, 1, 2);
+        let w_ndim = w.shape(ctx).len();
+        let w = if w_ndim > 3 { w.flip(ctx, &(3..w_ndim).collect::<Vec<_>>()) } else { w };
+
+        // HW = weight.shape[2:]
+        let w_shape: Vec<SVal> = weight.shape(ctx).into_vec();
+        let hw: Vec<i64> = w_shape[2..].iter().map(|s| s.clone().as_i64().unwrap_or(0)).collect();
+        let nhw = hw.len();
+
+        // padding = flat_to_grouped(resolve_pool_pads(padding, len(HW)))
+        let pads = flat_to_grouped(&resolve_pool_pads(padding, nhw));
+
+        // stride, dilation, output_padding = [make_tuple(x, len(HW)) for x in (...)]
+        let stride_v = vec![stride; nhw];
+        let dilation_v = vec![dilation; nhw];
+        let opad_v = vec![output_padding; nhw];
+
+        // if any(s>1 for s in stride): insert zeros between input positions, then shrink
+        let mut x = self.clone();
+        if stride_v.iter().any(|&s| s > 1) {
+            // x.reshape(None, None, *flatten((k,1) for k in x.shape[2:]))
+            let xs: Vec<SVal> = x.shape(ctx).into_vec();
+            let mut sh: Vec<SVal> = vec![xs[0].clone(), xs[1].clone()];
+            for k in &xs[2..] {
+                sh.push(k.clone());
+                sh.push(SVal::I(1));
+            }
+            x = x.reshape(ctx, sh);
+            // x.pad((None, None, *flatten((None,(0,s-1)) for s in stride)))
+            let mut parg: Vec<(i64, i64)> = vec![(0, 0), (0, 0)];
+            for &s in &stride_v {
+                parg.push((0, 0));
+                parg.push((0, s - 1));
+            }
+            x = x.pad(ctx, &parg);
+            // x.reshape(None, None, *[k*s for k,s in zip(x.shape[2::2], stride)])
+            let xs2: Vec<SVal> = x.shape(ctx).into_vec();
+            let mut sh2: Vec<SVal> = vec![xs2[0].clone(), xs2[1].clone()];
+            for (i, &s) in stride_v.iter().enumerate() {
+                let k = xs2[2 + 2 * i].clone();
+                sh2.push(ctx.sval_mul(k, SVal::I(s as i128)));
+            }
+            x = x.reshape(ctx, sh2);
+            // x.shrink_to(None, None, *[k-(s-1) for k,s in zip(x.shape[2:], stride)])
+            let xs3: Vec<SVal> = x.shape(ctx).into_vec();
+            let mut sht: Vec<SVal> = vec![SVal::I(-1), SVal::I(-1)];
+            for (i, &s) in stride_v.iter().enumerate() {
+                let k = xs3[2 + i].clone();
+                sht.push(ctx.sval_sub(k, SVal::I((s - 1) as i128)));
+            }
+            x = x.shrink_to(ctx, &sht);
+        }
+
+        // padding = flatten((((k-1)*d-pB,(k-1)*d-pA+op) for ... in reversed(...)))
+        let mut padding_flat: Vec<i64> = Vec::with_capacity(2 * nhw);
+        for i in (0..nhw).rev() {
+            let k = hw[i];
+            let d = dilation_v[i];
+            let (pb, pa) = pads[i];
+            let op = opad_v[i];
+            padding_flat.push((k - 1) * d - pb);
+            padding_flat.push((k - 1) * d - pa + op);
+        }
+
+        // x.conv2d(w.flatten(end_dim=1), groups=groups, bias=bias, dilation=dilation, padding=padding)
+        let wflat = w.flatten(ctx, 0, 1);
+        x.conv2d(ctx, &wflat, bias, groups, 1, dilation, &padding_flat, None)
+    }
+
     /// `Tensor.max_pool2d(kernel_size, stride, dilation, padding, ceil_mode,
     /// return_indices)` (op.py:1338-1381). Returns `(pooled, indices?)`.
     #[allow(clippy::too_many_arguments)]

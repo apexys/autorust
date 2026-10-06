@@ -112,11 +112,13 @@ impl Linear {
     }
 }
 
-/// `nn::Conv2d`: 2D convolution.
-/// weight shape: (out_channels, in_channels/groups, kernel_h, kernel_w).
+/// `nn::Conv2d`: N-D convolution (nn/__init__.py:80-109). `kernel_size` has one
+/// entry per spatial dim, so a 1-tuple makes this a `Conv1d`.
+/// weight shape: (out_channels, in_channels/groups, *kernel_size).
 pub struct Conv2d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
+    pub kernel_size: Vec<i64>,
     pub groups: i64,
     pub stride: i64,
     pub dilation: i64,
@@ -125,28 +127,28 @@ pub struct Conv2d {
 
 impl Conv2d {
     /// Create a new Conv2d layer.
-    /// kernel_size: (kh, kw), padding: (ph_lo, ph_hi, pw_lo, pw_hi).
+    /// kernel_size: one entry per spatial dim; padding: one `(lo, hi)` per dim.
     pub fn new(
         ctx: &mut UOpCtx,
         in_channels: i64,
         out_channels: i64,
         kernel_size: &[i64],
         stride: i64,
-        padding: &[(i64, i64); 2],
+        padding: &[(i64, i64)],
         dilation: i64,
         groups: i64,
         bias: bool,
     ) -> Self {
-        assert_eq!(kernel_size.len(), 2, "Conv2d: kernel_size must be (kh, kw)");
-        assert_eq!(padding.len(), 2, "Conv2d: padding must be ((ph_lo, ph_hi), (pw_lo, pw_hi))");
+        assert_eq!(padding.len(), kernel_size.len(), "Conv2d: padding must have one (lo, hi) per spatial dim");
         assert_eq!(in_channels % groups, 0, "in_channels must be divisible by groups");
         assert_eq!(out_channels % groups, 0, "out_channels must be divisible by groups");
 
-        let (kh, kw) = (kernel_size[0], kernel_size[1]);
-        let scale = 1.0 / f64::sqrt((in_channels * kh * kw) as f64);
+        let kprod: i64 = kernel_size.iter().product();
+        let scale = 1.0 / f64::sqrt((in_channels * kprod) as f64);
 
-        // weight: (out_channels, in_channels/groups, kh, kw)
-        let weight_shape = [out_channels, in_channels / groups, kh, kw];
+        // weight: (out_channels, in_channels/groups, *kernel_size)
+        let mut weight_shape = vec![out_channels, in_channels / groups];
+        weight_shape.extend_from_slice(kernel_size);
         let weight = Tensor::uniform(ctx, &weight_shape, Some(-scale), Some(scale), None, None);
         let bias = if bias {
             Some(Tensor::uniform(ctx, &[out_channels], Some(-scale), Some(scale), None, None))
@@ -154,12 +156,13 @@ impl Conv2d {
             None
         };
 
-        // Flatten padding to (0,0,..., ph_lo, ph_hi, pw_lo, pw_hi) for non-batch dims
-        let padding_flat = vec![padding[0].0, padding[0].1, padding[1].0, padding[1].1];
+        // Flatten to the explicit `2*dims` form the conv path expects.
+        let padding_flat: Vec<i64> = padding.iter().flat_map(|(a, b)| [*a, *b]).collect();
 
         Conv2d {
             weight,
             bias,
+            kernel_size: kernel_size.to_vec(),
             groups,
             stride,
             dilation,
@@ -193,6 +196,115 @@ impl Module for Conv2d {
         self.bias = self.bias.map(|b| b.to_param(ctx));
         self
     }
+}
+
+
+/// `nn.Conv1d` (nn/__init__.py:62-78) — a `Conv2d` with a 1-element kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn conv1d(
+    ctx: &mut UOpCtx,
+    in_channels: i64,
+    out_channels: i64,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    dilation: i64,
+    groups: i64,
+    bias: bool,
+) -> Conv2d {
+    Conv2d::new(ctx, in_channels, out_channels, &[kernel_size], stride, &[(padding, padding)], dilation, groups, bias)
+}
+
+/// `nn::ConvTranspose2d` (nn/__init__.py:130-154). Subclasses `Conv2d`, but the
+/// weight has shape (in_channels, out_channels/groups, *kernel_size).
+pub struct ConvTranspose2d {
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+    pub kernel_size: Vec<i64>,
+    pub output_padding: i64,
+    pub groups: i64,
+    pub stride: i64,
+    pub dilation: i64,
+    pub padding: Vec<i64>,
+}
+
+impl ConvTranspose2d {
+    /// Create a new ConvTranspose2d layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        ctx: &mut UOpCtx,
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: &[i64],
+        stride: i64,
+        padding: &[(i64, i64)],
+        output_padding: i64,
+        dilation: i64,
+        groups: i64,
+        bias: bool,
+    ) -> Self {
+        // super().__init__(...) then replace the weight with the transposed shape.
+        let base = Conv2d::new(ctx, in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias);
+        let kprod: i64 = kernel_size.iter().product();
+        let scale = 1.0 / f64::sqrt((in_channels * kprod) as f64);
+        let mut weight_shape = vec![in_channels, out_channels / groups];
+        weight_shape.extend_from_slice(kernel_size);
+        let weight = Tensor::uniform(ctx, &weight_shape, Some(-scale), Some(scale), None, None);
+        ConvTranspose2d {
+            weight,
+            bias: base.bias,
+            kernel_size: base.kernel_size,
+            output_padding,
+            groups,
+            stride,
+            dilation,
+            padding: base.padding,
+        }
+    }
+
+    /// `ConvTranspose2d.__call__` (nn/__init__.py:153-154).
+    pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        x.conv_transpose2d(
+            ctx,
+            &self.weight,
+            self.bias.as_ref(),
+            self.groups,
+            self.stride,
+            self.dilation,
+            &self.padding,
+            self.output_padding,
+        )
+    }
+}
+
+impl Module for ConvTranspose2d {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        weight_bias(&self.weight, &self.bias)
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        self.weight = self.weight.to_param(ctx);
+        self.bias = self.bias.map(|b| b.to_param(ctx));
+        self
+    }
+}
+
+/// `nn.ConvTranspose1d` (nn/__init__.py:111-128) — a `ConvTranspose2d` with a
+/// 1-element kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn conv_transpose1d(
+    ctx: &mut UOpCtx,
+    in_channels: i64,
+    out_channels: i64,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    output_padding: i64,
+    dilation: i64,
+    groups: i64,
+    bias: bool,
+) -> ConvTranspose2d {
+    ConvTranspose2d::new(ctx, in_channels, out_channels, &[kernel_size], stride, &[(padding, padding)], output_padding, dilation, groups, bias)
 }
 
 /// `nn::BatchNorm`: batch normalization (nn/__init__.py:8-64).

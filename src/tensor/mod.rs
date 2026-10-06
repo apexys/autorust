@@ -453,6 +453,17 @@ impl Tensor {
         self.split(ctx, &sizes, dim)
     }
 
+    /// `Tensor.unflatten(dim, sizes)` (movement.py:362-378).
+    pub fn unflatten(&self, ctx: &mut UOpCtx, dim: i64, sizes: &[i64]) -> Tensor {
+        { let __u = movement::unflatten(ctx, self.uop().clone(), dim, sizes); Tensor::from_uop(ctx, __u) }
+    }
+
+    /// `Tensor.shrink_to(shape)` (movement.py:277-279): shrink each dim to the
+    /// given size (a `None`/negative entry leaves the dim untouched).
+    pub fn shrink_to(&self, ctx: &mut UOpCtx, shape: &[SVal]) -> Tensor {
+        { let __u = movement::shrink_to(ctx, self.uop().clone(), shape); Tensor::from_uop(ctx, __u) }
+    }
+
     /// `Tensor[t1, t2, ...]` — the `s![...]` index spec.
     pub fn getitem(&self, ctx: &mut UOpCtx, ixs: &[Ix]) -> Tensor {
         { let __u = movement::getitem(ctx, self.uop().clone(), ixs); Tensor::from_uop(ctx, __u) }

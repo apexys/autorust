@@ -85,6 +85,8 @@ L2 = []
 RMS = []
 EMB = []
 LSTM = []
+C1D = []
+CT = []
 ARGMAX = []
 
 
@@ -176,6 +178,36 @@ def ladd(name, inp, hid, x, h0, c0):
     LSTM.append((name, inp, hid, m.weight_ih, m.weight_hh, m.bias_ih, m.bias_hh, x, h0, c0, h1, c1, hz, cz))
 
 ladd("lstm_2x5", 4, 5, seq((2, 4), 0.3, 0.2), seq((2, 5), 0.2, -0.5), seq((2, 5), 0.1, 0.3))
+
+
+def c1add(name, inc, outc, k, stride, padding, dilation, groups, x, weight, bias):
+    m = nn.Conv1d(inc, outc, k, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=(bias is not None))
+    m.weight = weight.reshape(outc, inc // groups, k)
+    if bias is not None:
+        m.bias = Tensor(bias, dtype=dtypes.float32)
+    C1D.append((name, inc, outc, k, stride, padding, dilation, groups, m.weight, x, m(x), bias))
+
+
+c1add("conv1d_basic", 1, 1, 3, 1, 0, 1, 1, seq((1, 1, 5), 0.3, 0.1), seq((1, 1, 3), 0.1, -0.5), [0.2])
+c1add("conv1d_stride_pad", 2, 3, 2, 2, 1, 1, 1, seq((1, 2, 6), 0.2, -0.3), seq((3, 2, 2), 0.1, -0.4), None)
+
+
+def ctadd(name, inc, outc, k, stride, padding, output_padding, dilation, groups, x, weight, bias):
+    if isinstance(k, int):
+        m = nn.ConvTranspose1d(inc, outc, k, stride=stride, padding=padding, output_padding=output_padding, dilation=dilation, groups=groups)
+        kt = (k,)
+    else:
+        m = nn.ConvTranspose2d(inc, outc, k, stride=stride, padding=padding, output_padding=output_padding, dilation=dilation, groups=groups)
+        kt = k
+    m.weight = weight.reshape(inc, outc // groups, *kt)
+    if bias is not None:
+        m.bias = Tensor(bias, dtype=dtypes.float32)
+    CT.append((name, inc, outc, list(kt), stride, padding, output_padding, dilation, groups, m.weight, x, m(x), bias))
+
+
+ctadd("convt1d_basic", 1, 1, 3, 1, 0, 0, 1, 1, seq((1, 1, 4), 0.3, 0.1), seq((1, 1, 3), 0.1, -0.5), [0.05])
+ctadd("convt2d_basic", 1, 1, (2, 2), 1, 0, 0, 1, 1, seq((1, 1, 3, 3), 0.3, 0.1), seq((1, 1, 2, 2), 0.1, -0.4), [0.1])
+ctadd("convt2d_stride", 2, 3, (3, 3), 2, 1, 1, 1, 1, seq((1, 2, 4, 4), 0.2, -0.3), seq((2, 3, 3, 3), 0.1, -0.4), [0.2, -0.1, 0.05])
 def s(vals):
     return ", ".join(repr(float(v)) for v in vals)
 
@@ -391,6 +423,42 @@ def emit():
             f"h0_shape: &[{ishape(shape_of(h0))}], h0: &[{s(flat(h0))}], c0_shape: &[{ishape(shape_of(c0))}], c0: &[{s(flat(c0))}], "
             f"h1_shape: &[{ishape(shape_of(h1))}], h1: &[{s(flat(h1))}], c1_shape: &[{ishape(shape_of(c1))}], c1: &[{s(flat(c1))}], "
             f"hz_shape: &[{ishape(shape_of(hz))}], hz: &[{s(flat(hz))}], cz_shape: &[{ishape(shape_of(cz))}], cz: &[{s(flat(cz))}] }},"
+        )
+    L.append("];")
+    L.append("")
+    L.append("pub struct Conv1dGolden {")
+    L.append("    pub name: &'static str, pub in_channels: i64, pub out_channels: i64, pub kernel_size: i64,")
+    L.append("    pub stride: i64, pub padding: i64, pub dilation: i64, pub groups: i64,")
+    L.append("    pub weight_shape: &'static [usize], pub weight: &'static [f32], pub bias: &'static [f32],")
+    L.append("    pub x_shape: &'static [usize], pub x: &'static [f32],")
+    L.append("    pub out_shape: &'static [usize], pub out: &'static [f32],")
+    L.append("}")
+    L.append("")
+    L.append("pub static C1D_GOLDEN: &[Conv1dGolden] = &[")
+    for name, inc, outc, k, stride, padding, dilation, groups, weight, x, out, bias in C1D:
+        L.append(
+            f'    Conv1dGolden {{ name: "{name}", in_channels: {inc}, out_channels: {outc}, kernel_size: {k}, '
+            f'stride: {stride}, padding: {padding}, dilation: {dilation}, groups: {groups}, '
+            f"weight_shape: &[{ishape(shape_of(weight))}], weight: &[{s(flat(weight))}], bias: &[{'' if bias is None else s(bias)}], "
+            f"x_shape: &[{ishape(shape_of(x))}], x: &[{s(flat(x))}], out_shape: &[{ishape(shape_of(out))}], out: &[{s(flat(out))}] }},"
+        )
+    L.append("];")
+    L.append("")
+    L.append("pub struct ConvTGolden {")
+    L.append("    pub name: &'static str, pub in_channels: i64, pub out_channels: i64, pub kernel_size: &'static [i64],")
+    L.append("    pub stride: i64, pub padding: i64, pub output_padding: i64, pub dilation: i64, pub groups: i64,")
+    L.append("    pub weight_shape: &'static [usize], pub weight: &'static [f32], pub bias: &'static [f32],")
+    L.append("    pub x_shape: &'static [usize], pub x: &'static [f32],")
+    L.append("    pub out_shape: &'static [usize], pub out: &'static [f32],")
+    L.append("}")
+    L.append("")
+    L.append("pub static CT_GOLDEN: &[ConvTGolden] = &[")
+    for name, inc, outc, kt, stride, padding, opad, dilation, groups, weight, x, out, bias in CT:
+        L.append(
+            f'    ConvTGolden {{ name: "{name}", in_channels: {inc}, out_channels: {outc}, kernel_size: &[{", ".join(str(v) for v in kt)}], '
+            f"stride: {stride}, padding: {padding}, output_padding: {opad}, dilation: {dilation}, groups: {groups}, "
+            f"weight_shape: &[{ishape(shape_of(weight))}], weight: &[{s(flat(weight))}], bias: &[{'' if bias is None else s(bias)}], "
+            f"x_shape: &[{ishape(shape_of(x))}], x: &[{s(flat(x))}], out_shape: &[{ishape(shape_of(out))}], out: &[{s(flat(out))}] }},"
         )
     L.append("];")
     L.append("")
