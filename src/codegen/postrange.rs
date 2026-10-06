@@ -5,7 +5,7 @@
 //! `get_optimized_ast` (flatten range + KernelInfo with the colored name).
 
 use crate::dtype::ConstVal;
-use crate::uop::arg::{Arg, DataArg};
+use crate::uop::arg::{Arg, DataArg, EnumClass, EnumVal};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::range::AxisType;
@@ -62,6 +62,49 @@ fn axis_color(t: AxisType) -> &'static str {
     }
 }
 
+/// `argsort(x)` (helpers.py:29).
+fn argsort(x: &[usize]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..x.len()).collect();
+    idx.sort_by_key(|&i| x[i]);
+    idx
+}
+
+/// A RANGE's `arg[0]` (the axis id).
+fn range_axis_id(ctx: &mut UOpCtx, r: &UopId) -> Option<i64> {
+    match ctx.arg_of(r) {
+        Arg::Seq { tuple: true, items } if !items.is_empty() => items[0].as_int(),
+        _ => None,
+    }
+}
+
+/// Sort a list of RANGEs by `arg[0]` descending.
+fn sort_by_axis_desc(ctx: &mut UOpCtx, v: &mut Vec<UopId>) {
+    let mut keyed: Vec<(i64, UopId)> = v.drain(..).map(|u| (range_axis_id(ctx, &u).unwrap_or(i64::MIN), u)).collect();
+    keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    v.extend(keyed.into_iter().map(|(_, u)| u));
+}
+
+/// `reduceop.arg[0]` — the reduce ALU op.
+fn reduce_alu_op(ctx: &mut UOpCtx, reduceop: &UopId) -> Ops {
+    match ctx.arg_of(reduceop) {
+        Arg::Seq { tuple: true, items } => match &items[0] {
+            Arg::Enum(e) => Ops::from_u16(e.value).unwrap_or_else(|| panic!("TGERR: bad reduce op {e:?}")),
+            other => panic!("TGERR: bad reduce arg {other:?}"),
+        },
+        other => panic!("TGERR: bad reduce arg {other:?}"),
+    }
+}
+
+/// `ALLOW_TF32` (helpers.py) — default off, so float-input tensor cores skip.
+fn allow_tf32() -> bool {
+    std::env::var("ALLOW_TF32").ok().map(|v| v == "1").unwrap_or(false)
+}
+
+/// `getenv(name, default)` for integer knobs.
+fn env_int(name: &str, default: i64) -> i64 {
+    std::env::var(name).ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(default)
+}
+
 /// `colored` (helpers.py:38) — ANSI, colors always on (NO_COLOR unset).
 pub fn colored(st: &str, color: &str) -> String {
     const COLORS: [&str; 8] = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
@@ -71,6 +114,7 @@ pub fn colored(st: &str, color: &str) -> String {
 }
 
 use crate::renderer::Renderer;
+use crate::renderer::tc::TensorCore;
 
 
 /// `Scheduler` (postrange.py:26).
@@ -80,6 +124,8 @@ pub struct Scheduler<'a> {
     pub dont_use_locals: bool,
     pub     applied_opts: Vec<Arg>,
     opt_range: i64,
+    /// `self.tensor_core` — set by `_apply_tc_opt` (postrange.py:308).
+    tensor_core: Option<TensorCore>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -104,7 +150,7 @@ impl<'a> Scheduler<'a> {
                 base_axis = base_axis.max(AxisType::range_axis_id(ctx, u.clone()));
             }
         }
-        Scheduler { ast, ren, dont_use_locals, applied_opts, opt_range: base_axis + 1 }
+        Scheduler { ast, ren, dont_use_locals, applied_opts, opt_range: base_axis + 1, tensor_core: None }
     }
 
     /// `rngs` — opt axes in order.
@@ -211,6 +257,11 @@ impl<'a> Scheduler<'a> {
         ctx.backward_slice_with_self(&self.ast).into_iter().find(|u| ctx.op_of(u) == Ops::Reduce)
     }
 
+    /// `reduceops` (postrange.py:315) — all REDUCE ops, in toposort order.
+    pub fn reduceops(&self, ctx: &mut UOpCtx) -> Vec<UopId> {
+        ctx.toposort(&self.ast).into_iter().filter(|u| ctx.op_of(u) == Ops::Reduce).collect()
+    }
+
     /// `bufs` — INDEX nodes, reversed toposort.
     pub fn bufs(&self, ctx: &mut UOpCtx) -> Vec<UopId> {
         let mut v: Vec<UopId> = ctx.toposort(&self.ast).into_iter().filter(|u| ctx.op_of(u) == Ops::Index).collect();
@@ -276,15 +327,18 @@ impl<'a> Scheduler<'a> {
     }
 
     /// `shift_to`.
-    fn shift_to(&mut self, ctx: &mut UOpCtx, rng: UopId, amount: i64, new_type: AxisType, top: bool) -> (UopId, UopId) {
+    fn shift_to(&mut self, ctx: &mut UOpCtx, rng: UopId, amount: i64, new_type: AxisType, top: bool, input_new_rng: Option<UopId>) -> (UopId, UopId) {
         let ext = ctx.srcs(&rng)[0].clone();
         let old_sz = ctx.divides(ext, amount as i128).unwrap_or_else(|| panic!("TGERR: {} can't divide the range extent", amount));
-        let axis = self.opt_range;
-        self.opt_range += 1;
-        let new_rng = {
-            let dt = ctx.dt_of(&rng);
-            let eu = ctx.sint_to_uop_dt(SVal::I(amount as i128), dt);
-            ctx.uop(Ops::Range, Some(dt), vec![eu], Arg::Seq { tuple: true, items: vec![Arg::Int(axis), Arg::Enum(new_type.to_enum_val())] })
+        let new_rng = match input_new_rng {
+            Some(r) => r,
+            None => {
+                let axis = self.opt_range;
+                self.opt_range += 1;
+                let dt = ctx.dt_of(&rng);
+                let eu = ctx.sint_to_uop_dt(SVal::I(amount as i128), dt);
+                ctx.uop(Ops::Range, Some(dt), vec![eu], Arg::Seq { tuple: true, items: vec![Arg::Int(axis), Arg::Enum(new_type.to_enum_val())] })
+            }
         };
         let (rop, rdt, _rsrcs, rarg, rtag) = ctx.snapshot(&rng);
         let Arg::Seq { tuple: true, items: _ } = &rarg else { panic!("TGERR: bad range arg") };
@@ -304,13 +358,20 @@ impl<'a> Scheduler<'a> {
         (replaced, new_rng)
     }
 
-    /// `apply_opt` — corpus subset (UPCAST/UNROLL/LOCAL/GROUPTOP).
-    pub fn apply_opt(&mut self, ctx: &mut UOpCtx, op: OptOp, axis: Option<usize>, arg: Option<i64>) {
+    /// `apply_opt` — corpus subset (UPCAST/UNROLL/LOCAL/GROUPTOP/PADTO). Returns
+    /// the shifted `(replaced_rng, new_rng)` (python `apply_opt`'s `ret`).
+    pub fn apply_opt(&mut self, ctx: &mut UOpCtx, op: OptOp, axis: Option<usize>, arg: Option<i64>) -> Vec<UopId> {
+        assert!(!matches!(op, OptOp::Tc), "TGERR: use apply_opt_tc for TC");
+        if matches!(op, OptOp::PadTo) {
+            self.apply_padto(ctx, axis.unwrap_or(0), arg.unwrap_or(1));
+            return vec![];
+        }
         let at = match op {
             OptOp::Local => AxisType::Local,
             OptOp::Upcast => AxisType::Upcast,
             OptOp::Unroll => AxisType::Unroll,
             OptOp::Group | OptOp::GroupTop => AxisType::GroupReduce,
+            OptOp::PadTo | OptOp::Tc => unreachable!(),
         };
         if matches!(op, OptOp::Local | OptOp::Group | OptOp::GroupTop) {
             assert!(self.ren.has_local, "TGERR: locals needed for opt");
@@ -358,8 +419,9 @@ impl<'a> Scheduler<'a> {
                 assert!(!self.dont_use_locals, "TGERR: can't use locals");
                 assert!(AxisType::range_axis_type(ctx, rng.clone()) == AxisType::Reduce, "TGERR: group is for reduce");
             }
+            OptOp::PadTo | OptOp::Tc => unreachable!(),
         }
-        self.shift_to(ctx, rng, amt, at, matches!(op, OptOp::GroupTop));
+        let (replaced, new_rng) = self.shift_to(ctx, rng, amt, at, matches!(op, OptOp::GroupTop), None);
         self.applied_opts.push(Arg::Data(DataArg {
             tag: "Opt".into(),
             fields: vec![
@@ -368,6 +430,286 @@ impl<'a> Scheduler<'a> {
                 ("arg".into(), Arg::Int(amt)),
             ],
         }));
+        vec![replaced, new_rng]
+    }
+
+    /// `OptOps.PADTO` (postrange.py:185) — round a const range up to a multiple,
+    /// masking out-of-range lanes with `Invalid`.
+    fn apply_padto(&mut self, ctx: &mut UOpCtx, axis: usize, arg: i64) {
+        let rng = self.rngs(ctx)[axis].clone();
+        // check(rng.src[0].op is Ops.CONST)
+        assert!(ctx.op_of(&ctx.srcs(&rng)[0].clone()) == Ops::Const, "TGERR: only pad const axes");
+        let at = AxisType::range_axis_type(ctx, rng.clone());
+        assert!(!matches!(at, AxisType::Upcast | AxisType::Unroll), "TGERR: cannot pad upcasted");
+        assert!(at != AxisType::Thread, "TGERR: cannot pad thread");
+        let old = self.rng_vmax(ctx, rng.clone()) + 1;
+        let new_sz = (old + arg - 1) / arg * arg;
+        assert!(old > new_sz / 4, "TGERR: pad adds more than quadruple the work");
+        let (rop, rdt, _srcs, rarg, rtag) = ctx.snapshot(&rng);
+        let eu = ctx.sint_to_uop_dt(SVal::I(new_sz as i128), rdt);
+        let replaced_rng = ctx.uop_tag(rop, Some(rdt), vec![eu], rarg.clone(), rtag);
+        let mut replaces: HashMap<UopId, UopId> = HashMap::new();
+        replaces.insert(rng.clone(), replaced_rng.clone());
+        // valid = replaced_rng < old
+        let old_u = ctx.sint_to_uop_dt(SVal::I(old as i128), rdt);
+        let valid = ctx.binop(Ops::Cmplt, replaced_rng.clone(), old_u);
+        let store_targets: Vec<UopId> = ctx
+            .backward_slice_with_self(&self.ast)
+            .into_iter()
+            .filter(|u| ctx.op_of(u) == Ops::Store)
+            .map(|u| ctx.srcs(&u)[0].clone())
+            .collect();
+        for b in self.bufs(ctx) {
+            let bsrcs = ctx.srcs(&b).to_vec();
+            if bsrcs.len() < 2 {
+                continue;
+            }
+            let i = ctx.get_idx(bsrcs[1].clone());
+            if !ctx.backward_slice_with_self(&i).contains(&rng) {
+                continue;
+            }
+            let gv = ctx.get_valid(bsrcs[1].clone());
+            let combined = ctx.binop(Ops::And, valid.clone(), gv);
+            let new_idx = ctx.valid(i.clone(), combined);
+            let nb = ctx.uop_tag(ctx.op_of(&b), Some(ctx.dt_of(&b)), vec![bsrcs[0].clone(), new_idx], ctx.arg_of(&b).clone(), Arg::None);
+            if store_targets.contains(&b) {
+                replaces.insert(b.clone(), nb);
+            } else {
+                let inv = ctx.const_py(ConstVal::Invalid, Some(ctx.dt_of(&b)));
+                let wrapped = ctx.where_(valid.clone(), nb, inv);
+                replaces.insert(b.clone(), wrapped);
+            }
+        }
+        self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), replaces, false, false);
+    }
+
+
+    /// `apply_opt(Opt(OptOps.TC, axis, (tc_select, tc_opt, use_tensor_cores)))`
+    /// (postrange.py:172/dispatch → 214 `_apply_tc_opt`).
+    pub fn apply_opt_tc(&mut self, ctx: &mut UOpCtx, axis: usize, tc_select: i64, tc_opt: i64, use_tc: i64) -> Result<Vec<UopId>, String> {
+        if !self.applied_opts.is_empty() {
+            return Err("tensor core opts must be first".into());
+        }
+        if !(-1..self.ren.tensor_cores.len() as i64).contains(&tc_select) {
+            return Err("tensor core opts must have valid tc_select".into());
+        }
+        if !(0..=2).contains(&tc_opt) {
+            return Err("tensor core opts must have valid tc_opt".into());
+        }
+        if !(1..=2).contains(&use_tc) {
+            return Err("use_tensor_cores value is not valid".into());
+        }
+        self.apply_tc_opt(ctx, use_tc, axis, tc_select, tc_opt)
+    }
+
+    /// `_apply_tc_opt` (postrange.py:214).
+    fn apply_tc_opt(&mut self, ctx: &mut UOpCtx, use_tc: i64, axis: usize, tc_select: i64, opt_level: i64) -> Result<Vec<UopId>, String> {
+        let reduceops = self.reduceops(ctx);
+        let reduceop = reduceops.first().cloned().ok_or("no reduce ops for TensorCore")?;
+        if reduce_alu_op(ctx, &reduceop) != Ops::Add {
+            return Err("no tensor core available".into());
+        }
+        let rsrc0 = ctx.srcs(&reduceop)[0].clone();
+        let mul = if ctx.op_of(&rsrc0) == Ops::Cast { ctx.srcs(&rsrc0)[0].clone() } else { rsrc0 };
+        if ctx.op_of(&mul) != Ops::Mul {
+            return Err("no tensor core available".into());
+        }
+        let mul_srcs = ctx.srcs(&mul).to_vec();
+        if mul_srcs.len() != 2 {
+            return Err("no tensor core available".into());
+        }
+        let (in0, in1) = (mul_srcs[0].clone(), mul_srcs[1].clone());
+        let redt = ctx.dt_of(&reduceop);
+        let tensor_cores: Vec<TensorCore> = if tc_select == -1 {
+            self.ren.tensor_cores.clone()
+        } else {
+            vec![self.ren.tensor_cores[tc_select as usize].clone()]
+        };
+        for tc in tensor_cores {
+            if (self.ren.device == "CUDA" || self.ren.device == "NV") && tc.dtype_in == crate::dtype::FLOAT32 && !allow_tf32() {
+                continue;
+            }
+            if tc.dtype_in != ctx.dt_of(&in0) || tc.dtype_in != ctx.dt_of(&in1) || tc.dtype_out != redt {
+                continue;
+            }
+            // tensor cores have three ranges: X (in1), Y (in0), REDUCE
+            let in0r: Vec<UopId> = ctx.ranges(&in0).iter().cloned().collect();
+            let in1r: Vec<UopId> = ctx.ranges(&in1).iter().cloned().collect();
+            let mut ir0: Vec<UopId> = in0r.iter().filter(|u| !in1r.contains(u)).cloned().collect();
+            let mut ir1: Vec<UopId> = in1r.iter().filter(|u| !in0r.contains(u)).cloned().collect();
+            let mut rr: Vec<UopId> = ctx.srcs(&reduceop)[1..].to_vec();
+            sort_by_axis_desc(ctx, &mut ir0);
+            sort_by_axis_desc(ctx, &mut ir1);
+            sort_by_axis_desc(ctx, &mut rr);
+            if ir0.is_empty() || ir1.is_empty() || rr.is_empty() {
+                continue;
+            }
+            // NOTE: why are in1 and in0 switched?
+            let mut axis_choices: Vec<[UopId; 3]> = Vec::new();
+            for b in &ir1 {
+                for a in &ir0 {
+                    for r in &rr {
+                        axis_choices.push([b.clone(), a.clone(), r.clone()]);
+                    }
+                }
+            }
+            if axis >= axis_choices.len() {
+                continue;
+            }
+            let mut axes: [UopId; 3] = axis_choices[axis].clone();
+            if axes[..2].iter().any(|a| AxisType::range_axis_type(ctx, a.clone()) == AxisType::Reduce) {
+                return Err("tensor core X/Y axes can't be REDUCE".into());
+            }
+            // tag the reduceop
+            {
+                let (op, dt, srcs, arg, _t) = ctx.snapshot(&reduceop);
+                let tagged = ctx.uop_tag(op, Some(dt), srcs, arg, Arg::Str("TC".into()));
+                let mut m = HashMap::new();
+                m.insert(reduceop.clone(), tagged);
+                self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), m, false, false);
+            }
+            // PADTO when an axis doesn't divide the tensor-core dim
+            let dims = [tc.dims.0, tc.dims.1, tc.dims.2];
+            for i in 0..3 {
+                let idx = match self.rngs(ctx).iter().position(|r| r == &axes[i]) {
+                    Some(x) => x,
+                    None => return Err("tc axis vanished".into()),
+                };
+                let extent = self.rng_vmax(ctx, axes[i].clone()) + 1;
+                if extent % dims[i] as i64 != 0 {
+                    if opt_level < 2 {
+                        return Err("tc padding requires opt_level >= 2".into());
+                    }
+                    self.apply_opt(ctx, OptOp::PadTo, Some(idx), Some(dims[i] as i64));
+                    axes[i] = self.rngs(ctx)[idx].clone();
+                }
+            }
+            // create the warp as a whole, in case ranges move/removed later
+            let warp0 = ctx.range(SVal::I(tc.threads as i128), -1, AxisType::Warp);
+            let mut warp = warp0.clone();
+            let two = ctx.const_py(ConstVal::Int(2), Some(crate::dtype::WEAKINT));
+            let mut ne: Vec<UopId> = Vec::new();
+            for opt in tc.opts.clone() {
+                let di: usize = opt[1..].parse().unwrap();
+                if opt.starts_with('l') {
+                    let input = ctx.binop(Ops::Floormod, warp.clone(), two.clone());
+                    let rng = axes[di].clone();
+                    let (replaced, new_rng) = self.shift_to(ctx, rng, 2, AxisType::Local, false, Some(input));
+                    axes[di] = replaced;
+                    warp = ctx.binop(Ops::Floordiv, warp.clone(), two.clone());
+                    ne.push(new_rng);
+                } else {
+                    let rng = axes[di].clone();
+                    let (replaced, new_rng) = self.shift_to(ctx, rng, 2, AxisType::Upcast, false, None);
+                    axes[di] = replaced;
+                    ne.push(new_rng);
+                }
+            }
+            for (_, amt) in tc.get_reduce_axes() {
+                let rng = axes[2].clone();
+                let (replaced, new_rng) = self.shift_to(ctx, rng, amt as i64, AxisType::Unroll, false, None);
+                axes[2] = replaced;
+                ne.push(new_rng);
+            }
+            if use_tc != 2 {
+                let tagged = ctx
+                    .toposort(&self.ast)
+                    .into_iter()
+                    .find(|u| ctx.op_of(u) == Ops::Reduce && matches!(ctx.tag_of(u), Arg::Str(s) if s == "TC"))
+                    .ok_or("no tagged reduce")?;
+                let tne: Vec<UopId> = ne
+                    .iter()
+                    .map(|x| {
+                        let (op, dt, srcs, arg, _t) = ctx.snapshot(x);
+                        ctx.uop_tag(op, Some(dt), srcs, arg, Arg::Int(1))
+                    })
+                    .collect();
+                let mut m: HashMap<UopId, UopId> = HashMap::new();
+                for (a, b) in ne.iter().zip(tne.iter()) {
+                    m.insert(a.clone(), b.clone());
+                }
+                let ret = crate::uop::upat::substitute(ctx, tagged.clone(), m, false, false);
+                let ret_src0 = ctx.srcs(&ret)[0].clone();
+                let mul_node = if ctx.op_of(&ret_src0) == Ops::Cast { ctx.srcs(&ret_src0)[0].clone() } else { ret_src0 };
+                let srcs_list = ctx.srcs(&mul_node).to_vec();
+                let (p0, p1) = tc.permutes_for_shape_str(&tc.base_shape_str());
+                let perms = [p0, p1];
+                let mut new_srcs: Vec<UopId> = Vec::new();
+                for (x, p) in srcs_list.iter().zip(perms.iter()) {
+                    let asrt = argsort(p);
+                    let mut m2: HashMap<UopId, UopId> = HashMap::new();
+                    for (j, t) in tne.iter().enumerate() {
+                        m2.insert(t.clone(), ne[asrt[j]].clone());
+                    }
+                    new_srcs.push(crate::uop::upat::substitute(ctx, x.clone(), m2, false, false));
+                }
+                if new_srcs.len() != 2 {
+                    return Err("wmma srcs".into());
+                }
+                // get reduce/upcast axes for the tensor cores
+                let redu_nms: Vec<String> = (0..tc.get_reduce_axes().len()).map(|i| format!("r{i}")).collect();
+                let tc_reduce_axis_idx = self.shape_str_to_axis(ctx, &redu_nms);
+                let base_upcast_axis_idx = self.shape_str_to_axis(ctx, &tc.base_upcast_axes());
+                let base_upcast: Vec<(usize, usize)> = base_upcast_axis_idx.iter().map(|&s| (s, 2usize)).collect();
+                let ept = [tc.elements_per_thread.0, tc.elements_per_thread.1, tc.elements_per_thread.2];
+                let rngs_snapshot = self.rngs(ctx);
+                let mut tc_upcast_axes: Vec<Vec<(i64, i64)>> = (0..3)
+                    .map(|i| {
+                        let n = (ept[i] as f64).log2() as usize;
+                        base_upcast[..n]
+                            .iter()
+                            .map(|&(a, sz)| (range_axis_id(ctx, &rngs_snapshot[a]).unwrap(), sz as i64))
+                            .collect()
+                    })
+                    .collect();
+                let tc_reduce_axes: Vec<i64> = tc_reduce_axis_idx
+                    .iter()
+                    .map(|&a| range_axis_id(ctx, &rngs_snapshot[a]).unwrap())
+                    .collect();
+                // with_missing_tc_axes (uses the pre-update value)
+                let all_up: Vec<(i64, i64)> = tc_upcast_axes[0].iter().chain(tc_upcast_axes[1].iter()).cloned().collect();
+                for v in tc_upcast_axes.iter_mut() {
+                    for &(rn, _) in &all_up {
+                        if !v.iter().any(|x| x.0 == rn) {
+                            v.push((rn, 1));
+                        }
+                    }
+                }
+                let device = self.ren.device.clone();
+                let acc_consts: Vec<UopId> =
+                    (0..ept[2]).map(|_| ctx.const_py(ConstVal::Float(0.0), Some(tc.dtype_out))).collect();
+                let acc = crate::tensor::stack(ctx, acc_consts);
+                let tc_uop = ctx.wmma(
+                    new_srcs[0].clone(),
+                    new_srcs[1].clone(),
+                    acc,
+                    (tc.dims.0 as i64, tc.dims.1 as i64, tc.dims.2 as i64),
+                    &device,
+                    tc.threads as i64,
+                    Some(tc_upcast_axes),
+                );
+                // preserve extra reduces
+                let red_srcs: Vec<UopId> = ctx.srcs(&tagged)[1..].to_vec();
+                let sink = crate::tensor::sink(ctx, red_srcs);
+                let reduce_ranges: Vec<UopId> = ctx
+                    .toposort(&sink)
+                    .into_iter()
+                    .filter(|x| ctx.op_of(x) == Ops::Range && !tc_reduce_axes.contains(&range_axis_id(ctx, x).unwrap()))
+                    .collect();
+                let mut tc_final = tc_uop.clone();
+                if !reduce_ranges.is_empty() {
+                    let add_enum = Arg::Enum(EnumVal { class: EnumClass::Ops, value: Ops::Add as u16 });
+                    let arg = Arg::Seq { tuple: true, items: vec![add_enum, Arg::Int(0)] };
+                    tc_final = ctx.uop(Ops::Reduce, Some(redt), [vec![tc_uop], reduce_ranges].concat(), arg);
+                }
+                let mut m: HashMap<UopId, UopId> = HashMap::new();
+                m.insert(tagged.clone(), tc_final);
+                self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), m, false, false);
+            }
+            self.tensor_core = Some(tc);
+            return Ok(axes.to_vec());
+        }
+        Err("no tensor core available".into())
     }
 
     /// `Scheduler.copy` (search.py) — clone for BEAM candidates.
@@ -378,6 +720,7 @@ impl<'a> Scheduler<'a> {
             dont_use_locals: self.dont_use_locals,
             applied_opts: self.applied_opts.clone(),
             opt_range: self.opt_range,
+            tensor_core: self.tensor_core.clone(),
         }
     }
 
@@ -426,6 +769,7 @@ impl<'a> Scheduler<'a> {
                 if self.dont_use_locals { return Err("no locals".into()); }
                 if rtype != AxisType::Reduce { return Err("group axis type".into()); }
             }
+            OptOp::PadTo | OptOp::Tc => return Err("opt handled elsewhere".into()),
         }
         // `shift_to` panics unless the extent divides evenly.
         let ext = ctx.srcs(&rng)[0].clone();
@@ -437,8 +781,9 @@ impl<'a> Scheduler<'a> {
             OptOp::Upcast => AxisType::Upcast,
             OptOp::Unroll => AxisType::Unroll,
             OptOp::Group | OptOp::GroupTop => AxisType::GroupReduce,
+            OptOp::PadTo | OptOp::Tc => unreachable!(),
         };
-        self.shift_to(ctx, rng, amt, at, matches!(op, OptOp::GroupTop));
+        self.shift_to(ctx, rng, amt, at, matches!(op, OptOp::GroupTop), None);
         self.applied_opts.push(Arg::Data(DataArg {
             tag: "Opt".into(),
             fields: vec![
@@ -460,6 +805,14 @@ impl<'a> Scheduler<'a> {
             ret.push(format!("{}{}", axis_letter(x), c));
         }
         ret
+    }
+
+    /// `shape_str_to_axis` (postrange.py:41).
+    pub fn shape_str_to_axis(&self, ctx: &mut UOpCtx, nms: &[String]) -> Vec<usize> {
+        let ss = self.shape_str(ctx);
+        nms.iter()
+            .map(|n| ss.iter().position(|x| x == n).unwrap_or_else(|| panic!("TGERR: shape_str_to_axis {n} not in {ss:?}")))
+            .collect()
     }
 
     /// `get_optimized_ast`.
@@ -632,10 +985,57 @@ pub enum OptOp {
     Local,
     Group,
     GroupTop,
+    PadTo,
+    Tc,
 }
 
 /// `hand_coded_optimizations` (heuristic.py) — corpus subset.
 pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
+    // first try the tensor cores
+    let use_tc: i64 = env_int("USE_TC", 1);
+    let tc_opt: i64 = env_int("TC_OPT", 0);
+    let tc_select: i64 = env_int("TC_SELECT", -1);
+    if use_tc > 0 && (k.axes_of(ctx, &[AxisType::GroupReduce, AxisType::Reduce]).len() == 1 || tc_opt >= 1) {
+        for axis in 0..3usize {
+            let mut tk = k.copy();
+            let mut rngs = match tk.apply_opt_tc(ctx, axis, tc_select, tc_opt, use_tc) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            // attempt to upcast M and N
+            for &tc_dim in &[1usize, 0usize] {
+                let mut pick: Option<i64> = None;
+                for sz in [5i64, 4, 3, 2] {
+                    let ext = ctx.srcs(&rngs[tc_dim])[0].clone();
+                    if ctx.divides(ext, sz as i128).is_some() {
+                        pick = Some(sz);
+                        break;
+                    }
+                }
+                if let Some(sz) = pick {
+                    let idx = tk.rngs(ctx).iter().position(|r| r == &rngs[tc_dim]).unwrap();
+                    let ret = tk.apply_opt(ctx, OptOp::Upcast, Some(idx), Some(sz));
+                    rngs[tc_dim] = ret[0].clone();
+                }
+            }
+            // attempt to local N
+            let mut pick: Option<i64> = None;
+            for sz in [4i64, 2] {
+                let ext = ctx.srcs(&rngs[0])[0].clone();
+                if ctx.divides(ext, sz as i128).is_some() {
+                    pick = Some(sz);
+                    break;
+                }
+            }
+            if let Some(sz) = pick {
+                let idx = tk.rngs(ctx).iter().position(|r| r == &rngs[0]).unwrap();
+                tk.apply_opt(ctx, OptOp::Local, Some(idx), Some(sz));
+            }
+            *k = tk;
+            return;
+        }
+    }
+
     // are we grouping? (requires local shape support)
     {
         let ups = k.upcastable_dims(ctx);

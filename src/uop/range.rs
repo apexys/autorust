@@ -90,6 +90,49 @@ impl UOpCtx {
         self.uop(Ops::Range, Some(dtype::WEAKINT), vec![end_u], arg)
     }
 
+    /// `UOp.wmma(a, b, acc, dims, device, threads, tc_upcast_axes)` (ops.py:626).
+    /// `arg=(dims, dtype_in, device, threads, tc_upcast_axes)`.
+    pub fn wmma(
+        &mut self,
+        a: UopId,
+        b: UopId,
+        acc: UopId,
+        dims: (i64, i64, i64),
+        device: &str,
+        threads: i64,
+        tc_upcast_axes: Option<Vec<Vec<(i64, i64)>>>,
+    ) -> UopId {
+        let dtype_in = self.dt_of(&a);
+        let dt = self.dt_of(&acc);
+        let upcast = match tc_upcast_axes {
+            Some(v) => Arg::Seq {
+                tuple: true,
+                items: v
+                    .into_iter()
+                    .map(|inner| Arg::Seq {
+                        tuple: true,
+                        items: inner
+                            .into_iter()
+                            .map(|(rn, sz)| Arg::Seq { tuple: true, items: vec![Arg::Int(rn), Arg::Int(sz)] })
+                            .collect(),
+                    })
+                    .collect(),
+            },
+            None => Arg::None,
+        };
+        let arg = Arg::Seq {
+            tuple: true,
+            items: vec![
+                Arg::Seq { tuple: true, items: vec![Arg::Int(dims.0), Arg::Int(dims.1), Arg::Int(dims.2)] },
+                Arg::Dtype(dtype_in),
+                Arg::Str(device.to_string()),
+                Arg::Int(threads),
+                upcast,
+            ],
+        };
+        self.uop(Ops::Wmma, Some(dt), vec![a, b, acc], arg)
+    }
+
     /// `sint_to_uop(end, dtype)`.
     pub fn sint_to_uop_dt(&mut self, s: SVal, dt: crate::dtype::DTypeId) -> UopId {
         match s {

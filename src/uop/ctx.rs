@@ -493,7 +493,9 @@ impl UOpCtx {
                 let a = self.shape_of(&srcs[0])?;
                 let b = self.shape_of(&srcs[1])?;
                 let c = self.shape_of(&srcs[2])?;
-                let mut front = self.broadcast_shape(&[a[..a.len() - 1].to_vec(), b[..b.len() - 1].to_vec(), c[..c.len() - 1].to_vec()])?;
+                // python slicing handles the empty (scalar) shape: `()[:-1] == ()`
+                let head = |v: &[SVal]| -> Vec<SVal> { if v.is_empty() { Vec::new() } else { v[..v.len() - 1].to_vec() } };
+                let mut front = self.broadcast_shape(&[head(&a), head(&b), head(&c)])?;
                 front.extend(c.last().cloned());
                 Some(front)
             }

@@ -88,28 +88,25 @@ pub fn sum_acc_dtype(dt: DTypeId) -> DTypeId {
     }
 }
 
-/// `ReduceMixin.sum` (reduce.py:20-44).
+/// `ReduceMixin.sum` (reduce.py:20-45): cast the *input* to the accumulator
+/// dtype, reduce, then cast back for low-precision floats.
 pub fn sum(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> UopId {
     let self_dt = ctx.dt_of(&x);
     let dt = dtype.unwrap_or_else(|| sum_acc_dtype(self_dt));
-    let ret = reduce(ctx, x, Ops::Add, axis, keepdim);
-    let ret = ctx.cast(ret, dt);
+    let xc = ctx.cast(x, dt);
+    let ret = reduce(ctx, xc, Ops::Add, axis, keepdim);
     if dtype.is_none() && sum_cast_back(self_dt) {
         return ctx.cast(ret, self_dt);
     }
     ret
 }
 
-/// `ReduceMixin.prod` (reduce.py:47-71).
+/// `ReduceMixin.prod` (reduce.py:47-71): reduce in the input dtype (or `dtype`).
 pub fn prod(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> UopId {
     let self_dt = ctx.dt_of(&x);
-    let dt = dtype.unwrap_or_else(|| sum_acc_dtype(self_dt));
-    let ret = reduce(ctx, x, Ops::Mul, axis, keepdim);
-    let ret = ctx.cast(ret, dt);
-    if dtype.is_none() && sum_cast_back(self_dt) {
-        return ctx.cast(ret, self_dt);
-    }
-    ret
+    let dt = dtype.unwrap_or(self_dt);
+    let xc = ctx.cast(x, dt);
+    reduce(ctx, xc, Ops::Mul, axis, keepdim)
 }
 
 /// sum/prod cast back to the source dtype for low-precision floats

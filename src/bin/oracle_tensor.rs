@@ -137,6 +137,7 @@ fn main() {
             }
             "add" => tensors[st.x.unwrap_or(0)].clone().add(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
             "mul" => tensors[st.x.unwrap_or(0)].clone().mul(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
+            "matmul" => tensors[st.x.unwrap_or(0)].clone().matmul(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
             "addc" => tensors[st.x.unwrap_or(0)].clone().add(&mut ctx, st.val.unwrap_or(0.0)),
             "mulc" => tensors[st.x.unwrap_or(0)].clone().mul(&mut ctx, st.val.unwrap_or(1.0)),
             "neg" => tensors[st.x.unwrap_or(0)].clone().neg(&mut ctx),

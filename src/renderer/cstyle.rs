@@ -738,6 +738,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 prefix.push(cuda_vector_prefix(lang, *dt, *count));
             }
         }
+        prefix.extend(wmma_asm_prefix(lang, ctx, lst));
         return format!("{}\n{prg}", prefix.join("\n"));
     }
     if lang.vector_defines {
@@ -776,6 +777,96 @@ fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
         ConstVal::Int(v) => Some(v),
         _ => None,
     }
+}
+
+/// `wmma_args` (cstyle.py:112) — the deduped `(name, dims, dtype_in, dtype_out,
+/// upcast_sizes)` per WMMA op in the linear list.
+fn wmma_args(ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<(String, (i64, i64, i64), DTypeId, DTypeId, (i64, i64, i64))> {
+    use crate::uop::Ops;
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for u in lst {
+        if ctx.op_of(u) != Ops::Wmma {
+            continue;
+        }
+        let name = wmma_name(ctx, u.clone());
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name.clone());
+        let (dims, dtype_in) = match ctx.arg_of(u).clone() {
+            Arg::Seq { tuple: true, items } if items.len() >= 2 => {
+                let dims = match &items[0] {
+                    Arg::Seq { items: d, .. } => {
+                        let v: Vec<i64> = d.iter().filter_map(|it| it.as_int()).collect();
+                        if v.len() >= 3 { (v[0], v[1], v[2]) } else { continue }
+                    }
+                    _ => continue,
+                };
+                let di = match &items[1] {
+                    Arg::Dtype(d) => *d,
+                    _ => continue,
+                };
+                (dims, di)
+            }
+            _ => continue,
+        };
+        let dtype_out = ctx.dt_of(u);
+        let mut t = [0i64; 3];
+        for (i, slot) in t.iter_mut().enumerate() {
+            let s = ctx.srcs(u)[i].clone();
+            if let Ok(Some(sh)) = ctx.shape(&s) {
+                if let Some(last) = sh.last() {
+                    *slot = last.clone().as_i64_or_panic();
+                }
+            }
+        }
+        out.push((name, dims, dtype_in, dtype_out, (t[0], t[1], t[2])));
+    }
+    out
+}
+
+/// The CUDARenderer `mma.sync.aligned` asm wrapper (cstyle.py:449-455).
+fn wmma_asm_prefix(lang: &CStyleLang, ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<String> {
+    let map_in = |d: DTypeId| -> &'static str {
+        if d == dtype::FLOAT32 { "tf32" } else if d == dtype::FLOAT16 { "f16" } else if d == dtype::BFLOAT16 { "bf16" }
+        else if d == dtype::FP8E4M3 { "e4m3" } else if d == dtype::FP8E5M2 { "e5m2" } else { "?" }
+    };
+    let map_out = |d: DTypeId| -> &'static str {
+        if d == dtype::FLOAT32 { "f32" } else if d == dtype::FLOAT16 { "f16" } else { "?" }
+    };
+    let mut out = Vec::new();
+    for (name, (n, m, k), dtype_in, dtype_out, upcast) in wmma_args(ctx, lst) {
+        let sizes = [upcast.0, upcast.1, upcast.2];
+        let dts = [dtype_in, dtype_in, dtype_out];
+        let wd: Vec<String> = dts.iter().zip(sizes.iter()).map(|(d, i)| lang.render_dtype(*d, *i, Some(AddrSpace::Reg), false)).collect();
+        let nops: Vec<i64> = dts.iter().zip(sizes.iter()).map(|(d, i)| i * d.itemsize() as i64 / 4).collect();
+        let total: i64 = nops.iter().sum();
+        let operands: Vec<String> = (0..total).map(|i| format!("%{i}")).collect();
+        let c = &operands[..nops[2] as usize];
+        let a = &operands[nops[2] as usize..(nops[2] + nops[0]) as usize];
+        let b = &operands[operands.len() - nops[1] as usize..];
+        let c0s = c.join(", ");
+        let aops = a.join(", ");
+        let bops = b.join(", ");
+        let outc: Vec<String> = (0..nops[2]).map(|i| format!("\"+r\"(c_pk[{i}])")).collect();
+        let ain: Vec<String> = (0..nops[0]).map(|i| format!("\"r\"(a_pk[{i}])")).collect();
+        let bin: Vec<String> = (0..nops[1]).map(|i| format!("\"r\"(b_pk[{i}])")).collect();
+        let (wmc, wma, wmb) = (&wd[2], &wd[0], &wd[1]);
+        let din = map_in(dtype_in);
+        let dout = map_out(dtype_out);
+        let mut s = String::new();
+        s.push_str(&format!("__device__ {wmc} __{name}({wma} a, {wmb} b, {wmc} c){{\n"));
+        s.push_str("  int *a_pk = (int *)(&a), *b_pk = (int *)(&b), *c_pk = (int *)(&c);\n");
+        s.push_str(&format!("  asm(\"mma.sync.aligned.m{m}n{n}k{k}.row.col.{dout}.{din}.{din}.{dout}\"\n"));
+        s.push_str(&format!("      \"{{{c0s}}}, {{{aops}}},\"\n"));
+        s.push_str(&format!("      \"{{{bops}}}, {{{c0s}}};\"\n"));
+        s.push_str(&format!("    : {}\n", outc.join(", ")));
+        s.push_str(&format!("    : {}, {});\n", ain.join(", "), bin.join(", ")));
+        s.push_str("  return c;\n}");
+        out.push(s);
+    }
+    out
 }
 
 /// The base_rewrite const rules (in python match order) — cast dtype decides.
@@ -879,22 +970,24 @@ fn trunc_int(v: i128, dt: DTypeId) -> i128 {
     }
 }
 
-/// `_wmma_name`.
+/// `_wmma_name` (cstyle.py:107) — `WMMA_{N}_{M}_{K}_{dtype_in.name}_{dtype_out.name}`.
 fn wmma_name(ctx: &mut UOpCtx, u: UopId) -> String {
+    let dt_out = ctx.dt_of(&u);
     let arg = ctx.arg_of(&u).clone();
-    match arg {
-        Arg::Seq { tuple: _, items } => {
-            let dims: Vec<String> = items
-                .iter()
-                .filter_map(|it| match it {
-                    Arg::Const(ConstVal::Int(v)) => Some(v.to_string()),
-                    _ => None,
-                })
-                .collect();
-            format!("WMMA_{}", dims.join("_")).replace(' ', "_")
+    if let Arg::Seq { tuple: true, items } = arg {
+        if items.len() >= 2 {
+            let dims: Vec<String> = match &items[0] {
+                Arg::Seq { items: d, .. } => d.iter().filter_map(|it| it.as_int()).map(|v| v.to_string()).collect(),
+                _ => vec![],
+            };
+            let dtype_in = match &items[1] {
+                Arg::Dtype(d) => d.name().to_string(),
+                _ => "?".to_string(),
+            };
+            return format!("WMMA_{}_{}_{}", dims.join("_"), dtype_in, dt_out.name()).replace(' ', "_");
         }
-        _ => "WMMA".to_string(),
     }
+    "WMMA".to_string()
 }
 
 /// `CStyleLanguage.code_for_op` (clang subset + CUDARenderer overrides).

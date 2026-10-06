@@ -35,6 +35,12 @@ for st in prog:
         tensors.append(tensors[st["x"]] + tensors[st["y"]])
     elif op == "mul":
         tensors.append(tensors[st["x"]] * tensors[st["y"]])
+    elif op == "matmul":
+        tensors.append(tensors[st["x"]] @ tensors[st["y"]])
+    elif op == "reshape":
+        tensors.append(tensors[st["x"]].reshape(st["shape"]))
+    elif op == "rand":
+        tensors.append(Tensor.rand(*st["shape"], dtype=DT.get(st.get("dtype"), dtypes.float32), device="CUDA"))
     elif op == "neg":
         tensors.append(-tensors[st["x"]])
     else:

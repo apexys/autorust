@@ -5,6 +5,7 @@
 pub mod cstyle;
 pub mod expr;
 pub mod extra;
+pub mod tc;
 
 use crate::uop::Ops;
 
@@ -47,6 +48,9 @@ pub struct Renderer {
     pub global_max: Option<[i64; 3]>,
     pub local_max: Option<[i64; 3]>,
     pub shared_max: i64,
+    /// `tensor_cores` (renderer/__init__.py:72) — the WMMA descriptions this
+    /// renderer supports (empty for the interp/CL/clang backends).
+    pub tensor_cores: Vec<tc::TensorCore>,
     /// `code_for_op.keys()` — ops this renderer renders natively (everything
     /// else decomposes in the pipeline). python_alu for the interp, the
     /// C-style table for cstyle renderers.
@@ -70,6 +74,7 @@ impl Renderer {
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
+            tensor_cores: Vec::new(),
             code_for_op: python_alu_keys(),
             // ops_python.py:235 — 3.12+ keeps half, everything else stays.
             supported_dtypes: crate::dtype::ALL.to_vec(),
@@ -88,6 +93,7 @@ impl Renderer {
             global_max: Some([1024, 0, 0]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
+            tensor_cores: Vec::new(),
             code_for_op: cstyle_alu_keys_clang(),
             // cstyle.py:300 — fp8s excluded everywhere; bf16 only on x86/arm arch.
             supported_dtypes: crate::dtype::ALL.iter().cloned().filter(|&d| !in_fp8s(d)).collect(),
@@ -105,6 +111,7 @@ impl Renderer {
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
+            tensor_cores: Vec::new(),
             code_for_op: cstyle_alu_keys(),
             supported_dtypes: opencl_supported_dtypes(""),
             // cstyle.py:319 — bf16 compute-through-f32 + manual bit casts.
@@ -132,6 +139,7 @@ impl Renderer {
             global_max: Some([2147483647, 65535, 65535]),
             local_max: Some([1024, 1024, 64]),
             shared_max: 49152,
+            tensor_cores: tc::get_cuda(arch),
             code_for_op: cstyle_alu_keys(),
             supported_dtypes: cuda_supported_dtypes(arch),
             extra_matcher: extra::cuda_extra_matcher(),

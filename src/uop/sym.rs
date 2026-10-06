@@ -1044,11 +1044,12 @@ fn quotient_base(ctx: &mut UOpCtx, q: UopId, base: UopId, div: i128) -> Option<U
     if p != xs {
         return None;
     }
-    let t = (xa.as_int_exact()? + a_v - pa.as_int_exact()?).rem_euclid(d_big);
+    let t = xa.as_int_exact()? + a_v - pa.as_int_exact()?;
     if t % d_big != 0 {
         return None;
     }
-    let k = t / d_big - s.as_int_exact()?;
+    // python: `k = t//D - s` (floor division; t may be a nonzero multiple of D)
+    let k = t.div_euclid(d_big) - s.as_int_exact()?;
     if k == 0 {
         Some(base)
     } else {
@@ -1094,7 +1095,8 @@ fn fold_add_divmod_recombine(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
                 let d = ctx.val(&qsrcs[1]).as_int_exact()?;
                 if d > 0
                     && let Some(b) = quotient_base(ctx, (qsrcs[0]).clone(), base.clone(), div) {
-                        let dv = ctx.const_py(CV::Int(d * mul.as_int_exact().unwrap_or(1)), None);
+                        // python: `(b % (div*d))*mul`
+                        let dv = ctx.const_py(CV::Int(d * div), None);
                         let bm = ctx.mod_(b, dv);
                         let mk2 = ctx.const_like(v.clone(), mul);
                         let bm = ctx.mul(bm, mk2);
@@ -2343,9 +2345,10 @@ fn build_pm_sym_extra() -> PatternMatcher {
                 Some(ctx.mul(inner, kc))
             }),
         ),
-        // reduce mul chain
+        // reduce mul chain — `UPat(Ops.MUL).reduce(allow_any_len=True)`:
+        // the REDUCE's src[0] must be a MUL.
         (
-            UPat::op_var(vec![Ops::Reduce]).allow_all_srcs().named("r"),
+            UPat::ops1(Ops::Reduce).with_src_tup(vec![UPat::op_var(vec![Ops::Mul])]).allow_all_srcs().named("r"),
             r(|ctx, st, _| reduce_mul_chain(ctx, sget(st, "r"))),
         ),
     ])

@@ -448,6 +448,34 @@ fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
     }
 }
 
+/// `do_stack_wmma` (codegen/__init__.py:124) — stack each non-STACK WMMA src.
+fn do_stack_wmma(ctx: &mut Ctx2, u: UopId) -> Option<UopId> {
+    let srcs = ctx.srcs(&u).to_vec();
+    if srcs.iter().all(|x| matches!(ctx.op_of(x), crate::uop::Ops::Stack | crate::uop::Ops::Wmma)) {
+        return None;
+    }
+    let shape = ctx.shape(&u).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+    assert_eq!(shape.len(), 1, "TGERR: do_stack_wmma expects a 1-D value");
+    let mut new_srcs: Vec<UopId> = Vec::new();
+    for b in &srcs {
+        if ctx.op_of(b) != crate::uop::Ops::Stack {
+            let n = ctx.max_numel(b.clone());
+            let mut elems = Vec::new();
+            for i in 0..n {
+                let idx = ctx.const_py(crate::dtype::ConstVal::Int(i as i128), None);
+                elems.push(ctx.index(b.clone(), vec![idx]));
+            }
+            new_srcs.push(crate::tensor::stack(ctx, elems));
+        } else {
+            new_srcs.push(b.clone());
+        }
+    }
+    let dt = ctx.dt_of(&u);
+    let arg = ctx.arg_of(&u).clone();
+    let tag = ctx.tag_of(&u).clone();
+    Some(ctx.uop_tag(crate::uop::Ops::Wmma, Some(dt), new_srcs, arg, tag))
+}
+
 /// cartesian product over per-dim const lists.
 fn cartesian(lists: &[Vec<UopId>]) -> Vec<Vec<UopId>> {
     let mut ret: Vec<Vec<UopId>> = vec![vec![]];
@@ -485,6 +513,11 @@ fn devectorizer2() -> PatternMatcher {
                 .with_src_tup(vec![UPat::var(None, None)])
                 .named("x"),
             r(|ctx, st, _| Some(ctx.srcs(&sget(st, "x"))[0].clone())),
+        ),
+        // unpack WMMA (codegen/__init__.py:153): stack each non-STACK src.
+        (
+            UPat::ops1(crate::uop::Ops::Wmma).named("u"),
+            r(|ctx, st, _| do_stack_wmma(ctx, sget(st, "u"))),
         ),
         // stacked INDEX is many INDEX
         (
@@ -598,6 +631,7 @@ fn expander_pm() -> PatternMatcher {
 
 /// The `expander2` rules with the range map bound into the RANGE rule.
 fn expander_rules(rm: HashMap<i64, usize>) -> Vec<(UPat, RuleFn)> {
+    let rm_wmma = rm.clone();
     vec![
         (
             // `expand_reduce` (codegen/__init__.py:49): fold non-range srcs'
@@ -628,7 +662,104 @@ fn expander_rules(rm: HashMap<i64, usize>) -> Vec<(UPat, RuleFn)> {
                 Some(crate::tensor::movement::reshape(ctx, stack, &shape))
             }),
         ),
+        (
+            // `expand_wmma` (codegen/__init__.py:77).
+            UPat::ops1(crate::uop::Ops::Wmma).named("u"),
+            r(move |ctx: &mut Ctx2, st, _| expand_wmma(ctx, sget(st, "u"), &rm_wmma)),
+        ),
     ]
+}
+
+/// Parse a `tc_upcast_axes` triple `((rn,sz),...)` from an `Arg`.
+fn parse_upcast_triple(a: &Arg) -> Option<[Vec<(i64, i64)>; 3]> {
+    let items = match a {
+        Arg::Seq { tuple: true, items } if items.len() == 3 => items,
+        _ => return None,
+    };
+    let mut out: [Vec<(i64, i64)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for (i, part) in items.iter().enumerate() {
+        let inner = match part {
+            Arg::Seq { items, .. } => items,
+            _ => return None,
+        };
+        for pair in inner {
+            match pair {
+                Arg::Seq { items, .. } if items.len() == 2 => {
+                    out[i].push((items[0].as_int()?, items[1].as_int()?));
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some(out)
+}
+
+/// `contract_axis` (codegen/__init__.py:65).
+fn contract_axis(ctx: &mut Ctx2, u: UopId, arg: &[(i64, i64)], rm: &HashMap<i64, usize>) -> UopId {
+    let permute_tail: Vec<usize> = arg
+        .iter()
+        .map(|(rn, _)| *rm.get(rn).unwrap_or_else(|| panic!("TGERR: contract_axis rn {rn} not in range map")))
+        .collect();
+    let n = ctx.shape(&u).unwrap().unwrap_or_default().len();
+    let permute_head: Vec<usize> = (0..n).filter(|i| !permute_tail.contains(i)).collect();
+    let mut perm = permute_head.clone();
+    perm.extend(permute_tail.iter().copied());
+    let out = crate::tensor::movement::permute_internal(ctx, u, &perm);
+    let out_shape = ctx.shape(&out).unwrap().unwrap_or_default();
+    let new_shape: Vec<SVal> = out_shape[..permute_head.len()].iter().cloned().collect();
+    let mut new_shape = new_shape;
+    new_shape.push(SVal::I(-1));
+    crate::tensor::movement::reshape_internal(ctx, out, &new_shape)
+}
+
+/// `unroll_axis` (codegen/__init__.py:71).
+fn unroll_axis(ctx: &mut Ctx2, u: UopId, arg: &[(i64, i64)], rm: &HashMap<i64, usize>) -> UopId {
+    let permute_tail: Vec<usize> = arg
+        .iter()
+        .map(|(rn, _)| *rm.get(rn).unwrap_or_else(|| panic!("TGERR: unroll_axis rn {rn} not in range map")))
+        .collect();
+    let shape = ctx.shape(&u).unwrap().unwrap_or_default();
+    let mut new_shape: Vec<SVal> = shape[..shape.len() - 1].iter().cloned().collect();
+    new_shape.extend(arg.iter().map(|(_, nm)| SVal::I(*nm as i128)));
+    let out = crate::tensor::movement::reshape_internal(ctx, u, &new_shape);
+    let n = ctx.shape(&out).unwrap().unwrap_or_default().len();
+    let permute_head: Vec<usize> = (0..n).filter(|i| !permute_tail.contains(i)).collect();
+    let mut perm = permute_head;
+    perm.extend(permute_tail.iter().copied());
+    let order = argsort_u(&perm);
+    let order_i64: Vec<i64> = order.iter().map(|&i| i as i64).collect();
+    crate::tensor::movement::permute(ctx, out, &order_i64)
+}
+
+/// `expand_wmma` (codegen/__init__.py:77).
+fn expand_wmma(ctx: &mut Ctx2, u: UopId, rm: &HashMap<i64, usize>) -> Option<UopId> {
+    let arg = ctx.arg_of(&u).clone();
+    let items = match &arg {
+        Arg::Seq { tuple: true, items } if items.len() >= 5 => items.clone(),
+        _ => return None,
+    };
+    let upcast = parse_upcast_triple(&items[4])?;
+    let srcs = ctx.srcs(&u).to_vec();
+    let a = contract_axis(ctx, srcs[0].clone(), &upcast[0], rm);
+    let b = contract_axis(ctx, srcs[1].clone(), &upcast[1], rm);
+    let mut new_items = items[..4].to_vec();
+    new_items.push(Arg::None);
+    let dt = ctx.dt_of(&u);
+    let tag = ctx.tag_of(&u).clone();
+    let wmma = ctx.uop_tag(
+        crate::uop::Ops::Wmma,
+        Some(dt),
+        vec![a, b, srcs[2].clone()],
+        Arg::Seq { tuple: true, items: new_items },
+        tag,
+    );
+    Some(unroll_axis(ctx, wmma, &upcast[2], rm))
+}
+
+fn argsort_u(x: &[usize]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..x.len()).collect();
+    idx.sort_by_key(|&i| x[i]);
+    idx
 }
 
 /// expander with the range map bound.
@@ -714,18 +845,73 @@ fn expand_broadcast(ctx: &mut Ctx2, x: UopId) -> Option<UopId> {
 
 /// `pm_expand_broadcast` (codegen/__init__.py:106) — corpus subset (no WMMA).
 fn pm_expand_broadcast() -> PatternMatcher {
-    PatternMatcher::new(vec![(
-        UPat::op_var(
-            group::BINARY
-                .iter()
-                .cloned()
-                .chain(group::TERNARY.iter().cloned())
-                .chain([crate::uop::Ops::Store])
-                .collect(),
-        )
-        .named("x"),
-        r(|ctx, st, _| expand_broadcast(ctx, sget(st, "x"))),
-    )])
+    PatternMatcher::new(vec![
+        (
+            UPat::op_var(
+                group::BINARY
+                    .iter()
+                    .cloned()
+                    .chain(group::TERNARY.iter().cloned())
+                    .chain([crate::uop::Ops::Store])
+                    .collect(),
+            )
+            .named("x"),
+            r(|ctx, st, _| expand_broadcast(ctx, sget(st, "x"))),
+        ),
+        // `broadcast_and_devec_wmma` (codegen/__init__.py:123).
+        (
+            UPat::ops1(crate::uop::Ops::Wmma).named("b"),
+            r(|ctx, st, _| broadcast_and_devec_wmma(ctx, sget(st, "b"))),
+        ),
+    ])
+}
+
+/// `broadcast_and_devec_wmma` (codegen/__init__.py:123) — unpack a broadcasting
+/// WMMA into per-leading-index WMMAs stacked together.
+fn broadcast_and_devec_wmma(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
+    let srcs = ctx.srcs(&b).to_vec();
+    let head_shape = |ctx: &mut Ctx2, u: &UopId| -> Option<Vec<SVal>> {
+        let s = ctx.shape(u).ok()?.map(|v| v.as_ref().clone()).unwrap_or_default();
+        Some(s[..s.len().saturating_sub(1)].to_vec())
+    };
+    let mut shapes: Vec<Vec<SVal>> = Vec::new();
+    for u in &srcs {
+        shapes.push(head_shape(ctx, u)?);
+    }
+    if shapes.iter().all(|s| *s == shapes[0]) {
+        return None;
+    }
+    let shape = ctx.broadcast_shape(&shapes).ok()?;
+    let mut src_expanded: Vec<UopId> = Vec::new();
+    for u in &srcs {
+        let us = ctx.shape(u).ok()?.map(|v| v.as_ref().clone()).unwrap_or_default();
+        let last = us.last().cloned().unwrap_or(SVal::I(1));
+        let mut tgt = shape.clone();
+        tgt.push(last);
+        src_expanded.push(crate::tensor::movement::expand(ctx, u.clone(), &tgt));
+    }
+    let bshape = ctx.shape(&b).ok()?.map(|v| v.as_ref().clone()).unwrap_or_default();
+    let head = &bshape[..bshape.len() - 1];
+    let idx_lists: Vec<Vec<UopId>> = head
+        .iter()
+        .map(|d| {
+            let n = match d {
+                SVal::I(v) => *v as i64,
+                _ => 0,
+            };
+            (0..n).map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), None)).collect()
+        })
+        .collect();
+    let dt = ctx.dt_of(&b);
+    let arg = ctx.arg_of(&b).clone();
+    let tag = ctx.tag_of(&b).clone();
+    let mut elems: Vec<UopId> = Vec::new();
+    for idx in cartesian(&idx_lists) {
+        let new_srcs: Vec<UopId> = src_expanded.iter().map(|x| ctx.index(x.clone(), idx.clone())).collect();
+        elems.push(ctx.uop_tag(crate::uop::Ops::Wmma, Some(dt), new_srcs, arg.clone(), tag.clone()));
+    }
+    let stack = crate::tensor::stack(ctx, elems);
+    Some(crate::tensor::movement::reshape(ctx, stack, &bshape))
 }
 
 /// `maybe_load` (codegen/__init__.py:245).
