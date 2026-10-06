@@ -80,6 +80,9 @@ OH.append(("one_hot", Tensor([0, 1, 3, 3, 4], dtype=dtypes.int32), 5, Tensor([0,
 
 BN = []
 GN = []
+IN = []
+L2 = []
+RMS = []
 ARGMAX = []
 
 
@@ -117,6 +120,37 @@ def gadd(name, num_groups, num_channels, eps, weight, bias, x):
 gadd("gn_4d", 2, 6, 1e-5, [1.5, -0.5, 2.0, 0.3, -1.2, 0.7], [0.1, 0.2, -0.3, 0.4, 0.5, -0.6], seq((2, 6, 2, 2), 1.0, 0.0))
 gadd("gn_3d", 3, 6, 1e-5, [1.0, 0.5, -1.0, 2.0, 0.25, -0.75], [0.0, 0.1, -0.1, 0.2, -0.2, 0.3], seq((2, 6, 4), 0.5, -0.5))
 
+
+
+
+def iadd(name, num_features, eps, weight, bias, x):
+    m = nn.InstanceNorm(num_features, eps=eps, affine=True)
+    m.weight, m.bias = Tensor(list(weight), dtype=dtypes.float32), Tensor(list(bias), dtype=dtypes.float32)
+    IN.append((name, num_features, eps, weight, bias, x, m(x)))
+
+
+iadd("in_4d", 3, 1e-5, [1.5, -0.5, 2.0], [0.1, -0.2, 0.3], seq((2, 3, 3, 3), 0.3, 0.5))
+iadd("in_3d", 4, 1e-5, [1.0, 0.5, -1.0, 2.0], [0.0, 0.1, -0.1, 0.2], seq((2, 4, 5), 0.5, -0.5))
+
+
+def l2add(name, num_channels, eps, weight, bias, x):
+    m = nn.LayerNorm2d(num_channels, eps=eps)
+    m.weight, m.bias = Tensor(list(weight), dtype=dtypes.float32), Tensor(list(bias), dtype=dtypes.float32)
+    L2.append((name, num_channels, eps, weight, bias, x, m(x)))
+
+
+l2add("ln2d_3ch", 3, 1e-5, [1.0, 0.5, -1.0], [0.1, -0.2, 0.3], seq((2, 3, 3, 3), 0.4, 0.1))
+l2add("ln2d_4ch", 4, 1e-5, [1.0, 1.5, -0.5, 0.25], [-0.1, 0.2, 0.3, -0.4], seq((1, 4, 2, 4), 0.5, 0.0))
+
+
+def rmsadd(name, dim, eps, weight, x):
+    m = nn.RMSNorm(dim, eps=eps, elementwise_affine=True)
+    m.weight = Tensor(list(weight), dtype=dtypes.float32)
+    RMS.append((name, dim, eps, weight, x, m(x)))
+
+
+rmsadd("rms_4", 4, 1e-6, [0.5, 1.0, 1.5, -2.0], seq((3, 4), 0.5, 0.1))
+rmsadd("rms_5", 5, 1e-6, [1.0, -0.5, 0.25, 2.0, 0.75], seq((2, 3, 5), 0.3, -0.2))
 
 def s(vals):
     return ", ".join(repr(float(v)) for v in vals)
@@ -246,6 +280,54 @@ def emit():
     L.append("];")
     L.append("")
 
+    L.append("pub struct InGolden {")
+    L.append("    pub name: &'static str, pub num_features: i64, pub eps: f64,")
+    L.append("    pub weight: &'static [f32], pub bias: &'static [f32],")
+    L.append("    pub x_shape: &'static [usize], pub x: &'static [f32],")
+    L.append("    pub out_shape: &'static [usize], pub out: &'static [f32],")
+    L.append("}")
+    L.append("")
+    L.append("pub static IN_GOLDEN: &[InGolden] = &[")
+    for name, nf, eps, weight, bias, x, out in IN:
+        L.append(
+            f'    InGolden {{ name: "{name}", num_features: {nf}, eps: {eps!r}, '
+            f"weight: &[{s(weight)}], bias: &[{s(bias)}], "
+            f"x_shape: &[{ishape(shape_of(x))}], x: &[{s(flat(x))}], out_shape: &[{ishape(shape_of(out))}], out: &[{s(flat(out))}] }},"
+        )
+    L.append("];")
+    L.append("")
+    L.append("pub struct L2Golden {")
+    L.append("    pub name: &'static str, pub num_channels: i64, pub eps: f64,")
+    L.append("    pub weight: &'static [f32], pub bias: &'static [f32],")
+    L.append("    pub x_shape: &'static [usize], pub x: &'static [f32],")
+    L.append("    pub out_shape: &'static [usize], pub out: &'static [f32],")
+    L.append("}")
+    L.append("")
+    L.append("pub static L2_GOLDEN: &[L2Golden] = &[")
+    for name, nc, eps, weight, bias, x, out in L2:
+        L.append(
+            f'    L2Golden {{ name: "{name}", num_channels: {nc}, eps: {eps!r}, '
+            f"weight: &[{s(weight)}], bias: &[{s(bias)}], "
+            f"x_shape: &[{ishape(shape_of(x))}], x: &[{s(flat(x))}], out_shape: &[{ishape(shape_of(out))}], out: &[{s(flat(out))}] }},"
+        )
+    L.append("];")
+    L.append("")
+    L.append("pub struct RmsGolden {")
+    L.append("    pub name: &'static str, pub dim: i64, pub eps: f64,")
+    L.append("    pub weight: &'static [f32],")
+    L.append("    pub x_shape: &'static [usize], pub x: &'static [f32],")
+    L.append("    pub out_shape: &'static [usize], pub out: &'static [f32],")
+    L.append("}")
+    L.append("")
+    L.append("pub static RMS_GOLDEN: &[RmsGolden] = &[")
+    for name, dim, eps, weight, x, out in RMS:
+        L.append(
+            f'    RmsGolden {{ name: "{name}", dim: {dim}, eps: {eps!r}, '
+            f"weight: &[{s(weight)}], "
+            f"x_shape: &[{ishape(shape_of(x))}], x: &[{s(flat(x))}], out_shape: &[{ishape(shape_of(out))}], out: &[{s(flat(out))}] }},"
+        )
+    L.append("];")
+    L.append("")
     L.append("pub struct ArgmaxGolden {")
     L.append("    pub name: &'static str, pub x_shape: &'static [usize], pub x: &'static [f32],")
     L.append("    pub axis: Option<i64>, pub keepdim: bool,")

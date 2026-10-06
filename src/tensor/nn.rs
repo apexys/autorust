@@ -451,6 +451,136 @@ impl Module for GroupNorm {
     }
 }
 
+/// `nn::InstanceNorm`: instance normalization (nn/__init__.py:209-233). Like
+/// `GroupNorm` with `num_groups = num_features`: reshape to
+/// `(N, num_features, -1)`, layer-norm the last axis, reshape back, then apply
+/// the per-channel affine `x * weight.reshape(1,-1,1..) + bias.reshape(...)`.
+pub struct InstanceNorm {
+    pub num_features: i64,
+    pub eps: f64,
+    pub weight: Option<Tensor>,
+    pub bias: Option<Tensor>,
+}
+
+impl InstanceNorm {
+    /// Create a new InstanceNorm layer.
+    pub fn new(ctx: &mut UOpCtx, num_features: i64, eps: f64, affine: bool) -> Self {
+        let weight = if affine { Some(Tensor::ones(ctx, [num_features])) } else { None };
+        let bias = if affine { Some(Tensor::zeros(ctx, [num_features])) } else { None };
+        InstanceNorm { num_features, eps, weight, bias }
+    }
+
+    /// Forward pass (nn/__init__.py:230-233).
+    pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        let x_shape: Vec<SVal> = x.shape(ctx).into_vec();
+        let ndim = x_shape.len();
+        let batch = x_shape[0].clone();
+        let x = x
+            .reshape(ctx, vec![batch, SVal::I(self.num_features as i128), SVal::I(-1)])
+            .layernorm(ctx, -1, self.eps)
+            .reshape(ctx, x_shape);
+        match (&self.weight, &self.bias) {
+            (Some(w), Some(b)) => {
+                let mut aff_shape: Vec<SVal> = vec![SVal::I(1), SVal::I(-1)];
+                aff_shape.extend(std::iter::repeat_n(SVal::I(1), ndim - 2));
+                let w_r = w.reshape(ctx, aff_shape.clone());
+                let b_r = b.reshape(ctx, aff_shape);
+                x.mul(ctx, &w_r).add(ctx, &b_r)
+            }
+            _ => x,
+        }
+    }
+}
+
+impl Module for InstanceNorm {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        optional_weight_bias(&self.weight, &self.bias)
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        (self.weight, self.bias) = affine_into_params(self.weight, self.bias, ctx);
+        self
+    }
+}
+
+/// `nn::LayerNorm2d`: layer norm over a channel-first 2D image
+/// (nn/__init__.py:263-279). Normalizes over the channel axis by permuting
+/// `(N,C,H,W) -> (N,H,W,C)`, applying the inner `LayerNorm`, then permuting back.
+pub struct LayerNorm2d {
+    pub norm: LayerNorm,
+}
+
+impl LayerNorm2d {
+    /// Create a new LayerNorm2d layer (subclasses `LayerNorm(num_channels)`).
+    pub fn new(ctx: &mut UOpCtx, num_channels: i64, eps: f64, elementwise_affine: bool) -> Self {
+        LayerNorm2d { norm: LayerNorm::new(ctx, vec![num_channels], eps, elementwise_affine) }
+    }
+
+    /// `LayerNorm2d.__call__` (nn/__init__.py:279).
+    pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        let p = x.permute(ctx, &[0, 2, 3, 1]);
+        self.norm.forward(&p, ctx).permute(ctx, &[0, 3, 1, 2])
+    }
+}
+
+impl Module for LayerNorm2d {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        self.norm.named_params()
+    }
+
+    fn into_params(self, ctx: &mut UOpCtx) -> Self {
+        LayerNorm2d { norm: self.norm.into_params(ctx) }
+    }
+}
+
+/// `nn::RMSNorm`: root-mean-square normalization (nn/__init__.py:281-304).
+pub struct RMSNorm {
+    pub dim: i64,
+    pub eps: f64,
+    pub weight: Option<Tensor>,
+}
+
+impl RMSNorm {
+    /// Create a new RMSNorm layer.
+    pub fn new(ctx: &mut UOpCtx, dim: i64, eps: f64, elementwise_affine: bool) -> Self {
+        let weight = if elementwise_affine { Some(Tensor::ones(ctx, [dim])) } else { None };
+        RMSNorm { dim, eps, weight }
+    }
+
+    /// `RMSNorm._norm` (nn/__init__.py:300):
+    /// `x * (x.square().mean(-1, keepdim=True) + eps).rsqrt()`.
+    pub fn norm(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        let last = x.shape(ctx).len() - 1;
+        let ms = x.square(ctx).mean(ctx, Some(&[last]), true);
+        let eps_t = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(self.eps), None);
+        let r = ms.add(ctx, &eps_t).rsqrt(ctx);
+        x.mul(ctx, &r)
+    }
+
+    /// `RMSNorm.__call__` (nn/__init__.py:302-304): normalize in f32, cast back,
+    /// then apply the (optional) elementwise affine.
+    pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        let dt = x.dtype(ctx);
+        let xf = x.cast(ctx, crate::dtype::FLOAT32);
+        let normed = self.norm(&xf, ctx).cast(ctx, dt);
+        match &self.weight {
+            Some(w) => normed.mul(ctx, w),
+            None => normed,
+        }
+    }
+}
+
+impl Module for RMSNorm {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        optional_weight_bias(&self.weight, &None)
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        self.weight = self.weight.map(|w| w.to_param(ctx));
+        self
+    }
+}
+
 /// A list of modules, indexed like tinygrad `nn.state.get_state_dict` on a
 /// Python `list` (`"0.weight"`, `"1.weight"`, …). Handy for `Vec<Conv2d>` or a
 /// `Vec<Linear>` MLP without hand-listing every parameter.
