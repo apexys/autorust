@@ -83,6 +83,8 @@ GN = []
 IN = []
 L2 = []
 RMS = []
+EMB = []
+LSTM = []
 ARGMAX = []
 
 
@@ -152,6 +154,28 @@ def rmsadd(name, dim, eps, weight, x):
 rmsadd("rms_4", 4, 1e-6, [0.5, 1.0, 1.5, -2.0], seq((3, 4), 0.5, 0.1))
 rmsadd("rms_5", 5, 1e-6, [1.0, -0.5, 0.25, 2.0, 0.75], seq((2, 3, 5), 0.3, -0.2))
 
+
+
+def eadd(name, vocab, embed, weight, idx):
+    m = nn.Embedding(vocab, embed)
+    m.weight = Tensor(weight, dtype=dtypes.float32).reshape(vocab, embed)
+    EMB.append((name, vocab, embed, m.weight, Tensor(idx, dtype=dtypes.int32), m(Tensor(idx, dtype=dtypes.int32))))
+
+
+eadd("emb_small", 10, 3, [float(i) * 0.1 - 0.6 for i in range(30)], [1, 2, 3, 1])
+eadd("emb_2d", 5, 2, [float(i) * 0.2 - 0.4 for i in range(10)], [[0, 1], [2, 4]])
+
+def ladd(name, inp, hid, x, h0, c0):
+    m = nn.LSTMCell(inp, hid)
+    m.weight_ih = seq((hid * 4, inp), 0.05, -0.4)
+    m.weight_hh = seq((hid * 4, hid), 0.04, -0.3)
+    m.bias_ih = seq((hid * 4,), 0.1, -1.0)
+    m.bias_hh = seq((hid * 4,), 0.05, -0.5)
+    h1, c1 = m(x, (h0, c0))
+    hz, cz = m(x)
+    LSTM.append((name, inp, hid, m.weight_ih, m.weight_hh, m.bias_ih, m.bias_hh, x, h0, c0, h1, c1, hz, cz))
+
+ladd("lstm_2x5", 4, 5, seq((2, 4), 0.3, 0.2), seq((2, 5), 0.2, -0.5), seq((2, 5), 0.1, 0.3))
 def s(vals):
     return ", ".join(repr(float(v)) for v in vals)
 
@@ -325,6 +349,48 @@ def emit():
             f'    RmsGolden {{ name: "{name}", dim: {dim}, eps: {eps!r}, '
             f"weight: &[{s(weight)}], "
             f"x_shape: &[{ishape(shape_of(x))}], x: &[{s(flat(x))}], out_shape: &[{ishape(shape_of(out))}], out: &[{s(flat(out))}] }},"
+        )
+    L.append("];")
+    L.append("")
+    L.append("pub struct EmbGolden {")
+    L.append("    pub name: &'static str, pub vocab_size: i64, pub embed_size: i64,")
+    L.append("    pub weight_shape: &'static [usize], pub weight: &'static [f32],")
+    L.append("    pub idx_shape: &'static [usize], pub idx: &'static [i32],")
+    L.append("    pub out_shape: &'static [usize], pub out: &'static [f32],")
+    L.append("}")
+    L.append("")
+    L.append("pub static EMB_GOLDEN: &[EmbGolden] = &[")
+    for name, vocab, embed, weight, idx, out in EMB:
+        L.append(
+            f'    EmbGolden {{ name: "{name}", vocab_size: {vocab}, embed_size: {embed}, '
+            f"weight_shape: &[{ishape(shape_of(weight))}], weight: &[{s(flat(weight))}], "
+            f'idx_shape: &[{ishape(shape_of(idx))}], idx: &[{", ".join(str(int(v)) for v in idx.flatten().tolist())}], '
+            f"out_shape: &[{ishape(shape_of(out))}], out: &[{s(flat(out))}] }},"
+        )
+    L.append("];")
+    L.append("")
+    L.append("pub struct LstmGolden {")
+    L.append("    pub name: &'static str, pub input_size: i64, pub hidden_size: i64,")
+    L.append("    pub weight_ih_shape: &'static [usize], pub weight_ih: &'static [f32],")
+    L.append("    pub weight_hh_shape: &'static [usize], pub weight_hh: &'static [f32],")
+    L.append("    pub bias_ih: &'static [f32], pub bias_hh: &'static [f32],")
+    L.append("    pub x_shape: &'static [usize], pub x: &'static [f32],")
+    L.append("    pub h0_shape: &'static [usize], pub h0: &'static [f32], pub c0_shape: &'static [usize], pub c0: &'static [f32],")
+    L.append("    pub h1_shape: &'static [usize], pub h1: &'static [f32], pub c1_shape: &'static [usize], pub c1: &'static [f32],")
+    L.append("    pub hz_shape: &'static [usize], pub hz: &'static [f32], pub cz_shape: &'static [usize], pub cz: &'static [f32],")
+    L.append("}")
+    L.append("")
+    L.append("pub static LSTM_GOLDEN: &[LstmGolden] = &[")
+    for name, inp, hid, wih, whh, bih, bhh, x, h0, c0, h1, c1, hz, cz in LSTM:
+        L.append(
+            f'    LstmGolden {{ name: "{name}", input_size: {inp}, hidden_size: {hid}, '
+            f"weight_ih_shape: &[{ishape(shape_of(wih))}], weight_ih: &[{s(flat(wih))}], "
+            f"weight_hh_shape: &[{ishape(shape_of(whh))}], weight_hh: &[{s(flat(whh))}], "
+            f"bias_ih: &[{s(flat(bih))}], bias_hh: &[{s(flat(bhh))}], "
+            f"x_shape: &[{ishape(shape_of(x))}], x: &[{s(flat(x))}], "
+            f"h0_shape: &[{ishape(shape_of(h0))}], h0: &[{s(flat(h0))}], c0_shape: &[{ishape(shape_of(c0))}], c0: &[{s(flat(c0))}], "
+            f"h1_shape: &[{ishape(shape_of(h1))}], h1: &[{s(flat(h1))}], c1_shape: &[{ishape(shape_of(c1))}], c1: &[{s(flat(c1))}], "
+            f"hz_shape: &[{ishape(shape_of(hz))}], hz: &[{s(flat(hz))}], cz_shape: &[{ishape(shape_of(cz))}], cz: &[{s(flat(cz))}] }},"
         )
     L.append("];")
     L.append("")

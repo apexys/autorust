@@ -413,6 +413,46 @@ impl Tensor {
         { let __u = movement::flatten(ctx, self.uop().clone(), start_dim, end_dim); Tensor::from_uop(ctx, __u) }
     }
 
+    /// `MovementMixin.split` (movement.py:424-448): split along `dim` into pieces
+    /// of the given sizes. `dim` is resolved Python-style; a size list must sum
+    /// exactly to the resolved dimension length.
+    pub fn split(&self, ctx: &mut UOpCtx, sizes: &[i64], dim: i64) -> Vec<Tensor> {
+        let self_shape: Vec<SVal> = self.shape(ctx).into_vec();
+        let ndim = self_shape.len();
+        let d = movement::resolve_dim(ndim, dim, false);
+        let dim_sz = self_shape[d].clone().as_i64().unwrap_or(0);
+        assert_eq!(sizes.iter().sum::<i64>(), dim_sz, "TGERR: expect sizes to sum exactly to {dim_sz}");
+        let mut out = Vec::with_capacity(sizes.len());
+        let mut acc = 0i64;
+        for &sz in sizes {
+            let mut arg: Vec<(i64, i64)> = Vec::with_capacity(ndim);
+            for (j, s) in self_shape.iter().enumerate() {
+                if j == d { arg.push((acc, acc + sz)); } else { arg.push((0, s.clone().as_i64().unwrap_or(0))); }
+            }
+            out.push(self.shrink(ctx, &arg));
+            acc += sz;
+        }
+        out
+    }
+
+    /// `MovementMixin.chunk` (movement.py:450-476): split into `chunks` pieces
+    /// along `dim`. All pieces are the same size except the last (which may be
+    /// smaller); fewer than `chunks` pieces are returned when `dim` is short.
+    pub fn chunk(&self, ctx: &mut UOpCtx, chunks: i64, dim: i64) -> Vec<Tensor> {
+        let self_shape: Vec<SVal> = self.shape(ctx).into_vec();
+        let ndim = self_shape.len();
+        let d = movement::resolve_dim(ndim, dim, false);
+        let dim_sz = self_shape[d].clone().as_i64().unwrap_or(0);
+        assert!(chunks > 0, "TGERR: expect chunks to be greater than 0, got: {chunks}");
+        let sizes: Vec<i64> = if dim_sz == 0 {
+            vec![0; chunks as usize]
+        } else {
+            let c = (dim_sz + chunks - 1) / chunks;
+            (0..dim_sz).step_by(c.max(1) as usize).map(|i| c.min(dim_sz - i)).collect()
+        };
+        self.split(ctx, &sizes, dim)
+    }
+
     /// `Tensor[t1, t2, ...]` — the `s![...]` index spec.
     pub fn getitem(&self, ctx: &mut UOpCtx, ixs: &[Ix]) -> Tensor {
         { let __u = movement::getitem(ctx, self.uop().clone(), ixs); Tensor::from_uop(ctx, __u) }

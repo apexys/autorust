@@ -598,6 +598,126 @@ impl<T: Module> Module for Vec<T> {
     }
 }
 
+/// `_embedding_fwd` (nn/__init__.py:369-371): the non-atomic embedding lookup.
+/// `(arange(vocab) == idx.unsqueeze(-1)).unsqueeze(-1).where(weight, 0).sum(-2)`.
+pub fn _embedding_fwd(weight: &Tensor, idx: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+    let vocab = weight.shape(ctx).into_vec()[0].clone().as_i64().unwrap_or(0);
+    let arange = Tensor::arange(ctx, 0.0, Some(vocab as f64), 1.0, Some(crate::dtype::default_int()));
+    let idx_u = idx.unsqueeze(ctx, -1);
+    let cond = arange.eq(ctx, &idx_u).unsqueeze(ctx, -1);
+    let zero = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(0.0), Some(weight.dtype(ctx)));
+    let selected = cond.where_(ctx, weight, zero);
+    let ndim = selected.shape(ctx).len();
+    selected.sum(ctx, Some(&[ndim - 2]), false, Some(weight.dtype(ctx)))
+}
+
+/// `nn::Embedding`: a lookup table (nn/__init__.py:377-396).
+pub struct Embedding {
+    pub vocab_size: i64,
+    pub embed_size: i64,
+    pub weight: Tensor,
+}
+
+impl Embedding {
+    /// Create a new Embedding layer (`Tensor.glorot_uniform(vocab, embed)`).
+    pub fn new(ctx: &mut UOpCtx, vocab_size: i64, embed_size: i64) -> Self {
+        let weight = Tensor::glorot_uniform(ctx, &[vocab_size, embed_size], None);
+        Embedding { vocab_size, embed_size, weight }
+    }
+
+    /// Forward pass: `Embedding.__call__` (nn/__init__.py:391-396). The atomic
+    /// path is only used with `USE_ATOMICS`; this is `_embedding_fwd`.
+    pub fn forward(&self, idx: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        if !crate::dtype::is_int(idx.dtype(ctx)) {
+            panic!("TGERR: Expected integer dtype for index in embedding, got {:?}", idx.dtype(ctx));
+        }
+        _embedding_fwd(&self.weight, idx, ctx)
+    }
+}
+
+impl Module for Embedding {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        Box::new(std::iter::once(("weight".to_string(), self.weight.clone())))
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        self.weight = self.weight.to_param(ctx);
+        self
+    }
+}
+
+/// `nn::LSTMCell` (nn/__init__.py:398-420).
+pub struct LSTMCell {
+    pub weight_ih: Tensor,
+    pub weight_hh: Tensor,
+    pub bias_ih: Option<Tensor>,
+    pub bias_hh: Option<Tensor>,
+}
+
+impl LSTMCell {
+    /// Create a new LSTMCell layer (uniform init in `[-stdv, stdv]`,
+    /// `stdv = 1/sqrt(hidden_size)`; zero biases).
+    pub fn new(ctx: &mut UOpCtx, input_size: i64, hidden_size: i64, bias: bool) -> Self {
+        let stdv = 1.0 / (hidden_size as f64).sqrt();
+        let weight_ih = Tensor::uniform(ctx, &[hidden_size * 4, input_size], Some(-stdv), Some(stdv), None, None);
+        let weight_hh = Tensor::uniform(ctx, &[hidden_size * 4, hidden_size], Some(-stdv), Some(stdv), None, None);
+        let bias_ih = if bias { Some(Tensor::zeros(ctx, [hidden_size * 4])) } else { None };
+        let bias_hh = if bias { Some(Tensor::zeros(ctx, [hidden_size * 4])) } else { None };
+        LSTMCell { weight_ih, weight_hh, bias_ih, bias_hh }
+    }
+}
+
+impl LSTMCell {
+    /// `LSTMCell.__call__` (nn/__init__.py:414-420). `hc` is the optional (h, c)
+    /// hidden state; when absent it starts as zeros.
+    pub fn forward(&self, x: &Tensor, hc: Option<(&Tensor, &Tensor)>, ctx: &mut UOpCtx) -> (Tensor, Tensor) {
+        let (h, c) = match hc {
+            Some((h, c)) => (h.clone(), c.clone()),
+            None => {
+                let batch = x.shape(ctx).into_vec()[0].clone();
+                let hidden = self.weight_hh.shape(ctx).into_vec()[1].clone();
+                let z = Tensor::full_const(ctx, vec![batch, hidden], ConstVal::Float(0.0), Some(x.dtype(ctx)));
+                (z.clone(), z)
+            }
+        };
+        let wih_t = self.weight_ih.transpose(ctx, 0, 1);
+        let whh_t = self.weight_hh.transpose(ctx, 0, 1);
+        let g1 = x.linear(ctx, &wih_t, self.bias_ih.as_ref());
+        let g2 = h.linear(ctx, &whh_t, self.bias_hh.as_ref());
+        let gates = g1.add(ctx, &g2);
+        let parts = gates.chunk(ctx, 4, 1);
+        let i = sigmoid(&parts[0], ctx);
+        let f = sigmoid(&parts[1], ctx);
+        let g = parts[2].tanh(ctx);
+        let o = sigmoid(&parts[3], ctx);
+        // new_c = f * hc[1] + i * g
+        let ig = i.mul(ctx, &g);
+        let new_c = f.mul(ctx, &c).add(ctx, &ig);
+        let tanh_c = new_c.tanh(ctx);
+        (o.mul(ctx, &tanh_c), new_c)
+    }
+}
+
+impl Module for LSTMCell {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        let w = vec![
+            ("weight_ih".to_string(), self.weight_ih.clone()),
+            ("weight_hh".to_string(), self.weight_hh.clone()),
+        ];
+        let b1 = self.bias_ih.clone().map(|b| ("bias_ih".to_string(), b));
+        let b2 = self.bias_hh.clone().map(|b| ("bias_hh".to_string(), b));
+        Box::new(w.into_iter().chain(b1).chain(b2))
+    }
+
+    fn into_params(mut self, ctx: &mut UOpCtx) -> Self {
+        self.weight_ih = self.weight_ih.to_param(ctx);
+        self.weight_hh = self.weight_hh.to_param(ctx);
+        self.bias_ih = self.bias_ih.map(|b| b.to_param(ctx));
+        self.bias_hh = self.bias_hh.map(|b| b.to_param(ctx));
+        self
+    }
+}
+
 // ***** Activations *****
 
 /// `relu()`: max(x, 0).
