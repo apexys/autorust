@@ -363,7 +363,7 @@ impl<'a> Scheduler<'a> {
     pub fn apply_opt(&mut self, ctx: &mut UOpCtx, op: OptOp, axis: Option<usize>, arg: Option<i64>) -> Vec<UopId> {
         assert!(!matches!(op, OptOp::Tc), "TGERR: use apply_opt_tc for TC");
         if matches!(op, OptOp::PadTo) {
-            self.apply_padto(ctx, axis.unwrap_or(0), arg.unwrap_or(1));
+            let _ = self.apply_padto(ctx, axis.unwrap_or(0), arg.unwrap_or(1));
             return vec![];
         }
         let at = match op {
@@ -435,16 +435,24 @@ impl<'a> Scheduler<'a> {
 
     /// `OptOps.PADTO` (postrange.py:185) — round a const range up to a multiple,
     /// masking out-of-range lanes with `Invalid`.
-    fn apply_padto(&mut self, ctx: &mut UOpCtx, axis: usize, arg: i64) {
+    fn apply_padto(&mut self, ctx: &mut UOpCtx, axis: usize, arg: i64) -> Result<(), String> {
         let rng = self.rngs(ctx)[axis].clone();
-        // check(rng.src[0].op is Ops.CONST)
-        assert!(ctx.op_of(&ctx.srcs(&rng)[0].clone()) == Ops::Const, "TGERR: only pad const axes");
+        // python: these are `KernelOptError`s (caught by `_apply_tc_opt`), not fatal.
+        if ctx.op_of(&ctx.srcs(&rng)[0].clone()) != Ops::Const {
+            return Err("only pad const axes".into());
+        }
         let at = AxisType::range_axis_type(ctx, rng.clone());
-        assert!(!matches!(at, AxisType::Upcast | AxisType::Unroll), "TGERR: cannot pad upcasted");
-        assert!(at != AxisType::Thread, "TGERR: cannot pad thread");
+        if matches!(at, AxisType::Upcast | AxisType::Unroll) {
+            return Err("cannot pad upcasted".into());
+        }
+        if at == AxisType::Thread {
+            return Err("cannot pad thread".into());
+        }
         let old = self.rng_vmax(ctx, rng.clone()) + 1;
         let new_sz = (old + arg - 1) / arg * arg;
-        assert!(old > new_sz / 4, "TGERR: pad adds more than quadruple the work");
+        if old <= new_sz / 4 {
+            return Err("pad adds more than quadruple the work".into());
+        }
         let (rop, rdt, _srcs, rarg, rtag) = ctx.snapshot(&rng);
         let eu = ctx.sint_to_uop_dt(SVal::I(new_sz as i128), rdt);
         let replaced_rng = ctx.uop_tag(rop, Some(rdt), vec![eu], rarg.clone(), rtag);
@@ -481,6 +489,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), replaces, false, false);
+        Ok(())
     }
 
 
@@ -580,7 +589,7 @@ impl<'a> Scheduler<'a> {
                     if opt_level < 2 {
                         return Err("tc padding requires opt_level >= 2".into());
                     }
-                    self.apply_opt(ctx, OptOp::PadTo, Some(idx), Some(dims[i] as i64));
+                    self.apply_padto(ctx, idx, dims[i] as i64)?;
                     axes[i] = self.rngs(ctx)[idx].clone();
                 }
             }

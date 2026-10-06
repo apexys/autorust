@@ -1359,7 +1359,9 @@ does **not** use WMMA by default (CUDA-TC == CUDA-no-TC). `TC_OPT=1` (multi-axis
 does engage the convs (4 `mma.sync` kernels) and is ~9 % slower here - the bf16
 packing/swizzle overhead is not amortised on these small tiles.
 
-**Known gap:** `TC_OPT=2` (BEAM only; allows padding) panics on the `PADTO`
-"quadruple the work" guard; tinygrad raises/catches that as a `KernelOptError`
-and skips the candidate, so `apply_padto` should propagate a `Result` instead of
-asserting.
+**Known gap:** `TC_OPT=2` (BEAM only; allows padding) now propagates `PADTO`
+failures as a caught `Result` (matching tinygrad's `KernelOptError`) instead of
+panicking, but padded convs still fail at NVRTC: the emitted `__WMMA_...` helper
+references `nv_bfloat164` while the kernel never emits that struct typedef — the
+renderer does not yet emit the `nv_bfloat16N` typedefs for every WMMA operand
+width. `TC_OPT=0/1` are unaffected.
