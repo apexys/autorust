@@ -128,6 +128,7 @@ pub struct Conv2d {
 impl Conv2d {
     /// Create a new Conv2d layer.
     /// kernel_size: one entry per spatial dim; padding: one `(lo, hi)` per dim.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &mut UOpCtx,
         in_channels: i64,
