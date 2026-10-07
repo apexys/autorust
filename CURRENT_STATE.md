@@ -1095,6 +1095,17 @@ Gate: `tests/nn_layers.rs` (7 tests — InstanceNorm, LayerNorm2d, RMSNorm, Embe
 LSTMCell incl. the `hc=None` path, Conv1d, ConvTranspose1d+2d), all vs explicit-weight
 tinygrad goldens.
 
+### 8.26 Training mode + dropout (DONE)
+
+`TRAINING` (helpers.py:237) is a thread-local flag (`src/helpers/context.rs`,
+mirroring the `rand::set_jit` pattern) with a `TrainingGuard`/`with_training`
+scope, plus `Session::training(bool)` / `training_enabled()` mirroring
+`Session::jit`. `Tensor.dropout(p=0.5)` (`mixin/rand.py:274-296`) is ported
+(training-only inverted dropout `(rand_like(default_float) >= p).where(self,0)/(1-p)`);
+`Tensor.rand_like`/`const_like` added. Gate: `tests/nn_dropout.rs` — invariants
+plus **exact RNG parity** vs tinygrad (`py/dump_dropout_golden.py` →
+`tests/dropout_golden.rs`).
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same

@@ -635,6 +635,49 @@ impl Tensor {
         rand::manual_seed(seed)
     }
 
+    /// `Tensor.rand_like(dtype=None, device=None)` (rand.py:70):
+    /// `rand(*self.shape, dtype=dtype or self.dtype, device=device or self.device)`.
+    /// (`contiguous` is a layout flag in tinygrad and does not change the values;
+    /// the port's `rand` already yields a contiguous result.)
+    pub fn rand_like(&self, ctx: &mut UOpCtx, dtype: Option<DTypeId>) -> Tensor {
+        let shape = self.shape(ctx).into_vec();
+        let dev = self.device(ctx);
+        let dt = dtype.unwrap_or_else(|| self.dtype(ctx));
+        rand::rand(ctx, &shape, Some(dt), dev.as_deref())
+    }
+
+    /// `Tensor.const_like(b, dtype=None)` (creation.py:14): a tensor of `b` with
+    /// `self`'s shape (and dtype unless overridden).
+    pub fn const_like(&self, ctx: &mut UOpCtx, b: ConstVal, dtype: Option<DTypeId>) -> Tensor {
+        let shape = self.shape(ctx).into_vec();
+        let dt = dtype.unwrap_or_else(|| self.dtype(ctx));
+        Tensor::full_const(ctx, shape, b, Some(dt))
+    }
+
+    /// `Tensor.dropout(p=0.5)` (rand.py:274-296): inverted dropout, active only
+    /// under `TRAINING`. Kept elements are scaled by `1/(1-p)` so the expected
+    /// value is unchanged. Set `TRAINING` via
+    /// [`Session::training`](crate::engine::session::Session::training) or
+    /// [`crate::helpers::context::with_training`].
+    pub fn dropout(&self, ctx: &mut UOpCtx, p: f64) -> Tensor {
+        assert!((0.0..=1.0).contains(&p), "TGERR: dropout p is out of range [0, 1]");
+        if !crate::helpers::context::training() || p == 0.0 {
+            return self.clone();
+        }
+        if p == 1.0 {
+            return self.const_like(ctx, ConstVal::Float(0.0), None);
+        }
+        // (self.rand_like(default_float) >= p).contiguous().where(self, 0) / (1 - p)
+        let r = self.rand_like(ctx, Some(crate::dtype::default_float()));
+        let thr = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(p), Some(crate::dtype::default_float()));
+        let mask = r.ge(ctx, &thr).contiguous(ctx);
+        let zero = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(0.0), None);
+        let kept = mask.where_(ctx, self, zero);
+        // oracle divides by `(1 - p)` (inverted dropout)
+        let scale = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(1.0 - p), None);
+        kept.div(ctx, &scale)
+    }
+
     fn prod_tail(shape: &[i64]) -> f64 {
         shape[1..].iter().map(|&x| x as f64).product()
     }

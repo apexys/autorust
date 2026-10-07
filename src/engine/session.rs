@@ -53,6 +53,10 @@ pub struct Session {
     pub capturing: Option<Vec<UopId>>,
     /// `JIT`: whether [`Jit`](crate::engine::jit::Jit) capture/replay is active.
     pub jit: bool,
+    /// `TRAINING` (helpers.py:237): training vs eval mode. Set through
+    /// [`Session::training`], which also mirrors the value into the global flag
+    /// that `Tensor.dropout` reads at graph-build time.
+    pub training: bool,
 }
 
 impl Session {
@@ -72,6 +76,18 @@ impl Session {
 
     pub fn jit_enabled(&self) -> bool {
         self.jit
+    }
+
+    /// `sess.training(true)` / `sess.training(false)`: set the global `TRAINING`
+    /// flag that gates training-only ops (`Tensor.dropout`). Mirrors
+    /// [`Session::jit`].
+    pub fn training(&mut self, on: bool) {
+        self.training = on;
+        crate::helpers::context::set_training(on);
+    }
+
+    pub fn training_enabled(&self) -> bool {
+        self.training
     }
 
     /// `capturing.append(jit)` / `capturing.clear()` (jit.py:255) — start
