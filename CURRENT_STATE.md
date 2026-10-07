@@ -1168,9 +1168,10 @@ softmax** (running max `m`, denominator `l`, accumulator `acc`, rescaled per KV
 block), so the `N×N` score matrix is never materialized. Supports causal masking
 (lower-triangular), bool/additive `attn_mask`, **GQA** (inferred from
 `H // H_KV`, like fa.py's `head_kv = head // GROUP_SIZE`), 3-D→4-D promotion, and
-configurable block sizes (`flash_attention_blocks`) with block-grid padding. It
-is numerically identical to `scaled_dot_product_attention` and backprop flows
-through the ops, so it doubles as the FA backward.
+configurable block sizes (`flash_attention_blocks`) using **variable-size final
+Q/KV blocks (no padding)**. It is numerically identical to
+`scaled_dot_product_attention` and backprop flows through the ops, so it doubles
+as the FA backward.
 
 `FA=1` (read once in `TransformerBlock::attn`) routes the model's attention
 through the FA port instead of SDPA; the ViT-MNIST example trains with it.
@@ -1182,6 +1183,38 @@ tiling + remainders + padding, and a default-block/3-D-promote case.
 uses on its equal-size fast path. The fused `tk` warp-DSL kernel
 (`Tensor.custom_kernel`/CALL) remains the deferred M7 stretch (see above); this
 is the same algorithm expressed with `Tensor` ops.
+
+### 8.32 Attention on all backends: two bugs found + fixed (DONE)
+
+Getting FA to run correctly on **INTERP, CL and CUDA** surfaced two bugs:
+
+1. **CL/CUDA crash on FA graphs** (fixed). A kernel's used buffer slots can have
+   gaps (`globals = [0..9, 11]`), but `exec_kernel` built a dense
+   `globals.len()` `bufs` vec while CL/CUDA index `bufs[slot]` (tinygrad's
+   contract), so a gap slot read out of bounds (`ops_cuda.rs:271`). Fix: build
+   `bufs` **slot-indexed** (length `max_slot+1`, gap slots filled with a clone of
+   a live view — never referenced); `max_slot+1` is also `paramarg_start`, the
+   val-arg offset. INTERP updated to index `bufs[slot]` too. Files:
+   `src/engine/realize.rs`, `src/runtime/ops_interp.rs`.
+
+2. **FA wrong at large KV-padded shapes** (fixed). FA disagreed with SDPA by
+   ~1e-3..0.7 for `H>1` with KV padding, *identically on all three backends*
+   (so graph/port, not backend). Bisected: `H=1` and every `kvpad=0` shape were
+   exact even when large; only KV padding broke, above ~2048 padded elements.
+   `pad`/mask construction round-trip correctly on their own. Fix: rewrite
+   `flash_attention_blocks` to use **variable-size final Q/KV blocks** (static
+   block bounds, slice the `(nq,nk)` mask directly — no padding at all; also
+   closer to real FA). After the rewrite **every tested shape matches SDPA to
+   ~1e-6**, incl. `H4/S129`, `H4/S197`, `H1/S257`, `H2/S500` and the ViT-B/16
+   attention shape `H12/S197/D64` on INTERP, CL and CUDA. The underlying
+   "padded tensor feeding downstream ops at ~2048+ elems" port bug is **bypassed,
+   not root-caused** (possible latent scheduler issue — follow-up).
+
+**Measured on CUDA** (RTX 3060, ViT-B/16 attn `BS1 H12 N197 D64`, `examples/fa_bench`):
+SDPA fwd 1.08 ms vs FA fwd 1.49 ms (kernel, JIT replay); SDPA fwd+bwd 7.3 ms vs
+FA 87 ms. End-to-end per step (graph scheduling included) FA is ~18x/42x slower.
+The op-level FA is **not faster** — it is not a fused kernel; the fused `tk`
+kernel (`Tensor.custom_kernel`/CALL) is the deferred M7 stretch.
 
 ## 9. Next steps
 
