@@ -897,6 +897,17 @@ impl Tensor {
     /// `Tensor.dot(w)`: sum product over last axis of self and second-to-last of w.
     /// self (.., N) @ w (.., K, N) → (.., K) — mirrors tinygrad's dot.
     pub fn dot(&self, ctx: &mut UOpCtx, w: &Tensor) -> Tensor {
+        self.dot_impl(ctx, w, None)
+    }
+
+    /// `Tensor.dot(w, dtype=None)` (op.py:367): like `dot` but accumulate
+    /// the contraction in `dtype` (result cast to `dtype`). `None` keeps the
+    /// input dtype.
+    pub fn dot_dtype(&self, ctx: &mut UOpCtx, w: &Tensor, dtype: Option<DTypeId>) -> Tensor {
+        self.dot_impl(ctx, w, dtype)
+    }
+
+    fn dot_impl(&self, ctx: &mut UOpCtx, w: &Tensor, dtype: Option<DTypeId>) -> Tensor {
         let x_shape = self.shape(ctx);
         let w_shape = w.shape(ctx);
         let dx = x_shape.len();
@@ -926,7 +937,11 @@ impl Tensor {
         // sum-reduce the broadcasted product over the last axis
         let product = x_r.mul(ctx, &w_t);
         let last_axis = product.shape(ctx).len() - 1;
-        product.sum(ctx, Some(&[last_axis]), false, None)
+        let summed = product.sum(ctx, Some(&[last_axis]), false, dtype);
+        match dtype {
+            Some(dt) => summed.cast(ctx, dt),
+            None => summed,
+        }
     }
 
     /// `Tensor.linear(weight, bias)`: dot/mul + bias add.
@@ -991,6 +1006,57 @@ impl Tensor {
             }
             None => ret,
         }
+    }
+
+
+    /// `Tensor.scaled_dot_product_attention(key, value, attn_mask=None,
+    /// dropout_p=0.0, is_causal=False, enable_gqa=False)` (rand.py:298-327).
+    /// `self` is the query: `softmax(q·kᵀ/√d + mask)·v` with f32 accumulation.
+    pub fn scaled_dot_product_attention(
+        &self,
+        ctx: &mut UOpCtx,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+        enable_gqa: bool,
+    ) -> Tensor {
+        let ndim = self.shape(ctx).len();
+        let (key, value) = if enable_gqa {
+            let qh = self.shape(ctx).into_vec()[ndim - 3].clone().as_i64().unwrap_or(0);
+            let kh = key.shape(ctx).into_vec()[key.shape(ctx).len() - 3].clone().as_i64().unwrap_or(0);
+            let vh = value.shape(ctx).into_vec()[value.shape(ctx).len() - 3].clone().as_i64().unwrap_or(0);
+            (key.repeat_interleave(ctx, qh / kh, Some(-3)), value.repeat_interleave(ctx, qh / vh, Some(-3)))
+        } else {
+            (key.clone(), value.clone())
+        };
+        let q = self.clone();
+        let q_last = q.shape(ctx).into_vec()[ndim - 1].clone().as_i64().unwrap_or(0);
+        let acc = crate::dtype::least_upper_dtype(&[q.dtype(ctx), key.dtype(ctx), crate::dtype::FLOAT32]);
+        let kt = key.transpose(ctx, -2, -1);
+        let qk = q.dot_dtype(ctx, &kt, Some(acc)).div(ctx, TensorAddArg::C(ConstVal::Float((q_last as f64).sqrt())));
+        let mask: Option<Tensor> = if is_causal {
+            assert!(attn_mask.is_none(), "TGERR: cannot set attn_mask when is_causal=True");
+            Some(qk.const_like(ctx, ConstVal::Bool(true), Some(crate::dtype::BOOL)).tril(ctx, 0))
+        } else {
+            attn_mask.cloned()
+        };
+        let qk = if let Some(m) = &mask {
+            let m2 = if m.dtype(ctx) == crate::dtype::BOOL {
+                let zero = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(0.0), None);
+                let neg_inf = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(f64::NEG_INFINITY), None);
+                m.where_(ctx, zero, neg_inf)
+            } else {
+                m.clone()
+            };
+            qk.add(ctx, &m2)
+        } else {
+            qk
+        };
+        let sm = crate::tensor::nn::softmax(&qk.cast(ctx, self.dtype(ctx)), ctx, Some(ndim - 1));
+        let sm = sm.dropout(ctx, dropout_p);
+        sm.matmul(ctx, &value)
     }
 
     /// `Tensor.layernorm(axis, eps)`: layer normalization.

@@ -1120,6 +1120,18 @@ align_corners)` (op.py:1046-1078: linear via `gather`+`lerp`, plus
 `nearest`/`nearest-exact`) — used to resize MNIST 28→224 for the ViT. Goldens
 cover bilinear up/down, `align_corners`, and both nearest modes.
 
+### 8.28 Attention: `scaled_dot_product_attention` (DONE)
+
+Ported `Tensor.scaled_dot_product_attention(key, value, attn_mask, dropout_p,
+is_causal, enable_gqa)` (`mixin/rand.py:298-327`): f32-accumulated `q·kᵀ/√d`
+(`dot_dtype` with `least_upper_dtype(q,k,f32)`), `is_causal` via a bool `tril`,
+bool→`0/-inf` / additive masks, GQA `repeat_interleave`, softmax, dropout, `@v`.
+Gate: `tests/nn_attention.rs` vs tinygrad goldens (`py/dump_attention_golden.py`
+→ `tests/attention_golden.rs`): basic, multi-head, causal, bool/float masks, GQA.
+**Bug fixed:** `tril`/`triu` built their `0` branch with a weak-int const instead
+of `x`'s dtype, so `tril` of a bool tensor returned int — now they use
+`ctx.dt_of(&x)`, matching tinygrad's `self.const_like(0)`.
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same

@@ -206,7 +206,8 @@ pub fn triu(ctx: &mut UOpCtx, x: UopId, diagonal: i64) -> Tensor {
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let (r, c) = (<SInt as Clone>::clone(&shape[shape.len() - 2]), <SInt as Clone>::clone(&shape[shape.len() - 1]));
     let tri = _tri(ctx, r, c, diagonal);
-    let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), None);
+    let dt = ctx.dt_of(&x);
+    let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), Some(dt));
     { let __u = ctx.where_(tri.uop(), x, zero); Tensor::from_uop(ctx, __u) }
 }
 
@@ -216,7 +217,8 @@ pub fn tril(ctx: &mut UOpCtx, x: UopId, diagonal: i64) -> Tensor {
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let (r, c) = (<SInt as Clone>::clone(&shape[shape.len() - 2]), <SInt as Clone>::clone(&shape[shape.len() - 1]));
     let tri = _tri(ctx, r, c, diagonal + 1);
-    let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), None);
+    let dt = ctx.dt_of(&x);
+    let zero = ctx.const_like_dt(x.clone(), ConstVal::Int(0), Some(dt));
     { let __u = ctx.where_(tri.uop(), zero, x); Tensor::from_uop(ctx, __u) }
 }
 
