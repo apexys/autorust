@@ -96,9 +96,9 @@ fn main() {
     // ViT shape: default small, override all four for ViT-B/16.
     let layers: i64 = env_or("LAYERS", if fast { 1 } else { 2 });
     let embed: i64 = env_or("EMBED", if fast { 32 } else { 64 });
-    let heads: i64 = env_or("HEADS", if fast { 4 } else { 4 });
+    let heads: i64 = env_or("HEADS", 4);
     let size: i64 = env_or("SIZE", if fast { 16 } else { 32 });
-    let patch: i64 = env_or("PATCH", if fast { 8 } else { 8 });
+    let patch: i64 = env_or("PATCH", 8);
     let classes: i64 = env_or("CLASSES", 10);
     assert_eq!(size % patch, 0, "SIZE ({size}) must be divisible by PATCH ({patch})");
 

@@ -25,7 +25,7 @@ impl Act {
 }
 
 /// `(name.0, name.1)` for a tinygrad `(weight, bias)` tuple attribute.
-fn pair<'a>(prefix: &str, p: &'a (Tensor, Tensor)) -> Vec<(String, Tensor)> {
+fn pair(prefix: &str, p: &(Tensor, Tensor)) -> Vec<(String, Tensor)> {
     vec![(format!("{prefix}.0"), p.0.clone()), (format!("{prefix}.1"), p.1.clone())]
 }
 

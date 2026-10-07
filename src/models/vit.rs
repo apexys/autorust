@@ -84,11 +84,12 @@ impl ViT {
 
 impl Module for ViT {
     fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
-        let mut v = Vec::new();
-        v.push(("embedding.0".to_string(), self.embedding.0.clone()));
-        v.push(("embedding.1".to_string(), self.embedding.1.clone()));
-        v.push(("cls".to_string(), self.cls.clone()));
-        v.push(("pos_embedding".to_string(), self.pos_embedding.clone()));
+        let mut v = vec![
+            ("embedding.0".to_string(), self.embedding.0.clone()),
+            ("embedding.1".to_string(), self.embedding.1.clone()),
+            ("cls".to_string(), self.cls.clone()),
+            ("pos_embedding".to_string(), self.pos_embedding.clone()),
+        ];
         for (i, tb) in self.tbs.iter().enumerate() {
             for (n, t) in tb.named_params() {
                 v.push((format!("tbs.{i}.{n}"), t));
