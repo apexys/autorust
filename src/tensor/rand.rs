@@ -208,7 +208,7 @@ fn threefry_random_bits(ctx: &mut UOpCtx, key: &Tensor, counts0: &Tensor, counts
     let r = x.threefry(ctx, &packed_key);
     let lo = r.cast(ctx, dtype::UINT32);
     let hi = r.rshift(ctx, 32).cast(ctx, dtype::UINT32);
-    lo.cat(ctx, &[hi])
+    lo.cat(ctx, &[hi], 0)
 }
 
 /// `RandMixin.random_bits` (rand.py:18) as a device graph. `num` words fit one
@@ -353,7 +353,7 @@ fn next_counter_graph(ctx: &mut UOpCtx, dev: &str, num: u32) -> (Tensor, Tensor)
     let new_low = c0.add(ctx, num_low);
     let carry = new_low.lt(ctx, &c0).cast(ctx, dtype::UINT32);
     let new_high = c1.add(ctx, num_high).add(ctx, &carry);
-    let new_counter = new_low.cat(ctx, &[new_high]);
+    let new_counter = new_low.cat(ctx, &[new_high], 0);
     let eff = counter.assign_effect(ctx, &new_counter);
     counter.set_uop(eff.uop());
     // tensor.py:651: low = counter[0:1] - num, high = counter[1:2] - num_high
@@ -363,7 +363,7 @@ fn next_counter_graph(ctx: &mut UOpCtx, dev: &str, num: u32) -> (Tensor, Tensor)
     let borrow = a0.lt(ctx, num_low).cast(ctx, dtype::UINT32);
     let low = a0.sub(ctx, num_low);
     let high = a1.sub(ctx, num_high).sub(ctx, &borrow);
-    (seed, low.cat(ctx, &[high]))
+    (seed, low.cat(ctx, &[high], 0))
 }
 
 /// Host evaluator (`rand.rs` reference path): INTERP carries f64 lanes and

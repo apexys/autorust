@@ -1106,6 +1106,16 @@ scope, plus `Session::training(bool)` / `training_enabled()` mirroring
 plus **exact RNG parity** vs tinygrad (`py/dump_dropout_golden.py` →
 `tests/dropout_golden.rs`).
 
+### 8.27 Attention/ViT primitives: cat(dim), tril/triu, gather, clip, lerp, repeat_interleave (DONE)
+
+For the ViT/attention work, `Tensor` gained the movement/op primitives tinygrad's
+`mixin/op.py`/`mixin/elementwise.py` provide: a general `cat(*others, dim)`
+(equal-size fast path `stack(dim)+flatten`, else cumulative-pad + add — the
+oracle's `usum`), `tril`/`triu`, `gather(dim, index)`, `clamp`/`clip`, `lerp`,
+and `repeat_interleave`. Gate: `tests/nn_tensor_ops.rs` vs tinygrad goldens
+(`py/dump_tensor_golden.py` → `tests/tensor_golden.rs`). The RNG callers of `cat`
+now pass `dim=0` explicitly.
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same

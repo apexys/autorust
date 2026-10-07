@@ -1094,13 +1094,136 @@ impl Tensor {
         { let __u = ctx.shr(self.uop().clone(), b); Tensor::from_uop(ctx, __u) }
     }
 
-    /// `Tensor.cat(*others, dim=0)` (`mixin/op.py:734`), equal-shape fast path:
-    /// `self.stack(*others, dim).flatten(dim, dim+1)`. The RNG path always
-    /// concatenates same-shape operands along dim 0, so this covers it.
-    pub fn cat(&self, ctx: &mut UOpCtx, others: &[Tensor]) -> Tensor {
-        let uops: Vec<UopId> = std::iter::once(self.uop().clone()).chain(others.iter().map(|t| t.uop().clone())).collect();
-        let st = { let __u = stack(ctx, uops); Tensor::from_uop(ctx, __u) };
-        st.flatten(ctx, 0, 2)
+    /// `Tensor.cat(*others, dim=0)` (`mixin/op.py:734`): concatenate along `dim`.
+    /// When every operand is the same size along `dim`, this is
+    /// `stack(*args, dim).flatten(dim, dim+1)`; otherwise each is zero-padded to
+    /// the total length and summed (the oracle's `padded[0].usum(*padded[1:])`,
+    /// valid because the padded regions are disjoint).
+    pub fn cat(&self, ctx: &mut UOpCtx, others: &[Tensor], dim: i64) -> Tensor {
+        let mut tensors: Vec<Tensor> = Vec::with_capacity(others.len() + 1);
+        tensors.push(self.clone());
+        tensors.extend(others.iter().cloned());
+        let self_shape: Vec<SVal> = self.shape(ctx).into_vec();
+        let ndim = self_shape.len();
+        let d = movement::resolve_dim(ndim, dim, false);
+        for t in &tensors {
+            let ts: Vec<SVal> = t.shape(ctx).into_vec();
+            assert_eq!(ts.len(), ndim, "TGERR: cat: ndim mismatch");
+            for i in 0..ndim {
+                if i != d {
+                    assert_eq!(ts[i], self_shape[i], "TGERR: cat: shapes differ on non-cat dim {i}");
+                }
+            }
+        }
+        let sizes: Vec<i64> = tensors.iter().map(|t| t.shape(ctx).into_vec()[d].clone().as_i64().unwrap_or(0)).collect();
+        if sizes.iter().all(|&s| s == sizes[0]) {
+            let uops: Vec<UopId> = tensors.iter().map(|t| t.uop().clone()).collect();
+            let st = { let __u = movement::stack_tensors(ctx, &uops, d as i64); Tensor::from_uop(ctx, __u) };
+            return st.flatten(ctx, d as i64, d as i64 + 1);
+        }
+        let mut cum: Vec<i64> = vec![0];
+        for &s in &sizes {
+            cum.push(cum.last().unwrap() + s);
+        }
+        let total = *cum.last().unwrap();
+        let mut out: Option<Tensor> = None;
+        for (i, t) in tensors.iter().enumerate() {
+            let mut arg: Vec<(i64, i64)> = Vec::with_capacity(ndim);
+            for j in 0..ndim {
+                arg.push(if j == d { (cum[i], total - cum[i + 1]) } else { (0, 0) });
+            }
+            let p = t.pad(ctx, &arg);
+            out = Some(match out {
+                None => p,
+                Some(acc) => acc.add(ctx, &p),
+            });
+        }
+        out.unwrap()
+    }
+
+    /// `Tensor.tril(diagonal=0)` (op.py:259): lower-triangular part, else 0.
+    pub fn tril(&self, ctx: &mut UOpCtx, diagonal: i64) -> Tensor {
+        creation::tril(ctx, self.uop().clone(), diagonal)
+    }
+
+    /// `Tensor.triu(diagonal=0)` (op.py:236): upper-triangular part, else 0.
+    pub fn triu(&self, ctx: &mut UOpCtx, diagonal: i64) -> Tensor {
+        creation::triu(ctx, self.uop().clone(), diagonal)
+    }
+
+    /// `Tensor.clamp(min_=None, max_=None)` (elementwise.py:583): min/max bound.
+    pub fn clamp(&self, ctx: &mut UOpCtx, min_: Option<f64>, max_: Option<f64>) -> Tensor {
+        assert!(min_.is_some() || max_.is_some(), "TGERR: at least one of min_/max_ must be set");
+        let dt = self.dtype(ctx);
+        let mk = |v: f64| if crate::dtype::is_float(dt) { ConstVal::Float(v) } else { ConstVal::Int(v as i128) };
+        let mut ret = self.clone();
+        if let Some(mn) = min_ {
+            let mn_t = ret.const_like(ctx, mk(mn), None);
+            ret = ret.lt(ctx, &mn_t).contiguous(ctx).where_(ctx, &mn_t, &ret);
+        }
+        if let Some(mx) = max_ {
+            let mx_t = ret.const_like(ctx, mk(mx), None);
+            ret = ret.gt(ctx, &mx_t).contiguous(ctx).where_(ctx, &mx_t, &ret);
+        }
+        ret
+    }
+
+    /// `Tensor.clip(min_=None, max_=None)` (elementwise.py:596): alias for `clamp`.
+    pub fn clip(&self, ctx: &mut UOpCtx, min_: Option<f64>, max_: Option<f64>) -> Tensor {
+        self.clamp(ctx, min_, max_)
+    }
+
+    /// `Tensor.lerp(end, weight)` (elementwise.py:1078): `self + (end - self)*weight`.
+    /// (The uint8 integer path is not ported; only the float form is used by
+    /// `interpolate`.)
+    pub fn lerp(&self, ctx: &mut UOpCtx, end: &Tensor, weight: impl Into<TensorAddArg>) -> Tensor {
+        let diff = end.sub(ctx, self);
+        let scaled = diff.mul(ctx, weight);
+        self.add(ctx, &scaled)
+    }
+
+    /// `Tensor.gather(dim, index)` (op.py:1026): select along `dim` by index.
+    pub fn gather(&self, ctx: &mut UOpCtx, dim: i64, index: &Tensor) -> Tensor {
+        let self_shape: Vec<SVal> = self.shape(ctx).into_vec();
+        let idx_shape: Vec<SVal> = index.shape(ctx).into_vec();
+        let ndim = self_shape.len();
+        assert_eq!(idx_shape.len(), ndim, "TGERR: gather: self.ndim must equal index.ndim");
+        let d = movement::resolve_dim(ndim, dim, false);
+        let mut target: Vec<SVal> = Vec::with_capacity(ndim);
+        for i in 0..ndim {
+            target.push(if i == d { SVal::I(-1) } else { idx_shape[i].clone() });
+        }
+        let x = self.shrink_to(ctx, &target).unsqueeze(ctx, -1).transpose(ctx, -1, d as i64);
+        let ncl = self_shape[d].clone().as_i64().unwrap_or(0);
+        let oh = index.unsqueeze(ctx, -1).one_hot_along_dim(ctx, ncl, -1);
+        let zero = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Float(0.0), None);
+        let picked = oh.where_(ctx, &x, zero);
+        let last = picked.shape(ctx).len() - 1;
+        picked.sum(ctx, Some(&[last]), false, Some(self.dtype(ctx)))
+    }
+
+    /// `Tensor.repeat_interleave(repeats, dim=None)` (movement.py:560).
+    pub fn repeat_interleave(&self, ctx: &mut UOpCtx, repeats: i64, dim: Option<i64>) -> Tensor {
+        let (x, d) = match dim {
+            None => (self.flatten(ctx, 0, -1), 0usize),
+            Some(dd) => {
+                let ndim = self.shape(ctx).len();
+                (self.clone(), movement::resolve_dim(ndim, dd, false))
+            }
+        };
+        let shp: Vec<SVal> = x.shape(ctx).into_vec();
+        let mut r1: Vec<SVal> = shp[..d + 1].to_vec();
+        r1.push(SVal::I(1));
+        r1.extend_from_slice(&shp[d + 1..]);
+        let x = x.reshape(ctx, r1);
+        let mut e: Vec<SVal> = shp[..d + 1].to_vec();
+        e.push(SVal::I(repeats as i128));
+        e.extend_from_slice(&shp[d + 1..]);
+        let x = x.expand(ctx, e);
+        let mut r2: Vec<SVal> = shp[..d].to_vec();
+        r2.push(ctx.sval_mul(shp[d].clone(), SVal::I(repeats as i128)));
+        r2.extend_from_slice(&shp[d + 1..]);
+        x.reshape(ctx, r2)
     }
 
     /// `Tensor.threefry(seed)` (`mixin/elementwise.py:454`): `self.alu(Ops.THREEFRY, seed)`.

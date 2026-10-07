@@ -158,7 +158,7 @@ fn main() {
                 .cast(&mut ctx, dtype_from_name(st.dtype.clone()).unwrap_or(dtype::FLOAT32)),
             "cat" => {
                 let others: Vec<Tensor> = st.ys.clone().unwrap_or_default().iter().map(|&i| tensors[i].clone()).collect();
-                tensors[st.x.unwrap_or(0)].clone().cat(&mut ctx, &others)
+                tensors[st.x.unwrap_or(0)].clone().cat(&mut ctx, &others, 0)
             }
             "rand" => autorust::tensor::rand::rand(
                 &mut ctx,
