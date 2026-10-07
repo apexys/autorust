@@ -1114,7 +1114,11 @@ For the ViT/attention work, `Tensor` gained the movement/op primitives tinygrad'
 oracle's `usum`), `tril`/`triu`, `gather(dim, index)`, `clamp`/`clip`, `lerp`,
 and `repeat_interleave`. Gate: `tests/nn_tensor_ops.rs` vs tinygrad goldens
 (`py/dump_tensor_golden.py` → `tests/tensor_golden.rs`). The RNG callers of `cat`
-now pass `dim=0` explicitly.
+now pass `dim=0` explicitly. Also added `floordiv`(`//`)/`mod_(`%`)` (int int →
+`Ops.FLOORDIV`/`Ops.FLOORMOD`) and a faithful `Tensor.interpolate(size, mode,
+align_corners)` (op.py:1046-1078: linear via `gather`+`lerp`, plus
+`nearest`/`nearest-exact`) — used to resize MNIST 28→224 for the ViT. Goldens
+cover bilinear up/down, `align_corners`, and both nearest modes.
 
 ## 9. Next steps
 

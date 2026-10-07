@@ -57,6 +57,20 @@ a = seq((4,)); b = seq((4,), 0.5, 1.0)
 add("lerp", "lerp", a.lerp(b, 0.25), a=a, b=b, params=[0.25])
 
 
+# interpolate: linear (bilinear), nearest, nearest-exact
+a = seq((1, 1, 2, 2))
+add("interp_linear_up", "interpolate", a.interpolate((4, 4), mode="linear"), a=a, params=[0, 0, 4, 4])
+a = seq((1, 1, 4, 4))
+add("interp_linear_down", "interpolate", a.interpolate((2, 2), mode="linear"), a=a, params=[0, 0, 2, 2])
+a = seq((1, 1, 2, 2))
+add("interp_linear_align", "interpolate", a.interpolate((4, 4), mode="linear", align_corners=True), a=a, params=[0, 1, 4, 4])
+a = seq((1, 1, 3, 3))
+add("interp_nearest", "interpolate", a.interpolate((5, 5), mode="nearest"), a=a, params=[1, 0, 5, 5])
+a = seq((1, 1, 3, 3))
+add("interp_nearest_exact", "interpolate", a.interpolate((5, 5), mode="nearest-exact"), a=a, params=[2, 0, 5, 5])
+a = seq((2, 1, 2, 3))
+add("interp_bilinear_bs", "interpolate", a.interpolate((4, 6), mode="linear"), a=a, params=[0, 0, 4, 6])
+
 def ishape(t):
     return ", ".join(str(int(s)) for s in t.shape)
 

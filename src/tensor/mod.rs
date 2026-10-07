@@ -1028,6 +1028,81 @@ impl Tensor {
         }
     }
 
+    /// `Tensor // other` (elementwise.py:275): floor division
+    /// (`div(rounding_mode="floor")`). Int/int uses `Ops.FLOORDIV`.
+    pub fn floordiv(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        match other.into() {
+            TensorAddArg::T(o) => { let __u = elementwise::div(ctx, self.uop().clone(), o.uop(), Some("floor")); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => { let __u = elementwise::div_c(ctx, self.uop().clone(), c, Some("floor")); Tensor::from_uop(ctx, __u) },
+        }
+    }
+
+    /// `Tensor.mod(other)` / `%` (elementwise.py:198): Python floor remainder.
+    pub fn mod_(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
+        match other.into() {
+            TensorAddArg::T(o) => { let __u = elementwise::mod_(ctx, self.uop().clone(), o.uop()); Tensor::from_uop(ctx, __u) },
+            TensorAddArg::C(c) => {
+                let b = self.const_like(ctx, c, None);
+                let b = b.uop().clone();
+                let __u = elementwise::mod_(ctx, self.uop().clone(), b);
+                Tensor::from_uop(ctx, __u)
+            }
+        }
+    }
+
+    /// `Tensor.interpolate(size, mode="linear", align_corners=False)`
+    /// (op.py:1046-1078): resize the last `size.len()` dims. Supports `linear`
+    /// (bilinear/trilinear/...) and `nearest`/`nearest-exact`.
+    pub fn interpolate(&self, ctx: &mut UOpCtx, size: &[i64], mode: &str, align_corners: bool) -> Tensor {
+        let ndim = self.shape(ctx).len();
+        assert!(!size.is_empty() && size.len() <= ndim, "TGERR: invalid interpolate size");
+        assert!(matches!(mode, "linear" | "nearest" | "nearest-exact"), "TGERR: only linear/nearest/nearest-exact");
+        assert!(!(align_corners && mode != "linear"), "TGERR: align_corners only with linear");
+        let self_shape: Vec<SVal> = self.shape(ctx).into_vec();
+        let int_dt = Some(crate::dtype::default_int());
+        let mut x = self.clone();
+        for k in 0..size.len() {
+            let dim = ndim - size.len() + k;
+            let os = size[k];
+            let in_sz = self_shape[dim].clone().as_i64().unwrap_or(0);
+            let mut reshape: Vec<SVal> = vec![SVal::I(1); ndim];
+            reshape[dim] = SVal::I(os as i128);
+            let mut expand: Vec<SVal> = x.shape(ctx).into_vec();
+            expand[dim] = SVal::I(os as i128);
+            if mode == "linear" {
+                let arr = Tensor::arange(ctx, 0.0, Some(os as f64), 1.0, int_dt);
+                let (num, den_val): (Tensor, i64) = if align_corners {
+                    (arr.mul(ctx, TensorAddArg::C(ConstVal::Int((in_sz - 1) as i128))), os - 1)
+                } else {
+                    let t = arr.mul(ctx, TensorAddArg::C(ConstVal::Int(2))).add(ctx, TensorAddArg::C(ConstVal::Int(1)));
+                    let num = t.mul(ctx, TensorAddArg::C(ConstVal::Int(in_sz as i128))).sub(ctx, TensorAddArg::C(ConstVal::Int(os as i128)));
+                    (num, os * 2)
+                };
+                let den = Tensor::full_const(ctx, &[] as &[i64], ConstVal::Int(den_val as i128), int_dt);
+                let num = num.clip(ctx, Some(0.0), Some(((in_sz - 1) * den_val) as f64));
+                let low = num.floordiv(ctx, &den).reshape(ctx, reshape.clone()).expand(ctx, expand.clone());
+                let high = num.add(ctx, &den).sub(ctx, TensorAddArg::C(ConstVal::Int(1))).floordiv(ctx, &den).reshape(ctx, reshape.clone()).expand(ctx, expand.clone());
+                let numer = num.mod_(ctx, &den).cast(ctx, crate::dtype::FLOAT32);
+                let denf = den.cast(ctx, crate::dtype::FLOAT32);
+                let perc = numer.div(ctx, &denf).reshape(ctx, reshape.clone()).expand(ctx, expand.clone());
+                let gl = x.gather(ctx, dim as i64, &low);
+                let gh = x.gather(ctx, dim as i64, &high);
+                x = gl.lerp(ctx, &gh, &perc);
+            } else {
+                let scale = in_sz as f64 / os as f64;
+                let arr = Tensor::arange(ctx, 0.0, Some(os as f64), 1.0, Some(crate::dtype::FLOAT32));
+                let scaled = if mode == "nearest-exact" {
+                    arr.add(ctx, TensorAddArg::C(ConstVal::Float(0.5))).mul(ctx, TensorAddArg::C(ConstVal::Float(scale)))
+                } else {
+                    arr.mul(ctx, TensorAddArg::C(ConstVal::Float(scale)))
+                };
+                let index = scaled.cast(ctx, crate::dtype::default_int()).reshape(ctx, reshape.clone()).expand(ctx, expand.clone());
+                x = x.gather(ctx, dim as i64, &index);
+            }
+        }
+        x.cast(ctx, self.dtype(ctx))
+    }
+
     /// Tensor-level elementwise sugar for the oracle/schedule corpus.
     pub fn add(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {

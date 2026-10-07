@@ -57,6 +57,12 @@ fn tensor_ops_match_tinygrad() {
                 let b = f32_tensor(&mut ctx, g.b, g.b_shape);
                 a.lerp(&mut ctx, &b, p[0])
             }
+            "interpolate" => {
+                let mode = match p[0] as i64 { 0 => "linear", 1 => "nearest", _ => "nearest-exact" };
+                let align = p[1] != 0.0;
+                let size: Vec<i64> = p[2..].iter().map(|&v| v as i64).collect();
+                a.interpolate(&mut ctx, &size, mode, align)
+            }
             other => panic!("unknown kind {other}"),
         };
         assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
