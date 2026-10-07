@@ -1146,6 +1146,19 @@ weight — now `self.mul(weight) + bias` like tinygrad; (2) the prenorm branch
 applied the FFN activation to `n2` instead of `n2·ff1`
 (`act(x.layernorm().linear(ln2).linear(ff1)).linear(ff2)`).
 
+### 8.30 MNIST ViT training example (DONE)
+
+`examples/vit_mnist.rs` trains the ported `ViT` on MNIST, mirroring
+`extra/models/vit.py` + the `beautiful_mnist.py` loop. MNIST is normalized to
+[0,1], bilinearly resized (`Tensor.interpolate`) to `SIZE`, and 1→3 channels
+(`repeat_interleave`). Defaults to a small ViT (`LAYERS=2 EMBED=64 HEADS=4
+SIZE=32 PATCH=8`); `LAYERS=12 EMBED=768 HEADS=12 SIZE=224 PATCH=16` gives
+ViT-B/16. Uses the `Session::training` switch: dropout is active for train steps
+and the identity for eval. Gates: `tests/vit_e2e.rs` (ignored, `#[path]`-includes
+the example: one train step + param update + eval) and a real run that learns
+(loss 2.3→1.35, ~59% test acc in 40 steps on INTERP). Run:
+`cargo run --release --example vit_mnist` (`FAST=1` for a quick preset).
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same
