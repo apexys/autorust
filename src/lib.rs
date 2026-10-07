@@ -9,6 +9,7 @@ pub mod renderer;
 pub mod dtype;
 pub mod helpers;
 
+pub mod models;
 pub mod runtime;
 pub mod schedule;
 pub mod tensor;

@@ -950,13 +950,13 @@ impl Tensor {
     pub fn linear(&self, ctx: &mut UOpCtx, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
         let w_shape = weight.shape(ctx);
         if w_shape.len() == 1 {
-            // For 1D weight, broadcast: expand self with a singleton at the end, then add bias.
-            let mut expand_shape = w_shape.to_vec();
-            expand_shape.push(SVal::I(1));
-            let expanded = self.expand(ctx, expand_shape);
+            // 1-D weight (`nn/__init__` LayerNorm affine): `self.mul(weight) + bias`.
+            let last = self.shape(ctx).into_vec().last().cloned().unwrap_or(SVal::I(0));
+            assert_eq!(w_shape[0], last, "TGERR: linear 1-D weight length must match self.shape[-1]");
+            let result = self.mul(ctx, weight);
             return match bias {
-                Some(b) => expanded.add(ctx, b),
-                None => expanded,
+                Some(b) => result.add(ctx, b),
+                None => result,
             };
         }
         let result = self.dot(ctx, weight);

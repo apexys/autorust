@@ -1132,6 +1132,20 @@ Gate: `tests/nn_attention.rs` vs tinygrad goldens (`py/dump_attention_golden.py`
 of `x`'s dtype, so `tril` of a bool tensor returned int — now they use
 `ctx.dt_of(&x)`, matching tinygrad's `self.const_like(0)`.
 
+### 8.29 Transformer + ViT modules (DONE)
+
+`src/models/transformer.rs` (`TransformerBlock`, `Transformer`, `Act`) and
+`src/models/vit.rs` (`ViT`) mirror `extra/models/transformer.py` /
+`extra/models/vit.py`. `ViT::new(layers, embed_dim, num_heads)` reproduces the
+tinygrad defaults; `ViT::build(...)` takes the input shape explicitly for MNIST.
+Gate: `tests/nn_models.rs` vs tinygrad goldens (`py/dump_models_golden.py` →
+`tests/models_golden.rs`) — **seed parity** (the port's RNG matches, so the same
+seed reproduces tinygrad's random init) across `TransformerBlock` and a small
+`ViT`. **Two bugs fixed:** (1) `Tensor.linear` with a 1-D weight ignored the
+weight — now `self.mul(weight) + bias` like tinygrad; (2) the prenorm branch
+applied the FFN activation to `n2` instead of `n2·ff1`
+(`act(x.layernorm().linear(ln2).linear(ff1)).linear(ff2)`).
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same
