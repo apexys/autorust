@@ -410,12 +410,25 @@ fn exec_kernel(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId, cp: &Rc<Compiled
     let g0 = *cp.pi.globals.first().unwrap_or(&0) as usize;
     let dev_name = buffer_of(ctx, t, (resolved[g0]).clone()).device().to_string();
     let dev = device(&dev_name);
-    let mut bufs: Vec<OpaqueView> = Vec::new();
+    // `bufs` is indexed by **buffer slot**, not position (tinygrad's `bufs[slot]`
+    // contract): a kernel need not use every buffer in the graph, so the used
+    // slots can have gaps (`globals = [0..9, 11]`). Build a slot-indexed vec;
+    // its length `max_slot+1` is also exactly `paramarg_start`, the offset used
+    // for runtime variable (val) args.
+    let max_slot = cp.pi.globals.iter().copied().max().unwrap_or(-1);
+    let mut by_slot: Vec<Option<OpaqueView>> = vec![None; (max_slot + 1) as usize];
     for &g in &cp.pi.globals {
         let b = buffer_of(ctx, t, (resolved[g as usize]).clone());
         b.ensure_allocated(&dev);
-        bufs.push(b.get_buf(&dev));
+        by_slot[g as usize] = Some(b.get_buf(&dev));
     }
+    // Gap slots are never referenced by the kernel signature; fill them with a
+    // clone of a live view to keep the vec dense.
+    let fill = by_slot.iter().flatten().next().cloned();
+    let bufs: Vec<OpaqueView> = by_slot
+        .into_iter()
+        .map(|s| s.or_else(|| fill.clone()).expect("TGERR: kernel has no buffers"))
+        .collect();
     let rt = dev.runtime(TinyElf {
         lib: cp.elf.lib.clone(),
         name: cp.elf.name.clone(),

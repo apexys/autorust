@@ -89,10 +89,11 @@ impl Prog for InterpProgram {
         wait: bool,
     ) -> Option<f64> {
         let st = std::time::Instant::now();
-        // bind the signature slots to the passed buffer windows
+        // bind the signature slots to the passed buffer windows (bufs is
+        // slot-indexed, matching tinygrad's `bufs[slot]`)
         let mut views: HashMap<i64, MemView> = HashMap::new();
-        assert!(bufs.len() == self.globals.len(), "TGERR: kernel arg count mismatch");
-        for (&slot, o) in self.globals.iter().zip(bufs.iter()) {
+        for &slot in &self.globals {
+            let o = &bufs[slot as usize];
             let dt = self.sig_dtypes[&slot];
             let isz = dt.itemsize();
             let h = host_of(&**o);
