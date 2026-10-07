@@ -29,6 +29,13 @@ fn pair(prefix: &str, p: &(Tensor, Tensor)) -> Vec<(String, Tensor)> {
     vec![(format!("{prefix}.0"), p.0.clone()), (format!("{prefix}.1"), p.1.clone())]
 }
 
+/// `FA=1` env switch: route attention through the FlashAttention port instead of
+/// `scaled_dot_product_attention` (read once, like `JIT`/`TRAINING`).
+fn flash_enabled() -> bool {
+    static FA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FA.get_or_init(|| std::env::var("FA").map(|v| v != "0").unwrap_or(false))
+}
+
 /// `TransformerBlock` (extra/models/transformer.py:3-39).
 pub struct TransformerBlock {
     pub num_heads: i64,
@@ -80,7 +87,13 @@ impl TransformerBlock {
         let q = project(ctx, x, &self.query);
         let k = project(ctx, x, &self.key);
         let v = project(ctx, x, &self.value);
-        let attention = q.scaled_dot_product_attention(ctx, &k, &v, None, 0.0, false, false);
+        // `FA=1` swaps the (default) SDPA for the tiled FlashAttention port;
+        // both are the same softmax attention, so training is equivalent.
+        let attention = if flash_enabled() {
+            crate::models::flash_attention::flash_attention(&q, &k, &v, None, false, ctx)
+        } else {
+            q.scaled_dot_product_attention(ctx, &k, &v, None, 0.0, false, false)
+        };
         let attention = attention.transpose(ctx, 1, 2);
         let merged = attention.reshape(ctx, vec![bs, SVal::I(-1), SVal::I((self.num_heads * self.head_size) as i128)]);
         merged.linear(ctx, &self.out.0, Some(&self.out.1))

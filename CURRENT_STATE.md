@@ -206,7 +206,8 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
 ### M7 — user kernels + the rest of the Tensor (stretch) — PARTIAL
 - **`@function` / `Tensor.custom_kernel`**: the machinery is native since M3/M4; this
   milestone activates the user-facing API + precompiled-CALL fast path. **Proof target:
-  flash attention** (`extra/thunder/tiny/fa.py` slice). ⬜
+  flash attention** (`extra/thunder/tiny/fa.py` slice). ⬜ for the fused-kernel DSL
+  (`tk` + CALL); the **op-level FlashAttention algorithm is done** — see §8.31.
 - `TinyJit` (capture LINEAR, replay with fresh buffers). ⬜
 - autograd (`mixin/gradient.py`) — ✅ done early, see §8.4.
 - `rand` (`mixin/rand.py`) — ✅ done early, see §8.3.
@@ -1158,6 +1159,29 @@ and the identity for eval. Gates: `tests/vit_e2e.rs` (ignored, `#[path]`-include
 the example: one train step + param update + eval) and a real run that learns
 (loss 2.3→1.35, ~59% test acc in 40 steps on INTERP). Run:
 `cargo run --release --example vit_mnist` (`FAST=1` for a quick preset).
+
+### 8.31 FlashAttention (op-level) (DONE)
+
+`src/models/flash_attention.rs` ports the **FlashAttention/FA2 algorithm** from
+`extra/thunder/tiny/fa.py`: Q and KV block tiling with an **online (running)
+softmax** (running max `m`, denominator `l`, accumulator `acc`, rescaled per KV
+block), so the `N×N` score matrix is never materialized. Supports causal masking
+(lower-triangular), bool/additive `attn_mask`, **GQA** (inferred from
+`H // H_KV`, like fa.py's `head_kv = head // GROUP_SIZE`), 3-D→4-D promotion, and
+configurable block sizes (`flash_attention_blocks`) with block-grid padding. It
+is numerically identical to `scaled_dot_product_attention` and backprop flows
+through the ops, so it doubles as the FA backward.
+
+`FA=1` (read once in `TransformerBlock::attn`) routes the model's attention
+through the FA port instead of SDPA; the ViT-MNIST example trains with it.
+Gate: `tests/nn_flash_attention.rs` — forward **and backward** match SDPA for
+basic/multi-head/causal/bool+float masks/GQA, with small blocks to force
+tiling + remainders + padding, and a default-block/3-D-promote case.
+**Bug fixed:** `Ops::Stack` had no gradient rule — added it
+(`gradient.py`: STACK's grad is `ctx[i]` along the new dim 0), which `cat`
+uses on its equal-size fast path. The fused `tk` warp-DSL kernel
+(`Tensor.custom_kernel`/CALL) remains the deferred M7 stretch (see above); this
+is the same algorithm expressed with `Tensor` ops.
 
 ## 9. Next steps
 

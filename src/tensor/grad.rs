@@ -282,6 +282,20 @@ fn grad_of_op(ctx: &mut UOpCtx, ret: UopId, g: UopId) -> Option<Vec<Option<UopId
             Some(vec![Some(gr), None, None])
         }
         Ops::Bitcast => Some(vec![None]),
+        // `gradient.py`: STACK's grad is `ctx[i]` (slice along the new dim 0).
+        Ops::Stack => {
+            let shp = ctx.shape_of(&g).unwrap();
+            let gs: Vec<Option<UopId>> = (0..n)
+                .map(|i| {
+                    let shr: Vec<(SVal, SVal)> = std::iter::once((SVal::I(i as i128), SVal::I(i as i128 + 1)))
+                        .chain(shp.iter().skip(1).map(|s| (SVal::I(0), s.clone())))
+                        .collect();
+                    let sliced = movement::shrink(ctx, g.clone(), &shr);
+                    Some(movement::reshape(ctx, sliced, &shp[1..]))
+                })
+                .collect();
+            Some(gs)
+        }
         _ => None,
     }
 }

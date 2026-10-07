@@ -10,6 +10,7 @@
 //! ```sh
 //! cargo run --release --example vit_mnist
 //! FAST=1 cargo run --release --example vit_mnist
+//! FA=1 cargo run --release --example vit_mnist   # FlashAttention attention
 //! LAYERS=12 EMBED=768 HEADS=12 SIZE=224 PATCH=16 STEPS=20 TRAIN_N=2000 \
 //!   cargo run --release --example vit_mnist
 //! ```
