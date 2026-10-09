@@ -16,14 +16,16 @@
 //! dependency), keeping the default `--no-default-features` build std-only.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::renderer::{Renderer, UopRenderer};
+use crate::runtime::buffer::{host_of, OpaqueT};
 use crate::runtime::device::{register_device, Comp, Compiled, IdentityCompiler, LruAllocator, Prog, TinyElf};
-use crate::runtime::interp::exec_kernel_with_dims;
 use crate::runtime::ops_interp::InterpProgram;
+use crate::runtime::ray_kernel::{RayKernel, SendMemView};
 use crate::uop::ctx::UOpCtx;
-use crate::uop::flat::FlatGraph;
+use crate::uop::flat::{parse_flat, FlatGraph};
 use crate::uop::graph::Graph;
 use crate::uop::UopId;
 
@@ -61,29 +63,95 @@ impl UopRenderer for RayonUopRenderer {
     }
 }
 
-/// `RayonProgram` — R0 wraps the interpreter program. Kept as a distinct type
-/// (not a bare `InterpProgram`) so `RAYON` has its own program identity and the
-/// R1/R2 `Send` IR slots in without touching `ops_interp`.
+/// `RayonProgram` — R1 runs the owned `Send` kernel on the host, falling back
+/// to the interpreter for kernels the owned IR cannot compile (keeping `RAYON`
+/// correct-by-construction). `RAYON`'s R2 range-driven evaluator slots in here.
 pub struct RayonProgram {
+    kernel: Option<RayKernel>,
     inner: InterpProgram,
+    mode: Mode,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Owned IR, `rayon` over the global launch grid (default).
+    Parallel,
+    /// Owned IR, serial launches (`RAYON_SERIAL=1`).
+    Serial,
+    /// Always the interpreter (`RAYON_INTERP=1`); also the fallback when
+    /// `kernel` is `None`.
+    Interp,
+}
+
+fn mode_from_env() -> Mode {
+    if std::env::var("RAYON_INTERP").is_ok() {
+        Mode::Interp
+    } else if std::env::var("RAYON_SERIAL").is_ok() {
+        Mode::Serial
+    } else {
+        Mode::Parallel
+    }
+}
+
+/// Observability: `RayonProgram`s constructed with a compiled owned kernel
+/// (fast path) vs those that fell back to the interpreter.
+pub static OWNED_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static FALLBACK_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl RayonProgram {
     pub fn new(elf: &TinyElf) -> RayonProgram {
-        RayonProgram { inner: InterpProgram::new(elf) }
+        // Decode the flat graph once and compile the owned IR; `InterpProgram`
+        // re-decodes for the fallback (cheap, compile-time only).
+        let kernel = decode_lib(elf).and_then(|(mut ctx, uops)| RayKernel::compile(&mut ctx, &uops));
+        if kernel.is_some() {
+            OWNED_KERNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            FALLBACK_KERNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if std::env::var("RAYON_VERBOSE").is_ok() {
+            eprintln!("[rayon] program {} -> {}", elf.name, if kernel.is_some() { "owned" } else { "fallback" });
+        }
+        RayonProgram { kernel, inner: InterpProgram::new(elf), mode: mode_from_env() }
     }
 }
 
 impl Prog for RayonProgram {
     fn call(
         &mut self,
-        bufs: &[Rc<dyn crate::runtime::buffer::OpaqueT>],
+        bufs: &[Rc<dyn OpaqueT>],
         global_size: [usize; 3],
         local_size: Option<[usize; 3]>,
         vals: &[i64],
         wait: bool,
     ) -> Option<f64> {
-        self.inner.call(bufs, global_size, local_size, vals, wait)
+        // python's PythonProgram iterates `global_size[::-1]` / `local_size[::-1]`;
+        // the owned executor shares that little-endian dim convention.
+        if self.mode == Mode::Interp || self.kernel.is_none() {
+            return self.inner.call(bufs, global_size, local_size, vals, wait);
+        }
+        let kernel = self.kernel.as_ref().unwrap();
+        let st = std::time::Instant::now();
+        // Bind signature slots to raw host windows. The `Rc<dyn OpaqueT>`s are
+        // borrowed from `bufs`, which the caller keeps alive until `call`
+        // returns; the rayon scope below always joins before then.
+        let mut views: HashMap<i64, SendMemView> = HashMap::new();
+        for &slot in &kernel.globals {
+            let o = &bufs[slot as usize];
+            let dt = kernel.sig_dtypes[&slot];
+            let isz = dt.itemsize();
+            let h = host_of(&**o);
+            views.insert(slot, SendMemView::from_host(h, isz, h.size / isz));
+        }
+        let vals_f: Vec<f64> = vals.iter().map(|&v| v as f64).collect();
+        let gs_rev = [global_size[2], global_size[1], global_size[0]];
+        let ls_rev = local_size.map(|l| [l[2], l[1], l[0]]);
+        let parallel = self.mode == Mode::Parallel;
+        kernel.exec(&views, gs_rev, ls_rev, &vals_f, parallel);
+        if wait {
+            Some(st.elapsed().as_secs_f64())
+        } else {
+            None
+        }
     }
 }
 
@@ -100,39 +168,22 @@ pub fn register() {
     register_device("RAYON", Rc::new(make));
 }
 
-/// Decode the elf lib into a `(ctx, uops)` pair. Reserved for the R1 owned-IR
-/// compiler; kept here so `rayon` is a used dependency from R0 (the crate must
-/// link the feature) and so the decode path is centralized.
-#[allow(dead_code)]
-pub(crate) fn decode_lib(elf: &TinyElf) -> (UOpCtx, Vec<UopId>) {
-    let src = std::str::from_utf8(&elf.lib).expect("TGERR: rayon elf lib not utf8");
-    let fg: FlatGraph = crate::uop::flat::parse_flat(src).expect("TGERR: rayon elf lib parse");
-    let g = Graph::from_flat(&fg).expect("TGERR: rayon elf lib graph");
+/// Decode the elf lib into a `(ctx, uops)` pair for the owned-IR compiler.
+pub(crate) fn decode_lib(elf: &TinyElf) -> Option<(UOpCtx, Vec<UopId>)> {
+    let src = std::str::from_utf8(&elf.lib).ok()?;
+    let fg: FlatGraph = parse_flat(src).ok()?;
+    let g = Graph::from_flat(&fg).ok()?;
     let uops = g.roots.clone();
     let n = fg.nodes.len();
     let mut ctx = UOpCtx::new();
     ctx.grow_to(n);
     ctx.g = g;
-    (ctx, uops)
+    Some((ctx, uops))
 }
 
-/// Initialize the `rayon` thread pool explicitly (optional; rayon lazily builds
-/// a global pool on first use). Exposed so examples/tests can warm the pool and
-/// report the worker count. Honours `RAYON_NUM_THREADS`.
+/// The number of workers in the global `rayon` pool (honours
+/// `RAYON_NUM_THREADS`). Exposed for examples/tests to report parallelism.
 pub fn num_threads() -> usize {
     rayon::current_num_threads()
 }
 
-/// Reserved: execute the scalar path through `exec_kernel_with_dims`. Kept so
-/// the interpreter import is exercised and documents the R0 fallback boundary.
-#[allow(dead_code)]
-pub(crate) fn exec_scalar(
-    ctx: &mut UOpCtx,
-    uops: &[UopId],
-    views: &std::collections::HashMap<i64, crate::runtime::interp::MemView>,
-    vals: &[f64],
-    global: [usize; 3],
-    local: Option<[usize; 3]>,
-) {
-    exec_kernel_with_dims(ctx, uops, views, vals, global, local);
-}

@@ -92,7 +92,7 @@ enum Val {
 
 /// `exec_alu` (corpus subset).
 /// `python_alu` (ops.py:1287) over f64 lanes; int ops go through i64 bitops.
-fn exec_alu(op: Ops, a: f64, b: f64) -> f64 {
+pub(crate) fn exec_alu(op: Ops, a: f64, b: f64) -> f64 {
     match op {
         Ops::Add => a + b,
         Ops::Mul => a * b,
@@ -171,7 +171,7 @@ fn exec_alu(op: Ops, a: f64, b: f64) -> f64 {
 }
 
 /// ops.py:1295 — MULACC/WHERE are the ternary ALU ops.
-fn exec_alu_ternary(op: Ops, a: f64, b: f64, c: f64) -> f64 {
+pub(crate) fn exec_alu_ternary(op: Ops, a: f64, b: f64, c: f64) -> f64 {
     match op {
         Ops::Mulacc => (a * b) + c,
         Ops::Where => {
@@ -186,7 +186,7 @@ fn exec_alu_ternary(op: Ops, a: f64, b: f64, c: f64) -> f64 {
 }
 
 /// `truncate` (ops.py:1278) — round/clamp to the dtype's representable values.
-fn truncate(v: f64, dt: DTypeId) -> f64 {
+pub(crate) fn truncate(v: f64, dt: DTypeId) -> f64 {
     if dt == dtype::BOOL { (v != 0.0) as i64 as f64 }
     else if dtype::is_float(dt) { dtype::trunc_float(dt, v) }
     else {

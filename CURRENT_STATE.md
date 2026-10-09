@@ -355,7 +355,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **144 passed, 9 ignored, 0 failed**. The ignored = 1 `backend_harness`
+- `cargo test` → **145 passed, 9 ignored, 0 failed**. The ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `mnist_e2e` (downloads data + a CNN
   train step), 4 doc-tests.
@@ -499,6 +499,10 @@ those nodes).
   `CtxVal::Dict` instead of capturing a `UopId`.
 
 ### 8.9 Backends
+- **`RAYON`** (multithreaded CPU, feature `backend_rayon`, optional `rayon` dep) — §9.8.
+  R0+R1 landed: device selection priority CUDA → CL → RAYON → INTERP, and an owned `Send`
+  scalar kernel IR executed across the global launch grid with rayon (matmul ~20×, 57/57
+  kernels owned). Default device on a CPU-only host is now `RAYON`.
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
   kernel-count parity on the RTX 3060. `tests/backend_harness.rs` 12 passed / 1 ignored.
 - **Default device** (`Tensor::creation::default_device`): env `DEFAULT_DEVICE` if set, else
@@ -1628,10 +1632,23 @@ coverage grows.
   feature builds compile). New gate `tests/device_select.rs` (priority, registration,
   RAYON-executes, RAYON==INTERP). `rand`/`randn` gained `device::is_interp_engine` so the
   f64-lane host route applies to `RAYON` until its dtype-native IR lands (flip in R2).
-- **R1 — owned `Send` IR + parallel scalar execution (Lever A).** Compile pass over the
-  linearized uop list; `rayon` over global launches with scoped raw-pointer windows; serial
-  fallback. Gate: numerics equal `INTERP` across `tests/backend_harness.rs` and the
-  MNIST/XOR paths; measured speedup on elementwise/matmul kernels.
+- **R1 — owned `Send` IR + parallel scalar execution (Lever A) — DONE.** New
+  `src/runtime/ray_kernel.rs`: `RayKernel::compile` pre-resolves the linearized uop list into
+  owned data (op/dtype/src-indices/arg/addrspace/numel/const) and raw-pointer
+  `SendMemView` windows; `RayKernel::exec` is a faithful port of `interp::exec_launch`
+  (`Val`/`exec_alu`/`truncate`), fanning the **global launch grid** out over `rayon`
+  (`exec_launch` is per-workgroup independent; disjoint output writes, shared read-only
+  inputs, `rayon::scope` joins before `call` returns). Unsupported ops make `compile`
+  return `None` → `RayonProgram` falls back to `InterpProgram` (correct-by-construction).
+  Knobs: `RAYON_SERIAL=1` (owned IR, serial), `RAYON_INTERP=1` (force fallback),
+  `RAYON_VERBOSE=1` (per-program owned/fallback). Observability statics `OWNED_KERNELS`/
+  `FALLBACK_KERNELS`.
+  - **Coverage:** 57/57 kernels across conv/norm/reduce-broadcast tests compiled to the
+    owned IR (0 fallbacks); the whole `cargo test` suite is green with `RAYON` as default.
+  - **Speedup** (`examples/rayon_bench.rs`, 24 threads): matmul 256² 18.2×, matmul 512²
+    **20.9×**, elementwise 512² 4.7×; owned-IR-serial vs `INTERP` is already 1.5×/1.2×.
+  - Gate: `tests/device_select.rs` (`rayon_owned_fast_path_is_active`, `rayon_matches_interp`);
+    `cargo test` 145 pass / 9 ignored; `--no-default-features` and CL/CUDA builds compile.
 - **R2 — `Lowering::Range` + range-driven evaluator (Lever B).** Implement, then flip
   `RAYON` to it per supported kernel. Gate: numerics equal `INTERP` on the same corpus;
   `to_program` miss cost and per-step wall time down vs `INTERP`; `python` gates unaffected.
