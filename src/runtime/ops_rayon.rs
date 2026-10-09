@@ -19,11 +19,13 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
 use crate::runtime::buffer::{host_of, OpaqueT};
 use crate::runtime::device::{register_device, Comp, Compiled, IdentityCompiler, LruAllocator, Prog, TinyElf};
 use crate::runtime::ops_interp::InterpProgram;
 use crate::runtime::ray_kernel::{RayKernel, SendMemView};
+use crate::runtime::ray_typed::TypedKernel;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::flat::{parse_flat, FlatGraph};
 use crate::uop::graph::Graph;
@@ -63,11 +65,12 @@ impl UopRenderer for RayonUopRenderer {
     }
 }
 
-/// `RayonProgram` — R1 runs the owned `Send` kernel on the host, falling back
-/// to the interpreter for kernels the owned IR cannot compile (keeping `RAYON`
-/// correct-by-construction). `RAYON`'s R2 range-driven evaluator slots in here.
+/// `RayonProgram` — layered: the dtype-native `TypedKernel` (R2), else the
+/// `f64` `RayKernel` (R1), else the interpreter. This keeps `RAYON`
+/// correct-by-construction while the typed coverage grows.
 pub struct RayonProgram {
-    kernel: Option<RayKernel>,
+    typed: Option<TypedKernel>,
+    f64_kernel: Option<RayKernel>,
     inner: InterpProgram,
     mode: Mode,
 }
@@ -78,8 +81,9 @@ enum Mode {
     Parallel,
     /// Owned IR, serial launches (`RAYON_SERIAL=1`).
     Serial,
-    /// Always the interpreter (`RAYON_INTERP=1`); also the fallback when
-    /// `kernel` is `None`.
+    /// Bypass the typed path, use the f64 owned IR (`RAYON_F64=1`).
+    F64,
+    /// Always the interpreter (`RAYON_INTERP=1`); also the final fallback.
     Interp,
 }
 
@@ -88,31 +92,63 @@ fn mode_from_env() -> Mode {
         Mode::Interp
     } else if std::env::var("RAYON_SERIAL").is_ok() {
         Mode::Serial
+    } else if std::env::var("RAYON_F64").is_ok() {
+        Mode::F64
     } else {
         Mode::Parallel
     }
 }
 
-/// Observability: `RayonProgram`s constructed with a compiled owned kernel
-/// (fast path) vs those that fell back to the interpreter.
+/// Observability: programs compiled to an owned kernel (typed or f64),
+/// programs using the typed path, and interpreter fallbacks.
 pub static OWNED_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static TYPED_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub static FALLBACK_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl RayonProgram {
     pub fn new(elf: &TinyElf) -> RayonProgram {
-        // Decode the flat graph once and compile the owned IR; `InterpProgram`
-        // re-decodes for the fallback (cheap, compile-time only).
-        let kernel = decode_lib(elf).and_then(|(mut ctx, uops)| RayKernel::compile(&mut ctx, &uops));
-        if kernel.is_some() {
+        // Decode the flat graph once, then compile the owned IR. The typed path
+        // is tried first; the f64 path is the fallback for sub-word dtypes.
+        let (typed, f64_kernel) = match decode_lib(elf) {
+            Some((mut ctx, uops)) => {
+                let typed = TypedKernel::compile(&mut ctx, &uops);
+                // Always compile the f64 path too: it backs `RAYON_F64=1` and
+                // any runtime case typed can't handle.
+                let f64k = RayKernel::compile(&mut ctx, &uops);
+                (typed, f64k)
+            }
+            None => (None, None),
+        };
+        let owned = typed.is_some() || f64_kernel.is_some();
+        if owned {
             OWNED_KERNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         } else {
             FALLBACK_KERNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        if std::env::var("RAYON_VERBOSE").is_ok() {
-            eprintln!("[rayon] program {} -> {}", elf.name, if kernel.is_some() { "owned" } else { "fallback" });
+        if typed.is_some() {
+            TYPED_KERNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        RayonProgram { kernel, inner: InterpProgram::new(elf), mode: mode_from_env() }
+        if std::env::var("RAYON_VERBOSE").is_ok() {
+            let kind = if typed.is_some() { "typed" } else if f64_kernel.is_some() { "f64" } else { "fallback" };
+            eprintln!("[rayon] program {} -> {kind}", elf.name);
+        }
+        RayonProgram { typed, f64_kernel, inner: InterpProgram::new(elf), mode: mode_from_env() }
     }
+}
+
+/// Bind signature slots to raw host windows. The `Rc<dyn OpaqueT>`s are
+/// borrowed from `bufs`, which the caller keeps alive until `call` returns; the
+/// rayon scope always joins before then.
+fn bind_views(bufs: &[Rc<dyn OpaqueT>], globals: &[i64], sig: &HashMap<i64, DTypeId>) -> HashMap<i64, SendMemView> {
+    let mut views: HashMap<i64, SendMemView> = HashMap::new();
+    for &slot in globals {
+        let o = &bufs[slot as usize];
+        let dt = sig[&slot];
+        let isz = dt.itemsize();
+        let h = host_of(&**o);
+        views.insert(slot, SendMemView::from_host(h, isz, h.size / isz));
+    }
+    views
 }
 
 impl Prog for RayonProgram {
@@ -125,28 +161,30 @@ impl Prog for RayonProgram {
         wait: bool,
     ) -> Option<f64> {
         // python's PythonProgram iterates `global_size[::-1]` / `local_size[::-1]`;
-        // the owned executor shares that little-endian dim convention.
-        if self.mode == Mode::Interp || self.kernel.is_none() {
+        // the owned executors share that little-endian dim convention.
+        if self.mode == Mode::Interp {
             return self.inner.call(bufs, global_size, local_size, vals, wait);
         }
-        let kernel = self.kernel.as_ref().unwrap();
+        let use_typed = self.mode != Mode::F64 && self.typed.is_some();
+        let (globals, sig): (&[i64], &HashMap<i64, DTypeId>) = if use_typed {
+            let t = self.typed.as_ref().unwrap();
+            (t.globals(), t.sig_dtypes())
+        } else if let Some(k) = &self.f64_kernel {
+            (&k.globals, &k.sig_dtypes)
+        } else {
+            return self.inner.call(bufs, global_size, local_size, vals, wait);
+        };
         let st = std::time::Instant::now();
-        // Bind signature slots to raw host windows. The `Rc<dyn OpaqueT>`s are
-        // borrowed from `bufs`, which the caller keeps alive until `call`
-        // returns; the rayon scope below always joins before then.
-        let mut views: HashMap<i64, SendMemView> = HashMap::new();
-        for &slot in &kernel.globals {
-            let o = &bufs[slot as usize];
-            let dt = kernel.sig_dtypes[&slot];
-            let isz = dt.itemsize();
-            let h = host_of(&**o);
-            views.insert(slot, SendMemView::from_host(h, isz, h.size / isz));
-        }
+        let views = bind_views(bufs, globals, sig);
         let vals_f: Vec<f64> = vals.iter().map(|&v| v as f64).collect();
         let gs_rev = [global_size[2], global_size[1], global_size[0]];
         let ls_rev = local_size.map(|l| [l[2], l[1], l[0]]);
-        let parallel = self.mode == Mode::Parallel;
-        kernel.exec(&views, gs_rev, ls_rev, &vals_f, parallel);
+        let parallel = matches!(self.mode, Mode::Parallel | Mode::F64);
+        if use_typed {
+            self.typed.as_ref().unwrap().exec(&views, gs_rev, ls_rev, &vals_f, parallel);
+        } else {
+            self.f64_kernel.as_ref().unwrap().exec(&views, gs_rev, ls_rev, &vals_f, parallel);
+        }
         if wait {
             Some(st.elapsed().as_secs_f64())
         } else {

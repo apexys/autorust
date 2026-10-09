@@ -22,7 +22,7 @@ default = ["capi", "backend_rayon"]
 # C ABI loaded by the Python ctypes bridge (py/bridge.py).
 capi = []
 # Multithreaded CPU backend (device "RAYON"), parallelized with `rayon`.
-backend_rayon = ["dep:rayon"]
+backend_rayon = ["dep:rayon", "dep:bytemuck"]
 backend_cl = ["dep:opencl3"]
 # CUDA backend (operations/codegen on the CUDA driver API via `cudarc`).
 backend_cuda = ["dep:cudarc"]
@@ -37,6 +37,8 @@ dump = []
 nanoserde = "0.2.1"
 # Multithreaded CPU backend (`backend_rayon`); work-stealing parallelism.
 rayon = { version = "1.12", optional = true }
+# dtype-native byte reinterpretation for the `ops_rayon` typed evaluator.
+bytemuck = { version = "1", optional = true }
 opencl3 = { version = "0.9", optional = true }
 # CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
 # needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.

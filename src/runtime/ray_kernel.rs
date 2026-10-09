@@ -49,6 +49,35 @@ impl SendMemView {
         SendMemView { ptr, offset: h.offset, elemsize, count }
     }
 
+    #[inline]
+    pub(crate) fn elemsize(&self) -> usize {
+        self.elemsize
+    }
+
+    /// Byte offset of element `i`.
+    #[inline]
+    fn byte_at(&self, i: usize) -> usize {
+        self.offset + i * self.elemsize
+    }
+
+    /// Copy `n` bytes out of element `i` (typed loads).
+    #[inline]
+    pub(crate) fn read_bytes(&self, i: usize, dst: &mut [u8]) {
+        debug_assert!(i < self.count);
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.add(self.byte_at(i)), dst.as_mut_ptr(), dst.len());
+        }
+    }
+
+    /// Copy `n` bytes into element `i` (typed stores).
+    #[inline]
+    pub(crate) fn write_bytes(&self, i: usize, src: &[u8]) {
+        debug_assert!(i < self.count);
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.add(self.byte_at(i)), src.len());
+        }
+    }
+
     fn load(&self, i: usize, dt: DTypeId) -> f64 {
         if i >= self.count {
             panic!("TGERR: load out of bounds, size is {} and access is {i}", self.count);
@@ -72,18 +101,19 @@ impl SendMemView {
 }
 
 /// One pre-resolved uop of the linearized kernel.
-struct Instr {
-    op: Ops,
-    dt: DTypeId,
-    srcs: Vec<usize>,
-    arg: Arg,
-    addrspace: Option<AddrSpace>,
-    addrspace_derived: Option<AddrSpace>,
+#[derive(Clone)]
+pub(crate) struct Instr {
+    pub(crate) op: Ops,
+    pub(crate) dt: DTypeId,
+    pub(crate) srcs: Vec<usize>,
+    pub(crate) arg: Arg,
+    pub(crate) addrspace: Option<AddrSpace>,
+    pub(crate) addrspace_derived: Option<AddrSpace>,
     /// `numels[u]` (`exec_kernel_with_dims`): max_numel for
     /// Load/Store/Buffer/Param, the extent for Range, the SPECIAL extent else.
-    numel: usize,
+    pub(crate) numel: usize,
     /// Decoded `ConstVal` for `CONST`.
-    const_val: Option<f64>,
+    pub(crate) const_val: Option<ConstVal>,
 }
 
 /// A compiled, `Send` kernel: the linearized uops as owned data.
@@ -95,6 +125,21 @@ pub struct RayKernel {
 }
 
 impl RayKernel {
+    /// The compiled instruction list (shared with the typed executor).
+    pub(crate) fn instrs(&self) -> &[Instr] {
+        &self.instrs
+    }
+
+    /// Clone with every instruction dtype mapped through `f` (the typed
+    /// executor uses this to commit weak dtypes to concrete storage).
+    pub(crate) fn remap_dtypes(&self, f: impl Fn(DTypeId) -> DTypeId) -> RayKernel {
+        RayKernel {
+            instrs: self.instrs.iter().map(|ins| Instr { dt: f(ins.dt), ..ins.clone() }).collect(),
+            globals: self.globals.clone(),
+            sig_dtypes: self.sig_dtypes.clone(),
+        }
+    }
+
     /// Compile a decoded linear uop list. Returns `None` if any op is outside
     /// the supported set (the caller falls back to the interpreter).
     pub fn compile(ctx: &mut UOpCtx, uops: &[UopId]) -> Option<RayKernel> {
@@ -135,12 +180,7 @@ impl RayKernel {
             let srcs: Option<Vec<usize>> = ctx.srcs(u).iter().map(|s| index.get(s).copied()).collect();
             let srcs = srcs?;
             let const_val = match op {
-                Ops::Const => Some(match ctx.val(u) {
-                    ConstVal::Int(x) => x as f64,
-                    ConstVal::Float(x) => x,
-                    ConstVal::Bool(b) => b as i64 as f64,
-                    _ => return None,
-                }),
+                Ops::Const => Some(ctx.val(u)),
                 _ => None,
             };
             instrs.push(Instr {
@@ -387,7 +427,12 @@ impl RayKernel {
                     }
                 }
                 Ops::Const => {
-                    let v = self.instrs[i].const_val.expect("TGERR: rayon const");
+                    let v = match self.instrs[i].const_val.as_ref().expect("TGERR: rayon const") {
+                        ConstVal::Int(x) => *x as f64,
+                        ConstVal::Float(x) => *x,
+                        ConstVal::Bool(b) => *b as i64 as f64,
+                        other => panic!("TGERR: interp const {other:?}"),
+                    };
                     values.insert(i, Val::S(vec![v; wsize]));
                 }
                 Ops::Index | Ops::Shrink => {
@@ -623,7 +668,7 @@ impl SendMemView {
     /// An owned scratch window (REG buffers / non-shared locals). The backing
     /// `Box<[u8]>` is moved into `scratch`, which the caller keeps alive for the
     /// duration of the launch and drops afterwards.
-    fn from_owned(bytes: Vec<u8>, elemsize: usize, count: usize, scratch: &mut Vec<Box<[u8]>>) -> SendMemView {
+    pub(crate) fn from_owned(bytes: Vec<u8>, elemsize: usize, count: usize, scratch: &mut Vec<Box<[u8]>>) -> SendMemView {
         let boxed = bytes.into_boxed_slice();
         let ptr = boxed.as_ptr() as *mut u8;
         scratch.push(boxed);

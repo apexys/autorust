@@ -23,7 +23,7 @@ Merged from the former `PLAN.md` / `CURRENT_STATE.md` / `NNImpl.md`.
 - **Dependency policy: std-only Rust + nanoserde** for the core. No PyO3/maturin, no serde/syn
   ecosystem, no libc/sha2 crates; nanoserde (single micro-crate) for the JSON graph
   interchange. **Optional backend deps are the one sanctioned exception**, each behind its
-  own feature: `opencl3` (`backend_cl`), `cudarc` (`backend_cuda`), and `rayon`
+  own feature: `opencl3` (`backend_cl`), `cudarc` (`backend_cuda`), and `rayon` + `bytemuck`
   (`backend_rayon`, the multithreaded CPU backend, §9.8) — `--no-default-features` stays
   std-only. Two FFI faces only: (a) plain cargo binaries for batch oracle work over
   JSON graph files (one-shot — graph building, codegen diffs, CI), (b) a tiny `cdylib`
@@ -355,7 +355,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **145 passed, 9 ignored, 0 failed**. The ignored = 1 `backend_harness`
+- `cargo test` → **152 passed, 9 ignored, 0 failed**. The ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `mnist_e2e` (downloads data + a CNN
   train step), 4 doc-tests.
@@ -499,10 +499,13 @@ those nodes).
   `CtxVal::Dict` instead of capturing a `UopId`.
 
 ### 8.9 Backends
-- **`RAYON`** (multithreaded CPU, feature `backend_rayon`, optional `rayon` dep) — §9.8.
-  R0+R1 landed: device selection priority CUDA → CL → RAYON → INTERP, and an owned `Send`
-  scalar kernel IR executed across the global launch grid with rayon (matmul ~20×, 57/57
-  kernels owned). Default device on a CPU-only host is now `RAYON`.
+- **`RAYON`** (multithreaded CPU, feature `backend_rayon`, optional `rayon` + `bytemuck`)
+  — §9.8. R0–R2 landed: device selection priority CUDA → CL → RAYON → INTERP; an owned
+  `Send` f64 kernel IR executed across the global launch grid with rayon (R1); and a
+  **dtype-native typed register machine** (R2, `ray_value.rs`/`ray_typed.rs`) used by
+  default, with exact `uint64`/integer semantics and `bytemuck` slice reinterpretation.
+  Typed covers 159/159 kernels in the ops/conv/norm/attention/indexing/layer suites; matmul
+  ~27× / elementwise ~6× vs `INTERP`. Default device on a CPU-only host is `RAYON`.
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
   kernel-count parity on the RTX 3060. `tests/backend_harness.rs` 12 passed / 1 ignored.
 - **Default device** (`Tensor::creation::default_device`): env `DEFAULT_DEVICE` if set, else
@@ -1649,12 +1652,23 @@ coverage grows.
     **20.9×**, elementwise 512² 4.7×; owned-IR-serial vs `INTERP` is already 1.5×/1.2×.
   - Gate: `tests/device_select.rs` (`rayon_owned_fast_path_is_active`, `rayon_matches_interp`);
     `cargo test` 145 pass / 9 ignored; `--no-default-features` and CL/CUDA builds compile.
-- **R2 — `Lowering::Range` + range-driven evaluator (Lever B).** Implement, then flip
-  `RAYON` to it per supported kernel. Gate: numerics equal `INTERP` on the same corpus;
-  `to_program` miss cost and per-step wall time down vs `INTERP`; `python` gates unaffected.
-- **R3 — integration/perf.** Make `RAYON` the CPU default; run `xor`/`mnist`/`vit_mnist`
-  on it; benchmark vs `INTERP` and vs `CL`; consider aliasing `"CPU"` → `RAYON`; docs +
-  commit.
+- **R2 — dtype-native executor (Lever B, first slice) — DONE (typed register machine).**
+  Rather than add the `Lowering` seam, R2 was implemented as a **dtype-native register
+  machine over the existing linearized IR** (see §9.8.1). This is a deliberate deviation
+  from the "skip the `ndim→loop` rewrites" framing: those stages are *compile-time* and
+  `to_program` is content-cached, so skipping them buys ~nothing at runtime; the runtime
+  representation is what matters. Keeping the linearized IR also reuses the committed,
+  tested lowering and makes the executor a one-for-one transliteration of `interp::exec_launch`.
+  Gate: numerics equal `INTERP` on the whole suite; `cargo test` 152 pass / 9 ignored;
+  typed covers **159/159** kernels across ops/conv/norm/attention/indexing/layers.
+- **R2.2 — loop fusion / hoisting (next).** The register machine still dispatches per
+  instruction and materializes per-node registers, so its gain over the f64 R1 path is
+  modest (~1.3× matmul, ~1.1× elementwise); the large headroom vs native (the matmul
+  benchmark is still ~400× off a hand-blocked Rust loop) needs elementwise fusion and typed
+  tight loops for reductions. Tracked, not done.
+- **R3 — integration/perf.** `RAYON` is already the CPU default (R0). Running
+  `xor`/`mnist`/`vit_mnist` on it and benchmarking vs CL, plus considering `"CPU"` → `RAYON`,
+  remains.
 
 #### Risks / open questions
 
@@ -1673,3 +1687,43 @@ coverage grows.
    the elf, so it replays for free (same as `InterpProgram`).
 7. **Dependency policy** — `rayon` only behind `backend_rayon`; the default artifact's
    runtime deps stay `nanoserde` (+ `capi`).
+
+#### 9.8.1 R2 implementation — dtype-native register machine (DONE)
+
+**Files.** `src/runtime/ray_value.rs` (value storage + primitive ops) and
+`src/runtime/ray_typed.rs` (`TypedKernel`), both behind `backend_rayon`.
+
+- **Value storage (`ray_value::Bytes`).** An 8-byte-aligned, heap-backed `Vec<u64>`; whole
+  slices are reinterpreted with `bytemuck::cast_slice` (no hand-rolled `from_raw_parts`, no
+  per-element conversion). Values are lane-major `lanes*wsize` elements at the node dtype.
+- **`Prim` trait + dispatch.** ALU is monomorphized per native dtype (`f32`/`f64`,
+  `i8..i64`/`u8..u64`, `bool`↔`u8`) via a `dispatch!` macro selecting a generic impl fn.
+  Integer ops use wrapping arithmetic at the type width; comparisons write `u8` 0/1;
+  `cdiv`/`cmod`/`floordiv`/`floormod`, shifts, and float transcendentals mirror
+  `interp::exec_alu`. Float→int casts mirror tinygrad `truncate` (clamp negatives for an
+  unsigned destination, truncate, wrap) — this was a real bug found by the backend harness
+  (`cast_f2u8` wanted 44 from ~300, saturating `as` gave 255).
+- **`TypedKernel`.** `compile` reuses `RayKernel::compile`, commits **weak dtypes**
+  (`weakint`/`weakfloat`, which survive into the linear list as uncommitted constants) to
+  `default_int`/`default_float`, and rejects anything outside the native set (sub-word
+  floats, size-changing bitcasts) so those fall back.
+- **Executor.** A one-for-one transliteration of `interp::exec_launch` over typed slots:
+  RANGE/END/IF masks, SPECIAL, INDEX(→pair or scalar), gated LOAD, STORE (incl. the
+  devectorized `Stack`-dest form), CAST/BITCAST, STACK, ALU (with mixed-dtype coercion and
+  lane broadcast). Slots and a value-buffer pool live in a thread-local `Scratch` recycled
+  per launch, so a rayon worker allocates only on its first launch. Per-op operand access
+  uses `get_disjoint_mut` and only clones when coercion/broadcast/duplicate operands
+  require it.
+- **Layered selection.** `RayonProgram::new` compiles both `TypedKernel` and the f64
+  `RayKernel`; `call` uses typed → f64 → `INTERP`. Knobs: `RAYON_F64=1` (force f64, still
+  parallel), `RAYON_SERIAL=1`, `RAYON_INTERP=1`, `RAYON_VERBOSE=1`. Counters
+  `TYPED_KERNELS`/`OWNED_KERNELS`/`FALLBACK_KERNELS`.
+- **Bug found & fixed:** the first visit to a `RANGE` must initialize to 0 *without*
+  incrementing (the f64 executor inserts a zero and falls through); the typed executor
+  incremented immediately, an off-by-one that corrupted the advanced-index prefix-sum
+  kernel (`tests/indexing.rs::three_d_non_consecutive_and_consecutive`). Also
+  `put_data` must zero reused pool buffers (stale bytes).
+- **Perf (24 threads, `examples/rayon_bench.rs`).** Typed vs `INTERP`: matmul 512²
+  **27.2×**, elementwise 6.3×; typed vs the f64 R1 path: **~1.3×** matmul / ~1.1×
+  elementwise. The register machine removes the `f64` conversion and HashMap allocation but
+  still interprets per instruction, so the big win is deferred to R2.2 (fusion).

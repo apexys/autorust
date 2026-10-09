@@ -10,6 +10,10 @@ pub mod interp;
 pub mod ops_rayon;
 #[cfg(feature = "backend_rayon")]
 pub mod ray_kernel;
+#[cfg(feature = "backend_rayon")]
+pub mod ray_value;
+#[cfg(feature = "backend_rayon")]
+pub mod ray_typed;
 pub mod ops_interp;
 #[cfg(feature = "backend_cl")]
 pub mod ops_cl;
