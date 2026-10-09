@@ -55,26 +55,43 @@ impl SendMemView {
     }
 
     /// Byte offset of element `i`.
-    #[inline]
+    #[inline(always)]
     fn byte_at(&self, i: usize) -> usize {
         self.offset + i * self.elemsize
     }
 
-    /// Copy `n` bytes out of element `i` (typed loads).
-    #[inline]
+    /// Copy `n` bytes out of element `i` (typed loads). Specializes the common
+    /// element widths to a single unaligned load, avoiding a `memcpy` call.
+    #[inline(always)]
     pub(crate) fn read_bytes(&self, i: usize, dst: &mut [u8]) {
         debug_assert!(i < self.count);
+        let src = unsafe { self.ptr.add(self.byte_at(i)) };
+        let n = dst.len();
         unsafe {
-            std::ptr::copy_nonoverlapping(self.ptr.add(self.byte_at(i)), dst.as_mut_ptr(), dst.len());
+            match n {
+                1 => *dst.get_unchecked_mut(0) = *src,
+                2 => (dst.as_mut_ptr() as *mut u16).write_unaligned((src as *const u16).read_unaligned()),
+                4 => (dst.as_mut_ptr() as *mut u32).write_unaligned((src as *const u32).read_unaligned()),
+                8 => (dst.as_mut_ptr() as *mut u64).write_unaligned((src as *const u64).read_unaligned()),
+                _ => std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), n),
+            }
         }
     }
 
-    /// Copy `n` bytes into element `i` (typed stores).
-    #[inline]
+    /// Copy `n` bytes into element `i` (typed stores); see [`Self::read_bytes`].
+    #[inline(always)]
     pub(crate) fn write_bytes(&self, i: usize, src: &[u8]) {
         debug_assert!(i < self.count);
+        let dst = unsafe { self.ptr.add(self.byte_at(i)) };
+        let n = src.len();
         unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.add(self.byte_at(i)), src.len());
+            match n {
+                1 => *dst = src[0],
+                2 => (dst as *mut u16).write_unaligned(u16::from_le_bytes(src[..2].try_into().unwrap())),
+                4 => (dst as *mut u32).write_unaligned(u32::from_le_bytes(src[..4].try_into().unwrap())),
+                8 => (dst as *mut u64).write_unaligned(u64::from_le_bytes(src[..8].try_into().unwrap())),
+                _ => std::ptr::copy_nonoverlapping(src.as_ptr(), dst, n),
+            }
         }
     }
 

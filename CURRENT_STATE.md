@@ -504,8 +504,10 @@ those nodes).
   `Send` f64 kernel IR executed across the global launch grid with rayon (R1); and a
   **dtype-native typed register machine** (R2, `ray_value.rs`/`ray_typed.rs`) used by
   default, with exact `uint64`/integer semantics and `bytemuck` slice reinterpretation.
-  Typed covers 159/159 kernels in the ops/conv/norm/attention/indexing/layer suites; matmul
-  ~27× / elementwise ~6× vs `INTERP`. Default device on a CPU-only host is `RAYON`.
+  R2.2 hoisted all per-instruction framing out of the interpreter loop (§9.8.2). Typed
+  covers 159/159 kernels in the ops/conv/norm/attention/indexing/layer suites; matmul 512²
+  ~87× / elementwise ~7.5× vs `INTERP` (4.3× over the f64 R1 path on matmul). Default device
+  on a CPU-only host is `RAYON`.
 - INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
   kernel-count parity on the RTX 3060. `tests/backend_harness.rs` 12 passed / 1 ignored.
 - **Default device** (`Tensor::creation::default_device`): env `DEFAULT_DEVICE` if set, else
@@ -1661,11 +1663,19 @@ coverage grows.
   tested lowering and makes the executor a one-for-one transliteration of `interp::exec_launch`.
   Gate: numerics equal `INTERP` on the whole suite; `cargo test` 152 pass / 9 ignored;
   typed covers **159/159** kernels across ops/conv/norm/attention/indexing/layers.
-- **R2.2 — loop fusion / hoisting (next).** The register machine still dispatches per
-  instruction and materializes per-node registers, so its gain over the f64 R1 path is
-  modest (~1.3× matmul, ~1.1× elementwise); the large headroom vs native (the matmul
-  benchmark is still ~400× off a hand-blocked Rust loop) needs elementwise fusion and typed
-  tight loops for reductions. Tracked, not done.
+- **R2.2 — hoisting the interpreter loop (DONE).** Profiling with callgrind found the
+  R2.1 cost was *not* the math but per-instruction framing: ~34% of instructions were in
+  `malloc`/`free` (`srcs`/`real`/pair/view clones and a `vec!` per load element), plus a
+  linear `END` scan per RANGE iteration and a long `Ops`-match + `group::in_` walk per
+  dispatch. R2.2 hoists all of that to compile time and reuses buffers (see §9.8.1). Net:
+  matmul 512² **656 → 208 ms** (3.2× over R2.1; **87×** vs `INTERP`, **4.3×** over the f64
+  R1 path); elementwise ~1.1–1.3× over R2.1. The remaining cost is the interpreter's
+  per-node dispatch itself (65% of retired instructions), so closing the rest of the gap to
+  native would need native/typed code generation — out of scope for this std-only, no-JIT
+  port (tinygrad's own CPU backend JITs C via clang; its interpreters are equally far off).
+- **R2.3 — instruction-level fusion (not done).** A true fusion (recognize `Load`-vector →
+  per-lane ALU → `Stack`/`Store` and RANGE-reduce patterns and run them as native tight
+  loops) would remove the dispatch bottleneck, but requires codegen. Tracked.
 - **R3 — integration/perf.** `RAYON` is already the CPU default (R0). Running
   `xor`/`mnist`/`vit_mnist` on it and benchmarking vs CL, plus considering `"CPU"` → `RAYON`,
   remains.
@@ -1711,9 +1721,10 @@ coverage grows.
   RANGE/END/IF masks, SPECIAL, INDEX(→pair or scalar), gated LOAD, STORE (incl. the
   devectorized `Stack`-dest form), CAST/BITCAST, STACK, ALU (with mixed-dtype coercion and
   lane broadcast). Slots and a value-buffer pool live in a thread-local `Scratch` recycled
-  per launch, so a rayon worker allocates only on its first launch. Per-op operand access
-  uses `get_disjoint_mut` and only clones when coercion/broadcast/duplicate operands
-  require it.
+  per launch, so a rayon worker allocates only on its first launch. Value-producing ops
+  **detach** their destination slot (`Scratch::take_sized`), read sources immutably, fill,
+  and hand the buffer back — so the hot ops (LOAD/STORE/INDEX/ALU) allocate nothing and the
+  borrow checker stays happy (no `get_disjoint_mut` juggling).
 - **Layered selection.** `RayonProgram::new` compiles both `TypedKernel` and the f64
   `RayKernel`; `call` uses typed → f64 → `INTERP`. Knobs: `RAYON_F64=1` (force f64, still
   parallel), `RAYON_SERIAL=1`, `RAYON_INTERP=1`, `RAYON_VERBOSE=1`. Counters
@@ -1723,7 +1734,37 @@ coverage grows.
   incremented immediately, an off-by-one that corrupted the advanced-index prefix-sum
   kernel (`tests/indexing.rs::three_d_non_consecutive_and_consecutive`). Also
   `put_data` must zero reused pool buffers (stale bytes).
-- **Perf (24 threads, `examples/rayon_bench.rs`).** Typed vs `INTERP`: matmul 512²
-  **27.2×**, elementwise 6.3×; typed vs the f64 R1 path: **~1.3×** matmul / ~1.1×
-  elementwise. The register machine removes the `f64` conversion and HashMap allocation but
-  still interprets per instruction, so the big win is deferred to R2.2 (fusion).
+- **Perf (24 threads, `examples/rayon_bench.rs`).** R2.2 typed vs `INTERP`: matmul 512²
+  **87×**, elementwise 7.5×; vs the f64 R1 path: **4.3×** matmul / ~1.3× elementwise.
+
+#### 9.8.2 R2.2 — hoisting the interpreter loop (DONE)
+
+callgrind on the R2.1 executor (N=128, single-thread, `RAYON_SERIAL=1 BENCH_SKIP_INTERP=1`)
+showed the cost was framing, not math: `exec_launch` 29%, **`malloc`/`free`/`calloc` ≈ 34%**,
+`memcpy` 9%, `read_mem` 8%, `get_i128` 6%. R2.2 removed those.
+
+- **No per-instruction allocations.** `exec_launch` used to `clone()` the `srcs` `Vec` and
+  build a filtered `real` `Vec` for *every instruction, every loop iteration*, and the hot
+  ops allocated too (`index_pairs` built two `Vec`s per call; `load` a `vec![u8; isz]` per
+  element; `store` cloned the value and pairs; `After` cloned the view vector). All of it
+  moved to a compile-time [`Plan`] (`real: Vec<Vec<usize>>` etc.) and to a **detach/reuse**
+  pattern backed by per-thread pools in `Scratch` (value buffers, and `Vec<Pair>` /
+  `Vec<SendMemView>` payloads).
+- **Dense dispatch.** A `Plan::kind: Vec<Kind>` resolves each instruction to a small dense
+  enum (`AluBinary`, `Load`, `IndexPairs`, …) at compile time, replacing the runtime
+  `match Ops` + `group::in_(ALU, …)` walk. Unsupported ops are rejected in `compile`, so the
+  executor never hits a panic path. `RANGE`'s matching `END` is precomputed
+  (`range_after`), removing the per-iteration O(n) scan.
+- **Per-launch scrub.** `has_if` / `has_alu_param` / `needs_warp` are precomputed so the
+  `masks` / `pvals` / `warp` tables are only built when the kernel actually uses them
+  (most kernels allocate none); `masks.is_empty()` now means "all true".
+- **Typed memory access.** `SendMemView::read_bytes`/`write_bytes` specialize widths
+  1/2/4/8 to a single unaligned load/store (they were `copy_nonoverlapping` → `memcpy`
+  calls, ~10% of instructions). `get_i128` fast-paths `INT32`; `index_pairs`/`index_data`
+  read `i32` indices directly.
+- **Measurement.** Deterministic callgrind `Ir` for the N=128 matmul+elementwise workload:
+  **6.96G → 2.24G**. Wall (24 threads, N=512): matmul **656 → 208 ms**, elementwise
+  **6.8 → 5.9 ms**; at N=1024 the typed matmul is **~87×** `INTERP`.
+- **What's left.** 65% of remaining retired instructions are the interpreter loop itself
+  (inlined dispatch + indexing + loads). Cutting that needs instruction-level fusion or
+  codegen (R2.3), which this std-only, no-JIT port deliberately avoids.

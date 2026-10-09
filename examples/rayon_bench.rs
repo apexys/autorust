@@ -6,6 +6,7 @@
 //! cargo run --release --example rayon_bench             # default N=256, iters=5
 //! N=512 ITERS=10 cargo run --release --example rayon_bench
 //! RAYON_SERIAL=1 cargo run --release --example rayon_bench   # single-threaded owned IR
+//! BENCH_SKIP_INTERP=1 cargo run --release --example rayon_bench   # skip the slow oracle
 //! ```
 //!
 //! Times a square matmul and an elementwise chain end-to-end (schedule+exec),
@@ -53,6 +54,12 @@ fn main() {
     let t0 = Instant::now();
     let (r_mm, r_ew) = time_device("RAYON", n, iters);
     let rayon_total = t0.elapsed().as_secs_f64();
+    if std::env::var("BENCH_SKIP_INTERP").is_ok() {
+        println!("                 matmul      elementwise");
+        println!("RAYON   {:>10.4} ms {:>10.4} ms", r_mm * 1e3, r_ew * 1e3);
+        println!("(skip INTERP; RAYON total incl. warmup/compile: {rayon_total:.2}s)");
+        return;
+    }
     let t0 = Instant::now();
     let (i_mm, i_ew) = time_device("INTERP", n, iters);
     let interp_total = t0.elapsed().as_secs_f64();

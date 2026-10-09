@@ -40,21 +40,49 @@ enum Slot {
 struct Scratch {
     slots: Vec<Slot>,
     pool: Vec<Bytes>,
+    /// recycled `Slot::P` / `Slot::M` payloads (one per launch per slot).
+    pool_p: Vec<Vec<Pair>>,
+    pool_m: Vec<Vec<SendMemView>>,
     owned: Vec<Box<[u8]>>,
 }
 
 impl Scratch {
     fn recycle(&mut self, n: usize) {
-        let Scratch { slots, pool, owned } = self;
+        let Scratch { slots, pool, pool_p, pool_m, owned } = self;
         for slot in slots.iter_mut() {
-            if let Slot::Data { buf, .. } = slot {
-                pool.push(std::mem::take(buf));
+            match slot {
+                Slot::Data { buf, .. } => pool.push(std::mem::take(buf)),
+                Slot::P(v) => {
+                    v.clear();
+                    pool_p.push(std::mem::take(v));
+                }
+                Slot::M(v) => {
+                    v.clear();
+                    pool_m.push(std::mem::take(v));
+                }
+                Slot::Empty => {}
             }
             *slot = Slot::Empty;
         }
         owned.clear();
         if slots.len() < n {
             slots.resize_with(n, || Slot::Empty);
+        }
+    }
+
+    #[inline]
+    fn take_p(&mut self, i: usize) -> Vec<Pair> {
+        match std::mem::replace(&mut self.slots[i], Slot::Empty) {
+            Slot::P(v) => v,
+            _ => self.pool_p.pop().unwrap_or_default(),
+        }
+    }
+
+    #[inline]
+    fn take_m(&mut self, i: usize) -> Vec<SendMemView> {
+        match std::mem::replace(&mut self.slots[i], Slot::Empty) {
+            Slot::M(v) => v,
+            _ => self.pool_m.pop().unwrap_or_default(),
         }
     }
 
@@ -73,6 +101,29 @@ impl Scratch {
         b.reset(nbytes);
         b.as_bytes_mut().fill(0);
         self.slots[i] = Slot::Data { buf: b, dt, lanes };
+    }
+
+    /// Detach the buffer at slot `i` (reusing its allocation) and size it for a
+    /// `lanes * wsize` value at `dt`. Leaves the slot `Empty` so the caller can
+    /// read other slots immutably while filling the returned buffer, then hand
+    /// it back with [`Scratch::set_data`]. This is the allocation-free path used
+    /// by the executor's hot ops; those ops fully overwrite the buffer, so it is
+    /// deliberately *not* zeroed.
+    fn take_sized(&mut self, i: usize, dt: DTypeId, lanes: usize, wsize: usize) -> Bytes {
+        let nbytes = lanes * wsize * dt.itemsize();
+        let mut b = match std::mem::replace(&mut self.slots[i], Slot::Empty) {
+            Slot::Data { buf, .. } => buf,
+            _ => self.pool.pop().unwrap_or_default(),
+        };
+        if b.nbytes() != nbytes {
+            b.reset(nbytes);
+        }
+        b
+    }
+
+    #[inline]
+    fn set_data(&mut self, i: usize, buf: Bytes, dt: DTypeId, lanes: usize) {
+        self.slots[i] = Slot::Data { buf, dt, lanes };
     }
 
     #[inline]
@@ -96,9 +147,160 @@ thread_local! {
     static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default());
 }
 
+/// Dense per-instruction dispatch tag, resolved once at compile time so the
+/// interpreter loop matches a small enum instead of walking `Ops` and group
+/// membership on every iteration.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    End,
+    Range,
+    If,
+    Endif,
+    After,
+    Noop,
+    Store,
+    ParamBuffer,
+    Special,
+    Const,
+    IndexData,
+    IndexPairs,
+    Load,
+    Cast,
+    Bitcast,
+    Stack,
+    AluUnary,
+    AluBinary,
+    AluTernary,
+    Unsupported,
+}
+
+/// Compile-time per-instruction metadata. Hoisting this out of the interpreter
+/// loop removes two `Vec` allocations *per instruction per iteration* (the
+/// `srcs` clone and the non-`VOID` filter) and the O(n) `END` scan that the
+/// RANGE branch used to do on every iteration.
+struct Plan {
+    /// Non-`VOID` source indices, per instruction.
+    real: Vec<Vec<usize>>,
+    /// For a RANGE instruction, the instruction to resume at once the loop
+    /// ends (its matching `END` index + 1). `usize::MAX` when not a RANGE.
+    range_after: Vec<usize>,
+    /// Precomputed dispatch tag.
+    kind: Vec<Kind>,
+    /// The kernel contains `IF` (so `masks` is needed).
+    has_if: bool,
+    /// The kernel reads ALU parameters (`pvals`).
+    has_alu_param: bool,
+    /// The kernel has a `SPECIAL lidxN` (so the `warp` table is needed).
+    needs_warp: bool,
+}
+
+impl Plan {
+    fn build(instrs: &[crate::runtime::ray_kernel::Instr]) -> Plan {
+        let n = instrs.len();
+        let real: Vec<Vec<usize>> = instrs
+            .iter()
+            .map(|ins| ins.srcs.iter().copied().filter(|&s| instrs[s].dt != dtype::VOID).collect())
+            .collect();
+        let mut range_after = vec![usize::MAX; n];
+        for (i, ins) in instrs.iter().enumerate() {
+            if ins.op == Ops::End
+                && ins.srcs.len() >= 2
+                && let r = ins.srcs[1]
+                && r < n
+                && instrs[r].op == Ops::Range
+            {
+                range_after[r] = i + 1;
+            }
+        }
+        // Static value kind: 0 = none, 1 = data, 2 = pairs, 3 = views. Determines
+        // whether an `INDEX` gathers from a register (`index_data`) or forms
+        // address pairs (`index_pairs`).
+        let mut vk = vec![0u8; n];
+        for i in 0..n {
+            let ins = &instrs[i];
+            vk[i] = match ins.op {
+                Ops::Param => {
+                    if ins.addrspace == Some(AddrSpace::Alu) {
+                        1
+                    } else {
+                        3
+                    }
+                }
+                Ops::Buffer => 3,
+                Ops::Const | Ops::Special | Ops::Range | Ops::Load | Ops::Cast | Ops::Bitcast | Ops::Stack => 1,
+                Ops::After => ins
+                    .srcs
+                    .iter()
+                    .copied()
+                    .find(|&s| instrs[s].dt != dtype::VOID)
+                    .map(|s| vk[s])
+                    .unwrap_or(0),
+                Ops::Index | Ops::Shrink => {
+                    let s0 = ins.srcs[0];
+                    if ins.addrspace_derived == Some(AddrSpace::Alu) || vk[s0] == 1 {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                _ if group::in_(group::ALU, ins.op) => 1,
+                _ => 0,
+            };
+        }
+        let kind: Vec<Kind> = instrs
+            .iter()
+            .enumerate()
+            .map(|(i, ins)| match ins.op {
+                Ops::End => Kind::End,
+                Ops::Range => Kind::Range,
+                Ops::If => Kind::If,
+                Ops::Endif => Kind::Endif,
+                Ops::After => Kind::After,
+                Ops::Barrier | Ops::Sink | Ops::Noop | Ops::Group => Kind::Noop,
+                Ops::Store => Kind::Store,
+                Ops::Param | Ops::Buffer => Kind::ParamBuffer,
+                Ops::Special => Kind::Special,
+                Ops::Const => Kind::Const,
+                Ops::Index | Ops::Shrink => {
+                    if vk[i] == 1 {
+                        Kind::IndexData
+                    } else {
+                        Kind::IndexPairs
+                    }
+                }
+                Ops::Load => Kind::Load,
+                Ops::Cast => Kind::Cast,
+                Ops::Bitcast => Kind::Bitcast,
+                Ops::Stack => Kind::Stack,
+                _ if group::in_(group::ALU, ins.op) => match real[i].len() {
+                    1 => Kind::AluUnary,
+                    2 => Kind::AluBinary,
+                    3 => Kind::AluTernary,
+                    _ => Kind::Unsupported,
+                },
+                _ => Kind::Unsupported,
+            })
+            .collect();
+        let has_if = instrs.iter().any(|ins| ins.op == Ops::If);
+        let has_alu_param = instrs
+            .iter()
+            .any(|ins| ins.op == Ops::Param && ins.addrspace == Some(AddrSpace::Alu));
+        let needs_warp = instrs.iter().any(|ins| {
+            ins.op == Ops::Special
+                && matches!(&ins.arg, Arg::Str(s) if s.starts_with('l'))
+        });
+        Plan { real, range_after, kind, has_if, has_alu_param, needs_warp }
+    }
+
+    fn is_supported(&self) -> bool {
+        self.kind.iter().all(|&k| k != Kind::Unsupported)
+    }
+}
+
 /// The typed executor.
 pub struct TypedKernel {
     kernel: RayKernel,
+    plan: Plan,
 }
 
 impl TypedKernel {
@@ -123,7 +325,11 @@ impl TypedKernel {
                 }
             }
         }
-        Some(TypedKernel { kernel })
+        let plan = Plan::build(kernel.instrs());
+        if !plan.is_supported() {
+            return None;
+        }
+        Some(TypedKernel { kernel, plan })
     }
 
     pub fn globals(&self) -> &[i64] {
@@ -169,30 +375,39 @@ impl TypedKernel {
 
     fn exec_launch(&self, gidx: [usize; 3], lsize: [usize; 3], views: &HashMap<i64, SendMemView>, vals: &[f64], sc: &mut Scratch) {
         let instrs = self.kernel.instrs();
+        let wsize = (lsize[0] * lsize[1] * lsize[2]).max(1);
         let mut warp: Vec<[usize; 3]> = Vec::new();
-        for c in 0..lsize[2] {
-            for b in 0..lsize[1] {
-                for a in 0..lsize[0] {
-                    warp.push([a, b, c]);
+        if self.plan.needs_warp {
+            for c in 0..lsize[2] {
+                for b in 0..lsize[1] {
+                    for a in 0..lsize[0] {
+                        warp.push([a, b, c]);
+                    }
                 }
             }
         }
-        let wsize = warp.len().max(1);
-        let mut pvals: VecDeque<f64> = vals.iter().cloned().collect();
-        let mut masks: Vec<Vec<bool>> = vec![vec![true; wsize]];
+        let mut pvals: VecDeque<f64> = if self.plan.has_alu_param {
+            vals.iter().cloned().collect()
+        } else {
+            VecDeque::new()
+        };
+        let mut masks: Vec<Vec<bool>> = if self.plan.has_if {
+            vec![vec![true; wsize]]
+        } else {
+            Vec::new()
+        };
 
         let isz = |dt: DTypeId| dt.itemsize();
         let op = |i: usize| instrs[i].op;
         let dt = |i: usize| instrs[i].dt;
-        let srcs_of = |i: usize| instrs[i].srcs.clone();
 
         let mut i = 0usize;
         while i < instrs.len() {
             let o = op(i);
-            let srcs = srcs_of(i);
-            let real: Vec<usize> = srcs.iter().cloned().filter(|&s| dt(s) != dtype::VOID).collect();
-            match o {
-                Ops::End => {
+            let srcs: &[usize] = &instrs[i].srcs;
+            let real: &[usize] = &self.plan.real[i];
+            match self.plan.kind[i] {
+                Kind::End => {
                     if srcs.len() == 3 {
                         let (cdt, _) = sc.meta(srcs[2]);
                         if rv::truthy(cdt, sc.data(srcs[2]), 0) {
@@ -204,7 +419,7 @@ impl TypedKernel {
                         continue;
                     }
                 }
-                Ops::Range => {
+                Kind::Range => {
                     if dt(i) == dtype::VOID {
                         i += 1;
                         continue;
@@ -217,12 +432,12 @@ impl TypedKernel {
                         rv::add_i128(dt(i), sc.data_mut(i), 1);
                         if rv::get_i128(dt(i), sc.data(i), 0) == ext as i128 {
                             sc.slots[i] = Slot::Empty;
-                            i = self.loop_end_index(&srcs, i) + 1;
+                            i = self.plan.range_after[i];
                             continue;
                         }
                     }
                 }
-                Ops::If => {
+                Kind::If => {
                     let (cdt, cl) = sc.meta(srcs[0]);
                     let n = cl * wsize;
                     let last = masks.last().unwrap().clone();
@@ -231,16 +446,15 @@ impl TypedKernel {
                         .collect();
                     masks.push(last.iter().zip(condv.iter().chain(std::iter::repeat(&condv[0]))).map(|(a, b)| *a && *b).collect());
                 }
-                Ops::Endif => {
+                Kind::Endif => {
                     masks.pop();
                 }
-                Ops::After => {
-                    let s = *real.first().expect("TGERR: typed AFTER");
-                    copy_slot(sc, i, s);
+                Kind::After => {
+                    copy_slot(sc, i, real[0]);
                 }
-                Ops::Barrier | Ops::Sink | Ops::Noop | Ops::Group => {}
-                Ops::Store => self.store(sc, i, &srcs, &real, wsize, &masks),
-                Ops::Param | Ops::Buffer => {
+                Kind::Noop => {}
+                Kind::Store => self.store(sc, i, srcs, real, wsize, &masks),
+                Kind::ParamBuffer => {
                     let is_alu = instrs[i].addrspace == Some(AddrSpace::Alu);
                     if is_alu && o == Ops::Param {
                         let v = pvals.pop_front().unwrap_or(0.0);
@@ -252,7 +466,10 @@ impl TypedKernel {
                             _ => panic!("TGERR: typed PARAM arg"),
                         };
                         let mv = *views.get(&slot).unwrap_or_else(|| panic!("TGERR: typed missing view slot {slot}"));
-                        sc.slots[i] = Slot::M(vec![mv; wsize]);
+                        let mut vs = sc.take_m(i);
+                        vs.clear();
+                        vs.resize(wsize, mv);
+                        sc.slots[i] = Slot::M(vs);
                     } else if instrs[i].addrspace == Some(AddrSpace::Reg) {
                         let (nel, s) = (instrs[i].numel, isz(dt(i)));
                         let vs: Vec<SendMemView> =
@@ -261,10 +478,13 @@ impl TypedKernel {
                     } else {
                         let (nel, s) = (instrs[i].numel, isz(dt(i)));
                         let mv = SendMemView::from_owned(vec![0u8; nel * s], s, nel, &mut sc.owned);
-                        sc.slots[i] = Slot::M(vec![mv; wsize]);
+                        let mut vs = sc.take_m(i);
+                        vs.clear();
+                        vs.resize(wsize, mv);
+                        sc.slots[i] = Slot::M(vs);
                     }
                 }
-                Ops::Special => {
+                Kind::Special => {
                     let name = match &instrs[i].arg {
                         Arg::Str(s) => s.clone(),
                         _ => panic!("TGERR: typed SPECIAL arg"),
@@ -279,7 +499,7 @@ impl TypedKernel {
                         }
                     }
                 }
-                Ops::Const => {
+                Kind::Const => {
                     sc.put_data(i, dt(i), 1, wsize);
                     match instrs[i].const_val.as_ref().expect("TGERR: typed const") {
                         ConstVal::Int(x) => rv::fill_i128(dt(i), sc.data_mut(i), *x),
@@ -288,74 +508,63 @@ impl TypedKernel {
                         other => panic!("TGERR: typed const {other:?}"),
                     }
                 }
-                Ops::Index | Ops::Shrink => {
-                    if instrs[srcs[0]].addrspace_derived == Some(AddrSpace::Alu) || matches!(sc.slots[srcs[0]], Slot::Data { .. }) {
-                        self.index_data(sc, i, &srcs, wsize);
-                    } else {
-                        self.index_pairs(sc, i, &srcs, wsize);
-                    }
-                }
-                Ops::Load => self.load(sc, i, &srcs, &real, wsize, &masks),
-                Ops::Cast => {
+                Kind::IndexData => self.index_data(sc, i, srcs, wsize),
+                Kind::IndexPairs => self.index_pairs(sc, i, srcs, wsize),
+                Kind::Load => self.load(sc, i, srcs, real, wsize, &masks),
+                Kind::Cast => {
                     let (sdt, lanes) = sc.meta(srcs[0]);
                     sc.put_data(i, dt(i), lanes, wsize);
                     let src = sc.data(srcs[0]).clone();
                     assert!(rv::cast(sdt, dt(i), sc.data_mut(i), &src), "TGERR: typed CAST failed");
                 }
-                Ops::Bitcast => {
+                Kind::Bitcast => {
                     let (sdt, lanes) = sc.meta(srcs[0]);
                     debug_assert_eq!(sdt.itemsize(), dt(i).itemsize());
                     sc.put_data(i, dt(i), lanes, wsize);
                     let src = sc.data(srcs[0]).as_bytes().to_vec();
                     sc.data_mut(i).copy_from(&src);
                 }
-                Ops::Stack => self.stack(sc, i, &srcs, &real, wsize),
-                _ if group::in_(group::ALU, o) => self.alu(sc, i, o, &srcs, &real, wsize),
-                other => panic!("TGERR: typed op {other:?} not ported"),
+                Kind::Stack => self.stack(sc, i, srcs, real, wsize),
+                Kind::AluUnary | Kind::AluBinary | Kind::AluTernary => self.alu(sc, i, o, srcs, real, wsize),
+                Kind::Unsupported => unreachable!("TGERR: typed unsupported op rejected at compile"),
             }
             i += 1;
         }
     }
 
-    fn store(&self, sc: &mut Scratch, i: usize, srcs: &[usize], real: &[usize], wsize: usize, masks: &[Vec<bool>]) {
+    fn store(&self, sc: &mut Scratch, _i: usize, srcs: &[usize], _real: &[usize], wsize: usize, masks: &[Vec<bool>]) {
         let instrs = self.kernel.instrs();
-        let gate = masks.last().unwrap();
-        let store_n = instrs[i].numel;
+        let gate = masks.last();
         let (val_dt, val_lanes) = sc.meta(srcs[1]);
         let store_dt = instrs[instrs[srcs[0]].srcs[0]].dt;
         let val_isz = val_dt.itemsize();
-        let store_isz = store_dt.itemsize();
-        assert_eq!(val_isz, store_isz, "TGERR: typed store dtype mismatch");
+        assert_eq!(val_isz, store_dt.itemsize(), "TGERR: typed store dtype mismatch");
         let lanes = val_lanes.max(1);
-        let val = sc.data(srcs[1]).as_bytes().to_vec();
-        let gate_at = |t: usize| gate[t.min(gate.len() - 1)];
+        let vb = sc.data(srcs[1]).as_bytes();
+        let gate_at = |t: usize| gate.is_none_or(|g| g[t.min(g.len() - 1)]);
 
         if instrs[srcs[0]].op == Ops::Stack && val_lanes == 1 {
-            let dest_srcs = instrs[srcs[0]].srcs.clone();
+            let dest_srcs = &instrs[srcs[0]].srcs;
             for j in 0..lanes {
                 let dj = dest_srcs.get(j).copied().unwrap_or(dest_srcs[0]);
-                let dpairs: Vec<Pair> = match &sc.slots[dj] {
-                    Slot::P(p) => p.clone(),
-                    _ => continue,
-                };
-                for (t, (m, oo)) in dpairs.iter().enumerate() {
-                    if gate_at(t) {
-                        write_mem(m, *oo, val_elem(&val, wsize, val_isz, j, t), val_isz);
+                if let Slot::P(dp) = &sc.slots[dj] {
+                    for (t, (m, oo)) in dp.iter().enumerate() {
+                        if gate_at(t) {
+                            write_mem(m, *oo, val_elem(vb, wsize, val_isz, j, t), val_isz);
+                        }
                     }
                 }
             }
             return;
         }
-        let _ = real;
-        let _ = store_n;
-        let pairs: Vec<Pair> = match &sc.slots[srcs[0]] {
-            Slot::P(p) => p.clone(),
+        let pairs: &[Pair] = match &sc.slots[srcs[0]] {
+            Slot::P(p) => p,
             _ => panic!("TGERR: typed store src not pairs"),
         };
         for j in 0..lanes {
             for (t, (m, oo)) in pairs.iter().enumerate() {
                 if gate_at(t) {
-                    write_mem(m, *oo + j, val_elem(&val, wsize, val_isz, j, t), val_isz);
+                    write_mem(m, *oo + j, val_elem(vb, wsize, val_isz, j, t), val_isz);
                 }
             }
         }
@@ -365,38 +574,64 @@ impl TypedKernel {
         let (a_dt, a_lanes) = sc.meta(srcs[0]);
         let (b_dt, b_lanes) = sc.meta(srcs[1]);
         let isz = a_dt.itemsize();
-        let src = sc.data(srcs[0]).as_bytes().to_vec();
-        let idx: Vec<usize> = (0..wsize)
-            .map(|t| rv::get_i128(b_dt, sc.data(srcs[1]), lane_elem(b_lanes, wsize, t)).max(0) as usize)
-            .collect();
-        sc.put_data(i, a_dt, 1, wsize);
-        for (t, &ix) in idx.iter().enumerate() {
-            let alane = if a_lanes > 1 { ix.min(a_lanes - 1) } else { 0 };
-            let so = (alane * wsize + t) * isz;
-            let d = t * isz;
-            sc.data_mut(i).as_bytes_mut()[d..d + isz].copy_from_slice(&src[so..so + isz]);
+        let n_b = sc.data(srcs[1]).nbytes() / b_dt.itemsize();
+        let mut dest = sc.take_sized(i, a_dt, 1, wsize);
+        {
+            let sb = sc.data(srcs[0]).as_bytes();
+            let ib: &Bytes = sc.data(srcs[1]);
+            let ix32: Option<&[i32]> = if b_dt == dtype::INT32 { Some(ib.as_slice::<i32>()) } else { None };
+            let db = dest.as_bytes_mut();
+            for t in 0..wsize {
+                let be = lane_elem(b_lanes, wsize, t).min(n_b.saturating_sub(1));
+                let ix = match ix32 {
+                    Some(xs) => xs[be] as i128,
+                    None => rv::get_i128(b_dt, ib, be),
+                };
+                let alane = if a_lanes > 1 { (ix.max(0) as usize).min(a_lanes - 1) } else { 0 };
+                let so = (alane * wsize + t) * isz;
+                db[t * isz..t * isz + isz].copy_from_slice(&sb[so..so + isz]);
+            }
         }
+        sc.set_data(i, dest, a_dt, 1);
     }
 
     fn index_pairs(&self, sc: &mut Scratch, i: usize, srcs: &[usize], wsize: usize) {
         let instrs = self.kernel.instrs();
-        // (M|P) indexed by a scalar or per-thread offset value.
-        let (ms, base): (Vec<SendMemView>, Vec<usize>) = match &sc.slots[srcs[0]] {
-            Slot::M(m) => (m.clone(), vec![0; m.len()]),
-            Slot::P(p) => (p.iter().map(|(m, _)| *m).collect(), p.iter().map(|(_, o)| *o).collect()),
-            _ => panic!("TGERR: typed index_pairs src0"),
-        };
+        // (M|P) indexed by a scalar or per-thread offset value. Detach the
+        // destination so its `Vec` capacity is reused and the sources can be
+        // borrowed immutably without any cloning.
         let b_dt = instrs[srcs[1]].dt;
-        let b_lanes = match &sc.slots[srcs[1]] {
-            Slot::Data { lanes, .. } => *lanes,
-            _ => 1,
+        let (b_lanes, n_b) = match &sc.slots[srcs[1]] {
+            Slot::Data { lanes, buf, .. } => (*lanes, buf.nbytes() / b_dt.itemsize()),
+            _ => (1, 0),
         };
-        let n = sc.data(srcs[1]).nbytes() / b_dt.itemsize();
-        let mut ret = Vec::with_capacity(ms.len());
-        for (t, m) in ms.iter().enumerate() {
-            let be = lane_elem(b_lanes, wsize, t);
-            let o = rv::get_i128(b_dt, sc.data(srcs[1]), be.min(n.saturating_sub(1))).max(0) as usize;
-            ret.push((*m, base[t.min(base.len() - 1)] + o));
+        let mut ret = sc.take_p(i);
+        ret.clear();
+        {
+            let ib: &Bytes = sc.data(srcs[1]);
+            // Fast path for the dominant 32-bit signed index dtype.
+            let ix32: Option<&[i32]> = if b_dt == dtype::INT32 { Some(ib.as_slice::<i32>()) } else { None };
+            let read_idx = |be: usize| -> i128 {
+                match ix32 {
+                    Some(xs) => xs[be] as i128,
+                    None => rv::get_i128(b_dt, ib, be),
+                }
+            };
+            match &sc.slots[srcs[0]] {
+                Slot::M(ms) => {
+                    for (t, m) in ms.iter().enumerate() {
+                        let be = lane_elem(b_lanes, wsize, t).min(n_b.saturating_sub(1));
+                        ret.push((*m, read_idx(be).max(0) as usize));
+                    }
+                }
+                Slot::P(ps) => {
+                    for (t, (m, base)) in ps.iter().enumerate() {
+                        let be = lane_elem(b_lanes, wsize, t).min(n_b.saturating_sub(1));
+                        ret.push((*m, base + read_idx(be).max(0) as usize));
+                    }
+                }
+                _ => panic!("TGERR: typed index_pairs src0"),
+            }
         }
         sc.slots[i] = Slot::P(ret);
     }
@@ -406,60 +641,48 @@ impl TypedKernel {
         let load_n = instrs[i].numel.max(1);
         let dtv = instrs[i].dt;
         let isz = dtv.itemsize();
-        let pairs: Vec<Pair> = match &sc.slots[srcs[0]] {
-            Slot::P(p) => p.clone(),
+        let gated = real.len() >= 3;
+        let em = masks.last();
+        let mut dest = sc.take_sized(i, dtv, load_n, wsize);
+        let pairs: &[Pair] = match &sc.slots[srcs[0]] {
+            Slot::P(p) => p,
             _ => panic!("TGERR: typed load src not pairs"),
         };
-        let gated = real.len() >= 3;
-        let alt = if gated { sc.data(srcs[1]).as_bytes().to_vec() } else { Vec::new() };
-        let alt_dt = if gated { instrs[srcs[1]].dt } else { dtv };
-        let gate_dt = if gated { instrs[srcs[2]].dt } else { dtype::BOOL };
-        let gate_lanes = if gated {
-            match &sc.slots[srcs[2]] {
-                Slot::Data { lanes, .. } => *lanes,
-                _ => 1,
+        if !gated {
+            let db = dest.as_bytes_mut();
+            for j in 0..load_n {
+                for (t, (m, oo)) in pairs.iter().enumerate() {
+                    let d = (j * wsize + t) * isz;
+                    if em.is_none_or(|e| e[t.min(e.len() - 1)]) {
+                        read_mem(m, *oo + j, dtv, &mut db[d..d + isz]);
+                    } else {
+                        db[d..d + isz].fill(0);
+                    }
+                }
             }
         } else {
-            1
-        };
-        let gate_n = if gated { sc.data(srcs[2]).nbytes() / gate_dt.itemsize() } else { 0 };
-        let gatev: Vec<bool> = if gated {
-            (0..wsize)
-                .map(|t| rv::truthy(gate_dt, sc.data(srcs[2]), lane_elem(gate_lanes, wsize, t).min(gate_n.saturating_sub(1))))
-                .collect()
-        } else {
-            vec![true; wsize]
-        };
-        let em = masks.last().unwrap().clone();
-        let alt_lanes = if gated {
-            match &sc.slots[srcs[1]] {
-                Slot::Data { lanes, .. } => *lanes,
-                _ => 1,
-            }
-        } else {
-            1
-        };
-        let alt_n = if gated { alt.len() / alt_dt.itemsize() } else { 0 };
-
-        sc.put_data(i, dtv, load_n, wsize);
-        for j in 0..load_n {
-            for (t, (m, oo)) in pairs.iter().enumerate() {
-                let valid = em[t.min(em.len() - 1)] && gatev[t.min(gatev.len() - 1)];
-                let d = (j * wsize + t) * isz;
-                if valid {
-                    let mut tmp = vec![0u8; isz];
-                    read_mem(m, *oo + j, dtv, &mut tmp);
-                    sc.data_mut(i).as_bytes_mut()[d..d + isz].copy_from_slice(&tmp);
-                } else if gated {
-                    // alt is read with the f64 `tovec` convention (lane t, thread 0).
-                    let mut tmp = vec![0u8; isz];
-                    read_elem_conv(&alt, alt_dt, lane_elem(alt_lanes, wsize, t).min(alt_n.saturating_sub(1)), dtv, &mut tmp);
-                    sc.data_mut(i).as_bytes_mut()[d..d + isz].copy_from_slice(&tmp);
-                } else {
-                    sc.data_mut(i).as_bytes_mut()[d..d + isz].fill(0);
+            let alt: &Bytes = sc.data(srcs[1]);
+            let (alt_dt, alt_lanes) = sc.meta(srcs[1]);
+            let alt_n = alt.nbytes() / alt_dt.itemsize();
+            let gate: &Bytes = sc.data(srcs[2]);
+            let (gate_dt, gate_lanes) = sc.meta(srcs[2]);
+            let gate_n = gate.nbytes() / gate_dt.itemsize();
+            let db = dest.as_bytes_mut();
+            for j in 0..load_n {
+                for (t, (m, oo)) in pairs.iter().enumerate() {
+                    let d = (j * wsize + t) * isz;
+                    let valid = em.is_none_or(|e| e[t.min(e.len() - 1)])
+                        && rv::truthy(gate_dt, gate, lane_elem(gate_lanes, wsize, t).min(gate_n.saturating_sub(1)));
+                    if valid {
+                        read_mem(m, *oo + j, dtv, &mut db[d..d + isz]);
+                    } else {
+                        let be = lane_elem(alt_lanes, wsize, t).min(alt_n.saturating_sub(1));
+                        read_elem_conv(alt.as_bytes(), alt_dt, be, dtv, &mut db[d..d + isz]);
+                    }
                 }
             }
         }
+        sc.set_data(i, dest, dtv, load_n);
     }
 
     fn stack(&self, sc: &mut Scratch, i: usize, srcs: &[usize], real: &[usize], wsize: usize) {
@@ -516,67 +739,46 @@ impl TypedKernel {
             let (b_dt, bl) = sc.meta(srcs[1]);
             let (c_dt, cl) = sc.meta(srcs[2]);
             let lanes = al.max(bl).max(cl);
-            sc.put_data(i, dtv, lanes, wsize);
-            let parts = sc.slots.get_disjoint_mut([i, srcs[0], srcs[1], srcs[2]]);
-            if let Ok([d, s0, s1, s2]) = parts {
-                let d = slot_buf_mut(d);
-                let s0b = slot_buf(s0);
-                let s1b = slot_buf(s1);
-                let s2b = slot_buf(s2);
-                if opv == Ops::Where {
-                    let fast = a_dt == dtype::BOOL && b_dt == dtv && c_dt == dtv && al == lanes && bl == lanes && cl == lanes;
-                    if fast {
-                        assert!(rv::alu_where(dtv, d, s0b, s1b, s2b), "TGERR: typed WHERE failed");
-                    } else {
-                        let cond = broadcast(&coerce(s0b, a_dt, dtype::BOOL), al, lanes, wsize);
-                        let b = broadcast(&coerce(s1b, b_dt, dtv), bl, lanes, wsize);
-                        let c = broadcast(&coerce(s2b, c_dt, dtv), cl, lanes, wsize);
-                        assert!(rv::alu_where(dtv, d, &cond, &b, &c), "TGERR: typed WHERE failed");
-                    }
+            let mut dest = sc.take_sized(i, dtv, lanes, wsize);
+            let s0b = sc.data(srcs[0]);
+            let s1b = sc.data(srcs[1]);
+            let s2b = sc.data(srcs[2]);
+            if opv == Ops::Where {
+                let fast = a_dt == dtype::BOOL && b_dt == dtv && c_dt == dtv && al == lanes && bl == lanes && cl == lanes;
+                if fast {
+                    assert!(rv::alu_where(dtv, &mut dest, s0b, s1b, s2b), "TGERR: typed WHERE failed");
                 } else {
-                    let fast = a_dt == dtv && b_dt == dtv && c_dt == dtv && al == lanes && bl == lanes && cl == lanes;
-                    if fast {
-                        assert!(rv::alu_mulacc(dtv, d, s0b, s1b, s2b), "TGERR: typed MULACC failed");
-                    } else {
-                        let a = broadcast(&coerce(s0b, a_dt, dtv), al, lanes, wsize);
-                        let b = broadcast(&coerce(s1b, b_dt, dtv), bl, lanes, wsize);
-                        let c = broadcast(&coerce(s2b, c_dt, dtv), cl, lanes, wsize);
-                        assert!(rv::alu_mulacc(dtv, d, &a, &b, &c), "TGERR: typed MULACC failed");
-                    }
+                    let cond = broadcast(&coerce(s0b, a_dt, dtype::BOOL), al, lanes, wsize);
+                    let b = broadcast(&coerce(s1b, b_dt, dtv), bl, lanes, wsize);
+                    let c = broadcast(&coerce(s2b, c_dt, dtv), cl, lanes, wsize);
+                    assert!(rv::alu_where(dtv, &mut dest, &cond, &b, &c), "TGERR: typed WHERE failed");
                 }
             } else {
-                // duplicate source operands (e.g. `a*a`): clone them.
-                let s0b = sc.data(srcs[0]).clone();
-                let s1b = sc.data(srcs[1]).clone();
-                let s2b = sc.data(srcs[2]).clone();
-                let d = sc.data_mut(i);
-                if opv == Ops::Where {
-                    let cond = broadcast(&coerce(&s0b, a_dt, dtype::BOOL), al, lanes, wsize);
-                    let b = broadcast(&coerce(&s1b, b_dt, dtv), bl, lanes, wsize);
-                    let c = broadcast(&coerce(&s2b, c_dt, dtv), cl, lanes, wsize);
-                    assert!(rv::alu_where(dtv, d, &cond, &b, &c), "TGERR: typed WHERE failed");
+                let fast = a_dt == dtv && b_dt == dtv && c_dt == dtv && al == lanes && bl == lanes && cl == lanes;
+                if fast {
+                    assert!(rv::alu_mulacc(dtv, &mut dest, s0b, s1b, s2b), "TGERR: typed MULACC failed");
                 } else {
-                    let a = broadcast(&coerce(&s0b, a_dt, dtv), al, lanes, wsize);
-                    let b = broadcast(&coerce(&s1b, b_dt, dtv), bl, lanes, wsize);
-                    let c = broadcast(&coerce(&s2b, c_dt, dtv), cl, lanes, wsize);
-                    assert!(rv::alu_mulacc(dtv, d, &a, &b, &c), "TGERR: typed MULACC failed");
+                    let a = broadcast(&coerce(s0b, a_dt, dtv), al, lanes, wsize);
+                    let b = broadcast(&coerce(s1b, b_dt, dtv), bl, lanes, wsize);
+                    let c = broadcast(&coerce(s2b, c_dt, dtv), cl, lanes, wsize);
+                    assert!(rv::alu_mulacc(dtv, &mut dest, &a, &b, &c), "TGERR: typed MULACC failed");
                 }
             }
+            sc.set_data(i, dest, dtv, lanes);
             return;
         }
         if n == 1 {
             let dtv = instrs[i].dt;
             let (s_dt, sl) = sc.meta(srcs[0]);
-            sc.put_data(i, dtv, sl, wsize);
-            let [d, s0] = sc.slots.get_disjoint_mut([i, srcs[0]]).unwrap();
-            let d = slot_buf_mut(d);
-            let s0b = slot_buf(s0);
+            let mut dest = sc.take_sized(i, dtv, sl, wsize);
+            let s0b = sc.data(srcs[0]);
             if s_dt == dtv {
-                assert!(rv::alu_unary(opv, dtv, d, s0b), "TGERR: typed unary ALU {opv:?} failed");
+                assert!(rv::alu_unary(opv, dtv, &mut dest, s0b), "TGERR: typed unary ALU {opv:?} failed");
             } else {
                 let a = coerce(s0b, s_dt, dtv);
-                assert!(rv::alu_unary(opv, dtv, d, &a), "TGERR: typed unary ALU {opv:?} failed");
+                assert!(rv::alu_unary(opv, dtv, &mut dest, &a), "TGERR: typed unary ALU {opv:?} failed");
             }
+            sc.set_data(i, dest, dtv, sl);
             return;
         }
         let out_dt = instrs[i].dt;
@@ -584,36 +786,17 @@ impl TypedKernel {
         let (a_dt, al) = sc.meta(srcs[0]);
         let (b_dt, bl) = sc.meta(srcs[1]);
         let lanes = al.max(bl);
-        sc.put_data(i, out_dt, lanes, wsize);
-        let parts = sc.slots.get_disjoint_mut([i, srcs[0], srcs[1]]);
-        if let Ok([d, s0, s1]) = parts {
-            let d = slot_buf_mut(d);
-            let s0b = slot_buf(s0);
-            let s1b = slot_buf(s1);
-            if a_dt == op_dt && b_dt == op_dt && al == lanes && bl == lanes {
-                assert!(rv::alu_binary(opv, op_dt, d, s0b, s1b), "TGERR: typed binary ALU {opv:?} failed");
-            } else {
-                let a = broadcast(&coerce(s0b, a_dt, op_dt), al, lanes, wsize);
-                let b = broadcast(&coerce(s1b, b_dt, op_dt), bl, lanes, wsize);
-                assert!(rv::alu_binary(opv, op_dt, d, &a, &b), "TGERR: typed binary ALU {opv:?} failed");
-            }
+        let mut dest = sc.take_sized(i, out_dt, lanes, wsize);
+        let s0b = sc.data(srcs[0]);
+        let s1b = sc.data(srcs[1]);
+        if a_dt == op_dt && b_dt == op_dt && al == lanes && bl == lanes {
+            assert!(rv::alu_binary(opv, op_dt, &mut dest, s0b, s1b), "TGERR: typed binary ALU {opv:?} failed");
         } else {
-            // duplicate source operands (e.g. `a*a`): clone them.
-            let s0b = sc.data(srcs[0]).clone();
-            let s1b = sc.data(srcs[1]).clone();
-            let d = sc.data_mut(i);
-            let a = broadcast(&coerce(&s0b, a_dt, op_dt), al, lanes, wsize);
-            let b = broadcast(&coerce(&s1b, b_dt, op_dt), bl, lanes, wsize);
-            assert!(rv::alu_binary(opv, op_dt, d, &a, &b), "TGERR: typed binary ALU {opv:?} failed");
+            let a = broadcast(&coerce(s0b, a_dt, op_dt), al, lanes, wsize);
+            let b = broadcast(&coerce(s1b, b_dt, op_dt), bl, lanes, wsize);
+            assert!(rv::alu_binary(opv, op_dt, &mut dest, &a, &b), "TGERR: typed binary ALU {opv:?} failed");
         }
-    }
-
-    fn loop_end_index(&self, srcs: &[usize], range: usize) -> usize {
-        self.kernel
-            .instrs()
-            .iter()
-            .position(|x| x.op == Ops::End && x.srcs.len() >= 2 && x.srcs[1] == range)
-            .unwrap_or_else(|| panic!("TGERR: typed missing END for RANGE (range {range}, srcs {srcs:?})"))
+        sc.set_data(i, dest, out_dt, lanes);
     }
 }
 
@@ -627,38 +810,35 @@ impl Scratch {
 }
 
 fn copy_slot(sc: &mut Scratch, dst: usize, src: usize) {
-    match &sc.slots[src] {
-        Slot::Data { dt, lanes, buf } => {
-            let (dt, lanes) = (*dt, *lanes);
-            let bytes = buf.as_bytes().to_vec();
-            let items = lanes * dt.itemsize();
-            let wsize = (bytes.len() / items).max(1);
-            sc.put_data(dst, dt, lanes, wsize);
-            sc.data_mut(dst).copy_from(&bytes);
+    if matches!(sc.slots[src], Slot::P(_)) {
+        let mut v = sc.take_p(dst);
+        v.clear();
+        if let Slot::P(p) = &sc.slots[src] {
+            v.extend_from_slice(p);
         }
-        Slot::P(p) => {
-            let p = p.clone();
-            sc.slots[dst] = Slot::P(p);
+        sc.slots[dst] = Slot::P(v);
+    } else if matches!(sc.slots[src], Slot::M(_)) {
+        let mut v = sc.take_m(dst);
+        v.clear();
+        if let Slot::M(m) = &sc.slots[src] {
+            v.extend_from_slice(m);
         }
-        Slot::M(m) => {
-            let m = m.clone();
-            sc.slots[dst] = Slot::M(m);
+        sc.slots[dst] = Slot::M(v);
+    } else {
+        let (dt, lanes, nbytes) = match &sc.slots[src] {
+            Slot::Data { dt, lanes, buf } => (*dt, *lanes, buf.nbytes()),
+            Slot::Empty => panic!("TGERR: typed copy from empty"),
+            _ => unreachable!(),
+        };
+        let mut b = match std::mem::replace(&mut sc.slots[dst], Slot::Empty) {
+            Slot::Data { buf, .. } => buf,
+            _ => Bytes::default(),
+        };
+        if b.nbytes() != nbytes {
+            b.reset(nbytes);
         }
-        Slot::Empty => panic!("TGERR: typed copy from empty"),
-    }
-}
-
-fn slot_buf(s: &Slot) -> &Bytes {
-    match s {
-        Slot::Data { buf, .. } => buf,
-        _ => panic!("TGERR: typed expected data slot"),
-    }
-}
-
-fn slot_buf_mut(s: &mut Slot) -> &mut Bytes {
-    match s {
-        Slot::Data { buf, .. } => buf,
-        _ => panic!("TGERR: typed expected data slot"),
+        b.copy_from(sc.data(src).as_bytes());
+        sc.slots[dst] = Slot::Data { buf: b, dt, lanes };
     }
 }
 
@@ -717,6 +897,7 @@ fn read_elem_conv(buf: &[u8], dt: DTypeId, elem: usize, out_dt: DTypeId, out: &m
     read_slice_conv(&buf[off..off + isz], dt, out_dt, out);
 }
 
+#[inline(always)]
 fn read_mem(m: &SendMemView, idx: usize, dt: DTypeId, out: &mut [u8]) {
     let isz = dt.itemsize();
     if m.elemsize() == isz {
@@ -729,6 +910,7 @@ fn read_mem(m: &SendMemView, idx: usize, dt: DTypeId, out: &mut [u8]) {
     }
 }
 
+#[inline(always)]
 fn write_mem(m: &SendMemView, idx: usize, src: &[u8], isz: usize) {
     if m.elemsize() == isz {
         m.write_bytes(idx, &src[..isz]);

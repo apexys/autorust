@@ -620,8 +620,13 @@ fn set_i128_impl<T: Prim>(b: &mut Bytes, i: usize, v: i128) {
     b.as_slice_mut::<T>()[i] = T::from_i128(v);
 }
 
-/// Element `i` as `i128` (index/loop values).
+/// Element `i` as `i128` (index/loop values). The 32-bit signed case (the
+/// dominant index dtype) is fast-pathed.
+#[inline]
 pub fn get_i128(dt: DTypeId, b: &Bytes, i: usize) -> i128 {
+    if dt == dtype::INT32 {
+        return b.as_slice::<i32>()[i] as i128;
+    }
     dispatch!(dt, get_i128_impl, b, i).expect("TGERR: typed get_i128 dtype")
 }
 
