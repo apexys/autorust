@@ -83,9 +83,17 @@ impl Renderer {
         }
     }
 
+    /// `ops_rayon` (`RAYON`) — the multithreaded CPU backend facts. For now the
+    /// same capabilities as the interpreter (it composes the interpreter until
+    /// the range-driven fast path lands, §9.8); only the device label differs.
+    pub fn rayon() -> Renderer {
+        let mut r = Renderer::cpu_interp();
+        r.device = "RAYON".to_string();
+        r
+    }
+
     /// `ClangRenderer` — has_local=False, global_max=(NUM_CPU_THREADS, 0, 0).
-    pub fn clang() -> Renderer {
-        Renderer {
+    pub fn clang() -> Renderer {        Renderer {
             device: "CPU".to_string(),
             has_local: false,
             has_shared: true,

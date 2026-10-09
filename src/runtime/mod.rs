@@ -6,6 +6,8 @@
 pub mod buffer;
 pub mod device;
 pub mod interp;
+#[cfg(feature = "backend_rayon")]
+pub mod ops_rayon;
 pub mod ops_interp;
 #[cfg(feature = "backend_cl")]
 pub mod ops_cl;

@@ -329,6 +329,14 @@ impl UopRenderer for CudaUopRenderer {
 
 // ---------------- device + registration ----------------
 
+/// Whether a CUDA device is present, without opening a device singleton and
+/// without panicking (the default-device probe). `CudaContext::new` dynamically
+/// loads `libcuda`/`libcudart` and calls `cuInit`; failure (no driver/device or
+/// no lib) returns `false` rather than panicking.
+pub fn available() -> bool {
+    cudarc::driver::CudaContext::new(0).is_ok()
+}
+
 /// The `CUDADevice` composition + `Device._DeviceMap["CUDA"]` assignment.
 pub fn register() {
     let factory: crate::runtime::device::DeviceFactory = Rc::new(|| {

@@ -241,10 +241,25 @@ pub fn shape_from(args: impl super::ShapeArg) -> Shape {
 // **** constructors from host data (`Tensor.__init__` list/bytes paths -> `UOp._frompy`) ****
 
 /// Python `Device.DEFAULT` (device.py): env-configurable, else the best backend
-/// actually available. There is no "NV" backend ported, so the fallback is the
-/// interpreter (always present) — or the OpenCL backend when it is compiled in
-/// (`backend_cl`) and a device is present.
+/// actually available. Selection priority mirrors tinygrad: **CUDA → CL → RAYON
+/// → INTERP**. `ops_interp` is always compiled; `RAYON` is compiled by default
+/// (`backend_rayon`); `CL`/`CUDA` are opt-in features and, when present and a
+/// device is available, win over `RAYON`. There is no ported `NV` backend.
 pub static DEFAULT_DEVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The device-selection priority as a pure function of availability, so it can
+/// be unit-tested without touching the environment or a GPU.
+pub fn pick_device(cuda_available: bool, cl_available: bool) -> &'static str {
+    if cuda_available {
+        "CUDA"
+    } else if cl_available {
+        "CL"
+    } else if cfg!(feature = "backend_rayon") {
+        "RAYON"
+    } else {
+        "INTERP"
+    }
+}
 
 pub fn default_device() -> String {
     DEFAULT_DEVICE
@@ -252,11 +267,15 @@ pub fn default_device() -> String {
             if let Ok(dev) = std::env::var("DEFAULT_DEVICE") {
                 return dev;
             }
+            #[cfg(feature = "backend_cuda")]
+            let cuda = crate::runtime::ops_cuda::available();
+            #[cfg(not(feature = "backend_cuda"))]
+            let cuda = false;
             #[cfg(feature = "backend_cl")]
-            if crate::runtime::ops_cl::available() {
-                return "CL".to_string();
-            }
-            "INTERP".to_string()
+            let cl = crate::runtime::ops_cl::available();
+            #[cfg(not(feature = "backend_cl"))]
+            let cl = false;
+            pick_device(cuda, cl).to_string()
         })
         .clone()
 }

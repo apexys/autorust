@@ -274,6 +274,23 @@ pub fn canonicalize_device_name(device: &str) -> String {
     }
 }
 
+/// Whether the named device executes on the `f64`-lane scalar interpreter
+/// (`ops_interp`) rather than a dtype-native backend. The interpreter cannot
+/// represent the `uint64` Threefry pack exactly, so `rand`/`randn` use the host
+/// evaluator on these devices (§8.23).
+///
+/// `RAYON` is interpreter-backed until its dtype-native range IR lands
+/// (`CURRENT_STATE.md` §9.8, R2); flip it here when that happens.
+pub fn is_interp_engine(device: &str) -> bool {
+    match canonicalize_device_name(device).as_str() {
+        "INTERP" | "PYTHON" | "CPU" => true,
+        #[cfg(feature = "backend_rayon")]
+        "RAYON" => true,
+        _ => false,
+    }
+}
+
+
 pub type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
 
 thread_local! {
@@ -294,6 +311,8 @@ fn ensure_builtins() {
         if !b.get() {
             b.set(true);
             super::ops_interp::register();
+            #[cfg(feature = "backend_rayon")]
+            super::ops_rayon::register();
             #[cfg(feature = "backend_cl")]
             super::ops_cl::register();
             #[cfg(feature = "backend_cuda")]

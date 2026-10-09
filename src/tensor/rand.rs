@@ -399,7 +399,7 @@ fn rand_host(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, devic
 /// where `uint64` is exact; the host evaluator on INTERP (see [`rand_host`]).
 pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
     let dev = creation::canonicalize_device(device);
-    if dev == "INTERP" {
+    if crate::runtime::device::is_interp_engine(&dev) {
         rand_host(ctx, shape, dtype_opt, Some(&dev))
     } else {
         rand_graph(ctx, shape, dtype_opt, Some(&dev))
@@ -489,7 +489,7 @@ fn randn_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, dev
 /// `Tensor.randn` (rand.py:106): graph route on hardware, host on INTERP.
 pub fn randn(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
     let dev = creation::canonicalize_device(device);
-    if dev == "INTERP" {
+    if crate::runtime::device::is_interp_engine(&dev) {
         randn_host(ctx, shape, dtype_opt, Some(&dev))
     } else {
         randn_graph(ctx, shape, dtype_opt, Some(&dev))

@@ -15,9 +15,14 @@ name = "cuda_smoke"
 required-features = ["backend_cuda"]
 
 [features]
-default = ["capi"]
+# `ops_interp` is always compiled (the faithful reference interpreter). The
+# default set adds the multithreaded CPU backend `ops_rayon`; `backend_cl` and
+# `backend_cuda` are opt-in and, when compiled, take selection priority.
+default = ["capi", "backend_rayon"]
 # C ABI loaded by the Python ctypes bridge (py/bridge.py).
 capi = []
+# Multithreaded CPU backend (device "RAYON"), parallelized with `rayon`.
+backend_rayon = ["dep:rayon"]
 backend_cl = ["dep:opencl3"]
 # CUDA backend (operations/codegen on the CUDA driver API via `cudarc`).
 backend_cuda = ["dep:cudarc"]
@@ -30,6 +35,8 @@ dump = []
 
 [dependencies]
 nanoserde = "0.2.1"
+# Multithreaded CPU backend (`backend_rayon`); work-stealing parallelism.
+rayon = { version = "1.12", optional = true }
 opencl3 = { version = "0.9", optional = true }
 # CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
 # needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.

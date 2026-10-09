@@ -20,9 +20,12 @@ Merged from the former `PLAN.md` / `CURRENT_STATE.md` / `NNImpl.md`.
   (`Renderer`, `Compiler`, `Allocator`, `Program`, `Compiled` as Rust traits, plus cstyle
   rendering and grid-dim codegen) so an OpenCL backend is a pure additive impl. Nothing
   below the trait boundary may assume CPU.
-- **Dependency policy: std-only Rust + nanoserde.** No PyO3/maturin, no serde/syn
+- **Dependency policy: std-only Rust + nanoserde** for the core. No PyO3/maturin, no serde/syn
   ecosystem, no libc/sha2 crates; nanoserde (single micro-crate) for the JSON graph
-  interchange. Two FFI faces only: (a) plain cargo binaries for batch oracle work over
+  interchange. **Optional backend deps are the one sanctioned exception**, each behind its
+  own feature: `opencl3` (`backend_cl`), `cudarc` (`backend_cuda`), and `rayon`
+  (`backend_rayon`, the multithreaded CPU backend, §9.8) — `--no-default-features` stays
+  std-only. Two FFI faces only: (a) plain cargo binaries for batch oracle work over
   JSON graph files (one-shot — graph building, codegen diffs, CI), (b) a tiny `cdylib`
   C ABI (`#[no_mangle] extern "C"`, caller-owned buffers, ~5 functions) loaded from Python
   via stdlib `ctypes` for the per-kernel hot path (`ops_rust.py`) — bytes only, no JSON on
@@ -352,7 +355,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **105 passed, 7 ignored, 0 failed**. The ignored = 1 `backend_harness`
+- `cargo test` → **144 passed, 9 ignored, 0 failed**. The ignored = 1 `backend_harness`
   (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
   `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `mnist_e2e` (downloads data + a CNN
   train step), 4 doc-tests.
@@ -1323,12 +1326,11 @@ default-suite test; INTERP training is slow), mirroring
 6. **Docs** — keep this file current; `AGENTS.md` at the repo root states the faithful-port
    and end-user-feel rules and must be edited if its facts change.
 
-**Deferred:** a faster CPU backend. Backends are pluggable (`register_device` + the trait
-seams), but the engine is deliberately single-threaded (`Rc`/`RefCell`, `thread_local!`
-registry), so a threaded interpreter needs an owned `Send` kernel representation and
-`Arc`-based storage; `rayon` would also break the std-only policy (`std::thread::scope`
-would not). A cstyle→`cc -shared` native backend is the alternative. Tracked as a future
-option, not worked this session.
+**Deferred → now planned:** a faster CPU backend. See **§9.8** for the `ops_rayon`
+design (chosen name/device: `RAYON`, feature `backend_rayon`, optional dep `rayon`). The
+interpreter stays as the faithful debug/reference backend (`INTERP`); `RAYON` is a
+sibling, not a replacement. A cstyle→`cc -shared` native backend remains the alternative
+that needs no third-party dep but does need a C compiler at runtime.
 
 ### 9.6 Post-MNIST backlog (2026-10)
 Discovered while getting the CL MNIST run working (§8.17). Roughly ordered by leverage on
@@ -1516,3 +1518,141 @@ panicking, but padded convs still fail at NVRTC: the emitted `__WMMA_...` helper
 references `nv_bfloat164` while the kernel never emits that struct typedef — the
 renderer does not yet emit the `nv_bfloat16N` typedefs for every WMMA operand
 width. `TC_OPT=0/1` are unaffected.
+
+---
+
+### 9.8 Multithreaded CPU backend — `ops_rayon` / `RAYON` (plan, 2026-10)
+
+**Goal.** A fast CPU backend that needs no C/Rust compiler at runtime, executes a
+*higher-level* (pre-`ndim → loop`) kernel IR, and parallelizes with `rayon`. Keep the
+existing interpreter as the faithful reference/debug backend; `ops_rayon` is a sibling.
+
+**Decisions (agreed).**
+- Module `src/runtime/ops_rayon.rs`; device `"RAYON"`; renderer `RayonRenderer`; program
+  `RayonProgram`. Matches tinygrad's `ops_<tech>` naming (`ops_cl`, `ops_cuda`).
+- `rayon` is an **optional dependency behind feature `backend_rayon`**, like
+  `opencl3`/`cudarc`. `default = ["capi", "backend_rayon"]`; `--no-default-features`
+  stays std-only. INTERP remains unconditional (always compiled).
+- Device-selection priority (first *available* wins, like tinygrad `Device.DEFAULT`):
+  **CUDA → CL → RAYON → INTERP**. `DEFAULT_DEVICE` env still overrides. Unknown device
+  names keep falling back to the interpreter (staging devices like `PYTHON`).
+
+#### Why not just thread `ops_interp`
+
+`exec_kernel_with_dims` (`runtime/interp.rs`) already loops over global launch indices.
+The blocker is that `UOpCtx` is an `Rc<Node>` DAG with interior-mutable property caches
+(`shape_c`/`mm_c`/`addrspace_c`) and `HostOpaque` is `Rc<RefCell<Vec<u8>>>` — neither is
+`Send`/`Sync`, so it cannot be shared across `rayon` threads without UB. Every threaded
+approach therefore needs the same first step: **compile each kernel into an owned,
+`Send` instruction list once**, then execute it many times. That step is shared by the
+fast path and by a parallelized scalar path, so it is the foundation, not throwaway work.
+
+#### Execution-model choice
+
+Two independent levers; the plan does both, in order:
+
+- **Lever A — parallel scalar execution (cheap, low-risk).** Keep tinygrad's existing
+  lowering, but compile the linearized uop list into an owned `Vec<Instr>` (every
+  `ctx.*` query pre-resolved: `op`, `dtype`, src indices, `arg`, `addrspace`, `numel`,
+  const value, SPECIAL extent), hand the compiler's per-launch value machinery a `&[Instr]`
+  instead of `&UOpCtx`, and run the global-launch loop under `rayon` inside a scope. Store
+  to disjoint output regions through raw pointers (`struct SendPtr(*mut u8)`), inputs read
+  shared. Reuses `exec_alu`/`truncate`/`from_storage_scalar` verbatim, so numerics equal
+  `INTERP` by construction. This is the "make the current interpreter multithreaded" win.
+- **Lever B — range-driven array/loop-nest evaluator (the strategic ask).** Do **not** run
+  the `ndim → loop` lowering stages (`apply_opts`, `expander`, `devectorize2`,
+  `coalesce`, `add_control_flow`, `linearize`). Instead take the *kernel SINK AST* (the
+  output of `get_kernel_graph`, after the early symbolic/mops stages), build our own loop
+  nest from its `RANGE` nodes, and evaluate the value tree per element with our own
+  instruction array. This is what "leaves out the ndim→loop rewrites" means: we keep the
+  N-d ranges and compile them ourselves, with dtype-native inner loops and `rayon` over the
+  outer (parallel) axes.
+
+#### Seam change for Lever B
+
+`to_program` (`engine/realize.rs`) hardcodes `full_rewrite_to_sink_with` **and**
+`linearize`. Add a `Renderer` capability:
+
+```rust
+pub enum Lowering { Scalar, Range }
+// Renderer facts gain: pub lowering: Lowering  (Scalar for interp/CL/CUDA)
+```
+
+and a `UopRenderer::render_ast(ctx, sink)` method whose default linearizes then calls the
+existing `render` (so CL/CUDA/interp are untouched). In `to_program`:
+`Lowering::Range` stops the pipeline after the canonicalizing early stages and calls
+`render_ast`; `ProgramInfo::from_sink` and the `signature` scan still work on the SINK.
+Serialization reuses the existing flat-JSON (`FlatGraph`) codec, exactly as
+`InterpUopRenderer::render` does today.
+
+`RayonProgram::new` decodes the flat graph and **compiles it into an owned `Send`
+`RayonKernel`** (`Vec<Instr>` + range/loop metadata + buffer slot table), dropping the
+`UOpCtx`. `call` then runs the kernel, with raw-pointer buffer windows scoped to the call.
+
+**Robust fallback.** Any kernel the fast path cannot yet handle (images, `WMMA`, `LOCAL`/
+`GROUP` + `BARRIER` workgroup semantics, exotic dtype decomps) is compiled to the *scalar*
+IR and executed by the owned interpreter. So `RAYON` is correct-by-construction from day
+one and gains speed kernel-by-kernel; the per-step gate compares against `INTERP`.
+
+#### dtype-native values
+
+`ops_interp` carries every lane as `f64`. The owned evaluator should instead dispatch ALU
+on the real dtype (f32, f16/bf16, i32/i8/u8, bool, i64/f64) using the same rounding/wrap
+rules as `dtype::trunc_float` / `interp::truncate`, with an `f64` fallback for the rest.
+This is both faster and removes the documented `f64` precision loss for `uint64` pack /
+`bitcast` paths (§8.23). Staged: start native f32 + integer + bool, extend as harness
+coverage grows.
+
+#### Parallelism strategy
+
+- Build the loop nest from ranges, ordered outer→inner. Parallel axes = output `Loop`/
+  `Global`-class ranges not feeding a reduce accumulation; reduce axes are inner.
+- Pure elementwise → flat/chunked `rayon` over the output, tight typed inner loops when
+  the store index is affine-contiguous, otherwise a gather loop.
+- Single-axis reduce → parallelize the non-reduced output axes (row reductions).
+- Reduce-to-scalar / multi-axis → parallel partials + combine.
+- Workgroup kernels (`LOCAL`/`GROUP`/`BARRIER`) → serialize within a workgroup; initially
+  delegate to the scalar path rather than model local memory.
+- Soundness: parallel tasks write disjoint output slices and read shared inputs. Only
+  launch parallel tasks when the schedule's store ranges are disjoint by construction
+  (tinygrad's independent-work-item contract); otherwise serial. `rayon::scope` always
+  joins before `call` returns, so the raw pointers never outlive the `Rc<dyn OpaqueT>`s.
+
+#### Staged plan & gates
+
+- **R0 — scaffolding + device priority (DONE).** `backend_rayon` feature + optional dep;
+  `ops_rayon.rs` registering `RAYON` (composes the interpreter, so the device is correct and
+  usable immediately); `Renderer::rayon()` facts; `ops_cuda::available()` non-panicking probe;
+  `default_device()` priority CUDA → CL → RAYON → INTERP via a unit-testable `pick_device`.
+  `cargo test` 144 pass / 9 ignored (default and `--no-default-features` builds; CL+CUDA
+  feature builds compile). New gate `tests/device_select.rs` (priority, registration,
+  RAYON-executes, RAYON==INTERP). `rand`/`randn` gained `device::is_interp_engine` so the
+  f64-lane host route applies to `RAYON` until its dtype-native IR lands (flip in R2).
+- **R1 — owned `Send` IR + parallel scalar execution (Lever A).** Compile pass over the
+  linearized uop list; `rayon` over global launches with scoped raw-pointer windows; serial
+  fallback. Gate: numerics equal `INTERP` across `tests/backend_harness.rs` and the
+  MNIST/XOR paths; measured speedup on elementwise/matmul kernels.
+- **R2 — `Lowering::Range` + range-driven evaluator (Lever B).** Implement, then flip
+  `RAYON` to it per supported kernel. Gate: numerics equal `INTERP` on the same corpus;
+  `to_program` miss cost and per-step wall time down vs `INTERP`; `python` gates unaffected.
+- **R3 — integration/perf.** Make `RAYON` the CPU default; run `xor`/`mnist`/`vit_mnist`
+  on it; benchmark vs `INTERP` and vs `CL`; consider aliasing `"CPU"` → `RAYON`; docs +
+  commit.
+
+#### Risks / open questions
+
+1. **Faithfulness at array level** (integer wrap, NaN, float rounding) — mitigate by
+   reusing `exec_alu`/`truncate` and differential-testing vs `INTERP` *and* tinygrad.
+2. **Which early pipeline stages are safe to keep before `render_ast`** — spike with the
+   existing `TG_M5_STAGES` truncation to dump kernel ASTs and enumerate the op set; the
+   later stages are optimizations and are not required for semantics.
+3. **`Send`/UB boundary** — keep all unsafe confined to raw-pointer window extraction and
+   the rayon scope; no `UOpCtx`/`Rc` crosses a thread boundary.
+4. **Reductions with `GROUP`/`LOCAL`/`BARRIER`** — delegate initially; model local memory
+   later only if a hot kernel needs it.
+5. **Gather cost** — arbitrary index expressions are elementwise gathers; detect the
+   affine-contiguous fast case for typed inner loops.
+6. **JIT replay** — the owned `RayonKernel` is built at `render`/compile time and cached in
+   the elf, so it replays for free (same as `InterpProgram`).
+7. **Dependency policy** — `rayon` only behind `backend_rayon`; the default artifact's
+   runtime deps stay `nanoserde` (+ `capi`).
