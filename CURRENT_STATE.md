@@ -355,7 +355,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **170 passed, 9 ignored, 0 failed** (2026-10 release pass). The
+- `cargo test` → **172 passed, 9 ignored, 0 failed** (2026-10 release pass). The
   ignored = 1 `backend_harness` (`#[ignore = "M7 gate: XOR training via tinygrad.nn
   (Gradient/Adam)"]`), 1 `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `mnist_e2e`
   (downloads data + a CNN train step), 1 `vit_e2e`, and 5 doc-tests.
@@ -366,7 +366,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
   nn_xor_relu,nn_xor_parity,session,mem_probe,nn_conv,nn_norm,nn_module,indexing,assign,
   mnist_e2e,state,extra_ops,ctx_ops}.rs`.
 - `cargo build` is warning-free; `cargo rustdoc` is warning-free; `cargo clippy
-  --all-targets` has 0 errors and 58 mostly-style warnings (the `mutable_key_type` false
+  --all-targets` has 0 errors and 64 mostly-style warnings (the `mutable_key_type` false
   positive — `UopId` hashes by immutable `id` — is allowed at the crate root).
 - `cargo fmt` is clean after the 2026-10 formatting pass.
 

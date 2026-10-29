@@ -72,6 +72,7 @@ impl CompileCache {
 
 /// The CL device/context/queue pair shared by allocator, compiler and
 /// programs (python: CLDevice fields).
+#[allow(dead_code)]
 struct ClInner {
     dev: Device,
     context: Context,
@@ -96,7 +97,10 @@ impl ClInner {
         eprintln!("CLDevice: opening {device_name} with version {driver_version}");
         let context = check(Context::from_device(&dev), "clCreateContext");
         let queue = check(
-            unsafe { CommandQueue::create(&context, dev.id(), CL_QUEUE_PROFILING_ENABLE) },
+            #[allow(deprecated)]
+            unsafe {
+                CommandQueue::create(&context, dev.id(), CL_QUEUE_PROFILING_ENABLE)
+            },
             "clCreateCommandQueue",
         );
         ClInner {
@@ -148,6 +152,7 @@ fn cl_of(o: &dyn OpaqueT) -> &ClOpaque {
 /// A temporary `Buffer` view over an existing cl_mem for the enqueue calls
 /// (opencl3's enqueue API wants `&mut Buffer`; the temporary is leaked out of
 /// Drop so the owning `ClOpaque` stays the single release point).
+#[allow(dead_code)]
 fn temp_buf(mem: cl_mem) -> Buffer<u8> {
     Buffer::new(mem)
 }
@@ -264,6 +269,7 @@ impl Comp for ClCompiler {
 // ---------------- program ----------------
 
 /// `CLProgram` — create the kernel from the compiled binary and launch it.
+#[allow(dead_code)]
 pub struct ClProgram {
     inner: Rc<ClInner>,
     kernel: Kernel,
