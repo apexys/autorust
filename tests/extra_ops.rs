@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant, clippy::excessive_precision)]
 //! Long-tail Tensor ops implemented as compositions (silu/erf/normalize/…).
 
 use autorust::engine::session::Session;
@@ -329,5 +330,31 @@ fn cumulative_max_min_and_logsumexp() {
         &z.logcumsumexp(0).to_list::<f32>(&mut sess),
         &[0.0, 0.693147, 1.098612],
         1e-5,
+    );
+}
+
+#[test]
+fn cumsum_after_flip_is_contiguous() {
+    // A FLIP view has negative strides; `_cumalu` pads/pools it, which used to
+    // read past the buffer. The reverse-cumsum composition must materialize.
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let x = f32s(&ctx, &[1.0, 2.0, 3.0, 4.0], &[4]);
+    let rev = x.flip(&[0]).cumsum(0).flip(&[0]);
+    close(&rev.to_list::<f32>(&mut sess), &[10.0, 9.0, 7.0, 4.0], 1e-6);
+    let cp = x.flip(&[0]).cumprod(0).flip(&[0]);
+    close(
+        &cp.to_list::<f32>(&mut sess),
+        &[24.0, 24.0, 12.0, 4.0],
+        1e-6,
+    );
+    let (cm, ci) = x.flip(&[0]).cummax(0);
+    close(&cm.to_list::<f32>(&mut sess), &[4.0, 4.0, 4.0, 4.0], 1e-6);
+    assert_eq!(ci.to_list::<i32>(&mut sess), vec![0, 0, 0, 0]);
+    let cmi = x.flip(&[0]).cummin(0);
+    close(
+        &cmi.0.to_list::<f32>(&mut sess),
+        &[4.0, 3.0, 2.0, 1.0],
+        1e-6,
     );
 }

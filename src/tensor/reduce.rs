@@ -194,7 +194,7 @@ pub fn all(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) ->
     let b = ctx.cast(x, dtype::BOOL);
     let i = ctx.cast(b, dtype::INT32);
     let s = sum(ctx, i, axis, keepdim, None);
-    let nc = ctx.const_py(ConstVal::Int(n as i128), Some(dtype::INT32));
+    let nc = ctx.const_py(ConstVal::Int(n), Some(dtype::INT32));
     super::elementwise::eq(ctx, s, nc)
 }
 
@@ -350,6 +350,24 @@ pub fn cumalu(ctx: &mut UOpCtx, x: UopId, axis: usize, op: Ops) -> UopId {
         !matches!(shape[axis], SVal::I(0)) && matches!(op, Ops::Add | Ops::Max | Ops::Mul),
         "TGERR: bad _cumalu"
     );
+    // A FLIP view has negative strides; the pad/pool lowering used below does
+    // not handle reversed views (INTERP reads past the buffer). An identity
+    // advanced-index copy materializes the flipped view before padding; a
+    // plain `Contiguous` can be fused back into the pool and does not help.
+    let has_flip = ctx
+        .backward_slice_with_self(&x)
+        .iter()
+        .any(|u| ctx.op_of(u) == Ops::Flip);
+    let x = if has_flip {
+        let n = shape[axis].clone().as_i64().unwrap_or(0);
+        let idx: Vec<i32> = (0..n as i32).collect();
+        let idx = super::Tensor::from_slice(&mut *ctx, &idx, Some(crate::dtype::INT32), None);
+        let mut ixs: Vec<super::ix::Ix> = vec![super::ix::Ix::All; shape.len()];
+        ixs[axis] = super::ix::Ix::Tensor(idx);
+        movement::getitem(ctx, x, &ixs)
+    } else {
+        x
+    };
     // transpose(axis, -1)
     let t = movement::transpose(ctx, x, axis as i64, -1);
     let tshape = ctx.shape(&t).unwrap().unwrap_or_default();
@@ -367,7 +385,20 @@ pub fn cumalu(ctx: &mut UOpCtx, x: UopId, axis: usize, op: Ops) -> UopId {
         Ops::Mul => prod(ctx, pooled, Some(&[last]), false, None),
         _ => unreachable!(),
     };
-    movement::transpose(ctx, reduced, axis as i64, -1)
+    let out = movement::transpose(ctx, reduced, axis as i64, -1);
+    if has_flip {
+        // Force a materialized, row-major result: a following FLIP of the
+        // cumulative result is otherwise fused with the reduction's strided
+        // view and reads the padding.
+        let n = shape[axis].clone().as_i64().unwrap_or(0);
+        let idx: Vec<i32> = (0..n as i32).collect();
+        let idx = super::Tensor::from_slice(&mut *ctx, &idx, Some(crate::dtype::INT32), None);
+        let mut ixs: Vec<super::ix::Ix> = vec![super::ix::Ix::All; shape.len()];
+        ixs[axis] = super::ix::Ix::Tensor(idx);
+        movement::getitem(ctx, out, &ixs)
+    } else {
+        out
+    }
 }
 
 /// `MovementMixin.repeat` (movement.py:576-594).
