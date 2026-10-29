@@ -1210,3 +1210,41 @@ fn resize_nearest_honors_nearest_mode() {
         1e-6,
     );
 }
+
+#[test]
+fn pow_handles_tensor_exponents_and_negative_bases() {
+    let exp_vec = b::f32_tensor("exp_vec", &[4], &[3.0, 2.0, 0.5, 0.5]);
+    let half = b::f32_tensor("half", &[1], &[0.5]);
+    let nodes = vec![
+        b::node("Pow", &["x", "exp_vec"], &["general"], &[]),
+        b::node("Pow", &["x", "half"], &["sqrt"], &[]),
+    ];
+    let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(4)])];
+    let outputs = vec![
+        b::value_info("general", b::FLOAT, &[Dim::Val(4)]),
+        b::value_info("sqrt", b::FLOAT, &[Dim::Val(4)]),
+    ];
+    let bytes = b::model(
+        &b::graph(&nodes, &[exp_vec, half], &inputs, &outputs, "pow"),
+        17,
+    );
+    let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[-2.0f32, 2.0, 4.0, -4.0],
+        Some(dtype::FLOAT32),
+        None,
+    );
+    let out = m.run(&[("x", x)]).unwrap();
+    let g = out["general"].to_list::<f32>(m.session_mut());
+    close(&g[..3], &[-8.0, 4.0, 2.0], 1e-5);
+    assert!(
+        g[3].is_nan(),
+        "negative base with fractional exponent: {}",
+        g[3]
+    );
+    let s = out["sqrt"].to_list::<f32>(m.session_mut());
+    close(&s[1..3], &[std::f32::consts::SQRT_2, 2.0], 1e-5);
+    assert!(s[0].is_nan(), "sqrt(-2) should be NaN: {}", s[0]);
+    assert!(s[3].is_nan(), "sqrt(-4) should be NaN: {}", s[3]);
+}

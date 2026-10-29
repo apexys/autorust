@@ -357,10 +357,10 @@ impl OnnxModel {
                     } else if e.fract() == 0.0 && (-16.0..0.0).contains(&e) {
                         one(pow_positive(a, (-e) as u32).reciprocal())
                     } else {
-                        one(a.pow(b))
+                        one(xpow(a, b))
                     }
                 } else {
-                    one(a.pow(b))
+                    one(xpow(a, b))
                 }
             }
             "Mod" => {
@@ -1148,6 +1148,27 @@ impl OnnxModel {
                 .collect::<Vec<_>>(),
         ))
     }
+}
+
+/// tinygrad's `xpow`: `exp2(e * log2(|b|))` with negative-base, odd-exponent,
+/// NaN and `x**0` fixups (`codegen/decomp/transcendental.py:257`). Used for the
+/// general ONNX `Pow` case so no backend needs a native ALU `POW`.
+fn xpow(base: &Tensor, exponent: &Tensor) -> Tensor {
+    let abs = base.lt(0).where_(base.neg(), base);
+    let ret = abs.log2().mul(exponent).exp2();
+    let exp_int = exponent.cast(dtype::INT32).cast(exponent.dtype());
+    let non_int = exponent.ne(&exp_int);
+    let is_odd = exponent.abs().cast(dtype::INT32).mod_(2).ne(0);
+    let nan = base.const_like(ConstVal::Float(f64::NAN), None);
+    let neg_base = non_int.where_(
+        base.ne(f64::NEG_INFINITY).where_(nan, &ret),
+        is_odd.where_(ret.neg(), &ret),
+    );
+    let out = exponent.eq(0).where_(
+        ret.const_like(ConstVal::Float(1.0), None),
+        base.lt(0).where_(neg_base, &ret),
+    );
+    out.cast(base.dtype())
 }
 
 fn pow_positive(x: &Tensor, e: u32) -> Tensor {
