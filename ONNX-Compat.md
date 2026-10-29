@@ -69,7 +69,7 @@ outputs remain valid after it is dropped.
   zero image, the `depth` output (268,324 values) has **max abs error 0.015625**
   (2 fp16 ulps at ~8), mean abs error 0.0019, max relative error 0.0054. This
   is the T0 acceptance model.
-- `tests/onnx.rs`: 23 self-contained tests covering the parser, external data,
+- `tests/onnx.rs`: 24 self-contained tests covering the parser, external data,
   typed/raw tensor encodings, symbolic dims, movement/reduction/nn/resize ops,
   and error paths. The external-checkpoint test is `#[ignore]`d and driven by
   `ONNX_MODEL`/`ONNX_DEVICE`.
@@ -82,8 +82,10 @@ outputs remain valid after it is dropped.
   `masked_select`/scatter primitives.
 - `Pad` supports constant/edge/reflect/wrap, not arbitrary dynamic pads
   (pads must resolve to host constants).
-- `Resize` supports linear/nearest; cubic, antialias, and non-`stretch`
-  aspect-ratio policies are missing.
+- `Resize` supports linear (align-corners/half-pixel/pytorch-half-pixel for
+  outputs > 1) and all four `nearest_mode` choices; cubic, antialias,
+  `asymmetric`/`half_pixel_symmetric` linear, and non-`stretch` aspect-ratio
+  policies are missing.
 - `GatherND` only supports `batch_dims=0`; `GatherElements` uses a host-index
   loop (correct, not fast).
 - Zero-element tensors are rejected: the storage layer cannot allocate empty
@@ -142,7 +144,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `GatherElements GatherND` | 🟡 | `GatherND` supports `batch_dims=0`; `GatherElements` uses a host-index loop. |
 | `Scatter ScatterElements ScatterND TensorScatter` | ⬜ | needs the scatter primitive/`masked_select`. |
 | `Pad` | ✅ | constant/edge/reflect/wrap with static (host-resolved) pads. |
-| `Resize Upsample` | 🟡 | linear/nearest, `align_corners`/`half_pixel`; no cubic/antialias. |
+| `Resize Upsample` | 🟡 | linear (align-corners/half-pixel) and nearest with all `nearest_mode`s; no cubic/antialias. |
 | `Shape Size` | ✅ | runtime `int64` tensors; symbolic declared dims are bound from the input. |
 | `Range ConstantOfShape EyeLike OneHot Trilu` | ✅ | `arange`/`full`/`eye`/`one_hot`/`tril`/`triu`. |
 | `DepthToSpace SpaceToDepth` | ✅ | reshape+permute composition (DCR/CRD). |
