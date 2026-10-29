@@ -961,10 +961,10 @@ fn wmma_args(
         let mut t = [0i64; 3];
         for (i, slot) in t.iter_mut().enumerate() {
             let s = ctx.srcs(u)[i].clone();
-            if let Ok(Some(sh)) = ctx.shape(&s) {
-                if let Some(last) = sh.last() {
-                    *slot = last.clone().as_i64_or_panic();
-                }
+            if let Ok(Some(sh)) = ctx.shape(&s)
+                && let Some(last) = sh.last()
+            {
+                *slot = last.clone().as_i64_or_panic();
             }
         }
         out.push((name, dims, dtype_in, dtype_out, (t[0], t[1], t[2])));
@@ -1153,23 +1153,22 @@ fn trunc_int(v: i128, dt: DTypeId) -> i128 {
 fn wmma_name(ctx: &mut UOpCtx, u: UopId) -> String {
     let dt_out = ctx.dt_of(&u);
     let arg = ctx.arg_of(&u).clone();
-    if let Arg::Seq { tuple: true, items } = arg {
-        if items.len() >= 2 {
-            let dims: Vec<String> = match &items[0] {
-                Arg::Seq { items: d, .. } => d
-                    .iter()
-                    .filter_map(|it| it.as_int())
-                    .map(|v| v.to_string())
-                    .collect(),
-                _ => vec![],
-            };
-            let dtype_in = match &items[1] {
-                Arg::Dtype(d) => d.name().to_string(),
-                _ => "?".to_string(),
-            };
-            return format!("WMMA_{}_{}_{}", dims.join("_"), dtype_in, dt_out.name())
-                .replace(' ', "_");
-        }
+    if let Arg::Seq { tuple: true, items } = arg
+        && items.len() >= 2
+    {
+        let dims: Vec<String> = match &items[0] {
+            Arg::Seq { items: d, .. } => d
+                .iter()
+                .filter_map(|it| it.as_int())
+                .map(|v| v.to_string())
+                .collect(),
+            _ => vec![],
+        };
+        let dtype_in = match &items[1] {
+            Arg::Dtype(d) => d.name().to_string(),
+            _ => "?".to_string(),
+        };
+        return format!("WMMA_{}_{}_{}", dims.join("_"), dtype_in, dt_out.name()).replace(' ', "_");
     }
     "WMMA".to_string()
 }

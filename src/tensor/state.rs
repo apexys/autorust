@@ -556,10 +556,10 @@ pub fn load_state_dict<M: crate::tensor::nn::Module>(
         let dst_shape = param.shape().into_vec();
         let src_shape = src.shape().into_vec();
         if src_shape != dst_shape {
-            let unit_swap = (src_shape.len() == 0
+            let unit_swap = (src_shape.is_empty()
                 && dst_shape.len() == 1
                 && dst_shape[0] == crate::uop::sint::SVal::I(1))
-                || (dst_shape.len() == 0
+                || (dst_shape.is_empty()
                     && src_shape.len() == 1
                     && src_shape[0] == crate::uop::sint::SVal::I(1));
             if !unit_swap {

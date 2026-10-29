@@ -98,7 +98,7 @@ fn session_training_switch_gates_dropout() {
     let train = x.dropout(0.5);
     let v = read(&train, &mut sess);
     assert!(
-        v.iter().any(|&x| x == 0.0) && v.iter().any(|&x| x == 2.0),
+        v.contains(&0.0) && v.contains(&2.0),
         "training masks+scales"
     );
 }

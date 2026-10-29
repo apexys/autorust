@@ -190,13 +190,13 @@ impl AsCtx for &mut UOpCtx {
 
 impl AsCtx for &mut &mut UOpCtx {
     fn with_ctx<T>(self, f: impl FnOnce(&mut UOpCtx) -> T) -> T {
-        f(*self)
+        f(self)
     }
 }
 
 impl AsCtx for &mut RefMut<'_, UOpCtx> {
     fn with_ctx<T>(self, f: impl FnOnce(&mut UOpCtx) -> T) -> T {
-        f(&mut **self)
+        f(self)
     }
 }
 

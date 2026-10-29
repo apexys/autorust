@@ -71,7 +71,7 @@ impl OnnxModel {
                     }
                     return one(Tensor::from_slice(
                         &self.ctx,
-                        &v,
+                        v,
                         Some(dtype::INT64),
                         self.device(),
                     ));

@@ -160,8 +160,7 @@ fn arg_json_shapes() {
         let j = arg_to_flat(&a).serialize_json();
         println!("{name}: {j}");
         let back: FlatGraph =
-            FlatGraph::deserialize_json(&"{\"dtypes\":[],\"nodes\":[],\"roots\":[]}".to_string())
-                .unwrap();
+            FlatGraph::deserialize_json("{\"dtypes\":[],\"nodes\":[],\"roots\":[]}").unwrap();
         assert!(back.dtypes.is_empty());
     }
 }

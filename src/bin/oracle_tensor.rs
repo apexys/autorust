@@ -98,9 +98,7 @@ fn main() {
                         dt,
                         dev,
                     ),
-                    "f64" => {
-                        Tensor::from_slice(&ctx, &data.iter().copied().collect::<Vec<_>>(), dt, dev)
-                    }
+                    "f64" => Tensor::from_slice(&ctx, &data.to_vec(), dt, dev),
                     "i32" => Tensor::from_slice(
                         &ctx,
                         &data.iter().map(|&v| v as i32).collect::<Vec<_>>(),

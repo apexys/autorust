@@ -2491,7 +2491,7 @@ impl UOpCtx {
     /// naive recursion is exponential on shared subgraphs — which bf16 ALU
     /// emulation produces in abundance (an inner value repeated N times per op).
     pub fn addrspace_derived(&self, id: UopId) -> Option<AddrSpace> {
-        if let Some(cached) = id.node.addrspace_c.borrow().clone() {
+        if let Some(cached) = *id.node.addrspace_c.borrow() {
             return cached;
         }
         let ret = self.addrspace_derived_uncached(id.clone());
@@ -2663,10 +2663,9 @@ impl UOpCtx {
         // fails to reach a fixed point on CL and loops.
         if let Some(crate::uop::arg::DeviceSpec::Single(s)) =
             crate::schedule::indexing::device_of(self, x.clone())
+            && (s.starts_with("WEBGPU") || s.starts_with("CL"))
         {
-            if s.starts_with("WEBGPU") || s.starts_with("CL") {
-                return None;
-            }
+            return None;
         }
         let numel = self.max_numel(x.clone());
         let flat = crate::tensor::movement::flatten(self, x, -1, -1);

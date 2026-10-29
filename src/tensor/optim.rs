@@ -469,7 +469,7 @@ impl Optim for SGD {
             .iter()
             .map(|p| match ctx.grad(&p.uop()) {
                 Some(g) => {
-                    let g = Tensor::from_uop(&ctx, g);
+                    let g = Tensor::from_uop(ctx, g);
                     let g_lr = g.mul_ctx(ctx, self.inner.lr as f64);
                     p.detach_ctx(ctx).sub_ctx(ctx, &g_lr)
                 }

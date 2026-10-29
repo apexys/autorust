@@ -975,7 +975,7 @@ fn contract_axis(ctx: &mut Ctx2, u: UopId, arg: &[(i64, i64)], rm: &HashMap<i64,
     perm.extend(permute_tail.iter().copied());
     let out = crate::tensor::movement::permute_internal(ctx, u, &perm);
     let out_shape = ctx.shape(&out).unwrap().unwrap_or_default();
-    let new_shape: Vec<SVal> = out_shape[..permute_head.len()].iter().cloned().collect();
+    let new_shape: Vec<SVal> = out_shape[..permute_head.len()].to_vec();
     let mut new_shape = new_shape;
     new_shape.push(SVal::I(-1));
     crate::tensor::movement::reshape_internal(ctx, out, &new_shape)
@@ -991,7 +991,7 @@ fn unroll_axis(ctx: &mut Ctx2, u: UopId, arg: &[(i64, i64)], rm: &HashMap<i64, u
         })
         .collect();
     let shape = ctx.shape(&u).unwrap().unwrap_or_default();
-    let mut new_shape: Vec<SVal> = shape[..shape.len() - 1].iter().cloned().collect();
+    let mut new_shape: Vec<SVal> = shape[..shape.len() - 1].to_vec();
     new_shape.extend(arg.iter().map(|(_, nm)| SVal::I(*nm as i128)));
     let out = crate::tensor::movement::reshape_internal(ctx, u, &new_shape);
     let n = ctx.shape(&out).unwrap().unwrap_or_default().len();

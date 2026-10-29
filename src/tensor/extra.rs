@@ -397,9 +397,9 @@ impl Tensor {
             .shrink_to(shape.as_slice());
 
         // Stable indices: count equal values before each position.
-        let n = orig_len as i64;
+        let n = orig_len;
         let mut mask_shape = vec![n, n];
-        mask_shape.extend(std::iter::repeat(1).take(ndim - dim - 1));
+        mask_shape.extend(std::iter::repeat_n(1, ndim - dim - 1));
         let mask = Tensor::full_const(
             self.ctx(),
             [n, n],
@@ -529,7 +529,7 @@ impl Tensor {
         let mut shaped = Vec::with_capacity(n);
         for (t, &i) in all.iter().zip(basis.iter()) {
             let mut shape = vec![-1i64];
-            shape.extend(std::iter::repeat(1).take(others.len() - i));
+            shape.extend(std::iter::repeat_n(1, others.len() - i));
             shaped.push(t.reshape(shape));
         }
         let mut out_shape = vec![1i64; n];
