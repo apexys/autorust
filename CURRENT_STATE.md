@@ -366,7 +366,8 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 - Suites: `tests/{golden,backend_harness,marshal,ops,grad,rand,m2_smoke,flat_codec,nn_xor,
   nn_xor_relu,nn_xor_parity,session,mem_probe,nn_conv,nn_norm,nn_module,indexing,assign,
   mnist_e2e,state,extra_ops,ctx_ops,onnx}.rs`.
-- `cargo build` is warning-free; `cargo rustdoc` is warning-free; `cargo clippy
+- `cargo build` is warning-free; `cargo rustdoc --lib -- -W missing_docs` is
+  warning-free (all public items documented); `cargo clippy
   --all-targets` has 0 errors and 0 warnings (the `mutable_key_type` false positive —
   `UopId` hashes by immutable `id` — is allowed at the crate root; the remaining
   `too_many_arguments` sites are targeted allows on functions whose signatures
@@ -1786,10 +1787,9 @@ API shape, and missing user-facing features.
   `repository`, `homepage`, `documentation`, `readme`, `keywords`,
   `categories = ["artificial-intelligence", "science", "hardware-support"]`,
   `rust-version = "1.88"`, `exclude`), docs.rs metadata.
-- Crate-level docs in `src/lib.rs`; module-level docs for `tensor`, `uop`,
-  `codegen`, `schedule`, `engine`, `helpers`, `models`. Public `Tensor`/`nn`
-  item docs are being filled in; `cargo rustdoc -W missing_docs` is the
-  tracker (855 warnings at review time).
+- Crate-level docs in `src/lib.rs`; module-level docs for every public module.
+  **All public items are documented**: `cargo rustdoc --lib -- -W missing_docs`
+  reports 0 warnings (2026-10), down from 932 at the start of the release pass.
 - `ONNX-Compat.md`: the T1/T2 contract, full 170-op matrix, parser/feature
   matrix, validation plan, and security notes.
 - Edition 2024 is current; `rust-version = "1.88"` is the first release with

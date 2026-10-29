@@ -68,6 +68,8 @@ INDEXING.md        the getitem index-DSL reference
 Run from this directory (`autorust/`):
 
 - `cargo build` — should be warning-free.
+- `cargo rustdoc --lib -- -W missing_docs` — 0 warnings (all public items and
+  module docs are present; keep it that way when adding API).
 - `cargo clippy --all-targets` — 0 errors, 0 warnings (`mutable_key_type` is
   allowed at the crate root; oracle-mirroring functions that exceed the argument
   limit carry targeted `allow`s).
