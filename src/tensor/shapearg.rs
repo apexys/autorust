@@ -16,6 +16,7 @@ use super::Shape;
 
 /// Anything a shape-taking API accepts. Converts eagerly to `Vec<SVal>`.
 pub trait ShapeArg {
+    /// Convert this argument into the dims of a shape.
     fn into_shape_vec(self) -> Vec<SVal>;
 }
 

@@ -25,6 +25,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
+/// A symbolic shape: one [`SVal`] per dimension.
 pub type Shape = Vec<SVal>;
 
 /// weak dtype bounds saturate to ±(i128::MAX/4); anything at or beyond this
@@ -33,7 +34,9 @@ pub type Shape = Vec<SVal>;
 /// unbounded operands).
 pub const MM_SENTINEL: i128 = i128::MAX / 4;
 
+/// The UOp interning context: the hash-consed arena plus the per-context state Python keeps on `UOpMetaClass`.
 pub struct UOpCtx {
+    /// Arena of interned [`UopId`] nodes.
     pub g: Graph,
     /// IndexingContext-style range counter (used by new_range)
     pub range_idx: i64,
@@ -50,6 +53,7 @@ impl Default for UOpCtx {
 }
 
 impl UOpCtx {
+    /// A fresh, unshared context (no handle for `Tensor`s; see [`UOpCtx::shared`]).
     pub fn new() -> Self {
         UOpCtx {
             g: Graph::new(),
@@ -128,6 +132,7 @@ impl UOpCtx {
         self.g.intern(op, dt, srcs, arg, Arg::None)
     }
 
+    /// UOp construction with an explicit tag (Python's `tag=` argument).
     pub fn uop_tag(
         &mut self,
         op: Ops,
@@ -160,10 +165,12 @@ impl UOpCtx {
         self.const_py(ConstVal::Int(v as i128), None)
     }
 
+    /// `UOp.const` from an i64 with an explicit dtype.
     pub fn cint_dt(&mut self, v: i64, dt: DTypeId) -> UopId {
         self.const_py(ConstVal::Int(v as i128), Some(dt))
     }
 
+    /// `UOp.const` from an f64 (weak float when no dtype is given).
     pub fn cfloat(&mut self, v: f64) -> UopId {
         self.const_py(ConstVal::Float(v), None)
     }
@@ -195,26 +202,31 @@ impl UOpCtx {
 
     // ---------- field access ----------
 
+    /// `u.op` — the node's opcode.
     #[inline]
     pub fn op_of(&self, id: &UopId) -> Ops {
         id.op
     }
 
+    /// `u.dtype` — the node's dtype handle.
     #[inline]
     pub fn dt_of(&self, id: &UopId) -> DTypeId {
         id.dtype
     }
 
+    /// `u.src` — the node's source operands, in order.
     #[inline]
     pub fn srcs<'a>(&self, id: &'a UopId) -> &'a [UopId] {
         &id.srcs
     }
 
+    /// `u.arg` — the node's opcode-specific argument.
     #[inline]
     pub fn arg_of<'a>(&self, id: &'a UopId) -> &'a Arg {
         &id.arg
     }
 
+    /// `u.tag` — the rewrite tag carried by the node.
     #[inline]
     pub fn tag_of<'a>(&self, id: &'a UopId) -> &'a Arg {
         &id.tag
@@ -255,10 +267,12 @@ impl UOpCtx {
         Some(self.val(id))
     }
 
+    /// `u.is_invalid` — true when this is a CONST holding the invalid sentinel.
     pub fn is_invalid(&self, id: &UopId) -> bool {
         id.op == Ops::Const && matches!(&id.arg, Arg::Const(ConstVal::Invalid))
     }
 
+    /// The [`ParamArg`] when the node is a BUFFER or PARAM.
     pub fn has_param<'a>(&self, id: &'a UopId) -> Option<&'a ParamArg> {
         match &id.arg {
             Arg::Param(p) => Some(p),
@@ -304,6 +318,7 @@ impl UOpCtx {
 
     // ---------- dtype production rules (ops.py:114-184) ----------
 
+    /// `promo_dtype` — the common dtype of the sources, or their least upper dtype.
     pub fn promo_dtype(&mut self, srcs: &[UopId]) -> DTypeId {
         let mut dts = srcs.iter().map(|s| self.dt_of(s)).collect::<Vec<_>>();
         dts.dedup();
@@ -314,6 +329,7 @@ impl UOpCtx {
         }
     }
 
+    /// `dtype_from_uop(op, src, arg)` — infer the result dtype, `None` when it cannot be known.
     pub fn dtype_from_uop(&mut self, op: Ops, srcs: &[UopId], arg: &Arg) -> Option<DTypeId> {
         use Ops::*;
         match op {
@@ -422,6 +438,7 @@ impl UOpCtx {
         }
     }
 
+    /// `least_upper_float` — weak int promotes to weak float, ints to at least float32.
     pub fn least_upper_float(&self, d: DTypeId) -> DTypeId {
         if d == WEAKINT {
             WEAKFLOAT
@@ -432,6 +449,7 @@ impl UOpCtx {
         }
     }
 
+    /// `is_image_shape` — true for a `(H, W, 4)` image shape (INDEX on an image is float).
     pub fn is_image_shape_of(&mut self, u: &UopId) -> bool {
         match self.shape(u) {
             Ok(Some(s)) => s.len() == 3 && matches!(s[2], SVal::I(4)),
@@ -1066,10 +1084,12 @@ impl UOpCtx {
         ret
     }
 
+    /// `u.vmin` — the lower bound of the node's value range.
     pub fn vmin(&mut self, id: &UopId) -> Result<SVal, String> {
         Ok(self.min_max(id)?.0)
     }
 
+    /// `u.vmax` — the upper bound of the node's value range.
     pub fn vmax(&mut self, id: &UopId) -> Result<SVal, String> {
         Ok(self.min_max(id)?.1)
     }
@@ -1348,6 +1368,7 @@ impl UOpCtx {
         Ok((dmin, dmax))
     }
 
+    /// `dtype.min`/`dtype.max` of `d` as [`SVal`] bounds.
     pub fn dtype_bounds(&mut self, d: DTypeId) -> Result<(SVal, SVal), String> {
         Ok((
             self.constval_to_sval(&dtype::dtype_min(d), "dtype bounds")?,
@@ -1463,6 +1484,7 @@ impl UOpCtx {
         }
     }
 
+    /// Concrete comparison helper: true iff `a ord b` certainly holds (symbolic pairs are treated as true).
     pub fn resolve_cmp(
         &mut self,
         a: SVal,
@@ -1481,6 +1503,7 @@ impl UOpCtx {
         Ok(u)
     }
 
+    /// `u.toposort()` — insertion-ordered topological sort of `root`'s DAG.
     pub fn toposort(&self, root: &UopId) -> Vec<UopId> {
         Graph::toposort_root(&self.g, root)
     }
@@ -1491,10 +1514,12 @@ impl UOpCtx {
         ts.into_iter().filter(|x| x != root).collect()
     }
 
+    /// `u.backward_slice_with_self` — every node reachable from `root`, including itself.
     pub fn backward_slice_with_self(&self, root: &UopId) -> HashSet<UopId> {
         self.toposort(root).into_iter().collect()
     }
 
+    /// `u.op_in_backward_slice_with_self(*ops)` — whether any of `ops` appears in `root`'s slice.
     pub fn op_in_backward_slice_with_self(&self, root: &UopId, ops: &[Ops]) -> bool {
         self.toposort(root)
             .iter()
@@ -1516,6 +1541,7 @@ impl std::fmt::Display for DebugOp {
     }
 }
 
+/// The arg as an integer when it is `Arg::Int` or a representable `Arg::UInt`.
 pub fn arg_as_int(a: &Arg) -> Option<i64> {
     match a {
         Arg::Int(i) => Some(*i),
@@ -1534,6 +1560,7 @@ fn resolve_uop_bool(ctx: &mut UOpCtx, u: UopId, default: bool) -> bool {
     }
 }
 
+/// Minimum of two [`SVal`]s by [`sval_cmp`] order.
 pub fn sval_min(a: SVal, b: SVal) -> SVal {
     if sval_cmp(a.clone(), b.clone()) == std::cmp::Ordering::Less {
         a
@@ -1542,6 +1569,7 @@ pub fn sval_min(a: SVal, b: SVal) -> SVal {
     }
 }
 
+/// Maximum of two [`SVal`]s by [`sval_cmp`] order.
 pub fn sval_max(a: SVal, b: SVal) -> SVal {
     if sval_cmp(a.clone(), b.clone()) == std::cmp::Ordering::Greater {
         a
@@ -1550,6 +1578,7 @@ pub fn sval_max(a: SVal, b: SVal) -> SVal {
     }
 }
 
+/// Compare two [`SVal`]s; incomparable symbolic pairs compare equal.
 pub fn sval_cmp(a: SVal, b: SVal) -> std::cmp::Ordering {
     match (a, b) {
         (SVal::I(x), SVal::I(y)) => x.cmp(&y),
@@ -1559,6 +1588,7 @@ pub fn sval_cmp(a: SVal, b: SVal) -> std::cmp::Ordering {
 }
 
 impl SVal {
+    /// Truncate an int-valued [`SVal`] toward zero; symbolic SVals are returned unchanged.
     pub fn trunc_toward_zero(self) -> SVal {
         match self {
             SVal::I(v) => SVal::I(v),
@@ -1573,11 +1603,17 @@ impl SVal {
 /// 3 variants and extra match arms would silently bind as variables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmpOrd {
+    /// The `<` relation.
     Lt,
+    /// The `<=` relation.
     Le,
+    /// The `==` relation.
     Eq,
+    /// The `!=` relation.
     Ne,
+    /// The `>=` relation.
     Ge,
+    /// The `>` relation.
     Gt,
 }
 impl UOpCtx {
@@ -1586,14 +1622,17 @@ impl UOpCtx {
         self.uop(op, None, srcs, Arg::None)
     }
 
+    /// `x.alu(op, a)` — ALU op with one source.
     pub fn alu1(&mut self, op: Ops, a: UopId) -> UopId {
         self.alu(op, vec![a])
     }
 
+    /// `x.alu(op, a, b)` — ALU op with two sources.
     pub fn alu2(&mut self, op: Ops, a: UopId, b: UopId) -> UopId {
         self.alu(op, vec![a, b])
     }
 
+    /// `x.alu(op, a, b, c)` — ALU op with three sources.
     pub fn alu3(&mut self, op: Ops, a: UopId, b: UopId, c: UopId) -> UopId {
         self.alu(op, vec![a, b, c])
     }
@@ -1624,6 +1663,7 @@ impl UOpCtx {
         self.uop(Ops::Cast, None, vec![t], Arg::Dtype(dt))
     }
 
+    /// `UOp.bitcast(dtype)` — reinterpret the bits, requiring concrete dtypes.
     pub fn bitcast(&mut self, t: UopId, dt: DTypeId) -> UopId {
         assert!(
             !is_weak_dt(self.dt_of(&t)) && !is_weak_dt(dt),
@@ -1641,10 +1681,12 @@ impl UOpCtx {
         self.alu2(op, x, y)
     }
 
+    /// `a + b` (`Ops::Add` after broadcast promotion).
     pub fn add(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Add, a, b)
     }
 
+    /// `a - b`, expanded as `a + (-b)` after promotion.
     pub fn sub(&mut self, a: UopId, b: UopId) -> UopId {
         // a + (-b): _broadcasted already promoted these
         let (x, y) = self.broadcasted(a, b);
@@ -1652,10 +1694,12 @@ impl UOpCtx {
         self.alu2(Ops::Add, x, neg_y)
     }
 
+    /// `a * b` (`Ops::Mul` after broadcast promotion).
     pub fn mul(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Mul, a, b)
     }
 
+    /// `-a` — logical negation for bool, otherwise multiply by `-1`.
     pub fn neg(&mut self, a: UopId) -> UopId {
         if self.dt_of(&a) == crate::dtype::BOOL {
             return self.logical_not(a);
@@ -1666,6 +1710,7 @@ impl UOpCtx {
         }
     }
 
+    /// `logical_not` — `a.cast(bool) != True`.
     pub fn logical_not(&mut self, a: UopId) -> UopId {
         let b = self.cast(a, crate::dtype::BOOL);
         let t = self.const_py(ConstVal::Bool(true), Some(crate::dtype::BOOL));
@@ -1690,6 +1735,7 @@ impl UOpCtx {
         self.div_mode(a, b, true)
     }
 
+    /// `a / b` with truncating division (`CDIV` for ints).
     pub fn div_trunc(&mut self, a: UopId, b: UopId) -> UopId {
         self.div_mode(a, b, false)
     }
@@ -1708,18 +1754,22 @@ impl UOpCtx {
         self.alu2(Ops::Mul, x, r)
     }
 
+    /// `a < b`.
     pub fn lt(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Cmplt, a, b)
     }
 
+    /// `a > b`, expanded as `b < a`.
     pub fn gt(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Cmplt, b, a)
     }
 
+    /// `a != b`.
     pub fn ne(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Cmpne, a, b)
     }
 
+    /// `a == b`, expanded as `!(a != b)`.
     pub fn eq(&mut self, a: UopId, b: UopId) -> UopId {
         {
             let n = self.ne(a, b);
@@ -1727,30 +1777,37 @@ impl UOpCtx {
         }
     }
 
+    /// `a & b` (bitwise/logical and).
     pub fn and_(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::And, a, b)
     }
 
+    /// `a | b` (bitwise/logical or).
     pub fn or_(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Or, a, b)
     }
 
+    /// `a ^ b`.
     pub fn xor(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Xor, a, b)
     }
 
+    /// `a << b`.
     pub fn shl(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Shl, a, b)
     }
 
+    /// `a >> b`.
     pub fn shr(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Shr, a, b)
     }
 
+    /// `max(a, b)` (`Ops::Max`).
     pub fn maximum(&mut self, a: UopId, b: UopId) -> UopId {
         self.binop(Ops::Max, a, b)
     }
 
+    /// `min(a, b)` — float path via negated max, int path via xor with `-1`.
     pub fn minimum(&mut self, a: UopId, b: UopId) -> UopId {
         let (t, x) = self.broadcasted(a, b);
         let dt = least_upper_dtype(&[self.dt_of(&t), self.dt_of(&x)]);
@@ -1775,23 +1832,28 @@ impl UOpCtx {
         self.alu3(Ops::Where, cond, x, y)
     }
 
+    /// `1 / a` (`Ops::Reciprocal`).
     pub fn reciprocal(&mut self, a: UopId) -> UopId {
         self.alu1(Ops::Reciprocal, a)
     }
 
+    /// `sqrt(a)`.
     pub fn sqrt(&mut self, a: UopId) -> UopId {
         self.alu1(Ops::Sqrt, a)
     }
 
+    /// `2 ** a`.
     pub fn exp2(&mut self, a: UopId) -> UopId {
         self.alu1(Ops::Exp2, a)
     }
 
+    /// `a ** b` after broadcast promotion.
     pub fn pow(&mut self, a: UopId, b: UopId) -> UopId {
         let (x, y) = self.broadcasted(a, b);
         self.alu2(Ops::Pow, x, y)
     }
 
+    /// `trunc(a)` — truncate toward zero.
     pub fn trunc(&mut self, a: UopId) -> UopId {
         self.alu1(Ops::Trunc, a)
     }
@@ -1841,6 +1903,7 @@ impl UOpCtx {
         self.const_like_dt(x.clone(), v, Some(self.dt_of(&x)))
     }
 
+    /// [`UOpCtx::const_like`] with an explicit dtype.
     pub fn const_like_dt(&mut self, x: UopId, v: ConstVal, dtype: Option<DTypeId>) -> UopId {
         let ret = self.const_py(v, dtype);
         // expand to x's shape when it differs
@@ -1894,22 +1957,27 @@ impl UOpCtx {
         SVal::U(self.alu2(op, ua, ub))
     }
 
+    /// Symbolic `a + b` via [`UOpCtx::sval_binop`].
     pub fn sval_add(&mut self, a: SVal, b: SVal) -> SVal {
         self.sval_binop(Ops::Add, a, b)
     }
 
+    /// Symbolic `a - b`.
     pub fn sval_sub(&mut self, a: SVal, b: SVal) -> SVal {
         self.sval_binop(Ops::Sub, a, b)
     }
 
+    /// Symbolic `a * b`.
     pub fn sval_mul(&mut self, a: SVal, b: SVal) -> SVal {
         self.sval_binop(Ops::Mul, a, b)
     }
 
+    /// Symbolic `a // b`.
     pub fn sval_div_floor(&mut self, a: SVal, b: SVal) -> SVal {
         self.sval_binop(Ops::Floordiv, a, b)
     }
 
+    /// Symbolic `-a`: constant folds, symbolic becomes `NEG`.
     pub fn sval_neg(&mut self, a: SVal) -> SVal {
         match a {
             SVal::I(v) => SVal::I(-v),
@@ -1917,6 +1985,7 @@ impl UOpCtx {
         }
     }
 
+    /// `Some(true/false)` when `s` is a concrete int one, `None` when symbolic.
     pub fn sval_is_one(&mut self, s: &SVal) -> Option<bool> {
         match s {
             SVal::I(v) => Some(*v == 1),
@@ -1924,6 +1993,7 @@ impl UOpCtx {
         }
     }
 
+    /// `SVal` to [`Arg`]; symbolic elements cannot be stored in an arg and panic.
     pub fn sval_to_arg(&mut self, s: &SVal) -> Arg {
         match s {
             SVal::I(v) => arg_from_i128(*v),
@@ -1951,6 +2021,7 @@ impl UOpCtx {
         }
     }
 
+    /// `x.split_uop(sep)` collected into a vector.
     pub fn split_uop_vec(&self, root: UopId, sep: Ops) -> Vec<UopId> {
         let mut v = Vec::new();
         self.split_uop(root, sep, &mut v);
@@ -2187,7 +2258,9 @@ pub struct TupKey {
 /// (exact for corpus magnitudes; documented divergence beyond 2^53).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NumKey {
+    /// Integer value key (covers bools and ints).
     I(i128),
+    /// Float value key (compared numerically, NaN highest).
     F(f64),
 }
 
@@ -2249,22 +2322,46 @@ fn pyconst_numkey(v: &ConstVal) -> NumKey {
     }
 }
 
+/// Ordering key for [`Arg`] values, mirroring Python's tuple comparison.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArgKey {
+    /// `Arg::None`.
     None,
+    /// Bool payload; compares as an int in Python.
     Bool(bool),
+    /// Integer payload (also holds unsigned ints).
     Int(i128),
+    /// Float payload, compared numerically.
     Float(NumKey),
+    /// String payload.
     Str(String),
+    /// Raw byte payload.
     Bytes(Vec<u8>),
-    Enum { class: u8, value: u16 },
+    /// Enum payload: the enum class tag and member ordinal.
+    Enum {
+        /// Enum class tag (`ArgEnum` discriminant).
+        class: u8,
+        /// Member ordinal inside that class.
+        value: u16,
+    },
+    /// DType payload key.
     Dtype(DtKey),
-    Seq { tuple: bool, items: Vec<ArgKey> },
+    /// Sequence payload; `tuple` distinguishes tuples from lists.
+    Seq {
+        /// True for a tuple, false for a list.
+        tuple: bool,
+        /// Ordered element keys.
+        items: Vec<ArgKey>,
+    },
+    /// Buffer/PARAM payload key.
     Param(ParamKey),
+    /// Pickled payload bytes.
     Pickle(Vec<u8>),
+    /// Custom data payload: a tag plus named fields.
     Data(String, Vec<(String, ArgKey)>),
 }
 
+/// Ordering key for a dtype, matching Python's `(priority, bitsize, name, fmt)` tuple.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DtKey {
     priority: i32,
@@ -2274,6 +2371,7 @@ pub struct DtKey {
 }
 
 impl DtKey {
+    /// Build the ordering key for dtype handle `d`.
     pub fn of(d: DTypeId) -> DtKey {
         let dt = d.dt();
         DtKey {
@@ -2288,6 +2386,7 @@ impl DtKey {
     }
 }
 
+/// Ordering key for a [`ParamArg`].
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParamKey {
     slot: i64,
@@ -2302,9 +2401,12 @@ pub struct ParamKey {
     volatile: bool,
 }
 
+/// Ordering key for a [`DeviceSpec`].
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeviceKey {
+    /// A single device identifier.
     Single(String),
+    /// A multi-device identifier list.
     Multi(Vec<String>),
 }
 

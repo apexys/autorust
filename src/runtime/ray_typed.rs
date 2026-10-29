@@ -337,6 +337,7 @@ pub struct TypedKernel {
 }
 
 impl TypedKernel {
+    /// Compile `uops` into a typed kernel, or `None` when a dtype is not natively supported.
     pub fn compile(ctx: &mut crate::uop::ctx::UOpCtx, uops: &[UopId]) -> Option<TypedKernel> {
         let kernel = RayKernel::compile(ctx, uops)?;
         // Commit weak dtypes to concrete storage before the support scan.
@@ -365,13 +366,16 @@ impl TypedKernel {
         Some(TypedKernel { kernel, plan })
     }
 
+    /// Buffer slots passed as kernel arguments.
     pub fn globals(&self) -> &[i64] {
         &self.kernel.globals
     }
+    /// Dtype of each signature slot.
     pub fn sig_dtypes(&self) -> &HashMap<i64, DTypeId> {
         &self.kernel.sig_dtypes
     }
 
+    /// Execute over the launch grid; `parallel` enables the rayon path.
     pub fn exec(
         &self,
         views: &HashMap<i64, SendMemView>,

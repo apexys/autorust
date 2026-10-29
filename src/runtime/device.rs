@@ -21,9 +21,13 @@ use super::buffer::OpaqueT;
 /// Opaques are backend-owned (`OpaqueT` trait objects); the default host
 /// implementation is `MemAllocator`.
 pub trait BackendAllocator {
+    /// Allocate `size` bytes, returning a backend-owned opaque handle.
     fn _alloc(&self, size: usize) -> Rc<dyn OpaqueT>;
+    /// Release an opaque previously returned by `_alloc`.
     fn _free(&self, o: Rc<dyn OpaqueT>);
+    /// Copy host bytes into an opaque window (`Allocator._copyin`).
     fn _copyin(&self, dest: &dyn OpaqueT, src: &[u8]);
+    /// Copy an opaque window out into host bytes (`Allocator._copyout`).
     fn _copyout(&self, dest: &mut [u8], src: &dyn OpaqueT);
     /// `Allocator._offset` — slice the window (memoryview semantics).
     fn _offset(&self, buf: &dyn OpaqueT, size: usize, offset: usize) -> Rc<dyn OpaqueT>;
@@ -103,6 +107,7 @@ impl LruAllocator {
         }
     }
 
+    /// Allocate `size` bytes, reusing a cached free-list entry when possible.
     pub fn alloc(&self, size: usize) -> Rc<dyn OpaqueT> {
         assert!(size > 0, "TGERR: alloc size must be positive");
         if let Some(o) = self
@@ -136,15 +141,19 @@ impl LruAllocator {
         }
     }
 
+    /// Copy host bytes into `dest` through the backend allocator.
     pub fn _copyin(&self, dest: &dyn OpaqueT, src: &[u8]) {
         self.inner._copyin(dest, src)
     }
+    /// Copy `src` out into host bytes through the backend allocator.
     pub fn _copyout(&self, dest: &mut [u8], src: &dyn OpaqueT) {
         self.inner._copyout(dest, src)
     }
+    /// Return a `(size, offset)` sub-window of `buf`.
     pub fn _offset(&self, buf: &dyn OpaqueT, size: usize, offset: usize) -> Rc<dyn OpaqueT> {
         self.inner._offset(buf, size, offset)
     }
+    /// Copy device-to-device from `src` into `dest`.
     pub fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
         self.inner._copy_into(dest, src)
     }
@@ -162,9 +171,11 @@ impl Default for LruAllocator {
 /// The empty default is `src.encode()` (device.py:306). Disk caching is out
 /// of scope; `compile_cached` keeps an in-memory map.
 pub trait Comp {
+    /// Compile `src` to library bytes; the identity default returns the source bytes.
     fn compile(&self, src: &str) -> Vec<u8> {
         src.as_bytes().to_vec()
     }
+    /// `Compiler.compile` with an in-memory cache keyed by source.
     fn compile_cached(&self, src: &str) -> Vec<u8>;
 }
 
@@ -191,14 +202,18 @@ impl Comp for IdentityCompiler {
 /// whatever `Compiler.compile` returned (pickle bytes for interp, source
 /// text for NVIDIA CL).
 pub struct TinyElf {
+    /// Compiler output (pickle bytes for interp, source text for NVIDIA CL).
     pub lib: Vec<u8>,
+    /// Entry-point function name.
     pub name: String,
+    /// Buffer signature as `(slot, dtype)` pairs in linear order.
     pub signature: Vec<(i64, crate::dtype::DTypeId)>,
 }
 
 /// `Program.__call__(*bufs, global_size, local_size, vals, wait)` — the
 /// runtime launch seam. Returns elapsed seconds when `wait`.
 pub trait Prog {
+    /// Launch with the given buffers, grid sizes and integer vals; returns elapsed seconds when `wait`.
     fn call(
         &mut self,
         bufs: &[Rc<dyn OpaqueT>],
@@ -214,9 +229,13 @@ pub trait Prog {
 /// `Compiled` (device.py:343) — renderer + allocator + compiler + runtime
 /// factory, the four public seams every backend plugs into.
 pub struct Compiled {
+    /// Device name in canonical form.
     pub device: String,
+    /// Free-list allocator for this device.
     pub allocator: LruAllocator,
+    /// UOp renderer producing device source.
     pub renderer: Box<dyn UopRenderer>,
+    /// Compiler turning rendered source into library bytes.
     pub compiler: Rc<dyn Comp>,
     runtime_ctor: RuntimeCtor,
     compiles: Cell<usize>,
@@ -265,6 +284,7 @@ impl Compiled {
         (self.runtime_ctor)(elf)
     }
 
+    /// Number of runtimes constructed through the caching path.
     pub fn compile_count(&self) -> usize {
         self.compiles.get()
     }
@@ -330,6 +350,7 @@ pub fn is_interp_engine(device: &str) -> bool {
     }
 }
 
+/// Lazily builds a `Compiled` device for the registry.
 pub type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
 
 /// A registered backend and its lazily-constructed device.

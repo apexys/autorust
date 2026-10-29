@@ -49,7 +49,9 @@ use crate::dtype::ConstVal;
 
 /// arg for Tensor.add/mul: another Tensor or a python scalar.
 pub enum TensorAddArg {
+    /// A tensor operand.
     T(Tensor),
+    /// A Python scalar operand.
     C(ConstVal),
 }
 impl From<Tensor> for TensorAddArg {
@@ -365,6 +367,7 @@ impl Tensor {
     pub fn shape_ctx(&self, ctx: &mut UOpCtx) -> Shape {
         Shape::new((*ctx.shape(&self.uop()).unwrap().unwrap_or_default()).clone())
     }
+    /// `Tensor.dtype` — this tensor's dtype.
     pub fn dtype(&self) -> DTypeId {
         self.dtype_ctx(&self.ctx.borrow())
     }
@@ -983,6 +986,7 @@ pub fn invalid(ctx: &mut UOpCtx) -> UopId {
     ctx.const_py(ConstVal::Invalid, None)
 }
 
+/// `UOp.valid(cond)` — `x` where `cond`, else an INVALID const.
 pub fn valid(ctx: &mut UOpCtx, x: UopId, cond: UopId) -> UopId {
     let inv = ctx.const_like_dt(x.clone(), ConstVal::Invalid, None);
     ctx.where_(cond, x, inv)
@@ -1313,6 +1317,7 @@ impl Tensor {
             Tensor::from_uop(ctx, __u)
         }
     }
+    /// `Tensor.prod(axis, keepdim)` — product along `axis`.
     pub fn prod(&self, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> Tensor {
         self.prod_ctx(&mut self.ctx.borrow_mut(), axis, keepdim, dtype)
     }
@@ -1329,6 +1334,7 @@ impl Tensor {
             Tensor::from_uop(ctx, __u)
         }
     }
+    /// `Tensor.max(axis, keepdim)` — maximum along `axis`.
     pub fn max(&self, axis: Option<&[usize]>, keepdim: bool) -> Tensor {
         self.max_ctx(&mut self.ctx.borrow_mut(), axis, keepdim)
     }
@@ -1339,6 +1345,7 @@ impl Tensor {
             Tensor::from_uop(ctx, __u)
         }
     }
+    /// `Tensor.mean(axis, keepdim)` — arithmetic mean along `axis`.
     pub fn mean(&self, axis: Option<&[usize]>, keepdim: bool) -> Tensor {
         self.mean_ctx(&mut self.ctx.borrow_mut(), axis, keepdim)
     }
@@ -1349,6 +1356,7 @@ impl Tensor {
             Tensor::from_uop(ctx, __u)
         }
     }
+    /// `Tensor.var(axis, keepdim, correction)` — variance with Bessel correction.
     pub fn var(&self, axis: Option<&[usize]>, keepdim: bool, correction: i64) -> Tensor {
         self.var_ctx(&mut self.ctx.borrow_mut(), axis, keepdim, correction)
     }
@@ -1365,6 +1373,7 @@ impl Tensor {
             Tensor::from_uop(ctx, __u)
         }
     }
+    /// `Tensor.cumsum(axis)` — cumulative sum along `axis`.
     pub fn cumsum(&self, axis: i64) -> Tensor {
         self.cumsum_ctx(&mut self.ctx.borrow_mut(), axis)
     }
@@ -2206,6 +2215,7 @@ impl Tensor {
             }
         }
     }
+    /// `Tensor.mul(other)` — elementwise multiply by a tensor or scalar.
     pub fn mul(&self, other: impl Into<TensorAddArg>) -> Tensor {
         self.mul_ctx(&mut self.ctx.borrow_mut(), other)
     }
@@ -2222,6 +2232,7 @@ impl Tensor {
             }
         }
     }
+    /// `Tensor.neg()` — arithmetic negation (logical not for bools).
     pub fn neg(&self) -> Tensor {
         self.neg_ctx(&mut self.ctx.borrow_mut())
     }
@@ -2290,6 +2301,7 @@ impl Tensor {
             }
         }
     }
+    /// `Tensor.bitwise_and(other)` — elementwise and with a tensor or scalar.
     pub fn bitwise_and(&self, other: impl Into<TensorAddArg>) -> Tensor {
         self.bitwise_and_ctx(&mut self.ctx.borrow_mut(), other)
     }
@@ -2306,6 +2318,7 @@ impl Tensor {
             }
         }
     }
+    /// `Tensor.bitwise_xor(other)` — elementwise xor with a tensor or scalar.
     pub fn bitwise_xor(&self, other: impl Into<TensorAddArg>) -> Tensor {
         self.bitwise_xor_ctx(&mut self.ctx.borrow_mut(), other)
     }
@@ -2335,6 +2348,7 @@ impl Tensor {
             Tensor::from_uop(ctx, __u)
         }
     }
+    /// `Tensor.rshift(bits)` — logical right shift by `bits`.
     pub fn rshift(&self, bits: i64) -> Tensor {
         self.rshift_ctx(&mut self.ctx.borrow_mut(), bits)
     }

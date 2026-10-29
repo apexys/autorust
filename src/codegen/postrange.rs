@@ -135,9 +135,13 @@ use crate::renderer::tc::TensorCore;
 
 /// `Scheduler` (postrange.py:26).
 pub struct Scheduler<'a> {
+    /// The kernel AST (SINK) being scheduled.
     pub ast: UopId,
+    /// Renderer whose capabilities drive the opts.
     pub ren: &'a Renderer,
+    /// Whether the AST forbids LOCAL axes (`dont_use_locals`).
     pub dont_use_locals: bool,
+    /// Opts applied so far, recorded into the kernel AST's `applied_opts`.
     pub applied_opts: Vec<Arg>,
     opt_range: i64,
     /// `self.tensor_core` — set by `_apply_tc_opt` (postrange.py:308).
@@ -145,6 +149,7 @@ pub struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
+    /// Build a scheduler for `ast` under renderer `ren`.
     pub fn new(ctx: &mut UOpCtx, ast: UopId, ren: &'a Renderer) -> Scheduler<'a> {
         let dont_use_locals = match ctx.arg_of(&ast) {
             Arg::Data(d) => match d.get("dont_use_locals") {
@@ -217,6 +222,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    /// Number of opt axes (`len(full_shape)`).
     pub fn shape_len(&self, ctx: &mut UOpCtx) -> usize {
         self.rngs(ctx).len()
     }
@@ -229,6 +235,7 @@ impl<'a> Scheduler<'a> {
             .collect()
     }
 
+    /// Axis type of each opt axis, in order.
     pub fn axis_types(&self, ctx: &mut UOpCtx) -> Vec<AxisType> {
         self.rngs(ctx)
             .iter()
@@ -254,6 +261,7 @@ impl<'a> Scheduler<'a> {
             .collect()
     }
 
+    /// Ranges whose axis type is in `types`.
     pub fn ranges_of(&self, ctx: &mut UOpCtx, types: &[AxisType]) -> Vec<UopId> {
         self.rngs(ctx)
             .into_iter()
@@ -261,6 +269,7 @@ impl<'a> Scheduler<'a> {
             .collect()
     }
 
+    /// Indices of opt axes whose axis type is in `types`.
     pub fn axes_of(&self, ctx: &mut UOpCtx, types: &[AxisType]) -> Vec<usize> {
         self.axis_types(ctx)
             .into_iter()
@@ -286,11 +295,13 @@ impl<'a> Scheduler<'a> {
             .collect()
     }
 
+    /// Number of axes currently upcast or unrolled.
     pub fn upcasted(&self, ctx: &mut UOpCtx) -> usize {
         self.axes_of(ctx, &[AxisType::Upcast, AxisType::Unroll])
             .len()
     }
 
+    /// Product of the upcast/unroll axis extents.
     pub fn upcast_size(&self, ctx: &mut UOpCtx) -> i64 {
         self.axes_of(ctx, &[AxisType::Upcast, AxisType::Unroll])
             .iter()
@@ -298,6 +309,7 @@ impl<'a> Scheduler<'a> {
             .product()
     }
 
+    /// Number of GROUP_REDUCE axes.
     pub fn group_for_reduces(&self, ctx: &mut UOpCtx) -> usize {
         self.axes_of(ctx, &[AxisType::GroupReduce]).len()
     }
@@ -1278,12 +1290,19 @@ fn kernel_info_with_opts(name: &str, opts: &[Arg], dont_use_locals: bool) -> Dat
 /// `OptOps` subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptOp {
+    /// Upcast an axis (`OptOps.UPCAST`).
     Upcast,
+    /// Unroll an axis (`OptOps.UNROLL`).
     Unroll,
+    /// Localize an axis (`OptOps.LOCAL`).
     Local,
+    /// Group a reduce axis (`OptOps.GROUP`).
     Group,
+    /// Group a reduce axis with a shifted top (`OptOps.GROUPTOP`).
     GroupTop,
+    /// Pad an axis to a multiple (`OptOps.PADTO`).
     PadTo,
+    /// Apply the tensor-core opt (`OptOps.TC`).
     Tc,
 }
 

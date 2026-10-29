@@ -23,8 +23,10 @@ use super::sint::SVal;
 use crate::dtype::{ConstVal, DTypeId, is_bool};
 use ConstVal::*;
 
+/// Source-pattern shape for a [`UPat`], mirroring the Python `UPat.src` variants.
 #[derive(Clone, PartialEq)]
 pub enum SrcPat {
+    /// No src constraint: any srcs match.
     None,
     /// exact tuple (strict when allow_any_len is false)
     Tup(Vec<UPat>),
@@ -36,19 +38,30 @@ pub enum SrcPat {
     Any(Vec<UPat>),
 }
 
+/// A pattern over UOps (Python's `UPat`), matched one node at a time.
 #[derive(Clone, PartialEq)]
 pub struct UPat {
+    /// Allowed opcodes (`match op`), or `None` for any.
     pub op: Option<Vec<Ops>>,
+    /// Allowed dtypes (`match_dtype`), or `None` for any.
     pub dtype: Option<Vec<DTypeId>>,
+    /// Allowed tags (`match_tag`), or `None` for any.
     pub tag: Option<Vec<Arg>>,
+    /// Required arg value, or `None` for any.
     pub arg: Option<Arg>,
+    /// Binding name for the match store.
     pub name: Option<&'static str>,
+    /// Source patterns matched against the node's srcs.
     pub src: SrcPat,
+    /// Whether the src count must equal `required_len` exactly.
     pub strict_length: bool,
+    /// Minimum src count the node must have.
     pub required_len: usize,
+    /// Ops that must appear among the node's direct srcs (fast reject).
     pub early_reject: Vec<Ops>,
 }
 
+/// Pattern-match bindings: name to matched UOp.
 pub type Store = HashMap<&'static str, UopId>;
 
 // `add`/`sub`/`mul`/`shl`/`shr` build *patterns* for those Ops (named after
@@ -56,6 +69,7 @@ pub type Store = HashMap<&'static str, UopId>;
 // `impl Into<UPatOrConst>`, which a std operator could not cover.
 #[allow(clippy::should_implement_trait)]
 impl UPat {
+    /// `UPat(...)` — build a pattern, deriving length and early-reject fields from `src`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         op: Option<Vec<Ops>>,
@@ -103,10 +117,12 @@ impl UPat {
         }
     }
 
+    /// A pattern for any one of `ops` (`UPat(op=ops)`).
     pub fn op_var(ops: Vec<Ops>) -> UPat {
         UPat::new(Some(ops), None, SrcPat::None, None, None, false, None)
     }
 
+    /// A pattern for exactly one opcode (`UPat(op)`).
     pub fn ops1(op: Ops) -> UPat {
         UPat::new(Some(vec![op]), None, SrcPat::None, None, None, false, None)
     }
@@ -134,28 +150,33 @@ impl UPat {
         UPat::cvar(None, dtype, Some(super::arg::Arg::Const(v)))
     }
 
+    /// `UPat.any(*src)` — try each alternative against the same node.
     pub fn any(srcs: Vec<UPat>) -> UPat {
         UPat::new(None, None, SrcPat::Any(srcs), None, None, false, None)
     }
 
+    /// `UPat.named(name)` — copy with a store binding name.
     pub fn named(&self, name: &'static str) -> UPat {
         let mut p = self.clone();
         p.name = Some(name);
         p
     }
 
+    /// Copy with a new required `arg`.
     pub fn with_arg(&self, arg: Option<Arg>) -> UPat {
         let mut p = self.clone();
         p.arg = arg;
         p
     }
 
+    /// Copy with a new allowed dtype set.
     pub fn with_dtype(&self, dtype: Option<Vec<DTypeId>>) -> UPat {
         let mut p = self.clone();
         p.dtype = dtype;
         p
     }
 
+    /// Copy with a new allowed tag set.
     pub fn with_tag(&self, tag: Option<Vec<Arg>>) -> UPat {
         let mut p = self.clone();
         p.tag = tag;
@@ -205,6 +226,7 @@ impl UPat {
         }
     }
 
+    /// Copy matching an exact src tuple with strict length.
     pub fn with_src_tup(&self, srcs: Vec<UPat>) -> UPat {
         let mut p = self.clone();
         p.src = SrcPat::Tup(srcs);
@@ -229,6 +251,7 @@ impl UPat {
         self.early_reject = er;
     }
 
+    /// Recompute the early-reject op set from the direct src patterns.
     pub fn recompute_early_reject(&mut self) {
         let mut er = Vec::new();
         if let SrcPat::Tup(v) = &self.src {
@@ -253,6 +276,7 @@ impl UPat {
         }
     }
 
+    /// `UPat.alu(op, *src)` — ALU pattern, permuted for commutative ops.
     pub fn alu(self, op: Ops, src: Vec<UPat>) -> UPat {
         let mut asrc = vec![self];
         asrc.extend(src);
@@ -274,22 +298,27 @@ impl UPat {
         a.alu(op, vec![b])
     }
 
+    /// Pattern for `self * x`.
     pub fn mul(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Mul, x.into(), false)
     }
 
+    /// Pattern for `self + x`.
     pub fn add(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Add, x.into(), false)
     }
 
+    /// Pattern for `self - x`.
     pub fn sub(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Sub, x.into(), false)
     }
 
+    /// Pattern for `self // x`.
     pub fn floordiv(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Floordiv, x.into(), false)
     }
 
+    /// Pattern for `self / x`, expanded as `self * RECIPROCAL(x)`.
     pub fn truediv(self, x: impl Into<UPatOrConst>) -> UPat {
         // elementwise div: a * RECIPROCAL(b) for non-int pairs, CDIV/FLOORDIV otherwise;
         // the M2 rules only use `/` on const patterns where the composite matches
@@ -298,46 +327,57 @@ impl UPat {
         self.mul(y.alu(Ops::Reciprocal, vec![]))
     }
 
+    /// Pattern for `self % x` (`FLOORMOD`).
     pub fn mod_(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Floormod, x.into(), false)
     }
 
+    /// Pattern for `self & x`.
     pub fn and_(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::And, x.into(), false)
     }
 
+    /// Pattern for `self | x`.
     pub fn or_(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Or, x.into(), false)
     }
 
+    /// Pattern for `self ^ x`.
     pub fn xor(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Xor, x.into(), false)
     }
 
+    /// Pattern for `self << x`.
     pub fn shl(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Shl, x.into(), false)
     }
 
+    /// Pattern for `self >> x`.
     pub fn shr(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Shr, x.into(), false)
     }
 
+    /// Pattern for `self < x`.
     pub fn lt(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Cmplt, x.into(), false)
     }
 
+    /// Pattern for `self > x`, expanded as `x < self`.
     pub fn gt(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Cmplt, x.into(), true)
     }
 
+    /// Pattern for `self != x`.
     pub fn ne(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Cmpne, x.into(), false)
     }
 
+    /// Pattern for `max(self, x)`.
     pub fn maximum(self, x: impl Into<UPatOrConst>) -> UPat {
         self._binop(Ops::Max, x.into(), false)
     }
 
+    /// Pattern for `self.where(x, y)`.
     pub fn where_(self, x: impl Into<UPatOrConst>, y: impl Into<UPatOrConst>) -> UPat {
         let (x, y) = (Self::ufix(x.into()), Self::ufix(y.into()));
         self.alu(Ops::Where, vec![x, y])
@@ -384,6 +424,7 @@ impl UPat {
         )
     }
 
+    /// Pattern for `self.bitcast(dtype)`.
     pub fn bitcast(self, dtype: Option<DTypeId>) -> UPat {
         UPat::new(
             Some(vec![Ops::Bitcast]),
@@ -396,20 +437,24 @@ impl UPat {
         )
     }
 
+    /// Pattern for logical not: `self.cast(bool) != True`.
     pub fn logical_not(self) -> UPat {
         // mixin: self.cast(bool).ne(True)
         self.cast(Some(crate::dtype::BOOL))
             .ne(UPatOrConst::Val(ConstVal::Bool(true)))
     }
 
+    /// Pattern for `RECIPROCAL(self)`.
     pub fn reciprocal(self) -> UPat {
         self.alu(Ops::Reciprocal, vec![])
     }
 
+    /// Pattern for `TRUNC(self)`.
     pub fn trunc(self) -> UPat {
         self.alu(Ops::Trunc, vec![])
     }
 
+    /// Pattern for `REDUCE(self, *src)` with an optional arg.
     pub fn reduce(self, src: Vec<UPat>, arg: Option<Arg>, allow_any_len: bool) -> UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
@@ -427,6 +472,7 @@ impl UPat {
         p
     }
 
+    /// Pattern for `LOAD(self, *src)`.
     pub fn load(self, src: Vec<UPat>, allow_any_len: bool) -> UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
@@ -444,6 +490,7 @@ impl UPat {
         p
     }
 
+    /// Pattern for `STORE(self, *src)`.
     pub fn store(self, src: Vec<UPat>) -> UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
@@ -461,6 +508,7 @@ impl UPat {
         p
     }
 
+    /// Pattern for `INDEX(self, *srcs)`.
     pub fn index(self, srcs: Vec<UPat>) -> UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
@@ -478,6 +526,7 @@ impl UPat {
         p
     }
 
+    /// Pattern for `AFTER(self, *src)`.
     pub fn after(self, src: Vec<UPat>, allow_any_len: bool) -> UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
@@ -495,6 +544,7 @@ impl UPat {
         p
     }
 
+    /// Pattern for `END(self, *src)`.
     pub fn end(self, src: Vec<UPat>) -> UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
@@ -567,6 +617,7 @@ impl UPat {
 
     // ---------- matching ----------
 
+    /// `UPat.match` — append every binding store that matches `uop` to `out`.
     pub fn match_uop(&self, ctx: &UOpCtx, uop: UopId, store: Store, out: &mut Vec<Store>) {
         if let SrcPat::Any(alts) = &self.src {
             for alt in alts {
@@ -673,10 +724,13 @@ impl UPat {
 pub type L2iMemo =
     std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>;
 
+/// Either a nested pattern or a constant, accepted by the operator helpers.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)] // patterns are built once; boxing would complicate every match
 pub enum UPatOrConst {
+    /// A nested pattern.
     Pat(UPat),
+    /// A constant, matched as a CONST arg.
     Val(crate::dtype::ConstVal),
 }
 
@@ -763,6 +817,7 @@ pub fn py_const_eq(a: &ConstVal, b: &ConstVal) -> bool {
     }
 }
 
+/// All distinct permutations of `v` (an all-equal list collapses to one).
 pub fn permutations<T: Clone + PartialEq>(v: Vec<T>) -> Vec<Vec<T>> {
     fn helper<T: Clone>(
         items: &[T],
@@ -803,6 +858,7 @@ pub fn permutations<T: Clone + PartialEq>(v: Vec<T>) -> Vec<Vec<T>> {
 
 // ---------- PatternMatcher ----------
 
+/// A rewrite rule: `(ctx, store, ctxval)` returning `Some(replacement)` on a match.
 pub type RuleFn = Arc<dyn Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + Send + Sync>;
 
 /// Lazy `PatternMatcher` slot for a `static`.
@@ -821,9 +877,11 @@ impl Default for PmSlot {
 }
 
 impl PmSlot {
+    /// A new, uninitialized slot (usable in a `static`).
     pub const fn new() -> Self {
         PmSlot(std::sync::OnceLock::new())
     }
+    /// Return the interned matcher, building it once on first use.
     pub fn get_or_init(
         &'static self,
         build: impl FnOnce() -> PatternMatcher,
@@ -832,17 +890,23 @@ impl PmSlot {
     }
 }
 
+/// One pattern plus its action, inside a [`PatternMatcher`].
 pub struct Rule {
+    /// The pattern that must match.
     pub pat: UPat,
+    /// The action producing a replacement, or `None` for no match.
     pub f: RuleFn,
+    /// Ops that must appear among the node's direct srcs.
     pub early_reject: Vec<Ops>,
 }
 
 /// Threading context for rule functions (M2: substitution dicts).
 #[derive(Clone, Default)]
 pub enum CtxVal {
+    /// No extra context.
     #[default]
     None,
+    /// Variable substitution map (`UOp.substitute`).
     Subst(HashMap<UopId, UopId>),
     /// Scheduler IndexingContext (run_rangeify rules).
     Idx(std::rc::Rc<std::cell::RefCell<crate::schedule::indexing::IndexingContext>>),
@@ -869,21 +933,27 @@ pub enum CtxVal {
 /// `LocalAddBufferContext` (rangeify.py:469).
 #[derive(Default)]
 pub struct LocalAddBufferContext {
+    /// Next PARAM slot allocated by `debuf` (the `ParamArg` slot).
     pub dg: i64,
     /// insertion-ordered buf -> replacement map
     pub map_keys: Vec<UopId>,
+    /// Replacement values, parallel to `map_keys`.
     pub map_vals: Vec<UopId>,
+    /// Next local range number assigned by `renumber_range`.
     pub range: i64,
+    /// Opt tuples captured from a CONTIGUOUS arg (`rangeify_codegen`).
     pub opts: Option<Vec<Arg>>,
 }
 
 impl LocalAddBufferContext {
+    /// Look up a replacement by key.
     pub fn map_get(&self, k: UopId) -> Option<UopId> {
         self.map_keys
             .iter()
             .position(|x| *x == k)
             .map(|i| (self.map_vals[i]).clone())
     }
+    /// Insert a key/replacement pair unless the key is already present.
     pub fn map_insert(&mut self, k: UopId, v: UopId) {
         if self.map_get(k.clone()).is_none() {
             self.map_keys.push(k);
@@ -893,6 +963,7 @@ impl LocalAddBufferContext {
 }
 
 impl CtxVal {
+    /// The substitution for `u` when this is a [`CtxVal::Subst`].
     pub fn get_subst(&self, u: UopId) -> Option<UopId> {
         match self {
             CtxVal::Subst(m) => m.get(&u).cloned(),
@@ -1065,6 +1136,7 @@ fn add_cache() -> &'static AddCache {
 }
 
 impl PatternMatcher {
+    /// Compile `(pattern, rule)` pairs into a matcher indexed by opcode.
     pub fn new(patterns: Vec<(UPat, RuleFn)>) -> PatternMatcher {
         let mut inner = PmInner::default();
         for (pat, f) in patterns {
@@ -1091,6 +1163,7 @@ impl PatternMatcher {
         self
     }
 
+    /// The matcher's rules, in insertion order.
     pub fn rules(&self) -> &[Arc<Rule>] {
         &self.0.rules
     }
@@ -1185,6 +1258,7 @@ pub fn sget(store: &Store, name: &str) -> UopId {
         .clone()
 }
 
+/// `st.get(name)` — the binding when present.
 pub fn sget_opt(store: &Store, name: &str) -> Option<UopId> {
     store.get(name).cloned()
 }
@@ -1206,13 +1280,17 @@ pub fn const_arg(ctx: &mut UOpCtx, u: UopId) -> Option<ConstArgVal> {
     }
 }
 
+/// A constant or constant tuple extracted by [`const_arg`].
 #[derive(Clone, Debug)]
 pub enum ConstArgVal {
+    /// A single CONST value.
     One(crate::dtype::ConstVal),
+    /// A STACK of CONST values.
     Vec(Vec<crate::dtype::ConstVal>),
 }
 
 impl ConstArgVal {
+    /// The value when this is a single constant.
     pub fn one(self) -> Option<crate::dtype::ConstVal> {
         match self {
             ConstArgVal::One(v) => Some(v),
@@ -1232,14 +1310,17 @@ pub fn opset_union(a: &[Ops], b: &[Ops]) -> Vec<Ops> {
     v
 }
 
+/// Op-set difference `a - b`, preserving `a`'s order.
 pub fn opset_diff(a: &[Ops], b: &[Ops]) -> Vec<Ops> {
     a.iter().filter(|o| !b.contains(o)).cloned().collect()
 }
 
+/// A copy of an op set, for single-op rule patterns written as `{op}` in Python.
 pub fn opset_single(set: &[Ops]) -> Vec<Ops> {
     set.to_vec()
 }
 
+/// Compare `a` and `b` by `tuplize` order (Python's tuple ordering for commutative flips).
 pub fn tuplize_lt(ctx: &UOpCtx, a: UopId, b: UopId) -> std::cmp::Ordering {
     ctx.tuplize(&a).cmp(&ctx.tuplize(&b))
 }
@@ -1255,6 +1336,7 @@ pub fn is_bool_dtype(ctx: &UOpCtx, u: UopId) -> bool {
 #[derive(Debug)]
 pub struct BottomUpGate;
 
+/// Max rewrite stack depth before assuming an infinite loop.
 pub const REWRITE_STACK_LIMIT: usize = 250000;
 
 /// `_OPAQUE_CALL_BODIES` (ops.py:1179).
@@ -1589,6 +1671,7 @@ pub fn substitute_extra(
     .unwrap_or_else(|e| panic!("TGERR: substitute_extra failed: {e}"))
 }
 
+/// `UOp.substitute` — bottom-up rewrite replacing `dvars`.
 pub fn substitute(
     ctx: &mut UOpCtx,
     root: UopId,
@@ -1616,6 +1699,7 @@ pub fn substitute(
 
 static SUBSTITUTE_PM: PmSlot = PmSlot::new();
 
+/// The cached pattern matcher used by [`substitute`].
 pub fn substitute_pm() -> &'static PatternMatcher {
     SUBSTITUTE_PM.get_or_init(|| {
         let pat = UPat::op_var((0..=79u16).filter_map(Ops::from_u16).collect()).named("x");
@@ -1647,11 +1731,14 @@ pub fn simplify(ctx: &mut UOpCtx, u: UopId) -> UopId {
 /// SymVal: what `ssimplify` returns in Python (ConstType | UOp).
 #[derive(Clone, Debug)]
 pub enum SymVal {
+    /// A constant.
     C(crate::dtype::ConstVal),
+    /// A symbolic UOp.
     U(UopId),
 }
 
 impl SymVal {
+    /// Convert to a symbolic [`SVal`] (constants become ints).
     pub fn to_sval(&self) -> SVal {
         match self {
             SymVal::C(c) => {

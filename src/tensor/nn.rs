@@ -110,7 +110,9 @@ fn optional_weight_bias(
 /// `nn::Linear`: `x.linear(weight.transpose(), bias)`.
 /// weight shape: (out_features, in_features), bias shape: (out_features,).
 pub struct Linear {
+    /// Weight matrix, shape `(out_features, in_features)`.
     pub weight: Tensor,
+    /// Optional bias vector, shape `(out_features,)`.
     pub bias: Option<Tensor>,
 }
 
@@ -158,12 +160,19 @@ impl Linear {
 /// entry per spatial dim, so a 1-tuple makes this a `Conv1d`.
 /// weight shape: (out_channels, in_channels/groups, *kernel_size).
 pub struct Conv2d {
+    /// Kernel, shape `(out_channels, in_channels/groups, *kernel_size)`.
     pub weight: Tensor,
+    /// Optional per-out-channel bias.
     pub bias: Option<Tensor>,
+    /// Kernel extent per spatial dim.
     pub kernel_size: Vec<i64>,
+    /// Number of blocked connections between input and output channels.
     pub groups: i64,
+    /// Convolution stride.
     pub stride: i64,
+    /// Kernel dilation.
     pub dilation: i64,
+    /// Padding per spatial dim, as flat `(lo, hi)` pairs.
     pub padding: Vec<i64>,
 }
 
@@ -302,13 +311,21 @@ pub fn conv1d(
 /// `nn::ConvTranspose2d` (nn/__init__.py:130-154). Subclasses `Conv2d`, but the
 /// weight has shape (in_channels, out_channels/groups, *kernel_size).
 pub struct ConvTranspose2d {
+    /// Kernel, shape `(in_channels, out_channels/groups, *kernel_size)`.
     pub weight: Tensor,
+    /// Optional per-out-channel bias.
     pub bias: Option<Tensor>,
+    /// Kernel extent per spatial dim.
     pub kernel_size: Vec<i64>,
+    /// Extra size added to the output in each spatial dim.
     pub output_padding: i64,
+    /// Number of blocked connections between input and output channels.
     pub groups: i64,
+    /// Convolution stride.
     pub stride: i64,
+    /// Kernel dilation.
     pub dilation: i64,
+    /// Padding per spatial dim, as flat `(lo, hi)` pairs.
     pub padding: Vec<i64>,
 }
 
@@ -427,13 +444,21 @@ pub fn conv_transpose1d(
 
 /// `nn::BatchNorm`: batch normalization (nn/__init__.py:8-64).
 pub struct BatchNorm {
+    /// Numerical stability term added to the variance.
     pub eps: f64,
+    /// Whether to maintain running mean/variance across batches.
     pub track_running_stats: bool,
+    /// Running-stat update rate.
     pub momentum: f64,
+    /// Optional per-channel scale.
     pub weight: Option<Tensor>,
+    /// Optional per-channel shift.
     pub bias: Option<Tensor>,
+    /// Running mean buffer (used at eval time).
     pub running_mean: Option<Tensor>,
+    /// Running variance buffer (used at eval time).
     pub running_var: Option<Tensor>,
+    /// Count of observed batches.
     pub num_batches_tracked: Option<Tensor>,
 }
 
@@ -639,10 +664,15 @@ impl Module for BatchNorm {
 
 /// `nn::LayerNorm`: layer normalization.
 pub struct LayerNorm {
+    /// Shape of the normalized trailing dims.
     pub normalized_shape: Vec<i64>,
+    /// Numerical stability term added to the variance.
     pub eps: f64,
+    /// Whether the layer has learnable weight/bias.
     pub affine: bool,
+    /// Optional per-element scale.
     pub weight: Option<Tensor>,
+    /// Optional per-element shift.
     pub bias: Option<Tensor>,
 }
 
@@ -732,11 +762,17 @@ impl Module for LayerNorm {
 
 /// `nn::GroupNorm`: group normalization.
 pub struct GroupNorm {
+    /// Number of channel groups.
     pub num_groups: i64,
+    /// Number of input channels.
     pub num_channels: i64,
+    /// Numerical stability term added to the variance.
     pub eps: f64,
+    /// Whether the layer has learnable weight/bias.
     pub affine: bool,
+    /// Optional per-channel scale.
     pub weight: Option<Tensor>,
+    /// Optional per-channel shift.
     pub bias: Option<Tensor>,
 }
 
@@ -824,9 +860,13 @@ impl Module for GroupNorm {
 /// `(N, num_features, -1)`, layer-norm the last axis, reshape back, then apply
 /// the per-channel affine `x * weight.reshape(1,-1,1..) + bias.reshape(...)`.
 pub struct InstanceNorm {
+    /// Number of input channels (normalized per instance).
     pub num_features: i64,
+    /// Numerical stability term added to the variance.
     pub eps: f64,
+    /// Optional per-channel scale.
     pub weight: Option<Tensor>,
+    /// Optional per-channel shift.
     pub bias: Option<Tensor>,
 }
 
@@ -897,6 +937,7 @@ impl Module for InstanceNorm {
 /// (nn/__init__.py:263-279). Normalizes over the channel axis by permuting
 /// `(N,C,H,W) -> (N,H,W,C)`, applying the inner `LayerNorm`, then permuting back.
 pub struct LayerNorm2d {
+    /// The inner `LayerNorm` applied over the channel axis.
     pub norm: LayerNorm,
 }
 
@@ -935,8 +976,11 @@ impl Module for LayerNorm2d {
 
 /// `nn::RMSNorm`: root-mean-square normalization (nn/__init__.py:281-304).
 pub struct RMSNorm {
+    /// Size of the normalized (last) dim.
     pub dim: i64,
+    /// Numerical stability term added to the mean square.
     pub eps: f64,
+    /// Optional per-element scale.
     pub weight: Option<Tensor>,
 }
 
@@ -1037,8 +1081,11 @@ pub fn _embedding_fwd(weight: &Tensor, idx: &Tensor, ctx: &mut UOpCtx) -> Tensor
 
 /// `nn::Embedding`: a lookup table (nn/__init__.py:377-396).
 pub struct Embedding {
+    /// Number of rows in the lookup table.
     pub vocab_size: i64,
+    /// Width of each embedding.
     pub embed_size: i64,
+    /// The lookup table, shape `(vocab_size, embed_size)`.
     pub weight: Tensor,
 }
 
@@ -1085,9 +1132,13 @@ impl Module for Embedding {
 
 /// `nn::LSTMCell` (nn/__init__.py:398-420).
 pub struct LSTMCell {
+    /// Input-to-hidden weights, shape `(4*hidden_size, input_size)`.
     pub weight_ih: Tensor,
+    /// Hidden-to-hidden weights, shape `(4*hidden_size, hidden_size)`.
     pub weight_hh: Tensor,
+    /// Optional input-to-hidden bias.
     pub bias_ih: Option<Tensor>,
+    /// Optional hidden-to-hidden bias.
     pub bias_hh: Option<Tensor>,
 }
 

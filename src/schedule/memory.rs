@@ -40,6 +40,7 @@ pub struct TlsfAllocator {
 }
 
 impl TlsfAllocator {
+    /// Create an allocator over `size` bytes at `base` with the given minimum block size.
     pub fn new(size: i64, base: i64, block_size: i64, lv2_cnt: i64) -> Self {
         let l2_cnt = bit_length(lv2_cnt);
         let n = bit_length(size) as usize + 1;
@@ -141,6 +142,7 @@ impl TlsfAllocator {
         self.merge_right(start);
     }
 
+    /// Allocate `req_size` bytes with `align` alignment, returning the absolute base address.
     pub fn alloc(&mut self, req_size: i64, align: i64) -> i64 {
         let req_size = self.block_size.max(req_size);
         let mut size = self.block_size.max(req_size + align - 1);
@@ -176,6 +178,7 @@ impl TlsfAllocator {
         panic!("TGERR: Can't allocate {req_size} bytes");
     }
 
+    /// Free the block at absolute address `start` and coalesce its neighbours.
     pub fn free(&mut self, start: i64) {
         let s = start - self.base;
         let size = self.blocks[&s].0;

@@ -34,6 +34,7 @@ pub trait OpaqueT: 'static {
     fn size(&self) -> usize;
     /// Identity of the underlying storage (same allocation => same id).
     fn storage_id(&self) -> usize;
+    /// Upcast to `Any` for backend-specific downcasting.
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
@@ -41,12 +42,16 @@ pub trait OpaqueT: 'static {
 /// memoryview slicing model (`_offset` returns a narrower window).
 #[derive(Clone)]
 pub struct HostOpaque {
+    /// Shared host byte storage backing the base allocation.
     pub mem: Rc<RefCell<Vec<u8>>>,
+    /// Window start in bytes within `mem`.
     pub offset: usize,
+    /// Window length in bytes.
     pub size: usize,
 }
 
 impl HostOpaque {
+    /// Wrap `mem` as host storage with a full-size window.
     pub fn new(mem: Vec<u8>) -> HostOpaque {
         let size = mem.len();
         HostOpaque {
@@ -55,9 +60,11 @@ impl HostOpaque {
             size,
         }
     }
+    /// Copy the current window out as a fresh byte vector.
     pub fn read(&self) -> Vec<u8> {
         self.mem.borrow()[self.offset..self.offset + self.size].to_vec()
     }
+    /// Overwrite the current window with `data`, which must match its size.
     pub fn write(&self, data: &[u8]) {
         assert!(data.len() == self.size, "TGERR: opaque write size mismatch");
         self.mem.borrow_mut()[self.offset..self.offset + self.size].copy_from_slice(data);
@@ -88,23 +95,31 @@ pub type OpaqueView = Rc<dyn OpaqueT>;
 
 /// The base `Buffer` (python device.py:102): one allocation per base.
 pub struct BufferBase {
+    /// Backend device string this buffer lives on.
     pub device: String,
+    /// Number of elements in the base allocation.
     pub size: usize,
+    /// Element dtype of the base allocation.
     pub dtype: DTypeId,
+    /// Allocated opaque storage, `None` until first allocation.
     pub buf: RefCell<Option<OpaqueView>>,
     /// Tensor(data) staged bytes, copied in through the backend allocator on
     /// first allocation (python: opaque= host path generalized to devices).
     pub pending_copyin: RefCell<Option<Vec<u8>>>,
+    /// Scheduler refcount, python's `Buffer.uop_refcount`.
     pub uop_refcount: Cell<i64>,
 }
 
 impl BufferBase {
+    /// Size of the base allocation in bytes.
     pub fn nbytes(&self) -> usize {
         self.size * self.dtype.itemsize()
     }
+    /// Whether the base has been allocated by the backend.
     pub fn is_allocated(&self) -> bool {
         self.buf.borrow().is_some()
     }
+    /// Install `o` as the backing storage, applying any pending Tensor(data) copy-in.
     pub fn allocate_with(&self, o: OpaqueView) {
         assert!(
             !self.is_allocated(),
@@ -127,6 +142,7 @@ impl BufferBase {
         }
         *self.buf.borrow_mut() = Some(o);
     }
+    /// Drop the backing storage; the caller ensures there are no live users.
     pub fn deallocate(&self) {
         assert!(
             self.is_allocated(),
@@ -139,9 +155,13 @@ impl BufferBase {
 /// A (possibly view) `Buffer`: shares the base, carries a byte offset.
 #[derive(Clone)]
 pub struct Buffer {
+    /// Shared base allocation.
     pub base: Rc<BufferBase>,
+    /// Number of elements in this view.
     pub size: usize,
+    /// Element dtype of this view.
     pub dtype: DTypeId,
+    /// Byte offset of this view within the base allocation.
     pub offset: usize,
 }
 
@@ -164,12 +184,15 @@ impl Buffer {
         }
     }
 
+    /// Size of this view in bytes.
     pub fn nbytes(&self) -> usize {
         self.size * self.dtype.itemsize()
     }
+    /// Whether the shared base has been allocated.
     pub fn is_allocated(&self) -> bool {
         self.base.is_allocated()
     }
+    /// Device string of the shared base.
     pub fn device(&self) -> &str {
         &self.base.device
     }

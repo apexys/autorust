@@ -54,15 +54,24 @@ pub type MinMax = (SVal, SVal);
 /// shared handle and are freed with the node.
 #[derive(Debug)]
 pub struct Node {
+    /// Process-unique node id, used for identity, ordering and hashing.
     pub id: u32,
+    /// The op code.
     pub op: Ops,
+    /// Result dtype.
     pub dtype: DTypeId,
+    /// Src operands (strong handles).
     pub srcs: Vec<UopId>,
+    /// The op's argument.
     pub arg: Arg,
+    /// Python `tag` metadata for tracing.
     pub tag: Arg,
     // lazily computed, memoized recursive properties (one slot per property):
+    /// Cached `u.shape`.
     pub shape_c: RefCell<Option<Option<Rc<Shape>>>>,
+    /// Cached `u._min_max` bounds.
     pub mm_c: RefCell<Option<Option<MinMax>>>,
+    /// Cached `u.ranges` for this node.
     pub range_c: RefCell<Option<Option<Rc<Vec<UopId>>>>>,
     /// `u.addrspace` derived (`recursive_property`, ops.py:866). Cached so the
     /// recursive walk is memoized (linear, not exponential, on shared DAGs).
@@ -93,14 +102,17 @@ impl Eq for Node {}
 /// node's process-unique id.
 #[derive(Clone)]
 pub struct UopId {
+    /// The referenced node.
     pub node: Rc<Node>,
 }
 
 impl UopId {
+    /// The node's process-unique id.
     #[inline]
     pub fn id(&self) -> u32 {
         self.node.id
     }
+    /// The referenced node.
     #[inline]
     pub fn node(&self) -> &Node {
         &self.node
@@ -146,7 +158,9 @@ impl std::fmt::Debug for UopId {
 /// (`UopId`), not by the graph.
 #[derive(Default)]
 pub struct Graph {
+    /// Externally held roots, classified as outside the weak interner.
     pub roots: Vec<UopId>,
+    /// Structural-hash → node weak handle, for interning.
     interner: HashMap<u64, Weak<Node>>,
 }
 
@@ -162,6 +176,7 @@ impl Clone for Graph {
 }
 
 impl Graph {
+    /// An empty graph with no roots and an empty interner.
     pub fn new() -> Self {
         Graph::default()
     }

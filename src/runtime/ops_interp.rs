@@ -34,6 +34,7 @@ impl Default for InterpUopRenderer {
 }
 
 impl InterpUopRenderer {
+    /// Build the interpreter renderer facts.
     pub fn new() -> InterpUopRenderer {
         InterpUopRenderer {
             facts: Renderer::cpu_interp(),
@@ -66,6 +67,7 @@ pub struct InterpProgram {
 }
 
 impl InterpProgram {
+    /// Decode the flat-JSON ELF library into a context and its root uops.
     pub fn new(elf: &TinyElf) -> InterpProgram {
         let src = std::str::from_utf8(&elf.lib).expect("TGERR: interp elf lib not utf8");
         let fg: FlatGraph = crate::uop::flat::parse_flat(src).expect("TGERR: interp elf lib parse");

@@ -169,6 +169,7 @@ pub struct RayKernel {
     instrs: Vec<Instr>,
     /// Signature slots of the global params (used to bind buffer windows).
     pub globals: Vec<i64>,
+    /// Dtype of each signature slot.
     pub sig_dtypes: HashMap<i64, DTypeId>,
 }
 

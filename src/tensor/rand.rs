@@ -319,6 +319,7 @@ pub fn set_jit(on: bool) {
     JIT_ON.with(|c| c.set(on));
 }
 
+/// True when the RNG runs under `TinyJit` capture (device-side counter).
 pub fn jit_on() -> bool {
     JIT_ON.with(|c| c.get())
 }

@@ -17,6 +17,7 @@ pub fn ceildiv(a: i128, b: i128) -> i128 {
     (a + b - 1).div_euclid(b)
 }
 
+/// Python `round_up(num, amt)`: `ceildiv(num, amt) * amt`.
 pub fn round_up(num: i128, amt: i128) -> i128 {
     (num + amt - 1) / amt * amt
 }
@@ -41,6 +42,7 @@ pub fn prod_sval(ctx: &mut UOpCtx, shape: &[SVal]) -> SVal {
     SVal::U(acc)
 }
 
+/// Number of dims in `shape` (Python `len(shape)`).
 pub fn ndim(shape: &[SVal]) -> usize {
     shape.len()
 }
@@ -668,17 +670,24 @@ pub fn unflatten(ctx: &mut UOpCtx, x: UopId, dim: i64, sizes: &[i64]) -> UopId {
 /// One parsed view index: Python's `{"size", "boundary", "stride", "collapse_dim"}`.
 #[derive(Clone, Debug)]
 pub struct ViewIndex {
+    /// Size of the viewed dim.
     pub size: SVal,
+    /// Clamp bounds `(lo, hi)` for an integer index.
     pub boundary: (SVal, SVal),
+    /// Stride applied after slicing.
     pub stride: i64,
+    /// True when this dim is an int index (collapsed away by the view).
     pub collapse_dim: bool,
 }
 
 /// Python `slice(start, stop, step)` with int bounds (`Ix::Range` pre-resolved).
 #[derive(Clone, Copy, Debug)]
 pub struct SliceSpec {
+    /// Slice start, or `None` for the Python default.
     pub start: Option<i64>,
+    /// Slice stop, or `None` for the Python default.
     pub stop: Option<i64>,
+    /// Slice step; defaults to 1.
     pub step: i64,
 }
 

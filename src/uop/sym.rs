@@ -192,18 +192,21 @@ pub fn weak_dts() -> Vec<DTypeId> {
     vec![dtype::WEAKINT, dtype::WEAKFLOAT]
 }
 
+/// `dtypes.ints + (weakint,)` — int dtypes accepted by the symbolic rules.
 pub fn ints_plus_weak() -> Vec<DTypeId> {
     let mut v: Vec<DTypeId> = dtype::INTS.to_vec();
     v.push(WEAKINT);
     v
 }
 
+/// `dtypes.sints + (weakint,)` — signed int dtypes accepted by the symbolic rules.
 pub fn weak_int_dts() -> Vec<DTypeId> {
     let mut v: Vec<DTypeId> = crate::dtype::SINTS.to_vec();
     v.push(crate::dtype::WEAKINT);
     v
 }
 
+/// `dtypes.sints + (weakint,)` — signed int dtypes for constant-folding rules.
 pub fn sints_plus_weakint() -> Vec<DTypeId> {
     let mut v: Vec<DTypeId> = dtype::SINTS.to_vec();
     v.push(WEAKINT);
@@ -215,28 +218,34 @@ fn const_folding_pat() -> UPat {
     UPat::op_var(vec![Ops::Const, Ops::Stack])
 }
 
+/// `UPat.var(name)` — a named pattern variable matching any op.
 pub fn var(name: &'static str) -> UPat {
     UPat::var(Some(name), None)
 }
 
+/// `UPat.var(name, dtype)` — a named pattern variable restricted to dtypes.
 pub fn var_dt(name: &'static str, dts: Vec<DTypeId>) -> UPat {
     UPat::var(Some(name), Some(dts))
 }
 
+/// `UPat.cvar(name)` — a named pattern matching a const node.
 pub fn cvar(name: &'static str) -> UPat {
     UPat::cvar(Some(name), None, None)
 }
 
+/// `UPat.cvar(name, arg)` — a const pattern that must carry the given arg.
 pub fn cvar_arg(name: &'static str, a: CV) -> UPat {
     UPat::cvar(Some(name), None, Some(Arg::Const(a)))
 }
 
 // ---------- pm_data_invalid (symbolic.py:74-96) ----------
 
+/// Pattern matching the `Invalid` const.
 pub fn invalid_pat() -> UPat {
     UPat::cvar(Some("i"), None, Some(Arg::Const(CV::Invalid)))
 }
 
+/// `cond.where(x, Invalid)` — the data-invalid gate pattern.
 pub fn invalid_gate() -> UPat {
     var("cond").where_(UPatOrConst::Pat(var("x")), UPatOrConst::Pat(invalid_pat()))
 }
@@ -432,6 +441,7 @@ fn pm_data_invalid() -> PatternMatcher {
 }
 
 // shorthand for rule closures
+/// Wrap a rewrite closure as a `RuleFn`.
 pub fn r<F>(f: F) -> RuleFn
 where
     F: Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + Send + Sync + 'static,
@@ -440,6 +450,7 @@ where
 }
 
 impl UPat {
+    /// `UPat(..., src=UPat.any(*alts))` — match any one of `alts` as the src pattern.
     pub fn with_src_any(self, alts: Vec<UPat>) -> UPat {
         let mut p = self.clone();
         p.src = super::upat::SrcPat::Any(alts);
@@ -449,6 +460,7 @@ impl UPat {
         p
     }
 
+    /// `UPat(..., src=(...))` — match a fixed-length list of srcs in any order.
     pub fn with_src_list(self, srcs: Vec<UPat>) -> UPat {
         let n = srcs.len();
         let first = srcs.clone();
@@ -668,6 +680,7 @@ impl UPat {
         q
     }
 
+    /// Mirror `UPat(allow_any_len=any)`: relax the strict src-length check.
     pub fn with_src_any_len(self, any: bool) -> UPat {
         let mut q = self;
         if any {
@@ -1987,11 +2000,13 @@ fn sval_to_const(v: SVal) -> CV {
 }
 
 static COMMUTATIVE_PM: PmSlot = PmSlot::new();
+/// `commutative` (symbolic.py:214) — flip weakint commutative ops into canonical order.
 pub fn pm_commutative() -> &'static PatternMatcher {
     COMMUTATIVE_PM.get_or_init(pm_commutative_inner)
 }
 
 static MOP_CLEANUP_PM: PmSlot = PmSlot::new();
+/// `mop_cleanup` (uop/movement.py) — merge and drop redundant movement ops.
 pub fn pm_mop_cleanup() -> &'static PatternMatcher {
     MOP_CLEANUP_PM.get_or_init(pm_mop_cleanup_inner)
 }

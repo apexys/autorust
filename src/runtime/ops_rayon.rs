@@ -47,6 +47,7 @@ impl Default for RayonUopRenderer {
 }
 
 impl RayonUopRenderer {
+    /// Build the `RAYON` renderer facts.
     pub fn new() -> RayonUopRenderer {
         RayonUopRenderer {
             facts: Renderer::rayon(),
@@ -116,11 +117,14 @@ fn mode_from_env() -> Mode {
 /// Observability: programs compiled to an owned kernel (typed or f64),
 /// programs using the typed path, and interpreter fallbacks.
 pub static OWNED_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Observability: programs using the dtype-native typed path.
 pub static TYPED_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Observability: programs that fell back to the interpreter.
 pub static FALLBACK_KERNELS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 impl RayonProgram {
+    /// Decode the ELF and compile the owned IR, trying the typed path first.
     pub fn new(elf: &TinyElf) -> RayonProgram {
         // Decode the flat graph once, then compile the owned IR. The typed path
         // is tried first; the f64 path is the fallback for sub-word dtypes.

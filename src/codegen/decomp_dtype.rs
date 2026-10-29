@@ -1236,8 +1236,11 @@ pub fn pm_float_decomp() -> PatternMatcher {
 /// Context for `pm_dtype_decomps` (`ctx=(set(), ren)` in python).
 #[derive(Default)]
 pub struct DtypeDecompCtx {
+    /// Dtypes seen in the graph that may need decomposition.
     pub dtypes: HashSet<DTypeId>,
+    /// Dtypes the renderer computes natively.
     pub supported: Vec<DTypeId>,
+    /// Dtypes forced to be emulated (`EMULATED_DTYPES`).
     pub emulated: Vec<DTypeId>,
 }
 

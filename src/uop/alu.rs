@@ -43,6 +43,7 @@ pub fn py_add_const(
     }
 }
 
+/// Python `cdiv` — truncating division, `0` when the divisor is zero.
 pub fn cdiv(x: i128, y: i128) -> i128 {
     if y == 0 {
         return 0;
@@ -51,11 +52,13 @@ pub fn cdiv(x: i128, y: i128) -> i128 {
     if (x < 0) ^ (y < 0) { -q } else { q }
 }
 
+/// Python `cmod` — C-style modulo matching `cdiv`, `0` when the divisor is zero.
 pub fn cmod(x: i128, y: i128) -> i128 {
     // x - cdiv(x,y)*y (wrapping mul to avoid spurious overflow on sentinels)
     x.wrapping_sub(cdiv(x, y).wrapping_mul(y))
 }
 
+/// Python `floordiv` — division rounding toward negative infinity, `0` on zero divisor.
 pub fn floordiv(x: i128, y: i128) -> i128 {
     if y == 0 {
         return 0;
@@ -69,6 +72,7 @@ pub fn floordiv(x: i128, y: i128) -> i128 {
     }
 }
 
+/// Python `floormod` — modulo with the sign of the divisor.
 pub fn floormod(x: i128, y: i128) -> i128 {
     x.wrapping_sub(floordiv(x, y).wrapping_mul(y))
 }

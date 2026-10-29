@@ -25,12 +25,19 @@ use crate::uop::sint::SVal;
 /// `ProgramInfo` (ops.py:1215) — the PROGRAM arg dataclass.
 #[derive(Clone, Debug, Default)]
 pub struct ProgramInfo {
+    /// Rendered kernel function name.
     pub name: String,
+    /// Global launch dimensions.
     pub global_size: Vec<i64>,
+    /// Local (workgroup) dimensions, `None` for the backend default.
     pub local_size: Option<Vec<i64>>,
+    /// Variable ids whose values the kernel receives at launch.
     pub vars: Vec<i64>,
+    /// Buffer slots passed as kernel arguments.
     pub globals: Vec<i64>,
+    /// Buffer slots that are kernel outputs.
     pub outs: Vec<i64>,
+    /// Buffer slots that are kernel inputs.
     pub ins: Vec<i64>,
 }
 
@@ -71,6 +78,7 @@ impl ProgramInfo {
         })
     }
 
+    /// Decode a [`ProgramInfo`] from its `DataArg` encoding.
     pub fn from_arg(arg: &Arg) -> ProgramInfo {
         let Arg::Data(d) = arg else {
             panic!("TGERR: PROGRAM arg {arg:?}")
@@ -220,8 +228,11 @@ pub fn program_info_from_sink(ctx: &mut UOpCtx, sink: UopId) -> ProgramInfo {
 
 /// A lowered+compiled kernel: the PROGRAM uop, its ProgramInfo, and the elf.
 pub struct CompiledProg {
+    /// The PROGRAM uop that was lowered and compiled.
     pub uop: UopId,
+    /// Its decoded [`ProgramInfo`].
     pub pi: ProgramInfo,
+    /// The compiled artifact.
     pub elf: Rc<TinyElf>,
 }
 
@@ -276,6 +287,7 @@ impl ProgCache {
         }
         self.order.push_back(key);
     }
+    /// Look up a compiled program, recording the hit/miss and refreshing its LRU position.
     pub fn get(&mut self, key: u64) -> Option<Rc<CompiledProg>> {
         let p = self.map.get(&key).cloned();
         if p.is_some() {
@@ -290,9 +302,11 @@ impl ProgCache {
     pub fn len(&self) -> usize {
         self.map.len()
     }
+    /// Whether the cache holds no programs.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+    /// Insert or replace a compiled program, evicting LRU entries past the cap.
     pub fn insert(&mut self, key: u64, cp: Rc<CompiledProg>) {
         if !self.map.contains_key(&key) {
             self.order.push_back(key);
@@ -552,7 +566,9 @@ fn exec_kernel(
 /// this so a replay executes directly instead of re-running `compile_linear`
 /// (which re-hashes every call's AST on each step).
 pub struct CompiledLinear {
+    /// The LINEAR uop with CALLs swapped for compiled PROGRAMs.
     pub line: UopId,
+    /// Compiled programs keyed by CALL slot.
     pub progs: HashMap<u32, Rc<CompiledProg>>,
 }
 

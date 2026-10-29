@@ -93,10 +93,13 @@ pub fn getenv_float(name: &str, default: f64) -> f64 {
 
 /// `ContextVar` for typed defaults (e.g. DEFAULT_FLOAT).
 pub struct ContextVar {
+    /// Environment variable name this var reads (e.g. `DEFAULT_FLOAT`).
     pub env: &'static str,
+    /// Value used when the variable is unset in every scope.
     pub default: &'static str,
 }
 impl ContextVar {
+    /// Create a context var from its env name and default string.
     pub const fn new(env: &'static str, default: &'static str) -> Self {
         ContextVar { env, default }
     }
@@ -108,13 +111,17 @@ impl ContextVar {
     pub fn set(&self, v: &str) {
         push_context(&[(self.env, v.to_string())]);
     }
+    /// Pop the override pushed by `set` (context-manager exit).
     pub fn unset(&self) {
         pop_context();
     }
 }
 
+/// `DEFAULT_FLOAT` — dtype for Python floats / weak floats.
 pub static DEFAULT_FLOAT: ContextVar = ContextVar::new("DEFAULT_FLOAT", "float");
+/// `DEFAULT_INT` — dtype for Python ints / weak ints.
 pub static DEFAULT_INT: ContextVar = ContextVar::new("DEFAULT_INT", "int");
+/// `SUM_DTYPE` — accumulation dtype for float reductions.
 pub static SUM_DTYPE: ContextVar = ContextVar::new("SUM_DTYPE", "float");
 
 #[cfg(test)]

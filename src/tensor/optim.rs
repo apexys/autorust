@@ -155,12 +155,19 @@ fn scalar(ctx: &mut UOpCtx, v: f64) -> Tensor {
 /// (newton-schulz) is intentionally not ported yet.
 pub struct LARS {
     params: Vec<Tensor>,
+    /// Learning rate.
     pub lr: f32,
+    /// Momentum factor.
     pub momentum: f32,
+    /// Weight decay.
     pub wd: f32,
+    /// Nesterov momentum flag.
     pub nesterov: bool,
+    /// Classic momentum: scale by `lr` before the momentum update.
     pub classic: bool,
+    /// Apply weight decay to the gradient before the update.
     pub pre_wd: bool,
+    /// Trust-ratio coefficient; 0 disables the LARS trust ratio.
     pub tcoef: f32,
     /// Momentum state per parameter (`self.b`), empty when `momentum == 0`.
     b: Vec<Tensor>,
@@ -281,11 +288,17 @@ impl Optim for LARS {
 /// and `AdamW` are `LAMB(..., adam=true)`; plain `Adam` sets `weight_decay=0`.
 pub struct LAMB {
     params: Vec<Tensor>,
+    /// Learning rate.
     pub lr: f32,
+    /// First-moment decay (beta1).
     pub b1: f32,
+    /// Second-moment decay (beta2).
     pub b2: f32,
+    /// Numerical stability term.
     pub eps: f32,
+    /// Weight decay.
     pub wd: f32,
+    /// Use the Adam update in place of plain SGD.
     pub adam: bool,
     b1_t: Tensor,
     b2_t: Tensor,
@@ -485,6 +498,7 @@ pub struct Adam {
 }
 
 impl Adam {
+    /// Adam with tinygrad's defaults `(lr, b1=0.9, b2=0.999, eps=1e-8)` and no weight decay.
     pub fn new(params: Vec<Tensor>, lr: f32) -> Self {
         Adam {
             inner: LAMB::new(params, lr, 0.9, 0.999, 1e-8, 0.0, true),
@@ -513,6 +527,7 @@ pub struct AdamW {
 }
 
 impl AdamW {
+    /// AdamW with tinygrad's defaults and `weight_decay=0.01`.
     pub fn new(params: Vec<Tensor>, lr: f32) -> Self {
         AdamW {
             inner: LAMB::new(params, lr, 0.9, 0.999, 1e-8, 0.01, true),

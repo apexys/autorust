@@ -11,11 +11,14 @@ use crate::uop::sint::SVal;
 /// `act=lambda x: x.relu()` / `x.gelu()` in `TransformerBlock`.
 #[derive(Clone, Copy)]
 pub enum Act {
+    /// ReLU activation (`x.relu()`).
     Relu,
+    /// GELU activation (`x.gelu()`).
     Gelu,
 }
 
 impl Act {
+    /// Apply the activation to `x`.
     pub fn apply(self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
         match self {
             Act::Relu => crate::tensor::nn::relu_ctx(x, ctx),
@@ -41,23 +44,37 @@ fn flash_enabled() -> bool {
 
 /// `TransformerBlock` (extra/models/transformer.py:3-39).
 pub struct TransformerBlock {
+    /// Number of attention heads.
     pub num_heads: i64,
+    /// Per-head embedding size (`embed_dim / num_heads`).
     pub head_size: i64,
+    /// Whether layer norm runs before (pre-norm) rather than after the sublayers.
     pub prenorm: bool,
+    /// FFN activation.
     pub act: Act,
+    /// Dropout probability applied inside the block.
     pub dropout: f64,
+    /// `(weight, bias)` of the query projection.
     pub query: (Tensor, Tensor),
+    /// `(weight, bias)` of the key projection.
     pub key: (Tensor, Tensor),
+    /// `(weight, bias)` of the value projection.
     pub value: (Tensor, Tensor),
+    /// `(weight, bias)` of the attention output projection.
     pub out: (Tensor, Tensor),
+    /// `(weight, bias)` of the first FFN projection.
     pub ff1: (Tensor, Tensor),
+    /// `(weight, bias)` of the second FFN projection.
     pub ff2: (Tensor, Tensor),
+    /// `(weight, bias)` of the first layer norm.
     pub ln1: (Tensor, Tensor),
+    /// `(weight, bias)` of the second layer norm.
     pub ln2: (Tensor, Tensor),
 }
 
 impl TransformerBlock {
     #[allow(clippy::too_many_arguments)]
+    /// Construct a block with the given embedding/FFN widths and dropout.
     pub fn new(
         ctx: impl AsCtx,
         embed_dim: i64,
@@ -217,14 +234,20 @@ impl Module for TransformerBlock {
 
 /// `Transformer` (extra/models/transformer.py:41-61): the adder model.
 pub struct Transformer {
+    /// Maximum sequence length.
     pub maxlen: i64,
+    /// Alphabet size (number of symbols to predict).
     pub syms: i64,
+    /// Token embedding table, shape `[maxlen + syms, embed_dim]`.
     pub embed: Tensor,
+    /// Stacked transformer blocks.
     pub tbs: Vec<TransformerBlock>,
+    /// Final projection to symbol logits, shape `[embed_dim, syms]`.
     pub final_: Tensor,
 }
 
 impl Transformer {
+    /// Construct the adder model with `layers` blocks.
     pub fn new(
         ctx: impl AsCtx,
         syms: i64,
@@ -254,6 +277,7 @@ impl Transformer {
             final_: Tensor::scaled_uniform(&mut *ctx, &[embed_dim, syms], None),
         })
     }
+    /// `Transformer.forward` — embed the one-hot inputs and run the blocks.
     pub fn forward(&self, x: &Tensor) -> Tensor {
         self.forward_ctx(x, &mut x.ctx().borrow_mut())
     }

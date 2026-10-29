@@ -15,6 +15,7 @@ use std::rc::Rc;
 #[derive(Clone, Debug)]
 pub struct MemView(pub Rc<RefCell<Vec<u8>>>, pub usize, pub usize, pub usize);
 
+/// Decode the scalar at the start of `bytes` as `dt` into an `f64` lane.
 pub fn from_storage_scalar(bytes: &[u8], dt: DTypeId) -> f64 {
     let b = |i: usize| *bytes.get(i).unwrap_or(&0);
     match dt {
@@ -59,6 +60,7 @@ pub fn from_storage_scalar(bytes: &[u8], dt: DTypeId) -> f64 {
     }
 }
 
+/// Encode an `f64` lane as little-endian bytes of dtype `dt`.
 pub fn to_storage_scalar(v: f64, dt: DTypeId) -> Vec<u8> {
     match dt {
         d if d == dtype::BOOL => vec![(v != 0.0) as u8],

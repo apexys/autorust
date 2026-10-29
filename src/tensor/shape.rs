@@ -18,18 +18,22 @@ use crate::uop::sint::SVal;
 pub struct Shape(Vec<SVal>);
 
 impl Shape {
+    /// Wrap a `Vec<SVal>` as a `Shape`.
     pub fn new(v: Vec<SVal>) -> Shape {
         Shape(v)
     }
 
+    /// Build a fully static shape from integer dims.
     pub fn from_ints(ints: impl IntoIterator<Item = i128>) -> Shape {
         Shape(ints.into_iter().map(SVal::I).collect())
     }
 
+    /// Borrow the dims as a slice.
     pub fn as_slice(&self) -> &[SVal] {
         &self.0
     }
 
+    /// Consume the shape, returning its dims.
     pub fn into_vec(self) -> Vec<SVal> {
         self.0
     }
@@ -45,6 +49,7 @@ impl Shape {
         })
     }
 
+    /// Python-style `shape.get(i)` with negative indices; `None` if out of range.
     pub fn get(&self, i: isize) -> Option<&SVal> {
         let n = self.0.len() as isize;
         let i = if i < 0 { i + n } else { i };
@@ -67,6 +72,7 @@ impl Shape {
             .try_fold(1i128, |a, s| s.clone().as_i64().map(|v| a * v as i128))
     }
 
+    /// True when every dim is a concrete `int` (no `Variable`s).
     pub fn is_static(&self) -> bool {
         self.0.iter().all(|s| matches!(s, SVal::I(_)))
     }

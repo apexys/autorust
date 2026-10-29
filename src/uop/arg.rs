@@ -12,40 +12,65 @@ use nanoserde::{DeJson, SerJson};
 
 use crate::dtype::{AddrSpace, ConstVal, DTypeId};
 
+/// A non-finite float arg, encoded separately so bit identity survives JSON.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerJson, DeJson)]
 pub enum NonFinite {
+    /// Canonical NaN.
     Nan,
+    /// Positive infinity.
     PosInf,
+    /// Negative infinity.
     NegInf,
 }
 
+/// Which Python `IntEnum` class an `EnumVal` belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerJson, DeJson)]
 pub enum EnumClass {
+    /// `tinygrad.uop.Ops`.
     Ops,
+    /// `tinygrad.uop.ops.AxisType`.
     AxisType,
+    /// `tinygrad.dtype.AddrSpace`.
     AddrSpace,
 }
 
+/// An enum member arg, carried as class tag plus numeric value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerJson, DeJson)]
 pub struct EnumVal {
+    /// The enum class this member came from.
     pub class: EnumClass,
+    /// The member's numeric discriminant.
     pub value: u16,
 }
 
+/// The value space of a UOp `arg` (Python's untyped `arg: Any`).
 #[derive(Clone, Debug)]
 pub enum Arg {
+    /// Python `None`.
     None,
+    /// Python `int` that fits in `i64`.
     Int(i64),
+    /// Python `int` above `i64::MAX`, kept unsigned.
     UInt(u64),
+    /// Python finite `float`, compared and hashed by bit pattern.
     Float(f64),
+    /// Python non-finite `float`.
     NonFinite(NonFinite),
+    /// Python `bool`.
     Bool(bool),
+    /// Python `str`.
     Str(String),
+    /// Python `bytes`.
     Bytes(Vec<u8>),
+    /// A Python enum member.
     Enum(EnumVal),
+    /// A `DType` arg.
     Dtype(DTypeId),
+    /// Python `tuple`/`list` of args.
     Seq {
+        /// Whether the Python object is a `tuple` rather than a `list`.
         tuple: bool,
+        /// The elements, in order.
         items: Vec<Arg>,
     },
     /// Python `ParamArg` dataclass (BUFFER/PARAM args): the Variables/buffers spine.
@@ -66,11 +91,14 @@ pub enum Arg {
 /// fields we carry.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DataArg {
+    /// Dataclass name used to rebuild the Python object (e.g. `KernelInfo`).
     pub tag: String,
+    /// Fields in Python declaration order.
     pub fields: Vec<(String, Arg)>,
 }
 
 impl DataArg {
+    /// Look up a field by name, panicking when it is absent.
     pub fn get(&self, name: &str) -> &Arg {
         &self
             .fields
@@ -79,18 +107,21 @@ impl DataArg {
             .expect("TGERR: missing dataclass field")
             .1
     }
+    /// Read a field that must be a `bool`.
     pub fn as_bool(&self, name: &str) -> bool {
         match self.get(name) {
             Arg::Bool(b) => *b,
             other => panic!("TGERR: field {name} not bool: {other:?}"),
         }
     }
+    /// Read a field that must be a `str`.
     pub fn as_str(&self, name: &str) -> &str {
         match self.get(name) {
             Arg::Str(s) => s,
             other => panic!("TGERR: field {name} not str: {other:?}"),
         }
     }
+    /// True when the named field is Python `None`.
     pub fn is_none(&self, name: &str) -> bool {
         matches!(self.get(name), Arg::None)
     }
@@ -172,7 +203,9 @@ pub fn bufferize_opts(device: Arg, addrspace: Option<AddrSpace>, removable: bool
 /// Device field of ParamArg: `str | tuple[str, ...] | None`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DeviceSpec {
+    /// A single device name, e.g. `"CL"`.
     Single(String),
+    /// A multi-device tuple of names.
     Multi(Vec<String>),
 }
 
@@ -180,15 +213,23 @@ pub enum DeviceSpec {
 /// `slot, dtype, vmin_vmax=None, multiple_of=None, name=None, addrspace=GLOBAL, axis=None, device=None, volatile=False`.
 #[derive(Clone, Debug)]
 pub struct ParamArg {
+    /// Buffer slot this parameter occupies.
     pub slot: i64,
+    /// Element dtype of the buffer.
     pub dtype: DTypeId,
+    /// Optional known `(vmin, vmax)` bounds on the values.
     pub vmin_vmax: Option<(ConstVal, ConstVal)>,
+    /// Optional known divisibility of the values.
     pub multiple_of: Option<i64>,
+    /// Optional human-readable name.
     pub name: Option<String>,
     /// `0` encodes Python `None`; 1..4 are GLOBAL/LOCAL/REG/ALU.
     pub addrspace: Option<AddrSpace>,
+    /// Optional axis index for multi-device parameters.
     pub axis: Option<i64>,
+    /// Optional device (or device tuple) the buffer lives on.
     pub device: Option<DeviceSpec>,
+    /// Whether the buffer is marked volatile.
     pub volatile: bool,
 }
 
@@ -229,12 +270,14 @@ impl std::hash::Hash for ParamArg {
 }
 
 impl ParamArg {
+    /// Lower bound of `vmin_vmax`, defaulting to `False` like tinygrad.
     pub fn vmin(&self) -> ConstVal {
         match &self.vmin_vmax {
             Some((v, _)) => v.clone(),
             None => ConstVal::Bool(false),
         }
     }
+    /// Upper bound of `vmin_vmax`, defaulting to `True` like tinygrad.
     pub fn vmax(&self) -> ConstVal {
         match &self.vmin_vmax {
             Some((_, v)) => v.clone(),
@@ -244,10 +287,12 @@ impl ParamArg {
 }
 
 impl Arg {
+    /// True when the arg is Python `None`.
     pub fn is_none(&self) -> bool {
         matches!(self, Arg::None)
     }
 
+    /// The arg as an `i64`, if it is an int that fits.
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Arg::Int(i) => Some(*i),
@@ -256,6 +301,7 @@ impl Arg {
         }
     }
 
+    /// The arg as a `str`, if it is one.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Arg::Str(s) => Some(s),
@@ -263,6 +309,7 @@ impl Arg {
         }
     }
 
+    /// The arg as a sequence: `(items, is_tuple)`.
     pub fn as_seq(&self) -> Option<(&[Arg], bool)> {
         match self {
             Arg::Seq { tuple, items } => Some((items, *tuple)),
@@ -270,6 +317,7 @@ impl Arg {
         }
     }
 
+    /// The arg as a `ParamArg`, if it is one.
     pub fn as_param(&self) -> Option<&ParamArg> {
         match self {
             Arg::Param(p) => Some(p),
@@ -277,6 +325,7 @@ impl Arg {
         }
     }
 
+    /// The `AddrSpace` when the arg is an `AddrSpace` enum member.
     pub fn addr_space(&self) -> Option<AddrSpace> {
         match self {
             Arg::Enum(EnumVal {

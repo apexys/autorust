@@ -11,13 +11,21 @@ use crate::uop::sint::SVal;
 
 /// `ViT` (extra/models/vit.py:6-30).
 pub struct ViT {
+    /// `(weight, bias)` of the patch-embedding convolution.
     pub embedding: (Tensor, Tensor),
+    /// Embedding dimension.
     pub embed_dim: i64,
+    /// Class token, shape `[1, 1, embed_dim]`.
     pub cls: Tensor,
+    /// Positional embeddings, shape `[1, num_patches + 1, embed_dim]`.
     pub pos_embedding: Tensor,
+    /// Stacked transformer blocks.
     pub tbs: Vec<TransformerBlock>,
+    /// `(weight, bias)` of the final encoder layer norm.
     pub encoder_norm: (Tensor, Tensor),
+    /// `(weight, bias)` of the classification head.
     pub head: (Tensor, Tensor),
+    /// Patch size in pixels.
     pub patch_size: i64,
 }
 

@@ -4,90 +4,171 @@
 //! round-trip differential tests; FastEnum with auto() numbers 1..=79 in
 //! declaration order).
 
+/// `Ops` — the op codes of the UOp graph, mirroring tinygrad's `Ops` `IntEnum`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum Ops {
+    /// `Ops.SPECIAL` — a `RANGE` for GPU dimensions, similar to symbolic shapes.
     Special = 1,
+    /// `Ops.BUFFER` — allocates global/local/register storage depending on its addrspace.
     Buffer = 2,
+    /// `Ops.NOOP` — a uop that is not rendered.
     Noop = 3,
+    /// `Ops.REWRITE_ERROR` — a not-rendered uop recording a failed rewrite match.
     RewriteError = 4,
+    /// `Ops.PARAM` — a buffer-backed parameter leaf that optimizers can update in place.
     Param = 5,
+    /// `Ops.FUNCTION` — a differentiable function whose body is a `TUPLE`.
     Function = 6,
+    /// `Ops.CALL` — an opaque kernel invocation.
     Call = 7,
+    /// `Ops.PROGRAM` — a renderer program node.
     Program = 8,
+    /// `Ops.LINEAR` — a list of UOps forming a linear program.
     Linear = 9,
+    /// `Ops.SOURCE` — source code carried as a human-readable `str` arg.
     Source = 10,
+    /// `Ops.BINARY` — compiled code carried as a bytes arg.
     Binary = 11,
+    /// `Ops.SINK` — the kernel root that collects the values to compute.
     Sink = 12,
+    /// `Ops.AFTER` — passes `src[0]` through and orders consumers after `src[1..]`.
     After = 13,
+    /// `Ops.GROUP` — a `NOOP` that just merges things together.
     Group = 14,
+    /// `Ops.STACK` — vector creation from its srcs.
     Stack = 15,
+    /// `Ops.TUPLE` — tuple construction for functions with multiple returns.
     Tuple = 16,
+    /// `Ops.GETTUPLE` — selects one element of a `TUPLE`.
     Gettuple = 17,
+    /// `Ops.GETADDR` — HCQ-specific address retrieval.
     Getaddr = 18,
+    /// `Ops.INDEX` — like `ADD`, but it operates on pointers.
     Index = 19,
+    /// `Ops.SHRINK` — movement op slicing each dimension to a sub-range.
     Shrink = 20,
+    /// `Ops.LOAD` — load from a buffer.
     Load = 21,
+    /// `Ops.STORE` — store into a buffer.
     Store = 22,
+    /// `Ops.WMMA` — tensor-core math op, not elementwise.
     Wmma = 23,
+    /// Unary `Ops.CAST` — dtype conversion.
     Cast = 24,
+    /// Unary `Ops.BITCAST` — reinterpret the bits as another dtype.
     Bitcast = 25,
+    /// Unary `Ops.EXP2` — base-2 exponential.
     Exp2 = 26,
+    /// Unary `Ops.LOG2` — base-2 logarithm.
     Log2 = 27,
+    /// Unary `Ops.SIN` — sine.
     Sin = 28,
+    /// Unary `Ops.SQRT` — square root.
     Sqrt = 29,
+    /// Unary `Ops.RECIPROCAL` — `1/x`.
     Reciprocal = 30,
+    /// Unary `Ops.NEG` — negation.
     Neg = 31,
+    /// Unary `Ops.TRUNC` — truncation toward zero.
     Trunc = 32,
+    /// `Ops.ADD` — element-wise addition.
     Add = 33,
+    /// `Ops.MUL` — element-wise multiplication.
     Mul = 34,
+    /// `Ops.SHL` — element-wise shift left.
     Shl = 35,
+    /// `Ops.SHR` — element-wise shift right.
     Shr = 36,
+    /// `Ops.CDIV` — C-style (truncating) division.
     Cdiv = 37,
+    /// `Ops.MAX` — element-wise maximum.
     Max = 38,
+    /// `Ops.CMOD` — C-style (truncating) modulo.
     Cmod = 39,
+    /// `Ops.CMPLT` — less-than comparison, yielding a bool.
     Cmplt = 40,
+    /// `Ops.CMPNE` — not-equal comparison, yielding a bool.
     Cmpne = 41,
+    /// `Ops.CMPEQ` — equality comparison, yielding a bool.
     Cmpeq = 42,
+    /// `Ops.XOR` — bitwise exclusive or.
     Xor = 43,
+    /// `Ops.OR` — bitwise or.
     Or = 44,
+    /// `Ops.AND` — bitwise and.
     And = 45,
+    /// `Ops.THREEFRY` — Threefry random-number mixing step.
     Threefry = 46,
+    /// `Ops.SUB` — element-wise subtraction.
     Sub = 47,
+    /// `Ops.FDIV` — true division.
     Fdiv = 48,
+    /// `Ops.POW` — exponentiation.
     Pow = 49,
+    /// `Ops.FLOORDIV` — floor division.
     Floordiv = 50,
+    /// `Ops.FLOORMOD` — floor modulo (sign follows the divisor).
     Floormod = 51,
+    /// Ternary `Ops.WHERE` — select between two values by a bool predicate.
     Where = 52,
+    /// Ternary `Ops.MULACC` — fused multiply-add of its three srcs.
     Mulacc = 53,
+    /// `Ops.BARRIER` — control-flow barrier.
     Barrier = 54,
+    /// `Ops.RANGE` — a loop range variable; the arg holds end and axis.
     Range = 55,
+    /// `Ops.IF` — start of a conditional block.
     If = 56,
+    /// `Ops.END` — end of a `RANGE` loop.
     End = 57,
+    /// `Ops.ENDIF` — end of an `IF` block.
     Endif = 58,
+    /// `Ops.CONST` — a constant of the uop dtype.
     Const = 59,
+    /// `Ops.CUSTOM` — a custom codegen string emitted as an out-of-line call.
     Custom = 60,
+    /// `Ops.CUSTOMI` — a custom codegen string inlined into the kernel.
     Customi = 61,
+    /// `Ops.INS` — a machine instruction.
     Ins = 62,
+    /// `Ops.CONTIGUOUS` — scheduler hint that the value is contiguous.
     Contiguous = 63,
+    /// `Ops.CONTIGUOUS_BACKWARD` — scheduler hint for the backward pass of `CONTIGUOUS`.
     ContiguousBackward = 64,
+    /// `Ops.DETACH` — scheduler hint detaching the value from gradients.
     Detach = 65,
+    /// `Ops.STAGE` — buffer op staging a value into memory.
     Stage = 66,
+    /// `Ops.COPY` — buffer op copying a value to another device.
     Copy = 67,
+    /// `Ops.MSELECT` — select one buffer of a multi-buffer.
     Mselect = 68,
+    /// `Ops.MSTACK` — stack buffers into a multi-buffer.
     Mstack = 69,
+    /// `Ops.CUSTOM_FUNCTION` — a user function with a user-supplied backward.
     CustomFunction = 70,
+    /// Movement `Ops.RESHAPE` — reinterpret the shape with the same elements.
     Reshape = 71,
+    /// Movement `Ops.PERMUTE` — reorder the axes.
     Permute = 72,
+    /// Movement `Ops.EXPAND` — broadcast size-1 dimensions to the given sizes.
     Expand = 73,
+    /// Movement `Ops.PAD` — pad each dimension.
     Pad = 74,
+    /// Movement `Ops.FLIP` — reverse the given axes.
     Flip = 75,
+    /// `Ops.UNSHARD` — movement op gathering sharded pieces into one buffer.
     Unshard = 76,
+    /// `Ops.REDUCE` — reduce over an axis using the op in the arg.
     Reduce = 77,
+    /// `Ops.ALLREDUCE` — cross-device reduction.
     Allreduce = 78,
+    /// `Ops.PYLITERAL` — a Python literal arg for `CUSTOM` predicates.
     Pyliteral = 79,
 }
 
+/// `GroupOp.All` — every `Ops` variant in discriminant order.
 pub const OPS_ALL: &[Ops] = &[
     Ops::Special,
     Ops::Buffer,
@@ -171,6 +252,7 @@ pub const OPS_ALL: &[Ops] = &[
 ];
 
 impl Ops {
+    /// Decode a Python `IntEnum` discriminant back into an `Ops`, if it exists.
     pub fn from_u16(v: u16) -> Option<Ops> {
         OPS_ALL.iter().cloned().find(|o| *o as u16 == v)
     }
@@ -264,6 +346,7 @@ impl Ops {
 pub mod group {
     use super::Ops;
 
+    /// `GroupOp.Unary` — single-src elementwise math ops.
     pub const UNARY: &[Ops] = &[
         Ops::Exp2,
         Ops::Log2,
@@ -273,6 +356,7 @@ pub mod group {
         Ops::Neg,
         Ops::Trunc,
     ];
+    /// `GroupOp.Binary` — two-src elementwise math ops.
     pub const BINARY: &[Ops] = &[
         Ops::Add,
         Ops::Mul,
@@ -294,7 +378,9 @@ pub mod group {
         Ops::Floordiv,
         Ops::Floormod,
     ];
+    /// `GroupOp.Ternary` — three-src elementwise math ops.
     pub const TERNARY: &[Ops] = &[Ops::Where, Ops::Mulacc];
+    /// `GroupOp.ALU` — the union of the unary, binary and ternary op sets.
     pub const ALU: &[Ops] = &[
         Ops::Exp2,
         Ops::Log2,
@@ -325,6 +411,7 @@ pub mod group {
         Ops::Where,
         Ops::Mulacc,
     ];
+    /// `GroupOp.Broadcastable` — binary and ternary ops whose srcs may broadcast.
     pub const BROADCASTABLE: &[Ops] = &[
         Ops::Add,
         Ops::Mul,
@@ -348,6 +435,7 @@ pub mod group {
         Ops::Where,
         Ops::Mulacc,
     ];
+    /// `GroupOp.Elementwise` — the ALU set plus `CAST` and `BITCAST`.
     pub const ELEMENTWISE: &[Ops] = &[
         Ops::Exp2,
         Ops::Log2,
@@ -380,7 +468,9 @@ pub mod group {
         Ops::Cast,
         Ops::Bitcast,
     ];
+    /// `GroupOp.Defines` — ops that define a buffer-backed leaf.
     pub const DEFINES: &[Ops] = &[Ops::Param, Ops::Buffer];
+    /// `GroupOp.Irreducible` — ops that graph rewrites must not look inside.
     pub const IRREDUCIBLE: &[Ops] = &[
         Ops::Const,
         Ops::Special,
@@ -388,6 +478,7 @@ pub mod group {
         Ops::Param,
         Ops::Getaddr,
     ];
+    /// `GroupOp.Movement` — ops that change how a buffer is viewed.
     pub const MOVEMENT: &[Ops] = &[
         Ops::Reshape,
         Ops::Expand,
@@ -396,6 +487,7 @@ pub mod group {
         Ops::Shrink,
         Ops::Flip,
     ];
+    /// `GroupOp.Commutative` — binary ops that can be flipped: `f(a,b) == f(b,a)`.
     pub const COMMUTATIVE: &[Ops] = &[
         Ops::Add,
         Ops::Mul,
@@ -406,15 +498,21 @@ pub mod group {
         Ops::And,
         Ops::Or,
     ];
+    /// `GroupOp.Associative` — binary ops where `f(f(a,b),c) == f(a,f(b,c))`.
     pub const ASSOCIATIVE: &[Ops] = &[Ops::Add, Ops::Mul, Ops::And, Ops::Or, Ops::Max];
+    /// `GroupOp.Idempotent` — binary ops that satisfy `f(x,x) == x`.
     pub const IDEMPOTENT: &[Ops] = &[Ops::Or, Ops::And, Ops::Max];
+    /// `GroupOp.Reduce` — ALU ops valid as the reduce op in `REDUCE`/`ALLREDUCE` args.
     pub const REDUCE_OPS: &[Ops] = &[Ops::Add, Ops::Mul, Ops::Max];
+    /// `GroupOp.Comparison` — ops whose result dtype is bool.
     pub const COMPARISON: &[Ops] = &[Ops::Cmplt, Ops::Cmpne, Ops::Cmpeq];
 
+    /// Python's `x in set`, i.e. membership in a `GroupOp` slice.
     pub fn in_(set: &[Ops], o: Ops) -> bool {
         set.contains(&o)
     }
 
+    /// True when `o` belongs to `GroupOp.Binary`.
     pub fn is_binary(o: Ops) -> bool {
         in_(BINARY, o)
     }

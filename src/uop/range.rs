@@ -14,21 +14,34 @@ use std::rc::Rc;
 /// `AxisType` enum values, mirroring Python's `auto()` numbering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AxisType {
+    /// Axis spanning the whole device (kernel launch dimension).
     Device = 1,
+    /// Global axis of a single kernel.
     Global = 2,
+    /// Warp-level axis.
     Warp = 3,
+    /// Local (shared) memory axis.
     Local = 4,
+    /// Weak symbolic axis, ordered like `Loop`.
     Weak = 5,
+    /// Group-reduce axis.
     GroupReduce = 6,
+    /// Reduce axis.
     Reduce = 7,
+    /// Upcast (vectorization) axis.
     Upcast = 8,
+    /// Unroll axis.
     Unroll = 9,
+    /// Thread axis.
     Thread = 10,
+    /// Placeholder axis, resolved later by the scheduler.
     Placeholder = 11,
+    /// Loop axis.
     Loop = 12,
 }
 
 impl AxisType {
+    /// Decode the `auto()` value of an `AxisType`, panicking on an unknown one.
     pub fn from_val(v: u16) -> AxisType {
         match v {
             1 => AxisType::Device,
@@ -47,6 +60,7 @@ impl AxisType {
         }
     }
 
+    /// The `AxisType` enum arg carrying this axis type.
     pub fn to_enum_val(self) -> EnumVal {
         EnumVal {
             class: EnumClass::AxisType,
@@ -54,6 +68,7 @@ impl AxisType {
         }
     }
 
+    /// Read an `AxisType` from an `Arg::Enum` member, panicking on mismatch.
     pub fn from_arg(a: &Arg) -> AxisType {
         match a {
             Arg::Enum(e) if e.class == EnumClass::AxisType => AxisType::from_val(e.value),
@@ -175,6 +190,7 @@ impl UOpCtx {
         self.where_(cond, id, inv)
     }
 
+    /// The `Invalid` const (bool dtype) used as an out-of-bounds marker.
     pub fn const_invalid(&mut self) -> UopId {
         self.uop(
             Ops::Const,

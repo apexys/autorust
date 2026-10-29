@@ -13,6 +13,7 @@ use crate::uop::{UopId, arg::Arg, ctx::UOpCtx};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// The `REDUCE(ADD)` arg (sum with zero accumulator) used by `pm_reduce_simplify`.
 pub fn red_add_arg() -> Arg {
     Arg::Seq {
         tuple: true,

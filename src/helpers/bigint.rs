@@ -4,6 +4,7 @@
 //! dtype bounds like 2^800-1), so we need just enough bignum to represent,
 //! compare, and (de)serialize them. Not a general bignum library.
 
+/// Sign + magnitude arbitrary-precision integer, the stand-in for a Python int.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BigInt {
     neg: bool,
@@ -36,6 +37,7 @@ impl Ord for BigInt {
 }
 
 impl BigInt {
+    /// The value 0.
     pub fn zero() -> Self {
         BigInt {
             neg: false,
@@ -48,14 +50,17 @@ impl BigInt {
         self.mag.first().cloned().unwrap_or(0)
     }
 
+    /// Little-endian magnitude limbs, without the sign.
     pub fn limbs(&self) -> &[u64] {
         &self.mag
     }
 
+    /// True if the value is strictly negative (zero is never negative).
     pub fn is_negative(&self) -> bool {
         self.neg && !self.mag.is_empty()
     }
 
+    /// Build from an `i128`.
     pub fn from_i128(v: i128) -> Self {
         let neg = v < 0;
         let mut m = v.unsigned_abs();
@@ -79,6 +84,7 @@ impl BigInt {
         }
     }
 
+    /// `2^exp`.
     pub fn pow2(exp: u64) -> Self {
         let mut mag = vec![0u64; (exp / 64) as usize + 1];
         mag[(exp / 64) as usize] = 1u64 << (exp % 64);
@@ -98,10 +104,12 @@ impl BigInt {
         BigInt { neg: false, mag }
     }
 
+    /// True if the value is 0 (empty magnitude).
     pub fn is_zero(&self) -> bool {
         self.mag.is_empty()
     }
 
+    /// Additive inverse (`-self`).
     pub fn negate(&self) -> Self {
         BigInt {
             neg: !self.neg && !self.is_zero(),
@@ -156,6 +164,7 @@ impl BigInt {
         out
     }
 
+    /// `self + other`.
     pub fn add(&self, other: &BigInt) -> BigInt {
         if self.neg == other.neg {
             BigInt {
@@ -177,10 +186,12 @@ impl BigInt {
         }
     }
 
+    /// `self - other`.
     pub fn sub(&self, other: &BigInt) -> BigInt {
         self.add(&other.negate())
     }
 
+    /// Compare against an `i128` with Python int ordering.
     pub fn cmp_i128(&self, other: i128) -> std::cmp::Ordering {
         self.cmp(&BigInt::from_i128(other))
     }

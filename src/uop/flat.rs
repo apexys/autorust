@@ -17,85 +17,128 @@ use super::graph::{Graph, UopId};
 use crate::dtype::{self, AddrSpace, ConstVal, DTypeId};
 use crate::helpers::bigint::BigInt;
 
+/// The serialized form of a `Graph`: a dtype name table plus post-ordered nodes.
 #[derive(SerJson, DeJson, Debug, Clone, PartialEq)]
 pub struct FlatGraph {
+    /// Dtype attribute names referenced by index from nodes and args.
     pub dtypes: Vec<String>,
+    /// Nodes in post-order, so every src index is below its own index.
     pub nodes: Vec<FlatNode>,
+    /// Indices of the graph roots.
     pub roots: Vec<u32>,
 }
 
+/// One serialized UOp node, with indices into `FlatGraph::nodes`.
 #[derive(SerJson, DeJson, Debug, Clone, PartialEq)]
 pub struct FlatNode {
+    /// `Ops` discriminant.
     pub op: u16,
+    /// Index into `FlatGraph::dtypes`.
     pub dtype: u16,
+    /// Src node indices.
     pub srcs: Vec<u32>,
+    /// The node's `arg`.
     pub arg: FlatArg,
+    /// The node's `tag` metadata.
     pub tag: FlatArg,
 }
 
+/// Wire format of an `Arg`, with dtypes as table indices.
 #[derive(SerJson, DeJson, Debug, Clone, PartialEq)]
 pub enum FlatArg {
+    /// Python `None`.
     None,
+    /// Python `int` that fits in `i64`.
     Int(i64),
+    /// Python `int` above `i64::MAX`, kept unsigned.
     UInt(u64),
+    /// Python finite `float`.
     Float(f64),
+    /// Python non-finite `float`, tagged as a JSON object.
     NonFinite(NonFinite),
+    /// Python `bool`.
     Bool(bool),
+    /// Python `str`.
     Str(String),
+    /// Python `bytes`.
     Bytes(Vec<u8>),
+    /// A Python enum member.
     Enum(EnumVal),
+    /// Index into `FlatGraph::dtypes`.
     Dtype(u16),
+    /// Python `tuple`/`list` of args.
     Seq {
+        /// Whether the Python object is a `tuple` rather than a `list`.
         tuple: bool,
+        /// The elements, in order.
         items: Vec<FlatArg>,
     },
     /// Python `ParamArg` — no Option fields on the wire (nanoserde omits
     /// `None` when serializing, which would make the format non-round-trippable):
     /// presence flags lead each optional value.
     Param {
+        /// Buffer slot index.
         slot: i64,
+        /// Index into `FlatGraph::dtypes`.
         dtype: u16,
-        /// [has, vmin, vmax]
+        /// Presence flag followed by the vmin and vmax args.
         vmin_vmax: [Box<FlatArg>; 3],
+        /// Presence flag (single-element array) for `multiple_of_val`.
         multiple_of: [bool; 1],
+        /// Divisibility value, used when the flag is set.
         multiple_of_val: i64,
+        /// Presence flag (single-element array) for `name_val`.
         name: [bool; 1],
+        /// Parameter name, used when the flag is set.
         name_val: String,
         /// 0 = Python None, 1..4 = GLOBAL/LOCAL/REG/ALU
         addrspace: u8,
+        /// Presence flag (single-element array) for `axis_val`.
         axis: [bool; 1],
+        /// Axis index, used when the flag is set.
         axis_val: i64,
-        /// [has, kind(0=single,1=multi)]
+        /// Presence flag followed by the kind: 0 = single, 1 = multi.
         device: [bool; 2],
+        /// Device name when the device is a single `str`.
         device_single: String,
+        /// Device names when the device is a tuple.
         device_multi: Vec<String>,
+        /// Whether the buffer is marked volatile.
         volatile: bool,
     },
     /// Python int beyond i64/u64 (exact, sign + little-endian limbs).
     Big {
+        /// Whether the value is negative.
         neg: bool,
+        /// Magnitude as little-endian 64-bit limbs.
         limbs: Vec<u64>,
     },
     /// The `Invalid` const sentinel.
     ConstInvalid,
+    /// Escape hatch: pickle bytes, opaque to Rust until we model this arg.
     Pickle(Vec<u8>),
     /// Named python dataclass (KernelInfo/CallInfo/BufferizeOpts/...).
     Data {
+        /// Dataclass name.
         tag: String,
+        /// Fields in Python declaration order.
         fields: Vec<(String, FlatArg)>,
     },
 }
 
+/// Decode a `FlatGraph` from JSON.
 pub fn parse_flat(json: &str) -> Result<FlatGraph, String> {
     FlatGraph::deserialize_json(json).map_err(|e| format!("{e:?}"))
 }
 
+/// Encode a `FlatGraph` as JSON.
 pub fn to_string_flat(g: &FlatGraph) -> String {
     g.serialize_json()
 }
 
 // ---- FlatArg <-> Arg ----
 
+/// Decode a `FlatArg` that must not reference the dtype table.
 pub fn arg_from_flat(f: &FlatArg) -> Result<Arg, String> {
     arg_from_flat_with(f, &|i| {
         Err(format!("dtype idx {i} in arg outside graph decode"))
@@ -266,6 +309,7 @@ fn constval_to_flat(v: &ConstVal) -> FlatArg {
     }
 }
 
+/// Encode an `Arg`, treating its `DTypeId`s as dtype-table indices.
 pub fn arg_to_flat(a: &Arg) -> FlatArg {
     arg_to_flat_with(a, None)
 }
@@ -367,6 +411,7 @@ pub fn arg_to_flat_with(a: &Arg, dtidx: Option<&[u16]>) -> FlatArg {
 // ---- FlatGraph <-> Graph ----
 
 impl Graph {
+    /// Rebuild a `Graph` from its flat JSON form, interning all nodes and dtypes.
     pub fn from_flat(fg: &FlatGraph) -> Result<Graph, String> {
         // map dtype names to the interned table
         let mut dtmap: Vec<DTypeId> = Vec::with_capacity(fg.dtypes.len());
@@ -416,6 +461,7 @@ impl Graph {
         Ok(g)
     }
 
+    /// Serialize the nodes reachable from this graph's roots, in post-order.
     pub fn to_flat(&self) -> FlatGraph {
         // Only serialize nodes reachable from the roots, in post-order. Compiled
         // PROGRAM/BINARY nodes from earlier kernels are not reachable from the

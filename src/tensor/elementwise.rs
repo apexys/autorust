@@ -49,6 +49,7 @@ pub fn sub(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     ctx.alu2(Ops::Add, a, nb)
 }
 
+/// `sub` with a const RHS.
 pub fn sub_c(ctx: &mut UOpCtx, a: UopId, c: ConstVal) -> UopId {
     let b = ufix(ctx, c);
     sub(ctx, a, b)
@@ -79,6 +80,7 @@ pub fn div(ctx: &mut UOpCtx, a: UopId, b: UopId, rounding_mode: Option<&str>) ->
     }
 }
 
+/// `div` with a const divisor.
 pub fn div_c(ctx: &mut UOpCtx, a: UopId, c: ConstVal, rounding_mode: Option<&str>) -> UopId {
     let b = ufix(ctx, c);
     div(ctx, a, b, rounding_mode)
@@ -143,6 +145,7 @@ pub fn pow(ctx: &mut UOpCtx, base: UopId, exponent: UopId) -> UopId {
     ctx.alu2(Ops::Pow, base, exponent)
 }
 
+/// `pow` with a const exponent.
 pub fn pow_c(ctx: &mut UOpCtx, base: UopId, c: ConstVal) -> UopId {
     let e = ufix(ctx, c);
     pow(ctx, base, e)
@@ -150,14 +153,17 @@ pub fn pow_c(ctx: &mut UOpCtx, base: UopId, c: ConstVal) -> UopId {
 
 // ***** unary ops *****
 
+/// `Tensor.reciprocal` — `1/self`.
 pub fn reciprocal(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Reciprocal, x)
 }
 
+/// `Tensor.sqrt` — square root.
 pub fn sqrt(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Sqrt, x)
 }
 
+/// `Tensor.sin` — sine.
 pub fn sin(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Sin, x)
 }
@@ -181,14 +187,17 @@ pub fn tanh(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu2(Ops::Mul, num, recip)
 }
 
+/// `Tensor.log2` — base-2 logarithm.
 pub fn log2(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Log2, x)
 }
 
+/// `Tensor.exp2` — base-2 exponential.
 pub fn exp2(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Exp2, x)
 }
 
+/// `Tensor.trunc` — round toward zero.
 pub fn trunc(ctx: &mut UOpCtx, x: UopId) -> UopId {
     ctx.alu1(Ops::Trunc, x)
 }
@@ -242,33 +251,42 @@ pub fn square(ctx: &mut UOpCtx, x: UopId) -> UopId {
 
 /// comparison sugar — python spellings: `lt`/`ne` are bare binops, the rest
 /// compose (`eq = ne.logical_not()`, `le = !gt`, `ge = !lt`, `gt` reverse-lt).
+/// `Tensor.lt` — `a < b`.
 pub fn lt(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     binop(ctx, Ops::Cmplt, a, b)
 }
+/// `Tensor.gt` — `a > b`, built as `b < a`.
 pub fn gt(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     binop(ctx, Ops::Cmplt, b, a)
 }
+/// `Tensor.ne` — `a != b`.
 pub fn ne(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     binop(ctx, Ops::Cmpne, a, b)
 }
+/// `Tensor.eq` — `a == b`, built as `!(a != b)`.
 pub fn eq(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     let n = ne(ctx, a, b);
     logical_not(ctx, n)
 }
+/// `Tensor.__le__` — `a <= b`, built as `!(a > b)`.
 pub fn le(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     let g = gt(ctx, a, b);
     logical_not(ctx, g)
 }
+/// `Tensor.__ge__` — `a >= b`, built as `!(a < b)`.
 pub fn ge(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     let l = lt(ctx, a, b);
     logical_not(ctx, l)
 }
+/// `Tensor.__and__` — bitwise/logical and.
 pub fn and(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     binop(ctx, Ops::And, a, b)
 }
+/// `Tensor.__or__` — bitwise/logical or.
 pub fn or(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     binop(ctx, Ops::Or, a, b)
 }
+/// `Tensor.__xor__` — bitwise/logical xor.
 pub fn xor(ctx: &mut UOpCtx, a: UopId, b: UopId) -> UopId {
     binop(ctx, Ops::Xor, a, b)
 }

@@ -21,6 +21,7 @@ use crate::uop::sint::SVal;
 
 /// `Q_BLOCK_SIZE` / `KV_BLOCK_SIZE` (fa.py:11-12).
 pub const Q_BLOCK_SIZE: i64 = 64;
+/// Key/value tile size in the flash-attention loop (`fa.py:12`).
 pub const KV_BLOCK_SIZE: i64 = 64;
 
 /// Additive mask / running-max sentinel. A large *finite* negative (not `-inf`)

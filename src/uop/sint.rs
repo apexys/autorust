@@ -8,13 +8,17 @@ use std::cmp::Ordering;
 
 use super::graph::UopId;
 
+/// `sint` — a Python `int | UOp`: either a concrete `i128` or a symbolic uop.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SInt {
+    /// A concrete integer.
     I(i128),
+    /// A symbolic value carried by a uop.
     U(UopId),
 }
 
 impl SInt {
+    /// The value as an `i64` when it is a concrete int in range.
     pub fn as_i64(self) -> Option<i64> {
         match self {
             SInt::I(v) => i64::try_from(v).ok(),
@@ -22,6 +26,7 @@ impl SInt {
         }
     }
 
+    /// The concrete value, panicking when the value is symbolic.
     pub fn as_i128_or_panic(self) -> i128 {
         match self {
             SInt::I(v) => v,
@@ -29,15 +34,18 @@ impl SInt {
         }
     }
 
+    /// The concrete value as an `i64`, panicking when it is symbolic or out of range.
     pub fn as_i64_or_panic(self) -> i64 {
         self.as_i64()
             .unwrap_or_else(|| panic!("TGERR: symbolic value where int required"))
     }
 
+    /// The concrete value as a `usize` when it is a non-negative int in range.
     pub fn as_usize(self) -> Option<usize> {
         self.as_i64().and_then(|v| usize::try_from(v).ok())
     }
 
+    /// True when the value is symbolic (`SInt::U`).
     pub fn is_uop(self) -> bool {
         matches!(self, SInt::U(_))
     }
@@ -48,6 +56,7 @@ pub use SInt as SVal;
 /// `sint`-like scalar: any Rust integer literal converts to `SVal::I`.
 /// (SVal::U is symbolic — only built from UOps, never from literals.)
 pub trait SvalLike {
+    /// Convert this value into an `SVal`.
     fn into_sval(self) -> SVal;
 }
 

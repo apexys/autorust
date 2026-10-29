@@ -48,6 +48,7 @@ pub struct Jit {
 }
 
 impl Jit {
+    /// Create an empty (uncaptured) JIT.
     pub fn new() -> Self {
         Jit {
             linears: Vec::new(),
@@ -63,6 +64,7 @@ impl Jit {
         self.held.clear();
     }
 
+    /// Whether a capture has completed and can be replayed.
     pub fn is_captured(&self) -> bool {
         self.ret.is_some()
     }

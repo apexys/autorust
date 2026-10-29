@@ -60,6 +60,7 @@ pub struct Session {
 }
 
 impl Session {
+    /// Create a session with the default (JIT off, eval mode) settings.
     pub fn new() -> Self {
         Session::default()
     }
@@ -70,10 +71,12 @@ impl Session {
         crate::tensor::rand::set_jit(on);
     }
 
+    /// Alias for `jit(true)`.
     pub fn enable_jit(&mut self) {
         self.jit(true);
     }
 
+    /// Whether JIT capture+replay is enabled.
     pub fn jit_enabled(&self) -> bool {
         self.jit
     }
@@ -86,6 +89,7 @@ impl Session {
         crate::helpers::context::set_training(on);
     }
 
+    /// Whether training mode is enabled.
     pub fn training_enabled(&self) -> bool {
         self.training
     }

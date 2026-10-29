@@ -24,8 +24,11 @@ use crate::uop::range::AxisType;
 /// One candidate action (`Opt(op, axis, arg)`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Action {
+    /// Opt to apply.
     pub op: OptOp,
+    /// Axis index the opt targets.
     pub axis: usize,
+    /// Opt argument, usually a factor.
     pub arg: i64,
 }
 

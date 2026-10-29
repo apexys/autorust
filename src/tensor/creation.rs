@@ -376,6 +376,7 @@ pub fn pick_device(cuda_available: bool, cl_available: bool) -> &'static str {
     }
 }
 
+/// The selected device: `DEFAULT_DEVICE` if set, else the best available backend.
 pub fn default_device() -> String {
     DEFAULT_DEVICE
         .get_or_init(|| {
@@ -406,7 +407,9 @@ pub fn canonicalize_device(device: Option<&str>) -> String {
 /// (python lists carry no width information). Pass `Some(dtype)` for exact
 /// control — the values then pack at that width on the Python side.
 pub trait SliceElem: Sized {
+    /// The dtype Python would infer for a bare list of this element type.
     fn default_dtype() -> DTypeId;
+    /// Convert one element to `f64` (used for the Python-bridge path).
     fn to_f64(&self) -> f64;
     /// Little-endian bytes at `default_dtype()` width (no `f64` round-trip).
     fn encode_native(&self) -> Vec<u8>;

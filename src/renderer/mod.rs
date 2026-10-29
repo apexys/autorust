@@ -88,12 +88,19 @@ fn cstyle_alu_keys_clang() -> Vec<Ops> {
 /// pipeline and opts consume (`has_local`, dim maxima, `code_for_op` keys).
 #[derive(Clone)]
 pub struct Renderer {
+    /// Device name this renderer targets.
     pub device: String,
+    /// Whether local (workgroup) memory is available.
     pub has_local: bool,
+    /// Whether shared memory is available.
     pub has_shared: bool,
+    /// Whether the backend exposes explicit threads.
     pub has_threads: bool,
+    /// Per-axis maximum global work size, `None` when unbounded.
     pub global_max: Option<[i64; 3]>,
+    /// Per-axis maximum local work size, `None` when unbounded.
     pub local_max: Option<[i64; 3]>,
+    /// Maximum shared-memory bytes.
     pub shared_max: i64,
     /// `tensor_cores` (renderer/__init__.py:72) — the WMMA descriptions this
     /// renderer supports (empty for the interp/CL/clang backends).
@@ -248,6 +255,8 @@ fn opencl_supported_dtypes(arch: &str) -> Vec<crate::dtype::DTypeId> {
 /// The per-device render seam: pipeline facts + linear-uops-to-source text.
 /// (python: `Renderer.render` on the device's renderer instance.)
 pub trait UopRenderer {
+    /// The renderer's static capability facts.
     fn facts(&self) -> &Renderer;
+    /// Render a linear UOp list to backend source text.
     fn render(&self, ctx: &mut crate::uop::ctx::UOpCtx, lst: &[crate::uop::UopId]) -> String;
 }

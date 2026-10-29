@@ -19,7 +19,9 @@ pub struct TensorCore {
     pub threads: usize,
     /// elements per-thread to load/store from A/B/C
     pub elements_per_thread: (usize, usize, usize),
+    /// Input dtype of A/B.
     pub dtype_in: DTypeId,
+    /// Output (accumulator) dtype of C/D.
     pub dtype_out: DTypeId,
     /// ordered tuple of "ux"/"lx" kernel opts ("ux" upcasts dim x, "lx" localizes dim x)
     pub opts: Vec<&'static str>,
@@ -35,6 +37,7 @@ impl TensorCore {
             .collect()
     }
 
+    /// `get_upcast_axes` — the `u*` kernel opts.
     pub fn get_upcast_axes(&self) -> Vec<&'static str> {
         self.opts
             .iter()
@@ -43,6 +46,7 @@ impl TensorCore {
             .collect()
     }
 
+    /// `get_local_axes` — the `l*` kernel opts.
     pub fn get_local_axes(&self) -> Vec<&'static str> {
         self.opts
             .iter()

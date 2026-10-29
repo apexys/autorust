@@ -427,6 +427,7 @@ fn gcd_all(vals: &[i128]) -> i128 {
     vals.iter().cloned().fold(0, g)
 }
 
+/// `symbolic.py` `div_and_mod_symbolic` — rewrite rules normalizing floordiv/floormod.
 pub fn div_and_mod_symbolic() -> &'static PatternMatcher {
     PM.get_or_init(|| {
         let rules: Vec<(UPat, RuleFn)> = vec![

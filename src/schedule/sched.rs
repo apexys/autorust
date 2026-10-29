@@ -272,6 +272,7 @@ pub fn pm_post_sched_cache() -> PatternMatcher {
     PatternMatcher::new(rules)
 }
 
+/// Rule call context: the new-buffer `cache` (keyed by Param) and the resolved CALL `args` by slot.
 pub type CallCtx = (HashMap<UopId, UopId>, Vec<UopId>);
 
 fn sym_sget(st: &crate::uop::upat::Store, name: &str) -> UopId {

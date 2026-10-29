@@ -22,13 +22,18 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum AddrSpace {
+    /// Device global memory.
     Global = 1,
+    /// Workgroup/shared local memory.
     Local = 2,
+    /// Per-thread registers.
     Reg = 3,
+    /// ALU-internal (immediate/vector) space.
     Alu = 4,
 }
 
 impl AddrSpace {
+    /// Decode a numeric `AddrSpace` value, or `None` if out of range.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             1 => Some(AddrSpace::Global),
@@ -38,6 +43,7 @@ impl AddrSpace {
             _ => None,
         }
     }
+    /// Python `str()` name, e.g. `"AddrSpace.GLOBAL"`.
     pub fn name(&self) -> &'static str {
         match self {
             AddrSpace::Global => "AddrSpace.GLOBAL",
@@ -53,10 +59,15 @@ impl AddrSpace {
 /// `name` is the C name (e.g. "signed char"), `fmt` is the struct format char.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DType {
+    /// Sort priority; the least-upper-bound pick is the minimum by this key.
     pub priority: i32,
+    /// Width in bits (800 for the weak int/float sentinels).
     pub bitsize: u32,
+    /// Canonical Python attribute name (`char`, `uchar`, `float`, …).
     pub attr: &'static str,
+    /// C type name (`signed char`, `unsigned int`, …).
     pub name: &'static str,
+    /// Struct-format char for raw storage views, if the dtype has one.
     pub fmt: Option<u8>,
 }
 
@@ -65,29 +76,52 @@ pub struct DType {
 pub struct DTypeId(pub u16);
 
 // Table order == declaration order of DTypes class attributes.
+/// `dtypes.void` — the placeholder dtype with bitsize 0.
 pub const VOID: DTypeId = DTypeId(0);
+/// `dtypes.weakint` — unsuffixed Python integer literal.
 pub const WEAKINT: DTypeId = DTypeId(1);
+/// `dtypes.bool`.
 pub const BOOL: DTypeId = DTypeId(2);
+/// `dtypes.int8` (`char`).
 pub const INT8: DTypeId = DTypeId(3);
+/// `dtypes.uint8` (`uchar`).
 pub const UINT8: DTypeId = DTypeId(4);
+/// `dtypes.int16` (`short`).
 pub const INT16: DTypeId = DTypeId(5);
+/// `dtypes.uint16` (`ushort`).
 pub const UINT16: DTypeId = DTypeId(6);
+/// `dtypes.int32` (`int`).
 pub const INT32: DTypeId = DTypeId(7);
+/// `dtypes.uint32` (`uint`).
 pub const UINT32: DTypeId = DTypeId(8);
+/// `dtypes.int64` (`long`).
 pub const INT64: DTypeId = DTypeId(9);
+/// `dtypes.uint64` (`ulong`).
 pub const UINT64: DTypeId = DTypeId(10);
+/// `dtypes._uint128` — outside `dtypes.all`, no interchange identity.
 pub const UINT128: DTypeId = DTypeId(11);
+/// `dtypes._uint256` — outside `dtypes.all`, no interchange identity.
 pub const UINT256: DTypeId = DTypeId(12);
+/// `dtypes.weakfloat` — unsuffixed Python float literal.
 pub const WEAKFLOAT: DTypeId = DTypeId(13);
+/// `dtypes.fp8e4m3` — OCP float8, e4m3.
 pub const FP8E4M3: DTypeId = DTypeId(14);
+/// `dtypes.fp8e5m2` — OCP float8, e5m2.
 pub const FP8E5M2: DTypeId = DTypeId(15);
+/// `dtypes.fp8e4m3fnuz` — FNUZ float8, e4m3.
 pub const FP8E4M3FNUZ: DTypeId = DTypeId(16);
+/// `dtypes.fp8e5m2fnuz` — FNUZ float8, e5m2.
 pub const FP8E5M2FNUZ: DTypeId = DTypeId(17);
+/// `dtypes.float16` (`half`).
 pub const FLOAT16: DTypeId = DTypeId(18);
+/// `dtypes.bfloat16`.
 pub const BFLOAT16: DTypeId = DTypeId(19);
+/// `dtypes.float32` (`float`).
 pub const FLOAT32: DTypeId = DTypeId(20);
+/// `dtypes.float64` (`double`).
 pub const FLOAT64: DTypeId = DTypeId(21);
 
+/// The dtype table; `DTypeId(i)` indexes it.
 pub const DTYPES: &[DType] = &[
     DType {
         priority: -1,
@@ -246,24 +280,31 @@ pub const DTYPES: &[DType] = &[
 ];
 
 impl DTypeId {
+    /// The `DType` table entry for this id.
     pub fn dt(&self) -> &'static DType {
         &DTYPES[self.0 as usize]
     }
+    /// `DType.priority`.
     pub fn priority(&self) -> i32 {
         self.dt().priority
     }
+    /// `DType.bitsize`.
     pub fn bitsize(&self) -> u32 {
         self.dt().bitsize
     }
+    /// `DType.attr` — the canonical Python attribute name.
     pub fn attr(&self) -> &'static str {
         self.dt().attr
     }
+    /// `DType.name` — the C type name.
     pub fn name(&self) -> &'static str {
         self.dt().name
     }
+    /// `DType.fmt` — the struct-format char, if any.
     pub fn fmt(&self) -> Option<u8> {
         self.dt().fmt
     }
+    /// Size of one element in bytes (`ceil(bitsize / 8)`).
     pub fn itemsize(&self) -> usize {
         self.bitsize().div_ceil(8) as usize
     }
@@ -275,7 +316,9 @@ impl DTypeId {
 /// round-trips through `f64`. `from_bytes_le` reads exactly `DTYPE.itemsize()`
 /// bytes. `f16`/`bf16`/`fp8` tensors are read via a graph cast to a wider type.
 pub trait ReadDtype: Sized + Clone + PartialEq + core::fmt::Debug {
+    /// Dtype the tensor is cast to before its bytes are reinterpreted as `Self`.
     const DTYPE: DTypeId;
+    /// Read one little-endian element of `DTYPE.itemsize()` bytes.
     fn from_bytes_le(bytes: &[u8]) -> Self;
 }
 
@@ -303,6 +346,7 @@ impl ReadDtype for bool {
     }
 }
 
+/// Lookup from canonical attribute name to interned dtype, built once.
 pub static BY_ATTR: LazyLock<HashMap<&'static str, DTypeId>> = LazyLock::new(|| {
     DTYPES
         .iter()
@@ -311,6 +355,7 @@ pub static BY_ATTR: LazyLock<HashMap<&'static str, DTypeId>> = LazyLock::new(|| 
         .collect()
 });
 
+/// Look up a dtype by its exact canonical attribute name.
 pub fn by_attr(attr: &str) -> Option<DTypeId> {
     BY_ATTR.get(attr).cloned()
 }
@@ -336,9 +381,13 @@ pub fn to_dtype(attr: &str) -> Option<DTypeId> {
 
 // ---- sets (port of DTypes class-level tuples) ----
 
+/// OCP-format float8 dtypes (`e4m3`, `e5m2`).
 pub const FP8_OCP: &[DTypeId] = &[FP8E4M3, FP8E5M2];
+/// FNUZ-format float8 dtypes (`e4m3fnuz`, `e5m2fnuz`).
 pub const FP8_FNUZ: &[DTypeId] = &[FP8E4M3FNUZ, FP8E5M2FNUZ];
+/// All float8 dtypes, in both encodings.
 pub const FP8S: &[DTypeId] = &[FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ];
+/// `dtypes.floats` — every float dtype except the weak float.
 pub const FLOATS: &[DTypeId] = &[
     FP8E4M3,
     FP8E5M2,
@@ -349,9 +398,13 @@ pub const FLOATS: &[DTypeId] = &[
     FLOAT32,
     FLOAT64,
 ];
+/// `dtypes.uints` — the unsigned integer dtypes.
 pub const UINTS: &[DTypeId] = &[UINT8, UINT16, UINT32, UINT64];
+/// `dtypes.sints` — the signed integer dtypes.
 pub const SINTS: &[DTypeId] = &[INT8, INT16, INT32, INT64];
+/// `dtypes.ints` — unsigned then signed integer dtypes.
 pub const INTS: &[DTypeId] = &[UINT8, UINT16, UINT32, UINT64, INT8, INT16, INT32, INT64];
+/// `dtypes.weaks` — the weak int and weak float sentinels.
 pub const WEAKS: &[DTypeId] = &[WEAKINT, WEAKFLOAT];
 
 /// `dtypes.all` — floats + ints + bool (note: `_uint128`/`_uint256` are NOT in `all`).
@@ -375,32 +428,40 @@ pub const ALL: &[DTypeId] = &[
     BOOL,
 ];
 
+/// True if `d` is listed in `set`.
 pub fn in_set(set: &[DTypeId], d: DTypeId) -> bool {
     set.contains(&d)
 }
 
+/// `dtypes.is_float` — a float dtype or the weak float.
 pub fn is_float(d: DTypeId) -> bool {
     in_set(FLOATS, d) || d == WEAKFLOAT
 }
+/// `dtypes.is_int` — an integer dtype or the weak int.
 pub fn is_int(d: DTypeId) -> bool {
     in_set(INTS, d) || d == WEAKINT
 }
+/// `dtypes.is_unsigned` — one of the unsigned integer dtypes.
 pub fn is_unsigned(d: DTypeId) -> bool {
     in_set(UINTS, d)
 }
+/// `dtypes.is_bool`.
 pub fn is_bool(d: DTypeId) -> bool {
     d == BOOL
 }
+/// `dtypes.is_weak` — the weak int or weak float.
 pub fn is_weak(d: DTypeId) -> bool {
     d == WEAKINT || d == WEAKFLOAT
 }
 
+/// `dtypes.default_float`, resolved from `DEFAULT_FLOAT` once.
 pub fn default_float() -> DTypeId {
     static V: OnceLock<DTypeId> = OnceLock::new();
     *V.get_or_init(|| {
         to_dtype(&getenv_str(DEFAULT_FLOAT.env, DEFAULT_FLOAT.default)).expect("bad DEFAULT_FLOAT")
     })
 }
+/// `dtypes.default_int`, resolved from `DEFAULT_INT` once.
 pub fn default_int() -> DTypeId {
     static V: OnceLock<DTypeId> = OnceLock::new();
     *V.get_or_init(|| {
@@ -422,10 +483,15 @@ pub fn sum_dtype() -> DTypeId {
 /// with NaN == NaN (canonical NaN only).
 #[derive(Clone, Debug)]
 pub enum ConstVal {
+    /// A Python bool.
     Bool(bool),
+    /// A Python int that fits in `i128` (covers all non-weak int dtypes).
     Int(i128),
+    /// A Python int beyond `i128`, e.g. weak-dtype bounds like `2^800 - 1`.
     Big(BigInt),
+    /// A Python float; identity is by bit pattern.
     Float(f64),
+    /// Placeholder for a missing/invalid const.
     Invalid,
 }
 
@@ -459,6 +525,7 @@ impl std::hash::Hash for ConstVal {
 }
 
 impl ConstVal {
+    /// Coerce to `f64` like Python `float()` (`Invalid` becomes NaN).
     pub fn as_f64(&self) -> f64 {
         match self {
             ConstVal::Bool(b) => {
@@ -712,6 +779,7 @@ pub fn least_upper_dtype(ds: &[DTypeId]) -> DTypeId {
     best.unwrap()
 }
 
+/// `least_upper_dtype` of exactly two dtypes.
 pub fn least_upper_dtype2(a: DTypeId, b: DTypeId) -> DTypeId {
     least_upper_dtype(&[a, b])
 }
@@ -1088,6 +1156,7 @@ fn wrap_int(v: i128, d: DTypeId) -> i128 {
     }
 }
 
+/// `truncate` for a float dtype on an already-`f64` value (RNE per width).
 pub fn trunc_float(d: DTypeId, x: f64) -> f64 {
     if d == crate::dtype::WEAKFLOAT {
         return x;
@@ -1166,7 +1235,9 @@ pub fn storage_fmt(d: DTypeId) -> u8 {
 /// u16 for bf16, u8 for fp8, raw value otherwise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StorageScalar {
+    /// Value carried as `f64` (half, whose bits are packed later by `fmt`).
     F64(f64),
+    /// Raw bits (bf16/fp8) or the unsigned value for other dtypes.
     U64(u64),
 }
 

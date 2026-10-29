@@ -1951,6 +1951,7 @@ fn build_split_kernels() -> PatternMatcher {
 
 // ---------- get_kernel_graph (rangeify.py:584) ----------
 
+/// `get_kernel_graph` (rangeify.py:584) — run the full rangeify pipeline and return the kernel SINK.
 pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     // (single-device: multi_pm skipped; OPENPILOT_HACKS off)
 

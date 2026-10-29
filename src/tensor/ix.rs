@@ -24,8 +24,11 @@ pub enum Ix {
     All,
     /// Python `slice(start, stop, step)` with int bounds; `step` defaults to 1.
     Range {
+        /// Slice start, or `None` for the Python default.
         start: Option<i64>,
+        /// Slice stop, or `None` for the Python default.
         stop: Option<i64>,
+        /// Slice step; defaults to 1.
         step: i64,
     },
     /// Python `int` — collapses the dim.
@@ -64,6 +67,7 @@ impl PartialEq for Ix {
 impl Eq for Ix {}
 
 impl Ix {
+    /// Python `slice(start, stop, step)`.
     pub fn slice(start: Option<i64>, stop: Option<i64>, step: i64) -> Ix {
         Ix::Range { start, stop, step }
     }

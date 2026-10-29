@@ -35,10 +35,13 @@ pub fn is_always_contiguous(op: Ops) -> bool {
 
 /// `IndexingContext` (indexing.py:10).
 pub struct IndexingContext {
+    /// Ops that must be realized, mapped to the output axis indices to realize (`None` = all).
     pub realize_map: HashMap<UopId, Option<Vec<i64>>>,
+    /// Ops that must survive rangeify (side effects and barriers).
     pub non_removable: HashSet<UopId>,
     /// input ranges / output ranges
     pub range_map: HashMap<UopId, (Vec<UopId>, Vec<UopId>)>,
+    /// Monotonic counter for fresh RANGE ids.
     pub range_idx: i64,
 }
 
@@ -49,6 +52,7 @@ impl Default for IndexingContext {
 }
 
 impl IndexingContext {
+    /// Create an empty indexing context.
     pub fn new() -> Self {
         IndexingContext {
             realize_map: HashMap::new(),
@@ -972,6 +976,7 @@ fn finish_node(
     ictx.range_map.insert(x, (rngs, out_rngs.to_vec()));
 }
 
+/// `run_rangeify` — rewrite the SINK into ranged INDEX/STAGE/RANGE form.
 pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool) -> UopId {
     let shared = Rc::new(RefCell::new(IndexingContext::new()));
 

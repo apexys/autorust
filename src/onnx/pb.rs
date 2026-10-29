@@ -26,10 +26,15 @@ pub(crate) const MAX_TENSOR_BYTES: usize = 16 << 30;
 /// Error type shared by the parser and runner.
 #[derive(Debug, Clone)]
 pub enum OnnxError {
+    /// I/O failure, e.g. opening or reading external tensor data.
     Io(String),
+    /// Malformed protobuf or ONNX content.
     Parse(String),
+    /// Valid input using a feature the T0/T1 runner does not implement.
     Unsupported(String),
+    /// Shape/dimension mismatch found while running a node.
     Shape(String),
+    /// Failure while executing an op.
     Runtime(String),
 }
 
@@ -185,34 +190,54 @@ impl<'a> Reader<'a> {
 /// Storage of a `TensorProto`, exactly one of which is present in a valid file.
 #[derive(Debug, Default, Clone)]
 pub struct TensorData {
+    /// `raw_data` (field 9): little-endian storage bytes for the whole tensor.
     pub raw: Option<Vec<u8>>,
+    /// `float_data` (field 4); also carries FLOAT16/BFLOAT16 values.
     pub floats: Vec<f32>,
+    /// `double_data` (field 10).
     pub doubles: Vec<f64>,
+    /// `int32_data` (field 5), varint-decoded; also int8/16, uint8/16, bool, f16.
     pub int32s: Vec<u64>,
+    /// `int64_data` (field 7).
     pub int64s: Vec<i64>,
+    /// `uint64_data` (field 11), varint-decoded.
     pub uint64s: Vec<u64>,
+    /// Whether `float_data` (field 4) was present at all.
     pub has_floats: bool,
+    /// Whether `double_data` (field 10) was present at all.
     pub has_doubles: bool,
+    /// Whether `int32_data` (field 5) was present at all.
     pub has_int32s: bool,
+    /// Whether `int64_data` (field 7) was present at all.
     pub has_int64s: bool,
+    /// Whether `uint64_data` (field 11) was present at all.
     pub has_uint64s: bool,
 }
 
+/// ONNX `TensorProto` with its one-of storage fields split out.
 #[derive(Debug, Default, Clone)]
 pub struct TensorProto {
+    /// `name` (field 8): the tensor/value name.
     pub name: String,
+    /// `dims` (field 1): shape in elements, row-major.
     pub dims: Vec<i64>,
+    /// `data_type` (field 2): ONNX `TensorProto.DataType` enum value.
     pub data_type: i32,
+    /// The typed/raw payload fields; only one is meaningful per tensor.
     pub data: TensorData,
+    /// `external_data` (field 13) key/value pairs (`location`, `offset`, `length`).
     pub external: Vec<(String, String)>,
+    /// `data_location` (field 14): 0 = embedded, 1 = external file.
     pub data_location: i64,
 }
 
 impl TensorProto {
+    /// Map `data_type` to the tinygrad dtype.
     pub fn dtype(&self) -> Result<DTypeId> {
         onnx_dtype(self.data_type)
     }
 
+    /// Number of elements implied by `dims`.
     pub fn numel(&self) -> Result<usize> {
         let mut n: usize = 1;
         for &d in &self.dims {
@@ -456,25 +481,36 @@ pub(crate) fn onnx_dtype(t: i32) -> Result<DTypeId> {
 // Attributes, values, nodes, graph, model
 // ---------------------------------------------------------------------------
 
+/// One ONNX `AttributeProto`, tagged by the value kind present.
 #[derive(Debug, Clone)]
 pub enum Attribute {
+    /// Scalar `f` (field 2).
     Float(f32),
+    /// Scalar `i` (field 3).
     Int(i64),
+    /// Scalar `s` (field 4).
     String(String),
+    /// Tensor `t` (field 5).
     Tensor(TensorProto),
+    /// Subgraph `g` (field 6).
     Graph(GraphProto),
+    /// Repeated `floats` (field 7).
     Floats(Vec<f32>),
+    /// Repeated `ints` (field 8).
     Ints(Vec<i64>),
+    /// Repeated `strings` (field 9).
     Strings(Vec<String>),
 }
 
 impl Attribute {
+    /// Scalar int value, if this attribute is an `i`.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Attribute::Int(v) => Some(*v),
             _ => None,
         }
     }
+    /// Scalar numeric value as `f64` (accepts `f` and `i`).
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Attribute::Float(v) => Some(*v as f64),
@@ -482,18 +518,21 @@ impl Attribute {
             _ => None,
         }
     }
+    /// Scalar string value, if this attribute is an `s`.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Attribute::String(v) => Some(v),
             _ => None,
         }
     }
+    /// Int-list value, if this attribute is `ints`.
     pub fn as_i64s(&self) -> Option<&[i64]> {
         match self {
             Attribute::Ints(v) => Some(v),
             _ => None,
         }
     }
+    /// Numeric list as `f64` (accepts `floats` and `ints`).
     pub fn as_f64s(&self) -> Option<Vec<f64>> {
         match self {
             Attribute::Floats(v) => Some(v.iter().map(|x| *x as f64).collect()),
@@ -501,6 +540,7 @@ impl Attribute {
             _ => None,
         }
     }
+    /// Tensor value, if this attribute is a `t`.
     pub fn as_tensor(&self) -> Option<&TensorProto> {
         match self {
             Attribute::Tensor(t) => Some(t),
@@ -509,35 +549,46 @@ impl Attribute {
     }
 }
 
+/// One ONNX `NodeProto` with its attributes keyed by name.
 #[derive(Debug, Default, Clone)]
 pub struct Node {
+    /// `op_type` (field 4), e.g. `Conv` or `Relu`.
     pub op_type: String,
+    /// `domain` (field 7); empty for the default ONNX opset.
     pub domain: String,
+    /// `name` (field 3), optional node name.
     pub name: String,
+    /// `input` names (field 1), in positional order.
     pub inputs: Vec<String>,
+    /// `output` names (field 2), in positional order.
     pub outputs: Vec<String>,
+    /// `attribute` messages (field 5) keyed by their `name`.
     pub attrs: HashMap<String, Attribute>,
 }
 
 impl Node {
+    /// Int attribute `name`, or `default` when absent or not an int.
     pub fn attr_i64(&self, name: &str, default: i64) -> i64 {
         self.attrs
             .get(name)
             .and_then(Attribute::as_i64)
             .unwrap_or(default)
     }
+    /// Int-list attribute `name`, if present.
     pub fn attr_i64s(&self, name: &str) -> Option<Vec<i64>> {
         self.attrs
             .get(name)
             .and_then(Attribute::as_i64s)
             .map(|v| v.to_vec())
     }
+    /// Numeric attribute `name` as `f64`, or `default`.
     pub fn attr_f64(&self, name: &str, default: f64) -> f64 {
         self.attrs
             .get(name)
             .and_then(Attribute::as_f64)
             .unwrap_or(default)
     }
+    /// String attribute `name`, or `default`.
     pub fn attr_str<'a>(&'a self, name: &str, default: &'a str) -> &'a str {
         self.attrs
             .get(name)
@@ -549,21 +600,31 @@ impl Node {
 /// One dimension of a declared ONNX value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dim {
+    /// Concrete dimension size.
     Value(i64),
+    /// Symbolic dimension name (dynamic shape).
     Param(String),
+    /// Dimension with neither a value nor a param.
     Unknown,
 }
 
+/// A declared graph input/output with its TypeProto-derived shape.
 #[derive(Debug, Clone)]
 pub struct ValueInfo {
+    /// Value name; refers to an initializer or node output.
     pub name: String,
+    /// Element dtype, absent when the type was not declared.
     pub dtype: Option<DTypeId>,
+    /// Shape dimensions in order.
     pub dims: Vec<Dim>,
+    /// True if the type is `optional(...)`.
     pub is_optional: bool,
+    /// True if the type is `seq(...)`.
     pub is_sequence: bool,
 }
 
 impl ValueInfo {
+    /// Number of dimensions.
     pub fn rank(&self) -> usize {
         self.dims.len()
     }
@@ -580,19 +641,29 @@ impl ValueInfo {
     }
 }
 
+/// An ONNX `GraphProto` (nodes plus their declared inputs/outputs/weights).
 #[derive(Debug, Default, Clone)]
 pub struct GraphProto {
+    /// `name` (field 2).
     pub name: String,
+    /// `node` messages (field 1), in execution order.
     pub nodes: Vec<Node>,
+    /// `initializer` tensors (field 5), i.e. weights.
     pub initializers: Vec<TensorProto>,
+    /// `input` value infos (field 11).
     pub inputs: Vec<ValueInfo>,
+    /// `output` value infos (field 12).
     pub outputs: Vec<ValueInfo>,
 }
 
+/// An ONNX `ModelProto`: one graph plus its opset imports.
 #[derive(Debug, Default, Clone)]
 pub struct ModelProto {
+    /// `graph` (field 7).
     pub graph: GraphProto,
+    /// `opset_import` versions (field 8) keyed by domain.
     pub opsets: HashMap<String, i64>,
+    /// `producer_name` (field 2).
     pub producer: String,
 }
 

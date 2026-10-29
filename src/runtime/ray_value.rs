@@ -28,6 +28,7 @@ pub struct Bytes {
 }
 
 impl Bytes {
+    /// Allocate a zeroed byte buffer of `nbytes` bytes.
     pub fn zeroed(nbytes: usize) -> Bytes {
         Bytes {
             words: vec![0u64; nbytes.div_ceil(8)],
@@ -41,19 +42,23 @@ impl Bytes {
         self.nbytes = nbytes;
     }
 
+    /// Return the buffer length in bytes.
     pub fn nbytes(&self) -> usize {
         self.nbytes
     }
 
+    /// Return whether the buffer holds no bytes.
     pub fn is_empty(&self) -> bool {
         self.nbytes == 0
     }
 
+    /// View the buffer as a byte slice of exactly `nbytes` bytes.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         &cast_slice::<u64, u8>(&self.words)[..self.nbytes]
     }
 
+    /// View the buffer as a mutable byte slice of exactly `nbytes` bytes.
     #[inline]
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
         let n = self.nbytes;
@@ -67,6 +72,7 @@ impl Bytes {
         cast_slice(self.as_bytes())
     }
 
+    /// Reinterpret as a mutable native slice of `T`, with the same size rules as [`Bytes::as_slice`].
     #[inline]
     pub fn as_slice_mut<T: Pod>(&mut self) -> &mut [T] {
         cast_slice_mut(self.as_bytes_mut())
@@ -81,35 +87,63 @@ impl Bytes {
 
 /// Native scalar types the typed evaluator computes in.
 pub trait Prim: Pod + Copy + PartialEq + std::fmt::Debug + Send + Sync {
+    /// Whether the scalar is a floating-point type.
     const IS_FLOAT: bool;
+    /// Whether the scalar is an unsigned integer type.
     const IS_UNSIGNED: bool;
+    /// Width of the scalar in bits.
     const BITS: u32;
+    /// Cast an `f64` to this scalar.
     fn from_f64(x: f64) -> Self;
+    /// Cast this scalar to `f64`.
     fn to_f64(self) -> f64;
+    /// Cast an `i128` to this scalar, truncating to the target width.
     fn from_i128(x: i128) -> Self;
+    /// Cast this scalar to `i128`.
     fn to_i128(self) -> i128;
+    /// Whether this scalar equals zero.
     fn is_zero(self) -> bool;
 
+    /// Wrapping add (`ADD` for integers, `+` for floats).
     fn add(self, o: Self) -> Self;
+    /// Wrapping subtract (`SUB` for integers, `-` for floats).
     fn sub(self, o: Self) -> Self;
+    /// Wrapping multiply (`MUL` for integers, `*` for floats).
     fn mul(self, o: Self) -> Self;
+    /// Wrapping negate (`NEG` for integers, unary `-` for floats).
     fn neg(self) -> Self;
+    /// Float divide (`FDIV`); implemented only for float dtypes.
     fn fdiv(self, o: Self) -> Self;
+    /// Elementwise maximum, matching tinygrad's `maximum`.
     fn maxv(self, o: Self) -> Self;
+    /// Bitwise and (`AND`); unimplemented for float dtypes.
     fn bitand(self, o: Self) -> Self;
+    /// Bitwise or (`OR`); unimplemented for float dtypes.
     fn bitor(self, o: Self) -> Self;
+    /// Bitwise xor (`XOR`); unimplemented for float dtypes.
     fn bitxor(self, o: Self) -> Self;
+    /// Shift left (`SHL`), yielding 0 for out-of-range shift counts.
     fn shl(self, o: Self) -> Self;
+    /// Shift right (`SHR`), sign-extending negatives and saturating out-of-range counts.
     fn shr(self, o: Self) -> Self;
+    /// Less-than comparison (`CMPLT`).
     fn lt(self, o: Self) -> bool;
+    /// Equality comparison (`CMPEQ`).
     fn eqv(self, o: Self) -> bool;
 
+    /// `exp2` transcendental (`2**x`); unimplemented for integers.
     fn exp2(self) -> Self;
+    /// `log2` transcendental with tinygrad's zero/negative edge cases.
     fn log2v(self) -> Self;
+    /// `sqrt` transcendental returning NaN for negative inputs.
     fn sqrtv(self) -> Self;
+    /// Reciprocal (`1/x`) with a signed infinity at zero.
     fn recip(self) -> Self;
+    /// `sin` transcendental returning NaN for infinities.
     fn sinv(self) -> Self;
+    /// `pow` transcendental with tinygrad's zero/infinity edge cases.
     fn powv(self, o: Self) -> Self;
+    /// Truncate toward zero; non-finite values pass through.
     fn truncv(self) -> Self;
 }
 

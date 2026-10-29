@@ -15,29 +15,39 @@ use crate::uop::upat::{CtxVal, PatternMatcher, RuleFn, UPat, graph_rewrite, r_al
 /// `AllocCtx` (tensor.py:20).
 #[derive(Default)]
 pub struct AllocCtx {
+    /// Every tagged uop, in sequential tag order.
     pub uop_list: Vec<UopId>,
+    /// Virtual uop -> allocated buffer replacing it (insertion-ordered).
     pub buffer_map: Vec<(UopId, UopId)>, // insertion-ordered
+    /// Real (non-virtual, non-buffer-identity) bases of the sink sources.
     pub bases: Vec<UopId>,
+    /// STORE+AFTER assigns hoisted into the call.
     pub assigns: Vec<UopId>,
+    /// PARAM replacement chain returned by the call.
     pub replacements: Vec<UopId>,
+    /// Buffers backing contiguous views created from movement ops.
     pub views: Vec<UopId>,
 }
 
 impl AllocCtx {
+    /// Look up the buffer allocated for a virtual uop.
     pub fn buffer_map_get(&self, k: UopId) -> Option<UopId> {
         self.buffer_map
             .iter()
             .find(|(a, _)| *a == k)
             .map(|(_, v)| v.clone())
     }
+    /// Record `v` as the buffer for `k`, keeping the first mapping.
     pub fn buffer_map_insert(&mut self, k: UopId, v: UopId) {
         if self.buffer_map_get(k.clone()).is_none() {
             self.buffer_map.push((k, v));
         }
     }
+    /// True if `k` was collected as a sink base.
     pub fn in_bases(&self, k: UopId) -> bool {
         self.bases.contains(&k)
     }
+    /// True if `k` is a buffer backing a contiguous view.
     pub fn in_views(&self, k: UopId) -> bool {
         self.views.contains(&k)
     }

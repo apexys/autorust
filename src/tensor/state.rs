@@ -262,11 +262,14 @@ fn parse_json(s: &str) -> Result<Json, String> {
 
 /// A named collection of tensors (tinygrad `state_dict`).
 pub struct State {
+    /// Named tensors (parameter/buffer entries).
     pub tensors: HashMap<String, Tensor>,
+    /// Free-form string metadata attached to the state.
     pub metadata: HashMap<String, String>,
 }
 
 impl State {
+    /// An empty state.
     pub fn new() -> Self {
         State {
             tensors: HashMap::new(),
@@ -274,30 +277,37 @@ impl State {
         }
     }
 
+    /// Insert (or overwrite) a named tensor.
     pub fn insert(&mut self, name: impl Into<String>, t: Tensor) {
         self.tensors.insert(name.into(), t);
     }
 
+    /// Look up a tensor by name.
     pub fn get(&self, name: &str) -> Option<&Tensor> {
         self.tensors.get(name)
     }
 
+    /// Remove and return a named tensor.
     pub fn remove(&mut self, name: &str) -> Option<Tensor> {
         self.tensors.remove(name)
     }
 
+    /// Number of tensors in the state.
     pub fn len(&self) -> usize {
         self.tensors.len()
     }
 
+    /// True when the state holds no tensors.
     pub fn is_empty(&self) -> bool {
         self.tensors.is_empty()
     }
 
+    /// The tensor names.
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.tensors.keys()
     }
 
+    /// Iterate `(name, tensor)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Tensor)> {
         self.tensors.iter()
     }

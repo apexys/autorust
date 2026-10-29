@@ -1329,6 +1329,7 @@ fn dump_ast(ctx: &mut UOpCtx, sink: UopId) -> String {
     out
 }
 
+/// `full_rewrite_to_sink` with an explicit renderer; `optimize=false` skips the pre-opt stages and `apply_opts`.
 pub fn full_rewrite_to_sink_with(
     ctx: &mut UOpCtx,
     ast: UopId,
