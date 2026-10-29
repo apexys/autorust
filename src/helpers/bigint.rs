@@ -37,7 +37,10 @@ impl Ord for BigInt {
 
 impl BigInt {
     pub fn zero() -> Self {
-        BigInt { neg: false, mag: vec![] }
+        BigInt {
+            neg: false,
+            mag: vec![],
+        }
     }
 
     /// low 64 bits as an unsigned value (v mod 2^64 in two's complement)
@@ -70,7 +73,10 @@ impl BigInt {
         while mag.last() == Some(&0) {
             mag.pop();
         }
-        BigInt { neg: neg && !mag.is_empty(), mag }
+        BigInt {
+            neg: neg && !mag.is_empty(),
+            mag,
+        }
     }
 
     pub fn pow2(exp: u64) -> Self {
@@ -97,7 +103,10 @@ impl BigInt {
     }
 
     pub fn negate(&self) -> Self {
-        BigInt { neg: !self.neg && !self.is_zero(), mag: self.mag.clone() }
+        BigInt {
+            neg: !self.neg && !self.is_zero(),
+            mag: self.mag.clone(),
+        }
     }
 
     fn cmp_mag(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
@@ -149,16 +158,21 @@ impl BigInt {
 
     pub fn add(&self, other: &BigInt) -> BigInt {
         if self.neg == other.neg {
-            BigInt { neg: self.neg, mag: Self::add_mag(&self.mag, &other.mag) }
+            BigInt {
+                neg: self.neg,
+                mag: Self::add_mag(&self.mag, &other.mag),
+            }
         } else {
             match Self::cmp_mag(&self.mag, &other.mag) {
                 std::cmp::Ordering::Equal => BigInt::zero(),
-                std::cmp::Ordering::Greater => {
-                    BigInt { neg: self.neg, mag: Self::sub_mag(&self.mag, &other.mag) }
-                }
-                std::cmp::Ordering::Less => {
-                    BigInt { neg: other.neg, mag: Self::sub_mag(&other.mag, &self.mag) }
-                }
+                std::cmp::Ordering::Greater => BigInt {
+                    neg: self.neg,
+                    mag: Self::sub_mag(&self.mag, &other.mag),
+                },
+                std::cmp::Ordering::Less => BigInt {
+                    neg: other.neg,
+                    mag: Self::sub_mag(&other.mag, &self.mag),
+                },
             }
         }
     }
@@ -261,7 +275,11 @@ impl BigInt {
         }
         if bits > 0 {
             for i in 0..self.mag.len() {
-                let hi = if i + 1 < self.mag.len() { self.mag[i + 1] << (64 - bits) } else { 0 };
+                let hi = if i + 1 < self.mag.len() {
+                    self.mag[i + 1] << (64 - bits)
+                } else {
+                    0
+                };
                 self.mag[i] = (self.mag[i] >> bits) | hi;
             }
         }
@@ -312,10 +330,17 @@ impl BigInt {
         let mut mag = self.mag.clone();
         let mut chunks: Vec<String> = Vec::new();
         while !mag.is_empty() {
-            let mut cur = BigInt { neg: false, mag: mag.clone() };
+            let mut cur = BigInt {
+                neg: false,
+                mag: mag.clone(),
+            };
             let rem = cur.divmod_small(10_000_000_000_000_000_000);
             mag = cur.mag;
-            chunks.push(if mag.is_empty() { rem.to_string() } else { format!("{rem:019}") });
+            chunks.push(if mag.is_empty() {
+                rem.to_string()
+            } else {
+                format!("{rem:019}")
+            });
         }
         chunks.reverse();
         let mut s = String::new();
@@ -392,9 +417,15 @@ mod tests {
 
     #[test]
     fn basics() {
-        assert_eq!(BigInt::from_decimal("-12345678901234567890123456789").to_decimal(), "-12345678901234567890123456789");
+        assert_eq!(
+            BigInt::from_decimal("-12345678901234567890123456789").to_decimal(),
+            "-12345678901234567890123456789"
+        );
         assert_eq!(BigInt::pow2(800).to_decimal(), ref_pow2(800));
-        assert_eq!(BigInt::pow2_minus_one(64).to_decimal(), "18446744073709551615");
+        assert_eq!(
+            BigInt::pow2_minus_one(64).to_decimal(),
+            "18446744073709551615"
+        );
         assert_eq!(BigInt::pow2_minus_one(800).to_decimal(), {
             let p = ref_pow2(800);
             // subtract one from decimal string
@@ -411,8 +442,16 @@ mod tests {
             String::from_utf8(b).unwrap()
         });
         assert!(BigInt::from_i128(-5).cmp(&BigInt::from_i128(3)) == std::cmp::Ordering::Less);
-        assert_eq!(BigInt::from_i128(7).add(&BigInt::from_i128(-10)).to_decimal(), "-3");
-        assert_eq!(BigInt::pow2(64).sub(&BigInt::pow2(63)).to_decimal(), "9223372036854775808");
+        assert_eq!(
+            BigInt::from_i128(7)
+                .add(&BigInt::from_i128(-10))
+                .to_decimal(),
+            "-3"
+        );
+        assert_eq!(
+            BigInt::pow2(64).sub(&BigInt::pow2(63)).to_decimal(),
+            "9223372036854775808"
+        );
         assert_eq!(BigInt::pow2(63).negate().as_i64(), Some(i64::MIN));
         assert_eq!(BigInt::pow2(63).as_i64(), None);
         assert_eq!(BigInt::from_i128(-9).as_i64(), Some(-9));

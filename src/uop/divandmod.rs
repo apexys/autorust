@@ -3,14 +3,13 @@
 //! NOTE: Python caches `fold_divmod_general` on index UOps (`functools.cache`);
 //! we recompute per call (it is a pure function of the node).
 
-
-use super::ctx::{sval_cmp, UOpCtx};
-use super::graph::UopId;
-use super::ops::{group, Ops};
 use super::alu::{floordiv, py_mod};
-use super::sym::{cvar, cvar_arg, r, sget, var, weak_int_dts};
+use super::ctx::{UOpCtx, sval_cmp};
+use super::graph::UopId;
+use super::ops::{Ops, group};
 use super::sint::SVal;
-use super::upat::{simplify, CtxVal, PatternMatcher, RuleFn, Store, UPat, UPatOrConst};
+use super::sym::{cvar, cvar_arg, r, sget, var, weak_int_dts};
+use super::upat::{CtxVal, PatternMatcher, RuleFn, Store, UPat, UPatOrConst, simplify};
 use crate::dtype::ConstVal as CV;
 
 /// Python `sum(items)` over UOps: starts at int 0, so the first `+` is
@@ -56,27 +55,30 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
     // x//y is constant
     let xdiv = ctx.div_floor(x.clone(), y.clone());
     if let Ok((xdmin, xdmax)) = ctx.min_max(&xdiv)
-        && xdmin == xdmax {
-            let c = ctx.const_like(x.clone(), CV::Int(xdmin.as_i128_or_panic()));
-            if dop == Ops::Floormod {
-                let m = ctx.mul(c, y);
-                return Some(ctx.sub(x, m));
-            }
-            return Some(c);
+        && xdmin == xdmax
+    {
+        let c = ctx.const_like(x.clone(), CV::Int(xdmin.as_i128_or_panic()));
+        if dop == Ops::Floormod {
+            let m = ctx.mul(c, y);
+            return Some(ctx.sub(x, m));
         }
+        return Some(c);
+    }
 
     // PARAM // c is irreducible
-    if ctx.op_of(&x) == Ops::Param && ctx.op_of(&y) == Ops::Const
-        && let Some(p) = ctx.has_param(&x) {
-            let m = p.multiple_of.unwrap_or(1) as i128;
-            let yv = ctx.val(&y).as_int_exact()?;
-            if m % yv == 0 && dop == Ops::Floormod {
-                return Some(ctx.const_like(d, CV::Int(0)));
-            }
-            if m % yv == 0 {
-                return None;
-            }
+    if ctx.op_of(&x) == Ops::Param
+        && ctx.op_of(&y) == Ops::Const
+        && let Some(p) = ctx.has_param(&x)
+    {
+        let m = p.multiple_of.unwrap_or(1) as i128;
+        let yv = ctx.val(&y).as_int_exact()?;
+        if m % yv == 0 && dop == Ops::Floormod {
+            return Some(ctx.const_like(d, CV::Int(0)));
         }
+        if m % yv == 0 {
+            return None;
+        }
+    }
 
     // split uops
     let (x_peeled, const_v) = ctx.pop_const(x.clone(), Ops::Add);
@@ -96,12 +98,12 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
                     } else {
                         None
                     }
-                })
-                    && kv > 0 {
-                        let first = ctx.div_floor(ctx.srcs(&x)[0].clone(), y);
-                        let kconst = ctx.const_like(x, CV::Int(kv));
-                        return Some(ctx.mod_(first, kconst));
-                    }
+                }) && kv > 0
+                {
+                    let first = ctx.div_floor(ctx.srcs(&x)[0].clone(), y);
+                    let kconst = ctx.const_like(x, CV::Int(kv));
+                    return Some(ctx.mod_(first, kconst));
+                }
             }
 
             // remove_nested_mod in sum: (a%4 + b)%2 -> (a+b)%2
@@ -110,7 +112,9 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
                 let mut changed = false;
                 for u in &uops_no_const {
                     let mut u2 = u.clone();
-                    if ctx.op_of(u) == Ops::Floormod && ctx.divides(ctx.srcs(u)[1].clone(), c).is_some() {
+                    if ctx.op_of(u) == Ops::Floormod
+                        && ctx.divides(ctx.srcs(u)[1].clone(), c).is_some()
+                    {
                         u2 = ctx.srcs(u)[0].clone();
                         changed = true;
                     }
@@ -126,7 +130,12 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
                             ctx.usum(first, &new_xs[1..])
                         }
                     };
-                    let with_const = if const_i == 0 { sum } else { let kc = ctx.const_like(x, const_v); ctx.add(sum, kc) };
+                    let with_const = if const_i == 0 {
+                        sum
+                    } else {
+                        let kc = ctx.const_like(x, const_v);
+                        ctx.add(sum, kc)
+                    };
                     return Some(ctx.mod_(with_const, y));
                 }
             }
@@ -159,7 +168,11 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
             // iterate the cartesian product
             let mut idx = vec![0usize; rem_choices.len()];
             'product: loop {
-                let rems: Vec<i128> = idx.iter().enumerate().map(|(i, &j)| rem_choices[i][j]).collect();
+                let rems: Vec<i128> = idx
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &j)| rem_choices[i][j])
+                    .collect();
                 // rem = sum(r*v for r,v in zip(rems, terms)) + const%c  (as a node)
                 let mut parts: Vec<UopId> = Vec::new();
                 let mut sum_i = py_mod(const_i, c);
@@ -167,7 +180,8 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
                 for (i, &r_) in rems.iter().enumerate() {
                     let v = terms[i].clone();
                     if ctx.op_of(&v) == Ops::Const {
-                        sum_i = sum_i.wrapping_add(r_.wrapping_mul(ctx.val(&v).as_int_exact().unwrap_or(0)));
+                        sum_i = sum_i
+                            .wrapping_add(r_.wrapping_mul(ctx.val(&v).as_int_exact().unwrap_or(0)));
                     } else {
                         all_int = false;
                         // `r*v`: int * UOp → MUL(const, v)
@@ -186,7 +200,8 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
                     let (rmin_i, rmax_i) = (rmin.as_i128_or_panic(), rmax.as_i128_or_panic());
                     if floordiv(rmin_i, c) == floordiv(rmax_i, c) {
                         if dop == Ops::Floormod {
-                            let off = ctx.const_like(x, CV::Int(floordiv(rmin_i, c).wrapping_mul(c)));
+                            let off =
+                                ctx.const_like(x, CV::Int(floordiv(rmin_i, c).wrapping_mul(c)));
                             return Some(ctx.sub(rem_expr, off));
                         } else {
                             // sum((f-r)//c * v) + const//c + rmin//c — zero terms KEPT
@@ -254,7 +269,12 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
             let mut divs_seen: Vec<i128> = Vec::new();
             for (u, f) in uops_no_const.iter().zip(factors.iter()) {
                 let af = f.abs();
-                if ctx.op_of(u) != Ops::Const && 1 < af && af < c && c % af == 0 && !divs_seen.contains(&af) {
+                if ctx.op_of(u) != Ops::Const
+                    && 1 < af
+                    && af < c
+                    && c % af == 0
+                    && !divs_seen.contains(&af)
+                {
                     divs_seen.push(af);
                 }
             }
@@ -283,7 +303,8 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
                                 }
                             }
                             if py_mod(const_i, div) != 0 {
-                                b_parts.push(ctx.const_like(x.clone(), CV::Int(py_mod(const_i, div))));
+                                b_parts
+                                    .push(ctx.const_like(x.clone(), CV::Int(py_mod(const_i, div))));
                             }
                             // UOp.usum(*b_parts): reduce with first as start (no leading zero)
                             let b = match b_parts.len() {
@@ -328,7 +349,11 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
         let yq = ctx.divide_exact(y, gcd_s.clone())?;
 
         let ret = ctx.alu2(dop, xq, yq);
-        return Some(if dop == Ops::Floormod { ctx.mul(ret, gcd_s) } else { ret });
+        return Some(if dop == Ops::Floormod {
+            ctx.mul(ret, gcd_s)
+        } else {
+            ret
+        });
     }
 
     // factor_remainder: (d*x+y)//d -> x+y//d
@@ -347,10 +372,16 @@ pub fn fold_divmod_general(ctx: &mut UOpCtx, d: UopId) -> Option<UopId> {
                     let cf = ctx.const_factor(u.clone());
                     if py_mod(cf, cy) != cf {
                         let uc = ctx.divides(u.clone(), cf)?;
-                        { let rk = ctx.const_like(u.clone(), CV::Int(py_mod(cf, cy))); rem.push(ctx.mul(uc, rk)); }
+                        {
+                            let rk = ctx.const_like(u.clone(), CV::Int(py_mod(cf, cy)));
+                            rem.push(ctx.mul(uc, rk));
+                        }
                         if dop == Ops::Floordiv {
                             let qc = ctx.divides(u.clone(), cf)?;
-                            { let qk = ctx.const_like(u.clone(), CV::Int(floordiv(cf, cy))); quo.push(ctx.mul(qc, qk)); }
+                            {
+                                let qk = ctx.const_like(u.clone(), CV::Int(floordiv(cf, cy)));
+                                quo.push(ctx.mul(qc, qk));
+                            }
                         } else {
                             quo.push(ctx.const_like(u.clone(), CV::Int(0)));
                         }
@@ -401,7 +432,10 @@ pub fn div_and_mod_symbolic() -> &'static PatternMatcher {
         let rules: Vec<(UPat, RuleFn)> = vec![
             // (x//c+a)//d -> (x+a*c)//(c*d) for c>0, d>0
             (
-                var("x").floordiv(UPatOrConst::Pat(cvar("c"))).add(UPatOrConst::Pat(cvar_arg("a", CV::Int(0)))).floordiv(UPatOrConst::Pat(cvar("d"))),
+                var("x")
+                    .floordiv(UPatOrConst::Pat(cvar("c")))
+                    .add(UPatOrConst::Pat(cvar_arg("a", CV::Int(0))))
+                    .floordiv(UPatOrConst::Pat(cvar("d"))),
                 r(|ctx, st, _| {
                     let (x, c, a, d) = (sget(st, "x"), sget(st, "c"), sget(st, "a"), sget(st, "d"));
                     let (dmin, _) = ctx.min_max(&d).ok()?;
@@ -421,7 +455,9 @@ pub fn div_and_mod_symbolic() -> &'static PatternMatcher {
             (
                 UPat::op_var(vec![Ops::Floordiv, Ops::Floormod])
                     .with_src_tup(vec![
-                        var("x").with_dtype(Some(weak_int_dts())).add(UPatOrConst::Pat(cvar("c"))),
+                        var("x")
+                            .with_dtype(Some(weak_int_dts()))
+                            .add(UPatOrConst::Pat(cvar("c"))),
                         cvar("d"),
                     ])
                     .named("n"),
@@ -445,7 +481,9 @@ pub fn div_and_mod_symbolic() -> &'static PatternMatcher {
             ),
             // ** slow rules **
             (
-                UPat::op_var(vec![Ops::Floordiv, Ops::Floormod]).with_dtype(Some(weak_int_dts())).named("d"),
+                UPat::op_var(vec![Ops::Floordiv, Ops::Floormod])
+                    .with_dtype(Some(weak_int_dts()))
+                    .named("d"),
                 r(|ctx, st, _| fold_divmod_general(ctx, sget(st, "d"))),
             ),
         ];
@@ -454,7 +492,12 @@ pub fn div_and_mod_symbolic() -> &'static PatternMatcher {
 }
 
 #[allow(unused)]
-fn type_keepers(_: &SVal, _: &CtxVal, _: &Store, _: fn(&UOpCtx, UopId, UopId) -> std::cmp::Ordering) {
+fn type_keepers(
+    _: &SVal,
+    _: &CtxVal,
+    _: &Store,
+    _: fn(&UOpCtx, UopId, UopId) -> std::cmp::Ordering,
+) {
     let _ = sval_cmp;
     let _ = group::UNARY;
 }

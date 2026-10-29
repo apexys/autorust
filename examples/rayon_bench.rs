@@ -13,13 +13,16 @@
 //! per device, and prints the speedup. `RAYON_NUM_THREADS` controls the pool.
 
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 use std::time::Instant;
 
 fn time_device(dev: &str, n: usize, iters: usize) -> (f64, f64) {
-    let mut ctx = Ctx::new();
-    let a_data: Vec<f32> = (0..n * n).map(|i| ((i % 97) as f32 - 48.0) * 0.01).collect();
-    let w_data: Vec<f32> = (0..n * n).map(|i| ((i % 89) as f32 - 44.0) * 0.01).collect();
+    let ctx = Ctx::new();
+    let a_data: Vec<f32> = (0..n * n)
+        .map(|i| ((i % 97) as f32 - 48.0) * 0.01)
+        .collect();
+    let w_data: Vec<f32> = (0..n * n)
+        .map(|i| ((i % 89) as f32 - 44.0) * 0.01)
+        .collect();
     let x_data: Vec<f32> = (0..n * n).map(|i| (i % 13) as f32 * 0.1).collect();
 
     let a = Tensor::from_slice(&ctx, &a_data, None, Some(dev)).reshape([n, n]);
@@ -45,8 +48,14 @@ fn time_device(dev: &str, n: usize, iters: usize) -> (f64, f64) {
 }
 
 fn main() {
-    let n: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(256);
-    let iters: usize = std::env::var("ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    let iters: usize = std::env::var("ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
 
     let threads = autorust::runtime::ops_rayon::num_threads();
     println!("matmul {n}x{n}, elementwise {n}x{n}, iters={iters}, rayon threads={threads}");

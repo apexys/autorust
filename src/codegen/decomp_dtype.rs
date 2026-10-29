@@ -7,12 +7,12 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::dtype::{self, ConstVal, DTypeId};
+use crate::uop::UopId;
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::sym::{r, sget};
-use crate::uop::upat::{graph_rewrite, r_l2i, r_pair, CtxVal, PatternMatcher, RuleFn, UPat};
-use crate::uop::UopId;
+use crate::uop::upat::{CtxVal, PatternMatcher, RuleFn, UPat, graph_rewrite, r_l2i, r_pair};
 
 type L2iMemo = Rc<std::cell::RefCell<HashMap<(Ops, DTypeId, Vec<UopId>), Vec<UopId>>>>;
 
@@ -115,7 +115,10 @@ fn has_tag(ctx: &UOpCtx, x: UopId) -> bool {
 /// `u.rtag((w, dt))`.
 fn set_rtag(ctx: &mut UOpCtx, x: UopId, w: i64, dt: DTypeId) -> UopId {
     let (op, d, srcs, arg, _tag) = ctx.snapshot(&x);
-    let tag = Arg::Seq { tuple: true, items: vec![Arg::Int(w), Arg::Dtype(dt)] };
+    let tag = Arg::Seq {
+        tuple: true,
+        items: vec![Arg::Int(w), Arg::Dtype(dt)],
+    };
     ctx.uop_tag(op, Some(d), srcs, arg, tag)
 }
 
@@ -144,7 +147,14 @@ fn reindex(ctx: &mut UOpCtx, idx: UopId, off: i64, mul: i64) -> UopId {
         let new_off = ctx.add((srcs[1]).clone(), o);
         let tag = ctx.tag_of(&idx).clone();
         let arg = ctx.arg_of(&idx).clone();
-        ctx.replace(&idx, Ops::Index, ctx.dt_of(&idx), vec![(srcs[0]).clone(), new_off], arg, tag)
+        ctx.replace(
+            &idx,
+            Ops::Index,
+            ctx.dt_of(&idx),
+            vec![(srcs[0]).clone(), new_off],
+            arg,
+            tag,
+        )
     } else {
         let m = ctx.const_py(ConstVal::Int(mul as i128), None);
         let m2 = ctx.mul((srcs[1]).clone(), m);
@@ -162,7 +172,10 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
     let zero = ctx.const_py(ConstVal::Int(0), Some(dt));
     match op {
         Ops::Neg => l2i(ctx, Ops::Sub, dt, &[zero.clone(), zero, uops[0].clone()]),
-        Ops::Cast if (dt == dtype::INT64 || dt == dtype::UINT64) && !dtype::FLOATS.contains(&ctx.dt_of(&uops[0])) => {
+        Ops::Cast
+            if (dt == dtype::INT64 || dt == dtype::UINT64)
+                && !dtype::FLOATS.contains(&ctx.dt_of(&uops[0])) =>
+        {
             let x = uops[0].clone();
             let lo = ctx.cast(x.clone(), l2i_dt(dt));
             if ctx.dt_of(&x) == dtype::BOOL || dtype::UINTS.contains(&ctx.dt_of(&x)) {
@@ -192,7 +205,11 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
         }
         Ops::Cast if dtype::FLOATS.contains(&dt) => {
             let (a0, a1) = (uops[0].clone(), uops[1].clone());
-            let cdt = if dt == dtype::FLOAT64 { dtype::FLOAT64 } else { dtype::FLOAT32 };
+            let cdt = if dt == dtype::FLOAT64 {
+                dtype::FLOAT64
+            } else {
+                dtype::FLOAT32
+            };
             let z = ctx.const_py(ConstVal::Int(0), None);
             let a1_eq0 = ctx.eq(a1.clone(), z.clone());
             let m1 = ctx.const_py(ConstVal::Int(-1), None);
@@ -216,7 +233,10 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
             let b = ctx.bitcast(uops[0].clone(), dtype::UINT32);
             vec![ctx.cast(b, dt)]
         }
-        Ops::Bitcast => vec![ctx.bitcast(uops[0].clone(), dt), ctx.bitcast(uops[1].clone(), dt)],
+        Ops::Bitcast => vec![
+            ctx.bitcast(uops[0].clone(), dt),
+            ctx.bitcast(uops[1].clone(), dt),
+        ],
         Ops::Shl => {
             let a0u = ctx.bitcast(uops[0].clone(), dtype::UINT32);
             let a1u = ctx.bitcast(uops[1].clone(), dtype::UINT32);
@@ -235,7 +255,10 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
             let hi = ctx.bitcast(or1, dt);
             let cond = ge_c(ctx, uops[2].clone(), 32);
             let z = ctx.const_py(ConstVal::Int(0), Some(dt));
-            vec![ctx.where_(cond.clone(), z, lo.clone()), ctx.where_(cond, lo, hi)]
+            vec![
+                ctx.where_(cond.clone(), z, lo.clone()),
+                ctx.where_(cond, lo, hi),
+            ]
         }
         Ops::Shr => {
             let a0u = ctx.bitcast(uops[0].clone(), dtype::UINT32);
@@ -260,7 +283,10 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
                 zero
             };
             let cond = ge_c(ctx, uops[2].clone(), 32);
-            vec![ctx.where_(cond.clone(), hi.clone(), lo), ctx.where_(cond, fill, hi)]
+            vec![
+                ctx.where_(cond.clone(), hi.clone(), lo),
+                ctx.where_(cond, fill, hi),
+            ]
         }
         Ops::Add => {
             let low = ctx.add(uops[0].clone(), uops[2].clone());
@@ -281,7 +307,12 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
             vec![low, hi]
         }
         Ops::Mul => {
-            let (a0, a1, b0, b1) = (uops[0].clone(), uops[1].clone(), uops[2].clone(), uops[3].clone());
+            let (a0, a1, b0, b1) = (
+                uops[0].clone(),
+                uops[1].clone(),
+                uops[2].clone(),
+                uops[3].clone(),
+            );
             let (a00, a01) = unpack32(ctx, a0.clone());
             let (b00, b01) = unpack32(ctx, b0.clone());
             let p1 = ctx.mul(a00.clone(), b01.clone());
@@ -305,11 +336,21 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
             let cd = ctx.mul(a1, b0);
             let t = ctx.add(base, ab);
             let term1 = ctx.add(t, cd);
-            l2i(ctx, Ops::Add, dt, &[(mid[0]).clone(), (mid[1]).clone(), term0, term1])
+            l2i(
+                ctx,
+                Ops::Add,
+                dt,
+                &[(mid[0]).clone(), (mid[1]).clone(), term0, term1],
+            )
         }
         Ops::Cdiv | Ops::Cmod => {
             let signed = dt == dtype::INT32;
-            let (mut a0, mut a1, mut b0, mut b1) = (uops[0].clone(), uops[1].clone(), uops[2].clone(), uops[3].clone());
+            let (mut a0, mut a1, mut b0, mut b1) = (
+                uops[0].clone(),
+                uops[1].clone(),
+                uops[2].clone(),
+                uops[3].clone(),
+            );
             let mut a_neg = ctx.const_py(ConstVal::Int(0), None);
             let mut b_neg = ctx.const_py(ConstVal::Int(0), None);
             if signed {
@@ -342,14 +383,29 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
                 let z = ctx.const_py(ConstVal::Int(0), Some(dtype::UINT32));
                 let r2 = l2i(ctx, Ops::Shl, dtype::UINT32, &[rr.0, rr.1, one, z.clone()]);
                 let iu = ctx.const_py(ConstVal::Int(i as i128), Some(dtype::UINT32));
-                let sha = l2i(ctx, Ops::Shr, dtype::UINT32, &[a0.clone(), a1.clone(), iu, z]);
+                let sha = l2i(
+                    ctx,
+                    Ops::Shr,
+                    dtype::UINT32,
+                    &[a0.clone(), a1.clone(), iu, z],
+                );
                 let one2 = ctx.const_py(ConstVal::Int(1), Some(dtype::UINT32));
                 let amask = ctx.binop(Ops::And, (sha[0]).clone(), one2);
                 let lo = ctx.or_((r2[0]).clone(), amask);
                 rr = (lo, (r2[1]).clone());
-                let cmplt = l2i(ctx, Ops::Cmplt, dtype::UINT32, &[rr.0.clone(), rr.1.clone(), b0.clone(), b1.clone()]);
+                let cmplt = l2i(
+                    ctx,
+                    Ops::Cmplt,
+                    dtype::UINT32,
+                    &[rr.0.clone(), rr.1.clone(), b0.clone(), b1.clone()],
+                );
                 let cond = ctx.logical_not((cmplt[0]).clone());
-                let diff = l2i(ctx, Ops::Sub, dtype::UINT32, &[rr.0.clone(), rr.1.clone(), b0.clone(), b1.clone()]);
+                let diff = l2i(
+                    ctx,
+                    Ops::Sub,
+                    dtype::UINT32,
+                    &[rr.0.clone(), rr.1.clone(), b0.clone(), b1.clone()],
+                );
                 let ccond = ctx.cast(cond.clone(), dtype::UINT32);
                 let shifted = shl_u(ctx, ccond, (i % 32) as i64);
                 if i < 32 {
@@ -373,7 +429,10 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
                 let r0 = ctx.bitcast(rr.0.clone(), dt);
                 let r1 = ctx.bitcast(rr.1.clone(), dt);
                 if op == Ops::Cmod {
-                    return vec![ctx.where_(a_neg.clone(), nr0, r0), ctx.where_(a_neg, nr1, r1)];
+                    return vec![
+                        ctx.where_(a_neg.clone(), nr0, r0),
+                        ctx.where_(a_neg, nr1, r1),
+                    ];
                 }
                 let sgn = ctx.xor(a_neg, b_neg);
                 return vec![ctx.where_(sgn.clone(), nq0, q0), ctx.where_(sgn, nq1, q1)];
@@ -385,7 +444,12 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
             }
         }
         Ops::Cmplt => {
-            let (a0, a1, b0, b1) = (uops[0].clone(), uops[1].clone(), uops[2].clone(), uops[3].clone());
+            let (a0, a1, b0, b1) = (
+                uops[0].clone(),
+                uops[1].clone(),
+                uops[2].clone(),
+                uops[3].clone(),
+            );
             let hi_lt = ctx.lt(a1.clone(), b1.clone());
             let hi_eq = ctx.eq(a1, b1);
             let a0u = ctx.bitcast(a0, dtype::UINT32);
@@ -411,17 +475,37 @@ fn l2i(ctx: &mut UOpCtx, op: Ops, dt: DTypeId, uops: &[UopId]) -> Vec<UopId> {
         }
         Ops::Where => {
             let c = uops[0].clone();
-            vec![ctx.where_(c.clone(), uops[1].clone(), uops[3].clone()), ctx.where_(c, uops[2].clone(), uops[4].clone())]
+            vec![
+                ctx.where_(c.clone(), uops[1].clone(), uops[3].clone()),
+                ctx.where_(c, uops[2].clone(), uops[4].clone()),
+            ]
         }
         Ops::Max => {
             let cmplt = l2i(ctx, Ops::Cmplt, dt, uops);
-            l2i(ctx, Ops::Where, dt, &[(cmplt[0]).clone(), uops[2].clone(), uops[3].clone(), uops[0].clone(), uops[1].clone()])
+            l2i(
+                ctx,
+                Ops::Where,
+                dt,
+                &[
+                    (cmplt[0]).clone(),
+                    uops[2].clone(),
+                    uops[3].clone(),
+                    uops[0].clone(),
+                    uops[1].clone(),
+                ],
+            )
         }
         other => panic!("TGERR: long decomposition of {other:?} unsupported"),
     }
 }
 
-fn split_l2i(ctx: &mut UOpCtx, memo: &L2iMemo, op: Ops, dt: DTypeId, uops: Vec<UopId>) -> Vec<UopId> {
+fn split_l2i(
+    ctx: &mut UOpCtx,
+    memo: &L2iMemo,
+    op: Ops,
+    dt: DTypeId,
+    uops: Vec<UopId>,
+) -> Vec<UopId> {
     let key = (op, dt, uops.clone());
     if let Some(v) = memo.borrow().get(&key).cloned() {
         return v;
@@ -438,8 +522,17 @@ fn split_inputs(ctx: &mut UOpCtx, uops: &[UopId], memo: &L2iMemo) -> Vec<UopId> 
     }
     let sink = crate::tensor::sink(ctx, uops.to_vec());
     let pm = pm_long_decomp();
-    let out = graph_rewrite(ctx, sink, &pm, true, None, false, false, CtxVal::L2i(memo.clone()))
-        .unwrap_or_else(|e| panic!("TGERR: split_l2i rewrite failed: {e}"));
+    let out = graph_rewrite(
+        ctx,
+        sink,
+        &pm,
+        true,
+        None,
+        false,
+        false,
+        CtxVal::L2i(memo.clone()),
+    )
+    .unwrap_or_else(|e| panic!("TGERR: split_l2i rewrite failed: {e}"));
     ctx.srcs(&out).to_vec()
 }
 
@@ -479,7 +572,9 @@ pub fn pm_long_decomp() -> PatternMatcher {
     ));
     // INDEX long
     rules.push((
-        UPat::ops1(Ops::Index).with_dtype(Some(long_dt.clone())).named("x"),
+        UPat::ops1(Ops::Index)
+            .with_dtype(Some(long_dt.clone()))
+            .named("x"),
         r(|ctx, st, _| {
             let x = sget(st, "x");
             let (w, _dt) = tag_pair(ctx, x.clone())?;
@@ -490,7 +585,10 @@ pub fn pm_long_decomp() -> PatternMatcher {
     // STORE with long idx
     rules.push((
         UPat::ops1(Ops::Store)
-            .with_src_tup(vec![UPat::var(Some("idx"), Some(long_dt.clone())), UPat::var(Some("val"), None)])
+            .with_src_tup(vec![
+                UPat::var(Some("idx"), Some(long_dt.clone())),
+                UPat::var(Some("val"), None),
+            ])
             .allow_all_srcs()
             .named("st"),
         r(|ctx, st, _| {
@@ -511,7 +609,10 @@ pub fn pm_long_decomp() -> PatternMatcher {
     // Comparison with long src
     rules.push((
         UPat::op_var(vec![Ops::Cmplt, Ops::Cmpne, Ops::Cmpeq])
-            .with_src_tup(vec![UPat::var(Some("a"), Some(long_dt.clone())), UPat::var(Some("b"), None)])
+            .with_src_tup(vec![
+                UPat::var(Some("a"), Some(long_dt.clone())),
+                UPat::var(Some("b"), None),
+            ])
             .named("x"),
         r_l2i(|memo, ctx, st| {
             let (a, x) = (sget(st, "a"), sget(st, "x"));
@@ -557,7 +658,9 @@ pub fn pm_long_decomp() -> PatternMatcher {
     ));
     // CAST from long to non-long (a has no tag)
     rules.push((
-        UPat::ops1(Ops::Cast).with_src_tup(vec![UPat::var(Some("a"), Some(long_dt.clone()))]).named("x"),
+        UPat::ops1(Ops::Cast)
+            .with_src_tup(vec![UPat::var(Some("a"), Some(long_dt.clone()))])
+            .named("x"),
         r_l2i(|memo, ctx, st| {
             let (a, x) = (sget(st, "a"), sget(st, "x"));
             let xdt = ctx.dt_of(&x);
@@ -592,7 +695,11 @@ pub fn pm_long_decomp() -> PatternMatcher {
     rules.push((
         UPat::ops1(Ops::Where)
             .with_dtype(Some(long_dt.clone()))
-            .with_src_tup(vec![UPat::var(Some("c"), None), UPat::var(Some("a"), None), UPat::var(Some("b"), None)])
+            .with_src_tup(vec![
+                UPat::var(Some("c"), None),
+                UPat::var(Some("a"), None),
+                UPat::var(Some("b"), None),
+            ])
             .named("x"),
         r_l2i(|memo, ctx, st| {
             let (c, a, b, x) = (sget(st, "c"), sget(st, "a"), sget(st, "b"), sget(st, "x"));
@@ -617,7 +724,10 @@ pub fn pm_long_decomp() -> PatternMatcher {
         .chain(std::iter::once(Ops::Bitcast))
         .collect();
     rules.push((
-        UPat::op_var(alu_set).with_dtype(Some(long_dt.clone())).allow_all_srcs().named("x"),
+        UPat::op_var(alu_set)
+            .with_dtype(Some(long_dt.clone()))
+            .allow_all_srcs()
+            .named("x"),
         r_l2i(|memo, ctx, st| {
             let x = sget(st, "x");
             let (w, _dt) = tag_pair(ctx, x.clone())?;
@@ -643,8 +753,17 @@ pub fn pm_long_decomp() -> PatternMatcher {
             let (idx, x) = (sget(st, "idx"), sget(st, "x"));
             let (w, _dt) = tag_pair(ctx, x.clone())?;
             let pm = pm_long_decomp();
-            let ridx = graph_rewrite(ctx, idx, &pm, true, None, false, false, CtxVal::L2i(memo.clone()))
-                .unwrap_or_else(|e| panic!("TGERR: long load idx rewrite failed: {e}"));
+            let ridx = graph_rewrite(
+                ctx,
+                idx,
+                &pm,
+                true,
+                None,
+                false,
+                false,
+                CtxVal::L2i(memo.clone()),
+            )
+            .unwrap_or_else(|e| panic!("TGERR: long load idx rewrite failed: {e}"));
             let ridx = reindex(ctx, ridx, w, 2);
             let rt = clear_tag(ctx, ridx);
             let srcs = ctx.srcs(&x).to_vec();
@@ -700,7 +819,8 @@ fn f2f_clamp(ctx: &mut UOpCtx, val: UopId, dt: DTypeId, sat: bool) -> UopId {
     } else {
         ((1i64 << e) - 2, (1i64 << m) - 1)
     };
-    let mx_f = 2f64.powi((max_exp - exponent_bias(dt)) as i32) * (1.0 + max_man as f64 / (1i64 << m) as f64);
+    let mx_f = 2f64.powi((max_exp - exponent_bias(dt)) as i32)
+        * (1.0 + max_man as f64 / (1i64 << m) as f64);
     let mx = ctx.const_like(val.clone(), ConstVal::Float(mx_f));
     let sat_val = if dtype::FP8S.contains(&dt) && sat {
         mx.clone()
@@ -825,8 +945,17 @@ fn f2f(ctx: &mut UOpCtx, v: UopId, fr: DTypeId, to: DTypeId, sat: bool) -> UopId
 fn f2f_load(ctx: &mut UOpCtx, x: UopId, fr: DTypeId, to: DTypeId) -> UopId {
     let xsrcs = ctx.srcs(&x).to_vec();
     let pm = pm_float_decomp();
-    let storage_idx = graph_rewrite(ctx, (xsrcs[0]).clone(), &pm, true, None, false, false, CtxVal::Pair(fr, to))
-        .unwrap_or_else(|e| panic!("TGERR: f2f_load idx rewrite failed: {e}"));
+    let storage_idx = graph_rewrite(
+        ctx,
+        (xsrcs[0]).clone(),
+        &pm,
+        true,
+        None,
+        false,
+        false,
+        CtxVal::Pair(fr, to),
+    )
+    .unwrap_or_else(|e| panic!("TGERR: f2f_load idx rewrite failed: {e}"));
     let n = ctx.max_numel(x);
     if n == 1 {
         let ld = crate::tensor::load(ctx, storage_idx, xsrcs[1..].to_vec());
@@ -842,7 +971,14 @@ fn f2f_load(ctx: &mut UOpCtx, x: UopId, fr: DTypeId, to: DTypeId) -> UopId {
 }
 
 /// `f2f_store` (dtype.py:134).
-fn f2f_store(ctx: &mut UOpCtx, st_: UopId, idx: UopId, val: UopId, fr: DTypeId, to: DTypeId) -> UopId {
+fn f2f_store(
+    ctx: &mut UOpCtx,
+    st_: UopId,
+    idx: UopId,
+    val: UopId,
+    fr: DTypeId,
+    to: DTypeId,
+) -> UopId {
     let n = ctx.max_numel(val.clone());
     if n == 1 {
         let bc = ctx.bitcast(val, f2f_dt(to));
@@ -885,7 +1021,11 @@ pub fn pm_float_decomp() -> PatternMatcher {
         }),
     ));
     // INDEX / SHRINK
-    let not_load_stack: Vec<Ops> = all.iter().cloned().filter(|o| !matches!(o, Ops::Load | Ops::Stack)).collect();
+    let not_load_stack: Vec<Ops> = all
+        .iter()
+        .cloned()
+        .filter(|o| !matches!(o, Ops::Load | Ops::Stack))
+        .collect();
     rules.push((
         UPat::op_var(vec![Ops::Index, Ops::Shrink])
             .with_src_tup(vec![UPat::op_var(not_load_stack)])
@@ -898,8 +1038,17 @@ pub fn pm_float_decomp() -> PatternMatcher {
             }
             let srcs = ctx.srcs(&x).to_vec();
             let pm = pm_float_decomp();
-            let s0 = graph_rewrite(ctx, (srcs[0]).clone(), &pm, true, None, false, false, CtxVal::Pair(fr, to))
-                .unwrap_or_else(|e| panic!("TGERR: float idx rewrite failed: {e}"));
+            let s0 = graph_rewrite(
+                ctx,
+                (srcs[0]).clone(),
+                &pm,
+                true,
+                None,
+                false,
+                false,
+                CtxVal::Pair(fr, to),
+            )
+            .unwrap_or_else(|e| panic!("TGERR: float idx rewrite failed: {e}"));
             let mut new_srcs = vec![s0];
             new_srcs.extend(srcs[1..].iter().cloned());
             let arg = ctx.arg_of(&x).clone();
@@ -908,7 +1057,9 @@ pub fn pm_float_decomp() -> PatternMatcher {
     ));
     // LOAD floats
     rules.push((
-        UPat::ops1(Ops::Load).with_dtype(Some(dtype::FLOATS.to_vec())).named("x"),
+        UPat::ops1(Ops::Load)
+            .with_dtype(Some(dtype::FLOATS.to_vec()))
+            .named("x"),
         r_pair(|fr, to, ctx, st| {
             let x = sget(st, "x");
             if ctx.dt_of(&x) != fr {
@@ -929,8 +1080,17 @@ pub fn pm_float_decomp() -> PatternMatcher {
             }
             let srcs = ctx.srcs(&ld).to_vec();
             let pm = pm_float_decomp();
-            let base = graph_rewrite(ctx, (srcs[0]).clone(), &pm, true, None, false, false, CtxVal::Pair(fr, to))
-                .unwrap_or_else(|e| panic!("TGERR: float bitcast-load rewrite failed: {e}"));
+            let base = graph_rewrite(
+                ctx,
+                (srcs[0]).clone(),
+                &pm,
+                true,
+                None,
+                false,
+                false,
+                CtxVal::Pair(fr, to),
+            )
+            .unwrap_or_else(|e| panic!("TGERR: float bitcast-load rewrite failed: {e}"));
             let ld2 = crate::tensor::load(ctx, base, srcs[1..].to_vec());
             Some(ctx.bitcast(ld2, ctx.dt_of(&bc)))
         }),
@@ -953,7 +1113,9 @@ pub fn pm_float_decomp() -> PatternMatcher {
     ));
     // BITCAST to
     rules.push((
-        UPat::ops1(Ops::Bitcast).with_src_tup(vec![UPat::var(Some("x"), None)]).named("bc"),
+        UPat::ops1(Ops::Bitcast)
+            .with_src_tup(vec![UPat::var(Some("x"), None)])
+            .named("bc"),
         r_pair(|fr, to, ctx, st| {
             let (bc, x) = (sget(st, "bc"), sget(st, "x"));
             if ctx.dt_of(&bc) != fr {
@@ -980,7 +1142,9 @@ pub fn pm_float_decomp() -> PatternMatcher {
     ));
     // CONST float
     rules.push((
-        UPat::ops1(Ops::Const).with_dtype(Some(dtype::FLOATS.to_vec())).named("x"),
+        UPat::ops1(Ops::Const)
+            .with_dtype(Some(dtype::FLOATS.to_vec()))
+            .named("x"),
         r_pair(|fr, to, ctx, st| {
             let x = sget(st, "x");
             if ctx.dt_of(&x) != fr {
@@ -994,10 +1158,18 @@ pub fn pm_float_decomp() -> PatternMatcher {
     let generic: Vec<Ops> = all
         .iter()
         .cloned()
-        .filter(|o| !matches!(o, Ops::Param | Ops::Buffer | Ops::Cast | Ops::Bitcast | Ops::Const))
+        .filter(|o| {
+            !matches!(
+                o,
+                Ops::Param | Ops::Buffer | Ops::Cast | Ops::Bitcast | Ops::Const
+            )
+        })
         .collect();
     rules.push((
-        UPat::op_var(generic).with_dtype(Some(dtype::FLOATS.to_vec())).allow_all_srcs().named("x"),
+        UPat::op_var(generic)
+            .with_dtype(Some(dtype::FLOATS.to_vec()))
+            .allow_all_srcs()
+            .named("x"),
         r_pair(|fr, to, ctx, st| {
             let x = sget(st, "x");
             if ctx.dt_of(&x) != fr {
@@ -1006,7 +1178,13 @@ pub fn pm_float_decomp() -> PatternMatcher {
             let srcs = ctx.srcs(&x).to_vec();
             let new_srcs: Vec<UopId> = srcs
                 .into_iter()
-                .map(|s| if ctx.dt_of(&s) == fr { ctx.cast(s, to) } else { s })
+                .map(|s| {
+                    if ctx.dt_of(&s) == fr {
+                        ctx.cast(s, to)
+                    } else {
+                        s
+                    }
+                })
                 .collect();
             let (op, _d, _s, arg, tag) = ctx.snapshot(&x);
             Some(ctx.uop_tag(op, None, new_srcs, arg, tag))
@@ -1017,7 +1195,9 @@ pub fn pm_float_decomp() -> PatternMatcher {
         UPat::ops1(Ops::Store)
             .with_src_tup(vec![
                 UPat::var(Some("idx"), None),
-                UPat::ops1(Ops::Bitcast).with_dtype(Some(dtype::FLOATS.to_vec())).named("val"),
+                UPat::ops1(Ops::Bitcast)
+                    .with_dtype(Some(dtype::FLOATS.to_vec()))
+                    .named("val"),
             ])
             .allow_all_srcs()
             .named("st"),
@@ -1096,24 +1276,30 @@ pub fn do_dtype_decomps(ctx: &mut UOpCtx, sink: UopId, dctx: &mut DtypeDecompCtx
     for fr in dts {
         let to = if fr == dtype::INT64 {
             dtype::INT32
-        } else if !should_emulate(dtype::FLOAT16, &supported, &emulated) && dtype::FP8S.contains(&fr) {
+        } else if !should_emulate(dtype::FLOAT16, &supported, &emulated)
+            && dtype::FP8S.contains(&fr)
+        {
             dtype::FLOAT16
         } else {
             dtype::FLOAT32
         };
         let is_float = dtype::FLOATS.contains(&fr);
-        let pm = if is_float { pm_float_decomp() } else { pm_long_decomp() };
-        let ctxv = if is_float { CtxVal::Pair(fr, to) } else { CtxVal::L2i(new_l2i()) };
+        let pm = if is_float {
+            pm_float_decomp()
+        } else {
+            pm_long_decomp()
+        };
+        let ctxv = if is_float {
+            CtxVal::Pair(fr, to)
+        } else {
+            CtxVal::L2i(new_l2i())
+        };
         cur = graph_rewrite(ctx, cur, &pm, true, None, false, false, ctxv)
             .unwrap_or_else(|e| panic!("TGERR: decomp {fr:?} -> {to:?} failed: {e}"));
         changed = true;
     }
     dctx.dtypes.clear();
-    if changed {
-        Some(cur)
-    } else {
-        None
-    }
+    if changed { Some(cur) } else { None }
 }
 
 /// `pm_dtype_decomps` (dtype.py:209).
@@ -1129,14 +1315,20 @@ pub fn pm_dtype_decomps() -> PatternMatcher {
             crate::uop::upat::r_decomp(|dctx, ctx, st| {
                 let x = sget(st, "x");
                 let dt = ctx.dt_of(&x);
-                let dt = if dt == dtype::UINT64 { dtype::INT64 } else { dt };
+                let dt = if dt == dtype::UINT64 {
+                    dtype::INT64
+                } else {
+                    dt
+                };
                 dctx.dtypes.insert(dt);
                 None
             }),
         ),
         (
             UPat::ops1(Ops::Sink).named("sink"),
-            crate::uop::upat::r_decomp(|dctx, ctx, st| do_dtype_decomps(ctx, sget(st, "sink"), dctx)),
+            crate::uop::upat::r_decomp(|dctx, ctx, st| {
+                do_dtype_decomps(ctx, sget(st, "sink"), dctx)
+            }),
         ),
     ])
 }

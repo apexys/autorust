@@ -23,14 +23,14 @@ pub struct ViT {
 
 impl ViT {
     /// tinygrad `ViT(layers=12, embed_dim=192, num_heads=3)`.
-    pub fn new( ctx: impl AsCtx, layers: i64, embed_dim: i64, num_heads: i64) -> Self {
-        ctx.with_ctx(|ctx| {
-        Self::build(ctx, layers, embed_dim, num_heads, 3, 224, 16, 1000)
-            })}
+    pub fn new(ctx: impl AsCtx, layers: i64, embed_dim: i64, num_heads: i64) -> Self {
+        ctx.with_ctx(|ctx| Self::build(ctx, layers, embed_dim, num_heads, 3, 224, 16, 1000))
+    }
 
     /// The generalized constructor (shape params that tinygrad hardcodes).
     #[allow(clippy::too_many_arguments)]
-    pub fn build( ctx: impl AsCtx,
+    pub fn build(
+        ctx: impl AsCtx,
         layers: i64,
         embed_dim: i64,
         num_heads: i64,
@@ -40,47 +40,48 @@ impl ViT {
         num_classes: i64,
     ) -> Self {
         ctx.with_ctx(|ctx| {
-        let side = img_size / patch_size;
-        let num_patches = side * side;
-        ViT {
-            embedding: (
-                Tensor::uniform(
-                    &mut *ctx,
-                    &[embed_dim, in_channels, patch_size, patch_size],
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                Tensor::zeros(&mut *ctx, [embed_dim]),
-            ),
-            embed_dim,
-            cls: Tensor::ones(&mut *ctx, [1, 1, embed_dim]),
-            pos_embedding: Tensor::ones(&mut *ctx, [1, num_patches + 1, embed_dim]),
-            tbs: (0..layers)
-                .map(|_| {
-                    TransformerBlock::new(
+            let side = img_size / patch_size;
+            let num_patches = side * side;
+            ViT {
+                embedding: (
+                    Tensor::uniform(
                         &mut *ctx,
-                        embed_dim,
-                        num_heads,
-                        embed_dim * 4,
-                        true,
-                        Act::Gelu,
-                        0.1,
-                    )
-                })
-                .collect(),
-            encoder_norm: (
-                Tensor::uniform(&mut *ctx, &[embed_dim], None, None, None, None),
-                Tensor::zeros(&mut *ctx, [embed_dim]),
-            ),
-            head: (
-                Tensor::uniform(&mut *ctx, &[embed_dim, num_classes], None, None, None, None),
-                Tensor::zeros(&mut *ctx, [num_classes]),
-            ),
-            patch_size,
-        }
-            })}
+                        &[embed_dim, in_channels, patch_size, patch_size],
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                    Tensor::zeros(&mut *ctx, [embed_dim]),
+                ),
+                embed_dim,
+                cls: Tensor::ones(&mut *ctx, [1, 1, embed_dim]),
+                pos_embedding: Tensor::ones(&mut *ctx, [1, num_patches + 1, embed_dim]),
+                tbs: (0..layers)
+                    .map(|_| {
+                        TransformerBlock::new(
+                            &mut *ctx,
+                            embed_dim,
+                            num_heads,
+                            embed_dim * 4,
+                            true,
+                            Act::Gelu,
+                            0.1,
+                        )
+                    })
+                    .collect(),
+                encoder_norm: (
+                    Tensor::uniform(&mut *ctx, &[embed_dim], None, None, None, None),
+                    Tensor::zeros(&mut *ctx, [embed_dim]),
+                ),
+                head: (
+                    Tensor::uniform(&mut *ctx, &[embed_dim, num_classes], None, None, None, None),
+                    Tensor::zeros(&mut *ctx, [num_classes]),
+                ),
+                patch_size,
+            }
+        })
+    }
 
     /// `ViT.patch_embed` (vit.py:19-22).
     pub fn patch_embed(&self, x: &Tensor) -> Tensor {

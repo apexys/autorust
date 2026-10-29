@@ -1,6 +1,8 @@
 //! Debug helper: parse a JSON graph file and print the exact codec error.
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: dbg_parse <file.json>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: dbg_parse <file.json>");
     let j = std::fs::read_to_string(&path).expect("read");
     match autorust::uop::parse_flat(&j) {
         Err(e) => {

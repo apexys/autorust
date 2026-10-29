@@ -11,13 +11,13 @@
 //! (`get_late_rewrite_patterns`, `get_transcendental_patterns`), parameter
 //! renumbering (`pm_number_params`), the image path, and the BEAM worker pool.
 //! These are documented in `CURRENT_STATE.md` §5 and §9.6.
-pub mod pipeline;
-pub mod opt_search;
-pub mod simplify;
-pub mod postrange;
-pub mod gpudims;
 pub mod coalesce;
-pub mod linearize;
-pub mod gater;
 pub mod decomp;
 pub mod decomp_dtype;
+pub mod gater;
+pub mod gpudims;
+pub mod linearize;
+pub mod opt_search;
+pub mod pipeline;
+pub mod postrange;
+pub mod simplify;

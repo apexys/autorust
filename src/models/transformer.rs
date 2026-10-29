@@ -3,8 +3,8 @@
 //! activation is an [`Act`]. Dropout is applied by `Tensor::dropout` (active
 //! only under `TRAINING`).
 
-use crate::tensor::{AsCtx, Tensor};
 use crate::tensor::nn::Module;
+use crate::tensor::{AsCtx, Tensor};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::sint::SVal;
 
@@ -58,7 +58,8 @@ pub struct TransformerBlock {
 
 impl TransformerBlock {
     #[allow(clippy::too_many_arguments)]
-    pub fn new( ctx: impl AsCtx,
+    pub fn new(
+        ctx: impl AsCtx,
         embed_dim: i64,
         num_heads: i64,
         ff_dim: i64,
@@ -67,46 +68,47 @@ impl TransformerBlock {
         dropout: f64,
     ) -> Self {
         ctx.with_ctx(|ctx| {
-        assert_eq!(
-            embed_dim % num_heads,
-            0,
-            "embed_dim must be divisible by num_heads"
-        );
-        let d = embed_dim;
-        TransformerBlock {
-            num_heads,
-            head_size: embed_dim / num_heads,
-            prenorm,
-            act,
-            dropout,
-            query: (
-                Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
-                Tensor::zeros(&mut *ctx, [d]),
-            ),
-            key: (
-                Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
-                Tensor::zeros(&mut *ctx, [d]),
-            ),
-            value: (
-                Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
-                Tensor::zeros(&mut *ctx, [d]),
-            ),
-            out: (
-                Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
-                Tensor::zeros(&mut *ctx, [d]),
-            ),
-            ff1: (
-                Tensor::scaled_uniform(&mut *ctx, &[d, ff_dim], None),
-                Tensor::zeros(&mut *ctx, [ff_dim]),
-            ),
-            ff2: (
-                Tensor::scaled_uniform(&mut *ctx, &[ff_dim, d], None),
-                Tensor::zeros(&mut *ctx, [d]),
-            ),
-            ln1: (Tensor::ones(&mut *ctx, [d]), Tensor::zeros(&mut *ctx, [d])),
-            ln2: (Tensor::ones(&mut *ctx, [d]), Tensor::zeros(&mut *ctx, [d])),
-        }
-            })}
+            assert_eq!(
+                embed_dim % num_heads,
+                0,
+                "embed_dim must be divisible by num_heads"
+            );
+            let d = embed_dim;
+            TransformerBlock {
+                num_heads,
+                head_size: embed_dim / num_heads,
+                prenorm,
+                act,
+                dropout,
+                query: (
+                    Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
+                    Tensor::zeros(&mut *ctx, [d]),
+                ),
+                key: (
+                    Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
+                    Tensor::zeros(&mut *ctx, [d]),
+                ),
+                value: (
+                    Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
+                    Tensor::zeros(&mut *ctx, [d]),
+                ),
+                out: (
+                    Tensor::scaled_uniform(&mut *ctx, &[d, d], None),
+                    Tensor::zeros(&mut *ctx, [d]),
+                ),
+                ff1: (
+                    Tensor::scaled_uniform(&mut *ctx, &[d, ff_dim], None),
+                    Tensor::zeros(&mut *ctx, [ff_dim]),
+                ),
+                ff2: (
+                    Tensor::scaled_uniform(&mut *ctx, &[ff_dim, d], None),
+                    Tensor::zeros(&mut *ctx, [d]),
+                ),
+                ln1: (Tensor::ones(&mut *ctx, [d]), Tensor::zeros(&mut *ctx, [d])),
+                ln2: (Tensor::ones(&mut *ctx, [d]), Tensor::zeros(&mut *ctx, [d])),
+            }
+        })
+    }
 
     /// `TransformerBlock.attn` (transformer.py:24-28).
     pub fn attn(&self, x: &Tensor) -> Tensor {
@@ -223,7 +225,8 @@ pub struct Transformer {
 }
 
 impl Transformer {
-    pub fn new( ctx: impl AsCtx,
+    pub fn new(
+        ctx: impl AsCtx,
         syms: i64,
         maxlen: i64,
         layers: i64,
@@ -231,19 +234,26 @@ impl Transformer {
         num_heads: i64,
         ff_dim: i64,
     ) -> Self {
-        ctx.with_ctx(|ctx| {
-        Transformer {
+        ctx.with_ctx(|ctx| Transformer {
             maxlen,
             syms,
             embed: Tensor::scaled_uniform(&mut *ctx, &[maxlen + syms, embed_dim], None),
             tbs: (0..layers)
                 .map(|_| {
-                    TransformerBlock::new(&mut *ctx, embed_dim, num_heads, ff_dim, false, Act::Relu, 0.1)
+                    TransformerBlock::new(
+                        &mut *ctx,
+                        embed_dim,
+                        num_heads,
+                        ff_dim,
+                        false,
+                        Act::Relu,
+                        0.1,
+                    )
                 })
                 .collect(),
             final_: Tensor::scaled_uniform(&mut *ctx, &[embed_dim, syms], None),
-        }
-            })}
+        })
+    }
     pub fn forward(&self, x: &Tensor) -> Tensor {
         self.forward_ctx(x, &mut x.ctx().borrow_mut())
     }

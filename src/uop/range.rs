@@ -2,12 +2,12 @@
 //! and the `ranges` / `ended_ranges` / `get_idx` / `get_valid` properties
 //! from uop/ops.py.
 
+use super::UopId;
 use super::arg::{Arg, EnumClass, EnumVal};
-use crate::dtype::ConstVal;
 use super::ctx::UOpCtx;
 use super::ops::Ops;
 use super::sint::SVal;
-use super::UopId;
+use crate::dtype::ConstVal;
 use crate::dtype::{self, BOOL};
 use std::rc::Rc;
 
@@ -48,7 +48,10 @@ impl AxisType {
     }
 
     pub fn to_enum_val(self) -> EnumVal {
-        EnumVal { class: EnumClass::AxisType, value: self as u16 }
+        EnumVal {
+            class: EnumClass::AxisType,
+            value: self as u16,
+        }
     }
 
     pub fn from_arg(a: &Arg) -> AxisType {
@@ -62,7 +65,9 @@ impl AxisType {
     /// range `pm_split_ranges` inserts an extra field before it).
     pub fn range_axis_type(ctx: &UOpCtx, r: UopId) -> AxisType {
         match ctx.arg_of(&r) {
-            Arg::Seq { tuple: true, items } => AxisType::from_arg(items.last().expect("TGERR: empty RANGE arg")),
+            Arg::Seq { tuple: true, items } => {
+                AxisType::from_arg(items.last().expect("TGERR: empty RANGE arg"))
+            }
             other => panic!("TGERR: bad RANGE arg {other:?}"),
         }
     }
@@ -113,7 +118,10 @@ impl UOpCtx {
                         tuple: true,
                         items: inner
                             .into_iter()
-                            .map(|(rn, sz)| Arg::Seq { tuple: true, items: vec![Arg::Int(rn), Arg::Int(sz)] })
+                            .map(|(rn, sz)| Arg::Seq {
+                                tuple: true,
+                                items: vec![Arg::Int(rn), Arg::Int(sz)],
+                            })
                             .collect(),
                     })
                     .collect(),
@@ -123,7 +131,10 @@ impl UOpCtx {
         let arg = Arg::Seq {
             tuple: true,
             items: vec![
-                Arg::Seq { tuple: true, items: vec![Arg::Int(dims.0), Arg::Int(dims.1), Arg::Int(dims.2)] },
+                Arg::Seq {
+                    tuple: true,
+                    items: vec![Arg::Int(dims.0), Arg::Int(dims.1), Arg::Int(dims.2)],
+                },
                 Arg::Dtype(dtype_in),
                 Arg::Str(device.to_string()),
                 Arg::Int(threads),
@@ -164,7 +175,12 @@ impl UOpCtx {
     }
 
     pub fn const_invalid(&mut self) -> UopId {
-        self.uop(Ops::Const, Some(BOOL), vec![], Arg::Const(ConstVal::Invalid))
+        self.uop(
+            Ops::Const,
+            Some(BOOL),
+            vec![],
+            Arg::Const(ConstVal::Invalid),
+        )
     }
 
     /// `u.index(*srcs)` (ops.py:559): plain INDEX ctor, but fold
@@ -253,7 +269,11 @@ impl UOpCtx {
         IN_PROGRESS.with(|ip| {
             let mut ip = ip.borrow_mut();
             if ip.contains(&id.id()) {
-                panic!("TGERR: range cycle detected: node {} (op {:?})", id.id(), id.op);
+                panic!(
+                    "TGERR: range cycle detected: node {} (op {:?})",
+                    id.id(),
+                    id.op
+                );
             }
             ip.push(id.id());
         });
@@ -302,10 +322,9 @@ impl UOpCtx {
                 ret.retain(|u| !er_ranges.contains(u));
             }
         }
-        if id.op == Ops::Range
-            && !ret.contains(id) {
-                ret.insert(0, id.clone());
-            }
+        if id.op == Ops::Range && !ret.contains(id) {
+            ret.insert(0, id.clone());
+        }
         ret
     }
 
@@ -322,9 +341,10 @@ impl UOpCtx {
 /// (python `resolve(s != 1)` — raises on symbolic ambiguity).
 pub fn new_range(ctx: &mut UOpCtx, s: SVal, axistype: AxisType) -> UopId {
     if let SVal::U(ref u) = s
-        && ctx.op_of(u) == Ops::Range {
-            return u.clone();
-        }
+        && ctx.op_of(u) == Ops::Range
+    {
+        return u.clone();
+    }
     // lenient like resolve_ord's other callers: ambiguous symbolic sizes make a
     // range (the CONST-0 path only matters for concrete 1-sized axes)
     if ctx.resolve_ord(s.clone(), super::ctx::CmpOrd::Ne, SVal::I(1), true) {

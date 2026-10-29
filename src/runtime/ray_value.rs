@@ -13,7 +13,7 @@
 //! (f16/bf16/fp8) are emulated elsewhere and are handled by the `f64` fallback
 //! executor; `is_native_dtype` gates that.
 
-use bytemuck::{cast_slice, cast_slice_mut, Pod};
+use bytemuck::{Pod, cast_slice, cast_slice_mut};
 
 use crate::dtype::{self, DTypeId};
 use crate::uop::ops::Ops;
@@ -29,7 +29,10 @@ pub struct Bytes {
 
 impl Bytes {
     pub fn zeroed(nbytes: usize) -> Bytes {
-        Bytes { words: vec![0u64; nbytes.div_ceil(8)], nbytes }
+        Bytes {
+            words: vec![0u64; nbytes.div_ceil(8)],
+            nbytes,
+        }
     }
 
     /// Resize to `nbytes`, zero-extending (reuses capacity).
@@ -174,7 +177,11 @@ macro_rules! impl_int_prim {
             #[inline]
             fn shl(self, o: Self) -> Self {
                 let s = o.to_i128();
-                if s < 0 || s >= Self::BITS as i128 { 0 } else { self.wrapping_shl(s as u32) }
+                if s < 0 || s >= Self::BITS as i128 {
+                    0
+                } else {
+                    self.wrapping_shl(s as u32)
+                }
             }
             #[inline]
             #[allow(unused_comparisons)]
@@ -313,17 +320,29 @@ macro_rules! impl_float_prim {
             }
             #[inline]
             fn recip(self) -> Self {
-                if self != 0.0 { 1.0 / self } else { <$t>::INFINITY.copysign(self) }
+                if self != 0.0 {
+                    1.0 / self
+                } else {
+                    <$t>::INFINITY.copysign(self)
+                }
             }
             #[inline]
             fn sinv(self) -> Self {
-                if self.is_infinite() { <$t>::NAN } else { self.sin() }
+                if self.is_infinite() {
+                    <$t>::NAN
+                } else {
+                    self.sin()
+                }
             }
             #[inline]
             fn powv(self, o: Self) -> Self {
                 let p = self.powf(o);
                 if p.is_nan() && !(self.is_nan() || o.is_nan()) {
-                    if self == 0.0 { <$t>::INFINITY } else { <$t>::NAN }
+                    if self == 0.0 {
+                        <$t>::INFINITY
+                    } else {
+                        <$t>::NAN
+                    }
                 } else if p.is_infinite() && self == 0.0 && o < 0.0 {
                     <$t>::INFINITY
                 } else {
@@ -716,7 +735,8 @@ mod tests {
     #[test]
     fn uint64_exact_add() {
         let mut a = Bytes::zeroed(16);
-        a.as_slice_mut::<u64>().copy_from_slice(&[u64::MAX - 1, 1u64 << 60]);
+        a.as_slice_mut::<u64>()
+            .copy_from_slice(&[u64::MAX - 1, 1u64 << 60]);
         let mut b = Bytes::zeroed(16);
         b.as_slice_mut::<u64>().copy_from_slice(&[1, 0]);
         let mut o = Bytes::zeroed(16);

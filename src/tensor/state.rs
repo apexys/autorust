@@ -60,6 +60,7 @@ fn dtype_from_safe(name: &str) -> Option<DTypeId> {
 
 /// Minimal JSON value used for the safetensors header.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum Json {
     Null,
     Bool(bool),

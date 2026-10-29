@@ -94,11 +94,16 @@ impl Module for Model {
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 pub fn mnist_dir() -> PathBuf {
-    std::env::var("MNIST_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/tmp/opencode/mnist"))
+    std::env::var("MNIST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp/opencode/mnist"))
 }
 
 /// Download `url` through `sh -c 'curl … | gunzip > path'` unless it's cached.
@@ -110,7 +115,10 @@ pub fn fetch(url: &str, path: &Path) {
     println!("downloading {} -> {}", url, path.display());
     let status = Command::new("sh")
         .arg("-c")
-        .arg(format!("curl -fsSL '{url}' | gunzip > '{}'", path.display()))
+        .arg(format!(
+            "curl -fsSL '{url}' | gunzip > '{}'",
+            path.display()
+        ))
         .status()
         .expect("spawn sh/curl");
     assert!(status.success(), "download failed: {url}");
@@ -126,7 +134,8 @@ pub fn fetch(url: &str, path: &Path) {
 /// so the per-step graph reads a buffer.
 pub fn load_images(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx images");
-    let x = Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape([-1, 1, 28, 28]);
+    let x =
+        Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape([-1, 1, 28, 28]);
     let x = if n < 60_000 {
         x.getitem(&[Ix::slice(Some(0), Some(n), 1)])
     } else {
@@ -169,7 +178,10 @@ fn main() {
     let seed: i64 = env_or("SEED", 42);
     let target: f32 = env_or("TARGET_EVAL_ACC_PCT", 0.0);
 
-    println!("MNIST: BS={bs} STEPS={steps} TRAIN_N={train_n} TEST_N={test_n} lr={lr} dtype={}", dtype::default_float().attr());
+    println!(
+        "MNIST: BS={bs} STEPS={steps} TRAIN_N={train_n} TEST_N={test_n} lr={lr} dtype={}",
+        dtype::default_float().attr()
+    );
 
     let dir = mnist_dir();
     let base = "https://storage.googleapis.com/cvdf-datasets/mnist/";
@@ -183,13 +195,33 @@ fn main() {
         fetch(&format!("{base}{gz}"), &dir.join(raw));
     }
 
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
 
-    let x_train = load_images(&mut ctx.raw(), &mut sess, &dir.join("train-images-idx3-ubyte"), train_n);
-    let y_train = load_labels(&mut ctx.raw(), &mut sess, &dir.join("train-labels-idx1-ubyte"), train_n);
-    let x_test = load_images(&mut ctx.raw(), &mut sess, &dir.join("t10k-images-idx3-ubyte"), test_n);
-    let y_test = load_labels(&mut ctx.raw(), &mut sess, &dir.join("t10k-labels-idx1-ubyte"), test_n);
+    let x_train = load_images(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("train-images-idx3-ubyte"),
+        train_n,
+    );
+    let y_train = load_labels(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("train-labels-idx1-ubyte"),
+        train_n,
+    );
+    let x_test = load_images(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("t10k-images-idx3-ubyte"),
+        test_n,
+    );
+    let y_test = load_labels(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("t10k-labels-idx1-ubyte"),
+        test_n,
+    );
 
     Tensor::manual_seed(seed);
     let model = Model::new(&ctx).into_params();
@@ -221,15 +253,27 @@ fn main() {
 
         if step % 10 == 9 || step == steps - 1 {
             test_acc = test_jit
-                .call(&ctx, &mut sess, |ctx, sess| get_test_acc(&model, &x_test, &y_test, ctx, sess))
+                .call(&ctx, &mut sess, |ctx, sess| {
+                    get_test_acc(&model, &x_test, &y_test, ctx, sess)
+                })
                 .item::<f32>(&mut sess);
             let l = loss.item::<f32>(&mut sess);
-            println!("step {:>4}: loss {l:6.3}  test_accuracy {test_acc:5.2}%", step + 1);
+            println!(
+                "step {:>4}: loss {l:6.3}  test_accuracy {test_acc:5.2}%",
+                step + 1
+            );
         }
     }
 
-    println!("to_program: {} misses / {} hits", sess.cache.misses, sess.cache.hits);
-    println!("jit: train {} linears, test {} linears", train_jit.n_linears(), test_jit.n_linears());
+    println!(
+        "to_program: {} misses / {} hits",
+        sess.cache.misses, sess.cache.hits
+    );
+    println!(
+        "jit: train {} linears, test {} linears",
+        train_jit.n_linears(),
+        test_jit.n_linears()
+    );
     if target > 0.0 {
         if test_acc >= target && test_acc != 100.0 {
             println!("{test_acc} >= {target}: PASS");
@@ -243,7 +287,13 @@ fn main() {
 /// `Model.get_test_acc`: `(self(X).argmax(axis=1) == Y).mean()*100`.
 /// Returns the (lazy) accuracy tensor so a `Jit` can capture/replay it; call
 /// `.item()` on the result to read it.
-pub fn get_test_acc(model: &Model, x: &Tensor, y: &Tensor, _ctx: &Ctx, sess: &mut Session) -> Tensor {
+pub fn get_test_acc(
+    model: &Model,
+    x: &Tensor,
+    y: &Tensor,
+    _ctx: &Ctx,
+    sess: &mut Session,
+) -> Tensor {
     let out = model.forward(x, sess, false);
     let pred = out.argmax(Some(1), false);
     let correct = pred.eq(y).cast(dtype::FLOAT32).mean(None, false);

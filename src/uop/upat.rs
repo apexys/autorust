@@ -18,9 +18,9 @@ use std::sync::Arc;
 use super::arg::Arg;
 use super::ctx::UOpCtx;
 use super::graph::UopId;
-use super::ops::{group, Ops};
+use super::ops::{Ops, group};
 use super::sint::SVal;
-use crate::dtype::{is_bool, ConstVal, DTypeId};
+use crate::dtype::{ConstVal, DTypeId, is_bool};
 use ConstVal::*;
 
 #[derive(Clone, PartialEq)]
@@ -84,11 +84,23 @@ impl UPat {
         let mut early_reject = Vec::new();
         for p in direct {
             if let Some(ops) = &p.op
-                && ops.len() == 1 && !early_reject.contains(&ops[0]) {
-                    early_reject.push(ops[0]);
-                }
+                && ops.len() == 1
+                && !early_reject.contains(&ops[0])
+            {
+                early_reject.push(ops[0]);
+            }
         }
-        UPat { op, dtype, tag, arg, name, src, strict_length, required_len, early_reject }
+        UPat {
+            op,
+            dtype,
+            tag,
+            arg,
+            name,
+            src,
+            strict_length,
+            required_len,
+            early_reject,
+        }
     }
 
     pub fn op_var(ops: Vec<Ops>) -> UPat {
@@ -106,7 +118,15 @@ impl UPat {
 
     /// `UPat.cvar(name, dtype, arg)`
     pub fn cvar(name: Option<&'static str>, dtype: Option<Vec<DTypeId>>, arg: Option<Arg>) -> UPat {
-        UPat::new(Some(vec![Ops::Const]), dtype, SrcPat::None, arg, name, false, None)
+        UPat::new(
+            Some(vec![Ops::Const]),
+            dtype,
+            SrcPat::None,
+            arg,
+            name,
+            false,
+            None,
+        )
     }
 
     /// `UPat.const(b, dtype)`
@@ -165,7 +185,11 @@ impl UPat {
         let srcs = self.srcs_clone();
         let new_srcs: Vec<UPat> = srcs
             .into_iter()
-            .map(|s| UPat::ops1(Ops::Reshape).with_src_tup(vec![s]).allow_all_srcs())
+            .map(|s| {
+                UPat::ops1(Ops::Reshape)
+                    .with_src_tup(vec![s])
+                    .allow_all_srcs()
+            })
             .collect();
         let mut p = self.clone();
         p.src = SrcPat::Tup(new_srcs);
@@ -186,7 +210,9 @@ impl UPat {
         p.src = SrcPat::Tup(srcs);
         p.strict_length = true;
         p.required_len = {
-            let SrcPat::Tup(v) = &p.src else { unreachable!() };
+            let SrcPat::Tup(v) = &p.src else {
+                unreachable!()
+            };
             v.len()
         };
         p.recompute_early_reject();
@@ -196,9 +222,10 @@ impl UPat {
     pub(crate) fn recompute_early_reject_rep(&mut self, p: &UPat) {
         let mut er = Vec::new();
         if let Some(ops) = &p.op
-            && ops.len() == 1 {
-                er.push(ops[0]);
-            }
+            && ops.len() == 1
+        {
+            er.push(ops[0]);
+        }
         self.early_reject = er;
     }
 
@@ -207,9 +234,11 @@ impl UPat {
         if let SrcPat::Tup(v) = &self.src {
             for p in v {
                 if let Some(ops) = &p.op
-                    && ops.len() == 1 && !er.contains(&ops[0]) {
-                        er.push(ops[0]);
-                    }
+                    && ops.len() == 1
+                    && !er.contains(&ops[0])
+                {
+                    er.push(ops[0]);
+                }
             }
         }
         self.early_reject = er;
@@ -231,7 +260,11 @@ impl UPat {
             Ops::Cmplt | Ops::Cmpne => Some(vec![crate::dtype::BOOL]),
             _ => asrc.last().and_then(|p| p.dtype.clone()),
         };
-        let src = if group::in_(group::COMMUTATIVE, op) { SrcPat::List(permutations(asrc)) } else { SrcPat::Tup(asrc) };
+        let src = if group::in_(group::COMMUTATIVE, op) {
+            SrcPat::List(permutations(asrc))
+        } else {
+            SrcPat::Tup(asrc)
+        };
         UPat::new(Some(vec![op]), dt, src, None, None, false, None)
     }
 
@@ -316,24 +349,57 @@ impl UPat {
             if self.dtype == Some(vec![d]) {
                 return self;
             }
-            UPat::new(Some(vec![Ops::Cast]), Some(vec![d]), SrcPat::Tup(vec![self]), None, None, false, None)
+            UPat::new(
+                Some(vec![Ops::Cast]),
+                Some(vec![d]),
+                SrcPat::Tup(vec![self]),
+                None,
+                None,
+                false,
+                None,
+            )
         } else {
-            UPat::new(Some(vec![Ops::Cast]), None, SrcPat::Tup(vec![self]), None, None, false, None)
+            UPat::new(
+                Some(vec![Ops::Cast]),
+                None,
+                SrcPat::Tup(vec![self]),
+                None,
+                None,
+                false,
+                None,
+            )
         }
     }
 
     /// cast with a dtype SET (Python `cast(dtypes.ints + ...)`)
     pub fn cast_dts(self, dts: Vec<DTypeId>) -> UPat {
-        UPat::new(Some(vec![Ops::Cast]), Some(dts), SrcPat::Tup(vec![self]), None, None, false, None)
+        UPat::new(
+            Some(vec![Ops::Cast]),
+            Some(dts),
+            SrcPat::Tup(vec![self]),
+            None,
+            None,
+            false,
+            None,
+        )
     }
 
     pub fn bitcast(self, dtype: Option<DTypeId>) -> UPat {
-        UPat::new(Some(vec![Ops::Bitcast]), dtype.map(|d| vec![d]), SrcPat::Tup(vec![self]), None, None, false, None)
+        UPat::new(
+            Some(vec![Ops::Bitcast]),
+            dtype.map(|d| vec![d]),
+            SrcPat::Tup(vec![self]),
+            None,
+            None,
+            false,
+            None,
+        )
     }
 
     pub fn logical_not(self) -> UPat {
         // mixin: self.cast(bool).ne(True)
-        self.cast(Some(crate::dtype::BOOL)).ne(UPatOrConst::Val(ConstVal::Bool(true)))
+        self.cast(Some(crate::dtype::BOOL))
+            .ne(UPatOrConst::Val(ConstVal::Bool(true)))
     }
 
     pub fn reciprocal(self) -> UPat {
@@ -348,7 +414,15 @@ impl UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
         asrc.extend(src);
-        let mut p = UPat::new(Some(vec![Ops::Reduce]), dt, SrcPat::Tup(asrc), arg, None, allow_any_len, None);
+        let mut p = UPat::new(
+            Some(vec![Ops::Reduce]),
+            dt,
+            SrcPat::Tup(asrc),
+            arg,
+            None,
+            allow_any_len,
+            None,
+        );
         p.recompute_early_reject();
         p
     }
@@ -357,7 +431,15 @@ impl UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
         asrc.extend(src);
-        let mut p = UPat::new(Some(vec![Ops::Load]), dt, SrcPat::Tup(asrc), None, None, allow_any_len, None);
+        let mut p = UPat::new(
+            Some(vec![Ops::Load]),
+            dt,
+            SrcPat::Tup(asrc),
+            None,
+            None,
+            allow_any_len,
+            None,
+        );
         p.recompute_early_reject();
         p
     }
@@ -366,7 +448,15 @@ impl UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
         asrc.extend(src);
-        let mut p = UPat::new(Some(vec![Ops::Store]), dt, SrcPat::Tup(asrc), None, None, false, None);
+        let mut p = UPat::new(
+            Some(vec![Ops::Store]),
+            dt,
+            SrcPat::Tup(asrc),
+            None,
+            None,
+            false,
+            None,
+        );
         p.recompute_early_reject();
         p
     }
@@ -375,7 +465,15 @@ impl UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
         asrc.extend(srcs);
-        let mut p = UPat::new(Some(vec![Ops::Index]), dt, SrcPat::Tup(asrc), None, None, false, None);
+        let mut p = UPat::new(
+            Some(vec![Ops::Index]),
+            dt,
+            SrcPat::Tup(asrc),
+            None,
+            None,
+            false,
+            None,
+        );
         p.recompute_early_reject();
         p
     }
@@ -384,7 +482,15 @@ impl UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
         asrc.extend(src);
-        let mut p = UPat::new(Some(vec![Ops::After]), dt, SrcPat::Tup(asrc), None, None, allow_any_len, None);
+        let mut p = UPat::new(
+            Some(vec![Ops::After]),
+            dt,
+            SrcPat::Tup(asrc),
+            None,
+            None,
+            allow_any_len,
+            None,
+        );
         p.recompute_early_reject();
         p
     }
@@ -393,7 +499,15 @@ impl UPat {
         let dt = self.dtype.clone();
         let mut asrc = vec![self];
         asrc.extend(src);
-        let mut p = UPat::new(Some(vec![Ops::End]), dt, SrcPat::Tup(asrc), None, None, false, None);
+        let mut p = UPat::new(
+            Some(vec![Ops::End]),
+            dt,
+            SrcPat::Tup(asrc),
+            None,
+            None,
+            false,
+            None,
+        );
         p.recompute_early_reject();
         p
     }
@@ -402,7 +516,15 @@ impl UPat {
     pub fn broadcast(self, allow_any_len: bool) -> UPat {
         let dt = self.dtype.clone();
         let src = SrcPat::Repeat(Box::new(self));
-        UPat::new(Some(vec![Ops::Stack]), dt, src, None, None, allow_any_len, None)
+        UPat::new(
+            Some(vec![Ops::Stack]),
+            dt,
+            src,
+            None,
+            None,
+            allow_any_len,
+            None,
+        )
     }
 
     /// `or_casted(name)` (ops.py:1360).
@@ -411,7 +533,15 @@ impl UPat {
             None => self.clone(),
             Some(n) => self.named(n),
         };
-        let b = UPat::new(Some(vec![Ops::Cast]), None, SrcPat::Tup(vec![self.clone()]), None, name, false, None);
+        let b = UPat::new(
+            Some(vec![Ops::Cast]),
+            None,
+            SrcPat::Tup(vec![self.clone()]),
+            None,
+            name,
+            false,
+            None,
+        );
         UPat::any(vec![a, b])
     }
 
@@ -422,8 +552,15 @@ impl UPat {
             Some(n) => self.named(n),
         };
         let b = {
-            
-            UPat::new(Some(vec![Ops::After]), None, SrcPat::Tup(vec![self.clone()]), None, name, true, None)
+            UPat::new(
+                Some(vec![Ops::After]),
+                None,
+                SrcPat::Tup(vec![self.clone()]),
+                None,
+                name,
+                true,
+                None,
+            )
         };
         UPat::any(vec![a, b])
     }
@@ -439,9 +576,10 @@ impl UPat {
         }
         // op check
         if let Some(ops) = &self.op
-            && !ops.contains(&ctx.op_of(&uop)) {
-                return;
-            }
+            && !ops.contains(&ctx.op_of(&uop))
+        {
+            return;
+        }
         // name binding (identity)
         let mut store = store;
         if let Some(n) = self.name {
@@ -455,21 +593,25 @@ impl UPat {
         }
         // dtype
         if let Some(dts) = &self.dtype
-            && !dts.contains(&ctx.dt_of(&uop)) {
-                return;
-            }
+            && !dts.contains(&ctx.dt_of(&uop))
+        {
+            return;
+        }
         // arg (Python `!=` — bools compare as ints)
         if let Some(pa) = &self.arg
-            && !arg_matches(pa, ctx.arg_of(&uop)) {
-                return;
-            }
+            && !arg_matches(pa, ctx.arg_of(&uop))
+        {
+            return;
+        }
         // tag
         if let Some(tags) = &self.tag
-            && !tags.iter().any(|t| t == ctx.tag_of(&uop)) {
-                return;
-            }
+            && !tags.iter().any(|t| t == ctx.tag_of(&uop))
+        {
+            return;
+        }
         let srcs = ctx.srcs(&uop);
-        if srcs.len() < self.required_len || (self.strict_length && srcs.len() != self.required_len) {
+        if srcs.len() < self.required_len || (self.strict_length && srcs.len() != self.required_len)
+        {
             return;
         }
         match &self.src {
@@ -569,9 +711,16 @@ pub fn arg_matches(pat: &Arg, node: &Arg) -> bool {
     match (pat, node) {
         (Arg::Const(c), other) => const_arg_matches(c, other),
         (other, Arg::Const(c)) => const_arg_matches(c, other),
-        (Arg::Seq { tuple: t1, items: i1 }, Arg::Seq { tuple: t2, items: i2 }) => {
-            t1 == t2 && i1.len() == i2.len() && i1.iter().zip(i2).all(|(a, b)| arg_matches(a, b))
-        }
+        (
+            Arg::Seq {
+                tuple: t1,
+                items: i1,
+            },
+            Arg::Seq {
+                tuple: t2,
+                items: i2,
+            },
+        ) => t1 == t2 && i1.len() == i2.len() && i1.iter().zip(i2).all(|(a, b)| arg_matches(a, b)),
         (a, b) => a == b,
     }
 }
@@ -610,7 +759,12 @@ pub fn py_const_eq(a: &ConstVal, b: &ConstVal) -> bool {
 }
 
 pub fn permutations<T: Clone + PartialEq>(v: Vec<T>) -> Vec<Vec<T>> {
-    fn helper<T: Clone>(items: &[T], cur: &mut Vec<T>, used: &mut Vec<bool>, out: &mut Vec<Vec<T>>) {
+    fn helper<T: Clone>(
+        items: &[T],
+        cur: &mut Vec<T>,
+        used: &mut Vec<bool>,
+        out: &mut Vec<Vec<T>>,
+    ) {
         if cur.len() == items.len() {
             out.push(cur.clone());
             return;
@@ -665,7 +819,10 @@ impl PmSlot {
     pub const fn new() -> Self {
         PmSlot(std::sync::OnceLock::new())
     }
-    pub fn get_or_init(&'static self, build: impl FnOnce() -> PatternMatcher) -> &'static PatternMatcher {
+    pub fn get_or_init(
+        &'static self,
+        build: impl FnOnce() -> PatternMatcher,
+    ) -> &'static PatternMatcher {
         self.0.get_or_init(|| build().interned())
     }
 }
@@ -701,7 +858,11 @@ pub enum CtxVal {
     /// Dtype set context for `pm_dtype_decomps`.
     Decomp(std::rc::Rc<std::cell::RefCell<crate::codegen::decomp_dtype::DtypeDecompCtx>>),
     /// Memo dict for `pm_long_decomp` `split_l2i`.
-    L2i(std::rc::Rc<std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>>),
+    L2i(
+        std::rc::Rc<
+            std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>,
+        >,
+    ),
 }
 
 /// `LocalAddBufferContext` (rangeify.py:469).
@@ -717,7 +878,10 @@ pub struct LocalAddBufferContext {
 
 impl LocalAddBufferContext {
     pub fn map_get(&self, k: UopId) -> Option<UopId> {
-        self.map_keys.iter().position(|x| *x == k).map(|i| (self.map_vals[i]).clone())
+        self.map_keys
+            .iter()
+            .position(|x| *x == k)
+            .map(|i| (self.map_vals[i]).clone())
     }
     pub fn map_insert(&mut self, k: UopId, v: UopId) {
         if self.map_get(k.clone()).is_none() {
@@ -739,7 +903,10 @@ impl CtxVal {
 /// rule helper: closure over (IndexingContext, UOpCtx, store)
 pub fn r_idx<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut crate::schedule::indexing::IndexingContext, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut crate::schedule::indexing::IndexingContext, &mut UOpCtx, &Store) -> Option<UopId>
+        + Send
+        + Sync
+        + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Idx(ictx) => f(&mut ictx.borrow_mut(), ctx, st),
@@ -758,7 +925,10 @@ where
 /// rule helper: closure over (AllocCtx, UOpCtx, store)
 pub fn r_al<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut crate::tensor::callify::AllocCtx, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut crate::tensor::callify::AllocCtx, &mut UOpCtx, &Store) -> Option<UopId>
+        + Send
+        + Sync
+        + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Al(a) => f(&mut a.borrow_mut(), ctx, st),
@@ -791,7 +961,10 @@ where
 /// rule helper: closure over (device ctx, UOpCtx, store)
 pub fn r_dev<F>(f: F) -> RuleFn
 where
-    F: Fn(&Option<crate::uop::arg::DeviceSpec>, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&Option<crate::uop::arg::DeviceSpec>, &mut UOpCtx, &Store) -> Option<UopId>
+        + Send
+        + Sync
+        + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Dev(d) => f(d, ctx, st),
@@ -813,7 +986,10 @@ where
 /// rule helper: closure over ((from, to) dtype pair, UOpCtx, store)
 pub fn r_pair<F>(f: F) -> RuleFn
 where
-    F: Fn(crate::dtype::DTypeId, crate::dtype::DTypeId, &mut UOpCtx, &Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(crate::dtype::DTypeId, crate::dtype::DTypeId, &mut UOpCtx, &Store) -> Option<UopId>
+        + Send
+        + Sync
+        + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Pair(fr, to) => f(*fr, *to, ctx, st),
@@ -825,7 +1001,9 @@ where
 pub fn r_decomp<F>(f: F) -> RuleFn
 where
     F: Fn(&mut crate::codegen::decomp_dtype::DtypeDecompCtx, &mut UOpCtx, &Store) -> Option<UopId>
-        + Send + Sync + 'static,
+        + Send
+        + Sync
+        + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Decomp(d) => f(&mut d.borrow_mut(), ctx, st),
@@ -837,11 +1015,15 @@ where
 pub fn r_l2i<F>(f: F) -> RuleFn
 where
     F: Fn(
-            &std::rc::Rc<std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>>,
+            &std::rc::Rc<
+                std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>,
+            >,
             &mut UOpCtx,
             &Store,
         ) -> Option<UopId>
-        + Send + Sync + 'static,
+        + Send
+        + Sync
+        + 'static,
 {
     Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::L2i(d) => f(d, ctx, st),
@@ -887,7 +1069,11 @@ impl PatternMatcher {
         for (pat, f) in patterns {
             let ops = pat.op.clone().expect("every UPat must have ops");
             let idx = inner.rules.len();
-            inner.rules.push(Arc::new(Rule { early_reject: pat.early_reject.clone(), pat, f }));
+            inner.rules.push(Arc::new(Rule {
+                early_reject: pat.early_reject.clone(),
+                pat,
+                f,
+            }));
             for op in ops {
                 inner.pdict.entry(op).or_default().push(idx);
             }
@@ -915,11 +1101,13 @@ impl PatternMatcher {
     pub fn add(&self, more: &PatternMatcher) -> PatternMatcher {
         let memo = self.0.stable && more.0.stable;
         let key = (Arc::as_ptr(&self.0) as usize, Arc::as_ptr(&more.0) as usize);
-        if memo
-            && let Some(hit) = add_cache().lock().unwrap().get(&key) {
-                return hit.clone();
-            }
-        let mut inner = PmInner { stable: memo, ..Default::default() };
+        if memo && let Some(hit) = add_cache().lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let mut inner = PmInner {
+            stable: memo,
+            ..Default::default()
+        };
         inner.rules.extend(self.0.rules.iter().cloned());
         inner.rules.extend(more.0.rules.iter().cloned());
         {
@@ -949,22 +1137,36 @@ impl PatternMatcher {
                 continue;
             }
             let mut stores = Vec::new();
-            rule.pat.match_uop(ctx, uop.clone(), Store::new(), &mut stores);
+            rule.pat
+                .match_uop(ctx, uop.clone(), Store::new(), &mut stores);
             for store in &stores {
                 #[cfg(feature = "trace")]
                 if std::env::var("TG_TRACE").is_ok() {
-                    eprintln!("RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}", i, self.0.rules.len(), rule.pat.name, rule.pat.op, uop.id(), ctx.op_of(&uop));
+                    eprintln!(
+                        "RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}",
+                        i,
+                        self.0.rules.len(),
+                        rule.pat.name,
+                        rule.pat.op,
+                        uop.id(),
+                        ctx.op_of(&uop)
+                    );
                 }
                 let _r = (rule.f)(ctx, store, ctxval);
                 #[cfg(feature = "trace")]
                 if std::env::var("TG_TRACE").is_ok() {
-                    eprintln!("  -> u{} op {:?}", _r.clone().map(|x| x.id()).unwrap_or(0), _r.as_ref().map(|x| ctx.op_of(x)));
+                    eprintln!(
+                        "  -> u{} op {:?}",
+                        _r.clone().map(|x| x.id()).unwrap_or(0),
+                        _r.as_ref().map(|x| ctx.op_of(x))
+                    );
                 }
                 if let Some(ret) = _r
-                    && ret != uop {
-                        return Some(ret);
-                    }
-                    // python: rules returning self are skipped, try the next rule
+                    && ret != uop
+                {
+                    return Some(ret);
+                }
+                // python: rules returning self are skipped, try the next rule
             }
         }
         None
@@ -973,10 +1175,13 @@ impl PatternMatcher {
 
 /// helper for rules: `st["x"]`
 pub fn sget(store: &Store, name: &str) -> UopId {
-    store.get(name).unwrap_or_else(|| {
-        let keys: Vec<&str> = store.keys().cloned().collect();
-        panic!("TGERR: missing pattern binding {name} (have {keys:?})")
-    }).clone()
+    store
+        .get(name)
+        .unwrap_or_else(|| {
+            let keys: Vec<&str> = store.keys().cloned().collect();
+            panic!("TGERR: missing pattern binding {name} (have {keys:?})")
+        })
+        .clone()
 }
 
 pub fn sget_opt(store: &Store, name: &str) -> Option<UopId> {
@@ -1052,7 +1257,13 @@ pub struct BottomUpGate;
 pub const REWRITE_STACK_LIMIT: usize = 250000;
 
 /// `_OPAQUE_CALL_BODIES` (ops.py:1179).
-pub const OPAQUE_CALL_BODIES: &[Ops] = &[Ops::Sink, Ops::Program, Ops::Linear, Ops::Copy, Ops::CustomFunction];
+pub const OPAQUE_CALL_BODIES: &[Ops] = &[
+    Ops::Sink,
+    Ops::Program,
+    Ops::Linear,
+    Ops::Copy,
+    Ops::CustomFunction,
+];
 
 fn is_opaque_body_call(ctx: &UOpCtx, n: UopId) -> bool {
     let op = ctx.op_of(&n);
@@ -1069,11 +1280,17 @@ fn is_opaque_body_call(ctx: &UOpCtx, n: UopId) -> bool {
 /// `_rebuild_dtype` (ops.py:1748-1751).
 fn rebuild_dtype(ctx: &mut UOpCtx, n: UopId, new_src: &[UopId]) -> DTypeId {
     let old = ctx.srcs(&n);
-    if old.len() == new_src.len() && old.iter().zip(new_src).all(|(a, b)| ctx.dt_of(a) == ctx.dt_of(b)) {
+    if old.len() == new_src.len()
+        && old
+            .iter()
+            .zip(new_src)
+            .all(|(a, b)| ctx.dt_of(a) == ctx.dt_of(b))
+    {
         return ctx.dt_of(&n);
     }
     let (_, _, _, arg, _) = ctx.snapshot(&n);
-    ctx.dtype_from_uop(ctx.op_of(&n), new_src, &arg).unwrap_or_else(|| panic!("TGERR: dtype derivation failed in rebuild"))
+    ctx.dtype_from_uop(ctx.op_of(&n), new_src, &arg)
+        .unwrap_or_else(|| panic!("TGERR: dtype derivation failed in rebuild"))
 }
 
 struct RewriteCtxt<'a> {
@@ -1090,7 +1307,11 @@ impl<'a> RewriteCtxt<'a> {
         self.pm.unwrap().rewrite(ctx, x, self.ctxval)
     }
 
-    fn cached_bpm_rewrite(&mut self, ctx: &mut UOpCtx, x: UopId) -> Result<Option<UopId>, BottomUpGate> {
+    fn cached_bpm_rewrite(
+        &mut self,
+        ctx: &mut UOpCtx,
+        x: UopId,
+    ) -> Result<Option<UopId>, BottomUpGate> {
         if let Some(ret) = self.bpm_cache.get(&x) {
             return Ok(ret.clone());
         }
@@ -1119,7 +1340,9 @@ impl<'a> RewriteCtxt<'a> {
                     }
                     // bottom-up: try bpm on the original node first, use result as-is
                     if self.bpm.is_some() {
-                        let rewritten = self.cached_bpm_rewrite(ctx, n.clone()).map_err(|_| "bottom-up gate in walk".to_string())?;
+                        let rewritten = self
+                            .cached_bpm_rewrite(ctx, n.clone())
+                            .map_err(|_| "bottom-up gate in walk".to_string())?;
                         if let Some(r) = rewritten {
                             self.replace.insert(n, r);
                             continue;
@@ -1138,7 +1361,10 @@ impl<'a> RewriteCtxt<'a> {
                 }
                 Step::Rebuild(n) => {
                     let srcs = ctx.srcs(&n).to_vec();
-                    let new_src: Vec<UopId> = srcs.iter().map(|x| self.replace.get(x).cloned().unwrap_or(x.clone())).collect();
+                    let new_src: Vec<UopId> = srcs
+                        .iter()
+                        .map(|x| self.replace.get(x).cloned().unwrap_or(x.clone()))
+                        .collect();
                     let new_n = if new_src != srcs {
                         let (op, _, _, arg, tag) = ctx.snapshot(&n);
                         let dt = rebuild_dtype(ctx, n.clone(), &new_src);
@@ -1147,7 +1373,11 @@ impl<'a> RewriteCtxt<'a> {
                         n.clone()
                     };
                     // top-down: try pm on the rebuilt node, use result as-is
-                    let new_n = if self.pm.is_some() { self.pm_rewrite(ctx, new_n.clone()).unwrap_or(new_n) } else { new_n };
+                    let new_n = if self.pm.is_some() {
+                        self.pm_rewrite(ctx, new_n.clone()).unwrap_or(new_n)
+                    } else {
+                        new_n
+                    };
                     self.replace.insert(n, new_n);
                 }
             }
@@ -1236,7 +1466,11 @@ impl<'a> RewriteCtxt<'a> {
                         match self.replace.get(x) {
                             Some(rx) => tmp.push(rx.clone()),
                             None => {
-                                waitlist.entry(x.clone()).or_default().push((n.clone(), Stage::S1, new_n.clone()));
+                                waitlist.entry(x.clone()).or_default().push((
+                                    n.clone(),
+                                    Stage::S1,
+                                    new_n.clone(),
+                                ));
                                 ready = false;
                                 break;
                             }
@@ -1248,7 +1482,11 @@ impl<'a> RewriteCtxt<'a> {
                     let new_src = tmp;
                     if new_src == srcs {
                         // top-down rewrite of the node as-is
-                        let rewritten = if self.pm.is_some() { self.pm_rewrite(ctx, new_n.clone()) } else { None };
+                        let rewritten = if self.pm.is_some() {
+                            self.pm_rewrite(ctx, new_n.clone())
+                        } else {
+                            None
+                        };
                         match rewritten {
                             None => {
                                 self.replace.insert(n.clone(), new_n);
@@ -1270,19 +1508,20 @@ impl<'a> RewriteCtxt<'a> {
                         stack.push((new_src_n.clone(), Stage::S0, new_src_n));
                     }
                 }
-                Stage::S2 => {
-                    match self.replace.get(&new_n) {
-                        None => {
-                            waitlist.entry(new_n.clone()).or_default().push((n, Stage::S2, new_n));
-                        }
-                        Some(rn) => {
-                            self.replace.insert(n.clone(), rn.clone());
-                            if let Some(w) = waitlist.remove(&n) {
-                                stack.extend(w);
-                            }
+                Stage::S2 => match self.replace.get(&new_n) {
+                    None => {
+                        waitlist
+                            .entry(new_n.clone())
+                            .or_default()
+                            .push((n, Stage::S2, new_n));
+                    }
+                    Some(rn) => {
+                        self.replace.insert(n.clone(), rn.clone());
+                        if let Some(w) = waitlist.remove(&n) {
+                            stack.extend(w);
                         }
                     }
-                }
+                },
             }
         }
         match self.replace.get(&root) {
@@ -1312,7 +1551,11 @@ pub fn graph_rewrite(
         enter_calls,
     };
     let _ = &mut rc;
-    if walk { rc.walk_rewrite(ctx, sink) } else { rc.unified_rewrite(ctx, sink) }
+    if walk {
+        rc.walk_rewrite(ctx, sink)
+    } else {
+        rc.unified_rewrite(ctx, sink)
+    }
 }
 
 /// `UOp.substitute` (ops.py:529-534) — bottom-up rewrite with `_substitute`.
@@ -1331,18 +1574,42 @@ pub fn substitute_extra(
     }
     let extra = extra.expect("TGERR: substitute_extra requires extra pm");
     let pm = extra.add(substitute_pm());
-    graph_rewrite(ctx, root, &pm, true, None, walk, enter_calls, CtxVal::Subst(dvars))
-        .unwrap_or_else(|e| panic!("TGERR: substitute_extra failed: {e}"))
+    graph_rewrite(
+        ctx,
+        root,
+        &pm,
+        true,
+        None,
+        walk,
+        enter_calls,
+        CtxVal::Subst(dvars),
+    )
+    .unwrap_or_else(|e| panic!("TGERR: substitute_extra failed: {e}"))
 }
 
-pub fn substitute(ctx: &mut UOpCtx, root: UopId, dvars: HashMap<UopId, UopId>, walk: bool, enter_calls: bool) -> UopId {
+pub fn substitute(
+    ctx: &mut UOpCtx,
+    root: UopId,
+    dvars: HashMap<UopId, UopId>,
+    walk: bool,
+    enter_calls: bool,
+) -> UopId {
     let dvars: HashMap<UopId, UopId> = dvars.into_iter().filter(|(k, v)| k != v).collect();
     if dvars.is_empty() {
         return root;
     }
     let pm = substitute_pm();
-    graph_rewrite(ctx, root, pm, true, None, walk, enter_calls, CtxVal::Subst(dvars))
-        .unwrap_or_else(|e| panic!("TGERR: substitute failed: {e}"))
+    graph_rewrite(
+        ctx,
+        root,
+        pm,
+        true,
+        None,
+        walk,
+        enter_calls,
+        CtxVal::Subst(dvars),
+    )
+    .unwrap_or_else(|e| panic!("TGERR: substitute failed: {e}"))
 }
 
 static SUBSTITUTE_PM: PmSlot = PmSlot::new();
@@ -1350,7 +1617,10 @@ static SUBSTITUTE_PM: PmSlot = PmSlot::new();
 pub fn substitute_pm() -> &'static PatternMatcher {
     SUBSTITUTE_PM.get_or_init(|| {
         let pat = UPat::op_var((0..=79u16).filter_map(Ops::from_u16).collect()).named("x");
-        PatternMatcher::new(vec![(pat, Arc::new(|_, x, ctxv: &CtxVal| ctxv.get_subst(sget(x, "x"))))])
+        PatternMatcher::new(vec![(
+            pat,
+            Arc::new(|_, x, ctxv: &CtxVal| ctxv.get_subst(sget(x, "x"))),
+        )])
     })
 }
 
@@ -1360,8 +1630,8 @@ pub fn simplify(ctx: &mut UOpCtx, u: UopId) -> UopId {
         return u;
     }
     if ctx.op_of(&u) == Ops::Sink {
-        let ok = ctx.srcs(&u).iter().all(|s| ctx.op_of(s) == Ops::Const || {
-            ctx.op_of(s) == Ops::Stack && ctx.srcs(s).is_empty()
+        let ok = ctx.srcs(&u).iter().all(|s| {
+            ctx.op_of(s) == Ops::Const || { ctx.op_of(s) == Ops::Stack && ctx.srcs(s).is_empty() }
         });
         if ok {
             return u;
@@ -1386,7 +1656,13 @@ impl SymVal {
                 let i = match c {
                     crate::dtype::ConstVal::Int(v) => *v,
                     crate::dtype::ConstVal::Bool(b) => *b as i128,
-                    crate::dtype::ConstVal::Big(b) => b.as_i64().map(|v| v as i128).unwrap_or(if b.is_negative() { i128::MIN / 2 } else { i128::MAX / 2 }),
+                    crate::dtype::ConstVal::Big(b) => {
+                        b.as_i64().map(|v| v as i128).unwrap_or(if b.is_negative() {
+                            i128::MIN / 2
+                        } else {
+                            i128::MAX / 2
+                        })
+                    }
                     crate::dtype::ConstVal::Float(f) => *f as i128,
                     crate::dtype::ConstVal::Invalid => 0,
                 };
@@ -1441,11 +1717,17 @@ pub fn pat_sig(p: &UPat) -> String {
         }
     };
     let name = p.name.unwrap_or("");
-    let mut s = format!("{}|{}|req={}|strict={}", ops, name, p.required_len, p.strict_length);
+    let mut s = format!(
+        "{}|{}|req={}|strict={}",
+        ops, name, p.required_len, p.strict_length
+    );
     let kids: Vec<String> = match &p.src {
         SrcPat::None => Vec::new(),
         SrcPat::Tup(v) => v.iter().map(pat_sig).collect(),
-        SrcPat::List(ps) => ps.first().map(|x| x.iter().map(pat_sig).collect()).unwrap_or_default(),
+        SrcPat::List(ps) => ps
+            .first()
+            .map(|x| x.iter().map(pat_sig).collect())
+            .unwrap_or_default(),
         SrcPat::Repeat(x) => vec![format!("{}*", pat_sig(x))],
         SrcPat::Any(v) => v.iter().map(pat_sig).collect(),
     };

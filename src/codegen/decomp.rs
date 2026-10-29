@@ -3,13 +3,13 @@
 //! `Ops::THREEFRY(uint64, x, key)` into primitive uint32 ALU that the
 //! interpreter/renderer execute (no hardware supports THREEFRY directly).
 
-use crate::dtype::{self, DTypeId};
 use crate::dtype::ConstVal;
+use crate::dtype::{self, DTypeId};
+use crate::uop::UopId;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::sym::{r, sget};
 use crate::uop::upat::{PatternMatcher, RuleFn, UPat};
-use crate::uop::UopId;
 
 fn c_int(ctx: &mut UOpCtx, v: i64) -> UopId {
     ctx.const_py(ConstVal::Int(v as i128), None)
@@ -68,7 +68,7 @@ fn threefry2x32(ctx: &mut UOpCtx, x: UopId, key: UopId) -> UopId {
     let xr1_64 = ctx.cast(xr1, u64);
     let hi = ctx.binop(Ops::Shl, xr1_64, c32b);
     let xr0_64 = ctx.cast(xr0, u64);
-    
+
     ctx.binop(Ops::Or, hi, xr0_64)
 }
 
@@ -146,7 +146,11 @@ pub fn get_simplifying_rewrite_patterns(supports_max: bool) -> PatternMatcher {
     let mut rules: Vec<(UPat, RuleFn)> = vec![];
     // FLOORDIV by 2**y -> x >> y (arithmetic shift is floor division for any sign)
     rules.push((
-        UPat::var(Some("x"), Some(dtype::INTS.to_vec())).floordiv(UPat::cvar(Some("c"), None, None)),
+        UPat::var(Some("x"), Some(dtype::INTS.to_vec())).floordiv(UPat::cvar(
+            Some("c"),
+            None,
+            None,
+        )),
         r(|ctx, st, _| {
             let (x, c) = (sget(st, "x"), sget(st, "c"));
             let v = pow2_exp(const_int(ctx, c)?)?;

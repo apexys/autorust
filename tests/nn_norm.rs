@@ -8,30 +8,44 @@
 use autorust::engine::session::Session;
 use autorust::tensor::nn::{BatchNorm, GroupNorm, Module};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 mod nn_golden;
 use nn_golden::{BN_GOLDEN, GN_GOLDEN};
 
 fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
-    assert_eq!(got.len(), want.len(), "{name}: length {} != {}", got.len(), want.len());
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "{name}: length {} != {}",
+        got.len(),
+        want.len()
+    );
     for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
         let tol = rtol * b.abs().max(1.0);
-        assert!((a - b).abs() <= tol, "{name}[{i}]: got {a}, want {b} (diff {}, tol {tol})", (a - b).abs());
+        assert!(
+            (a - b).abs() <= tol,
+            "{name}[{i}]: got {a}, want {b} (diff {}, tol {tol})",
+            (a - b).abs()
+        );
     }
 }
 
 #[test]
 fn groupnorm_matches_tinygrad() {
     for g in GN_GOLDEN {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         let mut sess = Session::new();
         let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
         let mut gn = GroupNorm::new(&ctx, g.num_groups, g.num_channels, g.eps, true);
         gn.weight = Some(Tensor::from_slice(&ctx, g.weight, None, None));
         gn.bias = Some(Tensor::from_slice(&ctx, g.bias, None, None));
         let out = gn.forward(&x);
-        let got_shape: Vec<usize> = out.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect();
+        let got_shape: Vec<usize> = out
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0) as usize)
+            .collect();
         assert_eq!(got_shape, g.out_shape.to_vec(), "{}: shape", g.name);
         close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
@@ -40,7 +54,7 @@ fn groupnorm_matches_tinygrad() {
 #[test]
 fn batchnorm_matches_tinygrad() {
     for b in BN_GOLDEN {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         let mut sess = Session::new();
         let x1 = Tensor::from_slice(&ctx, b.x1, None, None).reshape(b.x1_shape);
         let x2 = Tensor::from_slice(&ctx, b.x2, None, None).reshape(b.x2_shape);
@@ -52,22 +66,61 @@ fn batchnorm_matches_tinygrad() {
 
         // two training steps
         let y1 = bn.forward_train(&x1, &mut sess);
-        close(&y1.to_list::<f32>(&mut sess), b.y1, 1e-4, &format!("{}_train1", b.name));
+        close(
+            &y1.to_list::<f32>(&mut sess),
+            b.y1,
+            1e-4,
+            &format!("{}_train1", b.name),
+        );
         let y2 = bn.forward_train(&x2, &mut sess);
-        close(&y2.to_list::<f32>(&mut sess), b.y2, 1e-4, &format!("{}_train2", b.name));
+        close(
+            &y2.to_list::<f32>(&mut sess),
+            b.y2,
+            1e-4,
+            &format!("{}_train2", b.name),
+        );
 
         // running stats + batch counter
         let rmean = bn.running_mean.as_ref().unwrap().to_list::<f32>(&mut sess);
-        close(&rmean, b.running_mean, 1e-4, &format!("{}_running_mean", b.name));
+        close(
+            &rmean,
+            b.running_mean,
+            1e-4,
+            &format!("{}_running_mean", b.name),
+        );
         let rvar = bn.running_var.as_ref().unwrap().to_list::<f32>(&mut sess);
-        close(&rvar, b.running_var, 1e-4, &format!("{}_running_var", b.name));
-        let nbt = bn.num_batches_tracked.as_ref().unwrap().to_list::<i64>(&mut sess);
-        assert_eq!(nbt, vec![b.num_batches_tracked], "{}: num_batches_tracked", b.name);
+        close(
+            &rvar,
+            b.running_var,
+            1e-4,
+            &format!("{}_running_var", b.name),
+        );
+        let nbt = bn
+            .num_batches_tracked
+            .as_ref()
+            .unwrap()
+            .to_list::<i64>(&mut sess);
+        assert_eq!(
+            nbt,
+            vec![b.num_batches_tracked],
+            "{}: num_batches_tracked",
+            b.name
+        );
 
         // eval reads the running stats
         let y3 = bn.forward_inference(&x1);
-        let got_shape: Vec<usize> = y3.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect();
+        let got_shape: Vec<usize> = y3
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0) as usize)
+            .collect();
         assert_eq!(got_shape, b.eval_shape.to_vec(), "{}: eval shape", b.name);
-        close(&y3.to_list::<f32>(&mut sess), b.eval_out, 1e-4, &format!("{}_eval", b.name));
+        close(
+            &y3.to_list::<f32>(&mut sess),
+            b.eval_out,
+            1e-4,
+            &format!("{}_eval", b.name),
+        );
     }
 }

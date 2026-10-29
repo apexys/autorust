@@ -120,8 +120,12 @@ impl Linear {
     /// `uniform(in, -1/sqrt(in), 1/sqrt(in))` for bias).
     pub fn new(ctx: impl AsCtx, in_features: i64, out_features: i64, bias: bool) -> Self {
         ctx.with_ctx(|ctx| {
-            let weight =
-                Tensor::kaiming_uniform(&mut *ctx, &[out_features, in_features], 5.0f64.sqrt(), None);
+            let weight = Tensor::kaiming_uniform(
+                &mut *ctx,
+                &[out_features, in_features],
+                5.0f64.sqrt(),
+                None,
+            );
             let bias = if bias {
                 let bound = 1.0 / f64::sqrt(in_features as f64);
                 Some(Tensor::uniform(

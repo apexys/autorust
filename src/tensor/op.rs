@@ -115,7 +115,11 @@ impl Tensor {
     #[doc(hidden)]
     pub fn argmax_ctx(&self, ctx: &mut UOpCtx, axis: Option<i64>, keepdim: bool) -> Tensor {
         let axis = match axis {
-            None => return self.flatten_ctx(ctx, 0, -1).argmax_ctx(ctx, Some(0), keepdim),
+            None => {
+                return self
+                    .flatten_ctx(ctx, 0, -1)
+                    .argmax_ctx(ctx, Some(0), keepdim);
+            }
             Some(a) => super::movement::resolve_dim(self.shape_ctx(ctx).len(), a, false),
         };
         let ndim = self.shape_ctx(ctx).len();
@@ -657,7 +661,11 @@ impl Tensor {
         };
         let shape = self.shape().into_vec();
         let reg_pads = resolve_pool_pads(padding, k.len());
-        let pads = if ceil_mode { apply_ceil_mode(&shape, &reg_pads, k, &s_, &d_) } else { reg_pads.clone() };
+        let pads = if ceil_mode {
+            apply_ceil_mode(&shape, &reg_pads, k, &s_, &d_)
+        } else {
+            reg_pads.clone()
+        };
 
         let pool = |x: &Tensor, padding_: &[i64]| -> Tensor {
             let grouped = flat_to_grouped(padding_);
@@ -670,8 +678,11 @@ impl Tensor {
 
         if !count_include_pad {
             let num = pool(self, &pads).sum(Some(&axis), false, None);
-            let den = pool(&self.const_like(crate::dtype::ConstVal::Float(1.0), None), &pads)
-                .sum(Some(&axis), false, None);
+            let den = pool(
+                &self.const_like(crate::dtype::ConstVal::Float(1.0), None),
+                &pads,
+            )
+            .sum(Some(&axis), false, None);
             return num.div(&den);
         }
         if !ceil_mode {
@@ -680,9 +691,16 @@ impl Tensor {
         let num = pool(self, &pads).sum(Some(&axis), false, None);
         let den = pool(
             &self
-                .pad_constant(&flat_pads(self, &reg_pads, k), crate::dtype::ConstVal::Float(0.0))
+                .pad_constant(
+                    &flat_pads(self, &reg_pads, k),
+                    crate::dtype::ConstVal::Float(0.0),
+                )
                 .const_like(crate::dtype::ConstVal::Float(1.0), None),
-            &pads.iter().zip(reg_pads.iter()).map(|(cp, rp)| cp - rp).collect::<Vec<_>>(),
+            &pads
+                .iter()
+                .zip(reg_pads.iter())
+                .map(|(cp, rp)| cp - rp)
+                .collect::<Vec<_>>(),
         )
         .sum(Some(&axis), false, None);
         num.div(&den)

@@ -20,7 +20,6 @@ use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 /// tinygrad-style model: layers wired by hand in `forward`, mirroring a
 /// `class Model` in tinygrad.
@@ -45,16 +44,25 @@ impl XorModel {
 
 impl Module for XorModel {
     fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
-        Box::new(nn::scoped("l1", self.l1.named_params()).chain(nn::scoped("l2", self.l2.named_params())))
+        Box::new(
+            nn::scoped("l1", self.l1.named_params())
+                .chain(nn::scoped("l2", self.l2.named_params())),
+        )
     }
 
     fn into_params(self) -> Self {
-        XorModel { l1: self.l1.into_params(), l2: self.l2.into_params() }
+        XorModel {
+            l1: self.l1.into_params(),
+            l2: self.l2.into_params(),
+        }
     }
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn main() {
@@ -64,7 +72,7 @@ fn main() {
 
     println!("XOR training: 2->4(relu)->1 MLP, MSE, SGD lr={lr}, epochs={n}, seed={seed}");
 
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
 
     // Build the model, make its params updateable buffer leaves, and collect
@@ -74,8 +82,13 @@ fn main() {
     let params: Vec<Tensor> = model.params().collect();
     let sgd = SGD::new(params.clone(), lr);
 
-    let x = Tensor::from_slice(&ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
-        .reshape([4, 2]);
+    let x = Tensor::from_slice(
+        &ctx,
+        &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        None,
+        None,
+    )
+    .reshape([4, 2]);
     let t = Tensor::from_slice(&ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape([4, 1]);
 
     let mut pred = Vec::new();
@@ -121,12 +134,20 @@ fn main() {
         let tt = truth[i];
         let good = (p > 0.5) == tt;
         ok &= good;
-        println!("  {} | {p:6.3} | {:>6} | {}", inputs[i], u8::from(tt), if good { "ok" } else { "MISS" });
+        println!(
+            "  {} | {p:6.3} | {:>6} | {}",
+            inputs[i],
+            u8::from(tt),
+            if good { "ok" } else { "MISS" }
+        );
     }
 
     println!("\nfinal loss: {last_loss:.6}");
     if sess.cache.misses != first_epoch_misses {
-        eprintln!("warning: epochs after the first recompiled {} kernel(s)", sess.cache.misses - first_epoch_misses);
+        eprintln!(
+            "warning: epochs after the first recompiled {} kernel(s)",
+            sess.cache.misses - first_epoch_misses
+        );
     }
     if !ok {
         eprintln!("XOR training did not converge; try more EPOCHS or a different LR/SEED.");

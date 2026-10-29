@@ -13,19 +13,23 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
+use opencl3::command_queue::{CL_QUEUE_PROFILING_ENABLE, CommandQueue};
 use opencl3::context::Context;
-use opencl3::device::{cl_device_id, get_all_devices, Device, CL_DEVICE_TYPE_DEFAULT, CL_DEVICE_TYPE_GPU};
+use opencl3::device::{
+    CL_DEVICE_TYPE_DEFAULT, CL_DEVICE_TYPE_GPU, Device, cl_device_id, get_all_devices,
+};
 use opencl3::kernel::Kernel;
-use opencl3::memory::{cl_mem, Buffer, ClMem, CL_MEM_READ_WRITE};
+use opencl3::memory::{Buffer, CL_MEM_READ_WRITE, ClMem, cl_mem};
 use opencl3::program::Program;
 
 use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
 use crate::runtime::buffer::OpaqueT;
-use crate::runtime::device::{register_device, BackendAllocator, Comp, Compiled, LruAllocator, Prog, TinyElf};
-use crate::uop::ctx::UOpCtx;
+use crate::runtime::device::{
+    BackendAllocator, Comp, Compiled, LruAllocator, Prog, TinyElf, register_device,
+};
 use crate::uop::UopId;
+use crate::uop::ctx::UOpCtx;
 
 // ---------------- device inner ----------------
 
@@ -41,8 +45,15 @@ struct CompileCache {
 
 impl CompileCache {
     fn new() -> CompileCache {
-        let cap = std::env::var("CL_COMPILE_CACHE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
-        CompileCache { map: HashMap::new(), order: VecDeque::new(), cap }
+        let cap = std::env::var("CL_COMPILE_CACHE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+        CompileCache {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
     }
     fn get(&self, src: &str) -> Option<Vec<u8>> {
         self.map.get(src).cloned()
@@ -84,8 +95,19 @@ impl ClInner {
         let exts = check(dev.extensions(), "CL extensions");
         eprintln!("CLDevice: opening {device_name} with version {driver_version}");
         let context = check(Context::from_device(&dev), "clCreateContext");
-        let queue = check(unsafe { CommandQueue::create(&context, dev.id(), CL_QUEUE_PROFILING_ENABLE) }, "clCreateCommandQueue");
-        ClInner { dev, context, queue, device_name, driver_version, exts, compile_cache: RefCell::new(CompileCache::new()) }
+        let queue = check(
+            unsafe { CommandQueue::create(&context, dev.id(), CL_QUEUE_PROFILING_ENABLE) },
+            "clCreateCommandQueue",
+        );
+        ClInner {
+            dev,
+            context,
+            queue,
+            device_name,
+            driver_version,
+            exts,
+            compile_cache: RefCell::new(CompileCache::new()),
+        }
     }
 
     fn synchronize(&self) {
@@ -118,7 +140,9 @@ impl OpaqueT for ClOpaque {
 }
 
 fn cl_of(o: &dyn OpaqueT) -> &ClOpaque {
-    o.as_any().downcast_ref::<ClOpaque>().expect("TGERR: expected CL opaque")
+    o.as_any()
+        .downcast_ref::<ClOpaque>()
+        .expect("TGERR: expected CL opaque")
 }
 
 /// A temporary `Buffer` view over an existing cl_mem for the enqueue calls
@@ -136,8 +160,18 @@ struct ClAllocator {
 
 impl BackendAllocator for ClAllocator {
     fn _alloc(&self, size: usize) -> Rc<dyn OpaqueT> {
-        let buf = unsafe { Buffer::<u8>::create(&self.inner.context, CL_MEM_READ_WRITE, size, std::ptr::null_mut()) };
-        Rc::new(ClOpaque { buf: check(buf, "clCreateBuffer"), size })
+        let buf = unsafe {
+            Buffer::<u8>::create(
+                &self.inner.context,
+                CL_MEM_READ_WRITE,
+                size,
+                std::ptr::null_mut(),
+            )
+        };
+        Rc::new(ClOpaque {
+            buf: check(buf, "clCreateBuffer"),
+            size,
+        })
     }
     fn _free(&self, o: Rc<dyn OpaqueT>) {
         drop(o); // Buffer drop => clReleaseMemObject
@@ -148,12 +182,22 @@ impl BackendAllocator for ClAllocator {
         let mut tmp = Buffer::new(cl_of(dest).buf.get());
         // blocking write (python posts a non-blocking write and retains the
         // source until the queue executes it)
-        check(unsafe { self.inner.queue.enqueue_write_buffer(&mut tmp, 1, 0, src, &[]) }, "clEnqueueWriteBuffer");
+        check(
+            unsafe {
+                self.inner
+                    .queue
+                    .enqueue_write_buffer(&mut tmp, 1, 0, src, &[])
+            },
+            "clEnqueueWriteBuffer",
+        );
         std::mem::forget(tmp);
     }
     fn _copyout(&self, dest: &mut [u8], src: &dyn OpaqueT) {
         let s = &cl_of(src).buf;
-        check(unsafe { self.inner.queue.enqueue_read_buffer(s, 1, 0, dest, &[]) }, "clEnqueueReadBuffer");
+        check(
+            unsafe { self.inner.queue.enqueue_read_buffer(s, 1, 0, dest, &[]) },
+            "clEnqueueReadBuffer",
+        );
         self.inner.synchronize();
     }
     fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
@@ -164,7 +208,11 @@ impl BackendAllocator for ClAllocator {
         let mut dst_tmp: Buffer<u8> = Buffer::new(cl_of(dest).buf.get());
         let src_tmp: Buffer<u8> = Buffer::new(cl_of(src).buf.get());
         check(
-            unsafe { self.inner.queue.enqueue_copy_buffer(&src_tmp, &mut dst_tmp, 0, 0, src.size(), &[]) },
+            unsafe {
+                self.inner
+                    .queue
+                    .enqueue_copy_buffer(&src_tmp, &mut dst_tmp, 0, 0, src.size(), &[])
+            },
             "clEnqueueCopyBuffer",
         );
         std::mem::forget(dst_tmp);
@@ -186,13 +234,19 @@ struct ClCompiler {
 impl Comp for ClCompiler {
     /// `CLCompiler.compile` — build from source, fetch the device binary.
     fn compile(&self, src: &str) -> Vec<u8> {
-        let mut program = check(Program::create_from_source(&self.inner.context, src), "clCreateProgramWithSource");
+        let mut program = check(
+            Program::create_from_source(&self.inner.context, src),
+            "clCreateProgramWithSource",
+        );
         let devices = [self.inner.dev.id()];
         if let Err(e) = program.build(&devices, "") {
             let log = program.get_build_log(devices[0]).unwrap_or_default();
             panic!("TGERR: OpenCL Compile Error\n--- src ---\n{src}\n--- log ---\n{log}\n{e}");
         }
-        check(program.get_binaries(), "CL_PROGRAM_BINARIES").into_iter().next().unwrap_or_default()
+        check(program.get_binaries(), "CL_PROGRAM_BINARIES")
+            .into_iter()
+            .next()
+            .unwrap_or_default()
     }
 
     fn compile_cached(&self, src: &str) -> Vec<u8> {
@@ -233,7 +287,12 @@ impl ClProgram {
         let mut program = check(program, "clCreateProgramWithBinary");
         check(program.build(&devices, ""), "clBuildProgram");
         let kernel = check(Kernel::create(&program, &obj.name), "clCreateKernel");
-        ClProgram { inner, kernel, program, signature: obj.signature.clone() }
+        ClProgram {
+            inner,
+            kernel,
+            program,
+            signature: obj.signature.clone(),
+        }
     }
 }
 
@@ -250,7 +309,11 @@ impl Prog for ClProgram {
         for (i, (slot, dt)) in self.signature.iter().enumerate() {
             if (*slot as usize) < bufs.len() {
                 let mem: cl_mem = cl_of(&*bufs[*slot as usize]).buf.get();
-                unsafe { self.kernel.set_arg(i as u32, &mem).expect("TGERR: clSetKernelArg") };
+                unsafe {
+                    self.kernel
+                        .set_arg(i as u32, &mem)
+                        .expect("TGERR: clSetKernelArg")
+                };
             } else {
                 let v = vals[(*slot as usize) - bufs.len()];
                 match dt.bitsize() {
@@ -264,7 +327,14 @@ impl Prog for ClProgram {
         }
         // python: local_size scales global_size
         let (gs, ls) = match local_size {
-            Some(l) => (global_size.iter().zip(l.iter()).map(|(g, l)| g * l).collect::<Vec<_>>(), Some(l)),
+            Some(l) => (
+                global_size
+                    .iter()
+                    .zip(l.iter())
+                    .map(|(g, l)| g * l)
+                    .collect::<Vec<_>>(),
+                Some(l),
+            ),
             None => (global_size.to_vec(), None),
         };
         // NB: keep the local sizes alive in a binding — a `map_or(.., |l| l.as_ptr())`
@@ -276,7 +346,14 @@ impl Prog for ClProgram {
         let st = std::time::Instant::now();
         let ev = check(
             unsafe {
-                self.inner.queue.enqueue_nd_range_kernel(self.kernel.get(), 3, std::ptr::null(), gs.as_ptr(), ls_ptr, &[])
+                self.inner.queue.enqueue_nd_range_kernel(
+                    self.kernel.get(),
+                    3,
+                    std::ptr::null(),
+                    gs.as_ptr(),
+                    ls_ptr,
+                    &[],
+                )
             },
             "clEnqueueNDRangeKernel",
         );
@@ -331,7 +408,9 @@ impl UopRenderer for OclUopRenderer {
 pub fn available() -> bool {
     match get_all_devices(CL_DEVICE_TYPE_GPU) {
         Ok(ids) if !ids.is_empty() => true,
-        _ => get_all_devices(CL_DEVICE_TYPE_DEFAULT).map(|ids| !ids.is_empty()).unwrap_or(false),
+        _ => get_all_devices(CL_DEVICE_TYPE_DEFAULT)
+            .map(|ids| !ids.is_empty())
+            .unwrap_or(false),
     }
 }
 
@@ -348,12 +427,20 @@ pub fn register() {
         // python: OpenCLRenderer.compiler is the base empty Compiler — the elf
         // lib is the rendered source; the real CL compile happens in CLProgram
         let compiler: Rc<dyn Comp> = Rc::new(crate::runtime::device::IdentityCompiler::default());
-        let allocator = LruAllocator::with_backend(Box::new(ClAllocator { inner: inner.clone() }));
+        let allocator = LruAllocator::with_backend(Box::new(ClAllocator {
+            inner: inner.clone(),
+        }));
         let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> = {
             let inner = inner.clone();
             Rc::new(move |elf| {
-                let cl_compiler = ClCompiler { inner: inner.clone() };
-                Rc::new(RefCell::new(ClProgram::new(&cl_compiler, inner.clone(), elf)))
+                let cl_compiler = ClCompiler {
+                    inner: inner.clone(),
+                };
+                Rc::new(RefCell::new(ClProgram::new(
+                    &cl_compiler,
+                    inner.clone(),
+                    elf,
+                )))
             })
         };
         Compiled::new("CL", renderer, allocator, compiler, ctor)

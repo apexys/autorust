@@ -15,8 +15,8 @@
 use crate::helpers::bigint::BigInt;
 use crate::helpers::{DEFAULT_FLOAT, DEFAULT_INT, SUM_DTYPE, getenv_str};
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 /// Address spaces (`AddrSpace` IntEnum, auto() starting at 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -89,28 +89,160 @@ pub const FLOAT32: DTypeId = DTypeId(20);
 pub const FLOAT64: DTypeId = DTypeId(21);
 
 pub const DTYPES: &[DType] = &[
-    DType { priority: -1, bitsize: 0, attr: "void", name: "void", fmt: None },
-    DType { priority: 0, bitsize: 800, attr: "weakint", name: "weakint", fmt: None },
-    DType { priority: 0, bitsize: 1, attr: "bool", name: "bool", fmt: Some(b'?') },
-    DType { priority: 1, bitsize: 8, attr: "char", name: "signed char", fmt: Some(b'b') },
-    DType { priority: 2, bitsize: 8, attr: "uchar", name: "unsigned char", fmt: Some(b'B') },
-    DType { priority: 3, bitsize: 16, attr: "short", name: "short", fmt: Some(b'h') },
-    DType { priority: 4, bitsize: 16, attr: "ushort", name: "unsigned short", fmt: Some(b'H') },
-    DType { priority: 5, bitsize: 32, attr: "int", name: "int", fmt: Some(b'i') },
-    DType { priority: 6, bitsize: 32, attr: "uint", name: "unsigned int", fmt: Some(b'I') },
-    DType { priority: 7, bitsize: 64, attr: "long", name: "long", fmt: Some(b'q') },
-    DType { priority: 8, bitsize: 64, attr: "ulong", name: "unsigned long", fmt: Some(b'Q') },
-    DType { priority: 8, bitsize: 128, attr: "_uint128", name: "uint128", fmt: None },
-    DType { priority: 8, bitsize: 256, attr: "_uint256", name: "uint256", fmt: None },
-    DType { priority: 9, bitsize: 800, attr: "weakfloat", name: "weakfloat", fmt: None },
-    DType { priority: 10, bitsize: 8, attr: "fp8e4m3", name: "float8_e4m3", fmt: None },
-    DType { priority: 11, bitsize: 8, attr: "fp8e5m2", name: "float8_e5m2", fmt: None },
-    DType { priority: 10, bitsize: 8, attr: "fp8e4m3fnuz", name: "float8_e4m3fnuz", fmt: None },
-    DType { priority: 11, bitsize: 8, attr: "fp8e5m2fnuz", name: "float8_e5m2fnuz", fmt: None },
-    DType { priority: 12, bitsize: 16, attr: "half", name: "half", fmt: Some(b'e') },
-    DType { priority: 13, bitsize: 16, attr: "bfloat16", name: "__bf16", fmt: None },
-    DType { priority: 14, bitsize: 32, attr: "float", name: "float", fmt: Some(b'f') },
-    DType { priority: 15, bitsize: 64, attr: "double", name: "double", fmt: Some(b'd') },
+    DType {
+        priority: -1,
+        bitsize: 0,
+        attr: "void",
+        name: "void",
+        fmt: None,
+    },
+    DType {
+        priority: 0,
+        bitsize: 800,
+        attr: "weakint",
+        name: "weakint",
+        fmt: None,
+    },
+    DType {
+        priority: 0,
+        bitsize: 1,
+        attr: "bool",
+        name: "bool",
+        fmt: Some(b'?'),
+    },
+    DType {
+        priority: 1,
+        bitsize: 8,
+        attr: "char",
+        name: "signed char",
+        fmt: Some(b'b'),
+    },
+    DType {
+        priority: 2,
+        bitsize: 8,
+        attr: "uchar",
+        name: "unsigned char",
+        fmt: Some(b'B'),
+    },
+    DType {
+        priority: 3,
+        bitsize: 16,
+        attr: "short",
+        name: "short",
+        fmt: Some(b'h'),
+    },
+    DType {
+        priority: 4,
+        bitsize: 16,
+        attr: "ushort",
+        name: "unsigned short",
+        fmt: Some(b'H'),
+    },
+    DType {
+        priority: 5,
+        bitsize: 32,
+        attr: "int",
+        name: "int",
+        fmt: Some(b'i'),
+    },
+    DType {
+        priority: 6,
+        bitsize: 32,
+        attr: "uint",
+        name: "unsigned int",
+        fmt: Some(b'I'),
+    },
+    DType {
+        priority: 7,
+        bitsize: 64,
+        attr: "long",
+        name: "long",
+        fmt: Some(b'q'),
+    },
+    DType {
+        priority: 8,
+        bitsize: 64,
+        attr: "ulong",
+        name: "unsigned long",
+        fmt: Some(b'Q'),
+    },
+    DType {
+        priority: 8,
+        bitsize: 128,
+        attr: "_uint128",
+        name: "uint128",
+        fmt: None,
+    },
+    DType {
+        priority: 8,
+        bitsize: 256,
+        attr: "_uint256",
+        name: "uint256",
+        fmt: None,
+    },
+    DType {
+        priority: 9,
+        bitsize: 800,
+        attr: "weakfloat",
+        name: "weakfloat",
+        fmt: None,
+    },
+    DType {
+        priority: 10,
+        bitsize: 8,
+        attr: "fp8e4m3",
+        name: "float8_e4m3",
+        fmt: None,
+    },
+    DType {
+        priority: 11,
+        bitsize: 8,
+        attr: "fp8e5m2",
+        name: "float8_e5m2",
+        fmt: None,
+    },
+    DType {
+        priority: 10,
+        bitsize: 8,
+        attr: "fp8e4m3fnuz",
+        name: "float8_e4m3fnuz",
+        fmt: None,
+    },
+    DType {
+        priority: 11,
+        bitsize: 8,
+        attr: "fp8e5m2fnuz",
+        name: "float8_e5m2fnuz",
+        fmt: None,
+    },
+    DType {
+        priority: 12,
+        bitsize: 16,
+        attr: "half",
+        name: "half",
+        fmt: Some(b'e'),
+    },
+    DType {
+        priority: 13,
+        bitsize: 16,
+        attr: "bfloat16",
+        name: "__bf16",
+        fmt: None,
+    },
+    DType {
+        priority: 14,
+        bitsize: 32,
+        attr: "float",
+        name: "float",
+        fmt: Some(b'f'),
+    },
+    DType {
+        priority: 15,
+        bitsize: 64,
+        attr: "double",
+        name: "double",
+        fmt: Some(b'd'),
+    },
 ];
 
 impl DTypeId {
@@ -172,7 +304,11 @@ impl ReadDtype for bool {
 }
 
 pub static BY_ATTR: LazyLock<HashMap<&'static str, DTypeId>> = LazyLock::new(|| {
-    DTYPES.iter().enumerate().map(|(i, d)| (d.attr, DTypeId(i as u16))).collect()
+    DTYPES
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.attr, DTypeId(i as u16)))
+        .collect()
 });
 
 pub fn by_attr(attr: &str) -> Option<DTypeId> {
@@ -203,8 +339,16 @@ pub fn to_dtype(attr: &str) -> Option<DTypeId> {
 pub const FP8_OCP: &[DTypeId] = &[FP8E4M3, FP8E5M2];
 pub const FP8_FNUZ: &[DTypeId] = &[FP8E4M3FNUZ, FP8E5M2FNUZ];
 pub const FP8S: &[DTypeId] = &[FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ];
-pub const FLOATS: &[DTypeId] =
-    &[FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ, FLOAT16, BFLOAT16, FLOAT32, FLOAT64];
+pub const FLOATS: &[DTypeId] = &[
+    FP8E4M3,
+    FP8E5M2,
+    FP8E4M3FNUZ,
+    FP8E5M2FNUZ,
+    FLOAT16,
+    BFLOAT16,
+    FLOAT32,
+    FLOAT64,
+];
 pub const UINTS: &[DTypeId] = &[UINT8, UINT16, UINT32, UINT64];
 pub const SINTS: &[DTypeId] = &[INT8, INT16, INT32, INT64];
 pub const INTS: &[DTypeId] = &[UINT8, UINT16, UINT32, UINT64, INT8, INT16, INT32, INT64];
@@ -212,8 +356,23 @@ pub const WEAKS: &[DTypeId] = &[WEAKINT, WEAKFLOAT];
 
 /// `dtypes.all` — floats + ints + bool (note: `_uint128`/`_uint256` are NOT in `all`).
 pub const ALL: &[DTypeId] = &[
-    FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ, FLOAT16, BFLOAT16, FLOAT32, FLOAT64,
-    UINT8, UINT16, UINT32, UINT64, INT8, INT16, INT32, INT64, BOOL,
+    FP8E4M3,
+    FP8E5M2,
+    FP8E4M3FNUZ,
+    FP8E5M2FNUZ,
+    FLOAT16,
+    BFLOAT16,
+    FLOAT32,
+    FLOAT64,
+    UINT8,
+    UINT16,
+    UINT32,
+    UINT64,
+    INT8,
+    INT16,
+    INT32,
+    INT64,
+    BOOL,
 ];
 
 pub fn in_set(set: &[DTypeId], d: DTypeId) -> bool {
@@ -318,8 +477,9 @@ impl ConstVal {
 
     /// Python ordering (`<`/`==`); `None` if either side is NaN.
     pub fn py_cmp(&self, other: &ConstVal) -> Option<std::cmp::Ordering> {
-        
-        if matches!(self, ConstVal::Float(f) if f.is_nan()) || matches!(other, ConstVal::Float(f) if f.is_nan()) {
+        if matches!(self, ConstVal::Float(f) if f.is_nan())
+            || matches!(other, ConstVal::Float(f) if f.is_nan())
+        {
             return None;
         }
         match (self, other) {
@@ -422,7 +582,10 @@ pub fn dtype_const(d: DTypeId, val: ConstVal) -> ConstVal {
                 // int(val): exact trunc toward zero
                 match BigInt::from_f64_trunc(f) {
                     None => ConstVal::Float(f64::NAN), // unreachable: int(nan) raises in Python
-                    Some(b) => b.as_i64().map(|i| ConstVal::Int(i as i128)).unwrap_or(ConstVal::Big(b)),
+                    Some(b) => b
+                        .as_i64()
+                        .map(|i| ConstVal::Int(i as i128))
+                        .unwrap_or(ConstVal::Big(b)),
                 }
             }
         }
@@ -497,7 +660,11 @@ static RECURSIVE_PARENTS: LazyLock<Vec<u32>> = LazyLock::new(|| {
         let mut changed = false;
         for i in 0..n {
             let d = DTypeId(i as u16);
-            let mut b = if d == FLOAT64 { 1u32 << FLOAT64.0 } else { 1u32 << i };
+            let mut b = if d == FLOAT64 {
+                1u32 << FLOAT64.0
+            } else {
+                1u32 << i
+            };
             for &p in lattice_parents(d) {
                 b |= bits[p.0 as usize];
             }
@@ -568,16 +735,42 @@ pub fn can_lossless_cast(dt0: DTypeId, dt1: DTypeId) -> bool {
     match dt1 {
         WEAKINT => in_set(INTS, dt0),
         FLOAT64 => in_set(
-            &[FLOAT32, FLOAT16, BFLOAT16, FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ,
-              UINT32, UINT16, UINT8, INT32, INT16, INT8],
+            &[
+                FLOAT32,
+                FLOAT16,
+                BFLOAT16,
+                FP8E4M3,
+                FP8E5M2,
+                FP8E4M3FNUZ,
+                FP8E5M2FNUZ,
+                UINT32,
+                UINT16,
+                UINT8,
+                INT32,
+                INT16,
+                INT8,
+            ],
             dt0,
         ),
         FLOAT32 => in_set(
-            &[FLOAT16, BFLOAT16, FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ,
-              UINT16, UINT8, INT16, INT8],
+            &[
+                FLOAT16,
+                BFLOAT16,
+                FP8E4M3,
+                FP8E5M2,
+                FP8E4M3FNUZ,
+                FP8E5M2FNUZ,
+                UINT16,
+                UINT8,
+                INT16,
+                INT8,
+            ],
             dt0,
         ),
-        FLOAT16 => in_set(&[FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ, UINT8, INT8], dt0),
+        FLOAT16 => in_set(
+            &[FP8E4M3, FP8E5M2, FP8E4M3FNUZ, FP8E5M2FNUZ, UINT8, INT8],
+            dt0,
+        ),
         UINT64 => in_set(&[UINT32, UINT16, UINT8], dt0),
         UINT32 => in_set(&[UINT16, UINT8], dt0),
         UINT16 => dt0 == UINT8,
@@ -722,10 +915,42 @@ struct Fp8Cfg {
 
 fn fp8_cfg(d: DTypeId) -> Fp8Cfg {
     match d {
-        FP8E4M3 => Fp8Cfg { bias: 7, sig_bits: 4, mant_mask: 0x7, min_denorm_half: 0x3F50000000000000, ovf_threshold: 0x407D000000000000, max_norm: 0x7E, min_norm: 0x3F90000000000000 },
-        FP8E5M2 => Fp8Cfg { bias: 15, sig_bits: 3, mant_mask: 0x3, min_denorm_half: 0x3EE0000000000000, ovf_threshold: 0x40EE000000000000 - 1, max_norm: 0x7B, min_norm: 0x3F10000000000000 },
-        FP8E4M3FNUZ => Fp8Cfg { bias: 8, sig_bits: 4, mant_mask: 0x7, min_denorm_half: 0x3F40000000000000, ovf_threshold: 0x406F000000000000 - 1, max_norm: 0x7F, min_norm: 0x3F80000000000000 },
-        FP8E5M2FNUZ => Fp8Cfg { bias: 16, sig_bits: 3, mant_mask: 0x3, min_denorm_half: 0x3ED0000000000000, ovf_threshold: 0x40EE000000000000 - 1, max_norm: 0x7F, min_norm: 0x3F00000000000000 },
+        FP8E4M3 => Fp8Cfg {
+            bias: 7,
+            sig_bits: 4,
+            mant_mask: 0x7,
+            min_denorm_half: 0x3F50000000000000,
+            ovf_threshold: 0x407D000000000000,
+            max_norm: 0x7E,
+            min_norm: 0x3F90000000000000,
+        },
+        FP8E5M2 => Fp8Cfg {
+            bias: 15,
+            sig_bits: 3,
+            mant_mask: 0x3,
+            min_denorm_half: 0x3EE0000000000000,
+            ovf_threshold: 0x40EE000000000000 - 1,
+            max_norm: 0x7B,
+            min_norm: 0x3F10000000000000,
+        },
+        FP8E4M3FNUZ => Fp8Cfg {
+            bias: 8,
+            sig_bits: 4,
+            mant_mask: 0x7,
+            min_denorm_half: 0x3F40000000000000,
+            ovf_threshold: 0x406F000000000000 - 1,
+            max_norm: 0x7F,
+            min_norm: 0x3F80000000000000,
+        },
+        FP8E5M2FNUZ => Fp8Cfg {
+            bias: 16,
+            sig_bits: 3,
+            mant_mask: 0x3,
+            min_denorm_half: 0x3ED0000000000000,
+            ovf_threshold: 0x40EE000000000000 - 1,
+            max_norm: 0x7F,
+            min_norm: 0x3F00000000000000,
+        },
         _ => panic!("not an fp8 dtype"),
     }
 }
@@ -747,7 +972,8 @@ pub fn float_to_fp8(x: f64, d: DTypeId) -> u8 {
         return if x.is_sign_negative() { 0xff } else { 0x7f };
     }
     if d == FP8E5M2 && !x.is_finite() {
-        return (if x.is_sign_negative() { 0x80 } else { 0 }) | if x.is_infinite() { 0x7c } else { 0x7f };
+        return (if x.is_sign_negative() { 0x80 } else { 0 })
+            | if x.is_infinite() { 0x7c } else { 0x7f };
     }
     let xbits = x.to_bits();
     let half_ulp = 1u64 << (52 - c.sig_bits);
@@ -760,8 +986,10 @@ pub fn float_to_fp8(x: f64, d: DTypeId) -> u8 {
     } else if absx > c.ovf_threshold {
         c.max_norm
     } else if absx >= c.min_norm {
-        let (mut r, round_bits) =
-            (((exp as u64) << (c.sig_bits - 1)) | mantissa, xbits & ((half_ulp << 1) - 1));
+        let (mut r, round_bits) = (
+            ((exp as u64) << (c.sig_bits - 1)) | mantissa,
+            xbits & ((half_ulp << 1) - 1),
+        );
         if round_bits > half_ulp || (round_bits == half_ulp && (mantissa & 1) == 1) {
             r += 1;
         }
@@ -801,7 +1029,11 @@ pub fn fp8_to_float(x: u8, d: DTypeId) -> f64 {
     let mantissa = (x & mant_max as u8) as u32;
     if !is_fnuz(d) && exp == exp_max {
         if d == FP8E5M2 {
-            let v = if mantissa != 0 { f64::NAN } else { f64::INFINITY };
+            let v = if mantissa != 0 {
+                f64::NAN
+            } else {
+                f64::INFINITY
+            };
             return if sign == 1 { -v } else { v };
         }
         if mantissa == mant_max {
@@ -813,11 +1045,7 @@ pub fn fp8_to_float(x: u8, d: DTypeId) -> f64 {
     } else {
         (1.0 + mantissa as f64 / (mant_max as f64 + 1.0)) * 2f64.powi(exp as i32 - c.bias)
     };
-    if sign == 1 {
-        -val
-    } else {
-        val
-    }
+    if sign == 1 { -val } else { val }
 }
 
 /// CPython/ctypes int-conversion semantics (probed empirically):
@@ -830,7 +1058,11 @@ fn trunc_int_ctypes(x: f64, d: DTypeId) -> ConstVal {
         None => return ConstVal::Int(0), // nan/inf: CPython raises; unreachable in tinygrad
     };
     let low = b.low64();
-    let m64: u64 = if b.is_negative() && low != 0 { (!low).wrapping_add(1) } else { low };
+    let m64: u64 = if b.is_negative() && low != 0 {
+        (!low).wrapping_add(1)
+    } else {
+        low
+    };
     if is_unsigned(d) {
         // c_ubyte/c_ushort/c_uint/c_ulonglong: unsigned wrap
         ConstVal::Int(match d.bitsize() {
@@ -913,7 +1145,10 @@ pub fn truncate_val(d: DTypeId, v: ConstVal) -> ConstVal {
 /// Python `int(x)` on a finite float: exact trunc toward zero as BigInt.
 pub fn float_to_bigint_trunc(f: f64) -> ConstVal {
     match BigInt::from_f64_trunc(f) {
-        Some(b) => b.as_i64().map(|i| ConstVal::Int(i as i128)).unwrap_or(ConstVal::Big(b)),
+        Some(b) => b
+            .as_i64()
+            .map(|i| ConstVal::Int(i as i128))
+            .unwrap_or(ConstVal::Big(b)),
         None => ConstVal::Float(f64::NAN),
     }
 }
@@ -953,12 +1188,13 @@ pub fn to_storage_scalar(v: ConstVal, d: DTypeId) -> StorageScalar {
             let x = (u as f32).to_bits();
             StorageScalar::U64(((x >> 16) & 0xFFFF) as u64)
         }
-        FP8E4M3 | FP8E5M2 | FP8E4M3FNUZ | FP8E5M2FNUZ => StorageScalar::U64(
-            float_to_fp8(match v {
+        FP8E4M3 | FP8E5M2 | FP8E4M3FNUZ | FP8E5M2FNUZ => StorageScalar::U64(float_to_fp8(
+            match v {
                 ConstVal::Float(f) => f,
                 other => other.as_f64(),
-            }, d) as u64,
-        ),
+            },
+            d,
+        ) as u64),
         _ => match v {
             ConstVal::Bool(b) => StorageScalar::U64(b as u64),
             ConstVal::Int(i) => StorageScalar::U64(i as u64),
@@ -995,7 +1231,11 @@ pub fn from_storage_scalar(x: StorageScalar, d: DTypeId) -> ConstVal {
 
 /// `bitcast(x, in_dtype, out_dtype)` (dtype.py:292-295) — same-width reinterp.
 pub fn bitcast_val(x: ConstVal, in_dt: DTypeId, out_dt: DTypeId) -> ConstVal {
-    assert_eq!(in_dt.itemsize(), out_dt.itemsize(), "bitcast itemsize mismatch");
+    assert_eq!(
+        in_dt.itemsize(),
+        out_dt.itemsize(),
+        "bitcast itemsize mismatch"
+    );
     let w = in_dt.itemsize();
     // to raw little-endian bytes via the storage scalar
     let bits: u128 = match x {

@@ -5,10 +5,16 @@ use autorust::uop::ctx::UOpCtx;
 use autorust::uop::graph::UopId;
 use autorust::uop::ops::Ops;
 use autorust::uop::sint::SVal;
-use autorust::uop::upat::{graph_rewrite, CtxVal, PatternMatcher, UPat};
+use autorust::uop::upat::{CtxVal, PatternMatcher, UPat, graph_rewrite};
 
 fn var(c: &mut UOpCtx, name: &str, lo: i64, hi: i64) -> UopId {
-    c.variable(name, ConstVal::Int(lo as i128), ConstVal::Int(hi as i128), autorust::dtype::WEAKINT, true)
+    c.variable(
+        name,
+        ConstVal::Int(lo as i128),
+        ConstVal::Int(hi as i128),
+        autorust::dtype::WEAKINT,
+        true,
+    )
 }
 
 #[test]
@@ -34,7 +40,12 @@ fn test_shape_basic() {
     let base = c.uop(Ops::Stack, None, items, autorust::uop::arg::Arg::None);
     assert_eq!(&*c.shape_of(&base).unwrap(), &vec![SVal::I(4)]);
     let shp_node = c.shape_arg(&[SVal::I(2), SVal::I(2)]);
-    let r = c.uop(Ops::Reshape, None, vec![base, shp_node], autorust::uop::arg::Arg::None);
+    let r = c.uop(
+        Ops::Reshape,
+        None,
+        vec![base, shp_node],
+        autorust::uop::arg::Arg::None,
+    );
     let sh = c.shape_of(&r).unwrap();
     assert_eq!(&*sh, &vec![SVal::I(2), SVal::I(2)]);
 }
@@ -107,7 +118,10 @@ fn test_rewrite_bottom_up_chain() {
         std::sync::Arc::new(|ctx: &mut UOpCtx, st, _| {
             let x = autorust::uop::upat::sget(st, "x");
             let y = autorust::uop::upat::sget(st, "y");
-            let (a, b) = (ctx.val(&x).as_int_exact().unwrap(), ctx.val(&y).as_int_exact().unwrap());
+            let (a, b) = (
+                ctx.val(&x).as_int_exact().unwrap(),
+                ctx.val(&y).as_int_exact().unwrap(),
+            );
             Some(ctx.cint((a + b) as i64))
         }),
     )]);
@@ -133,22 +147,25 @@ fn test_substitute() {
     assert_eq!(out, expected);
 }
 
-
-
 #[test]
 fn test_getitem_slices() {
     use autorust::s;
-use autorust::tensor::{Ctx, ix::Ix, movement, Tensor};
-    use autorust::uop::ctx::UOpCtx;
+    use autorust::tensor::{Ctx, Tensor, ix::Ix, movement};
+
     use autorust::uop::ops::Ops;
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     // x = STACK of 12 consts reshaped to (3, 4): simple way to get a shaped tensor
     let vals: Vec<_> = (0..12).map(|i| ctx.raw().cint(i)).collect();
-    let x = ctx.raw().uop(Ops::Stack, None, vals, autorust::uop::arg::Arg::None);
+    let x = ctx
+        .raw()
+        .uop(Ops::Stack, None, vals, autorust::uop::arg::Arg::None);
     let x = movement::reshape(
         &mut ctx.raw(),
         x,
-        &[autorust::uop::sint::SVal::I(3), autorust::uop::sint::SVal::I(4)],
+        &[
+            autorust::uop::sint::SVal::I(3),
+            autorust::uop::sint::SVal::I(4),
+        ],
     );
     let t = Tensor::from_uop(&ctx.raw(), x);
     // t[1] -> shape (4,)
@@ -160,9 +177,21 @@ use autorust::tensor::{Ctx, ix::Ix, movement, Tensor};
     // t[1:3, ::2] -> shape (2, 2)
     let ts = t.clone().getitem(&s![1..3, ..;2]);
     let sh = ts.shape();
-    assert_eq!(sh.as_slice(), &[autorust::uop::sint::SVal::I(2), autorust::uop::sint::SVal::I(2)]);
+    assert_eq!(
+        sh.as_slice(),
+        &[
+            autorust::uop::sint::SVal::I(2),
+            autorust::uop::sint::SVal::I(2)
+        ]
+    );
     // t[NewAxis, 2] -> shape (1, 4)
     let tn = t.getitem(&s![NewAxis, 2]);
     let sh = tn.shape();
-    assert_eq!(sh.as_slice(), &[autorust::uop::sint::SVal::I(1), autorust::uop::sint::SVal::I(4)]);
+    assert_eq!(
+        sh.as_slice(),
+        &[
+            autorust::uop::sint::SVal::I(1),
+            autorust::uop::sint::SVal::I(4)
+        ]
+    );
 }

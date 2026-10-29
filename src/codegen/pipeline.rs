@@ -11,27 +11,33 @@
 //! compares stage-for-stage.
 
 use crate::codegen::postrange::apply_opts;
-use crate::renderer::Renderer;
-use crate::codegen::simplify::{pm_flatten_range, pm_load_collapse, pm_reduce_unparented, pm_split_ranges};
-use crate::uop::sym::{pm_cast_float_alu, pm_mop_cleanup, pm_move_where_on_load, pm_remove_invalid, sym, symbolic, symbolic_simple, sget};
-use crate::schedule::rangeify::pm_mops;
+use crate::codegen::simplify::{
+    pm_flatten_range, pm_load_collapse, pm_reduce_unparented, pm_split_ranges,
+};
 use crate::dtype;
-use crate::uop::range::AxisType;
-use crate::uop::sym::r;
-use crate::uop::upat::{graph_rewrite, CtxVal, PatternMatcher, RuleFn, UPat};
+use crate::renderer::Renderer;
+use crate::schedule::rangeify::pm_mops;
 use crate::uop::ctx::UOpCtx;
-use crate::uop::sint::SVal;
 use crate::uop::ops::group;
-use crate::uop::{arg::Arg, ctx::UOpCtx as Ctx2, UopId};
+use crate::uop::range::AxisType;
+use crate::uop::sint::SVal;
+use crate::uop::sym::r;
+use crate::uop::sym::{
+    pm_cast_float_alu, pm_mop_cleanup, pm_move_where_on_load, pm_remove_invalid, sget, sym,
+    symbolic, symbolic_simple,
+};
+use crate::uop::upat::{CtxVal, PatternMatcher, RuleFn, UPat, graph_rewrite};
+use crate::uop::{UopId, arg::Arg, ctx::UOpCtx as Ctx2};
 use std::collections::{HashMap, HashSet};
 
 /// Truncation for stage-by-stage differentials (default: run everything).
 fn stage_limit() -> usize {
     #[cfg(feature = "dump")]
     if let Ok(v) = std::env::var("TG_M5_STAGES")
-        && let Ok(n) = v.parse::<usize>() {
-            return n;
-        }
+        && let Ok(n) = v.parse::<usize>()
+    {
+        return n;
+    }
     usize::MAX
 }
 
@@ -47,13 +53,31 @@ fn stages() -> Vec<Stage> {
     vec![
         Stage {
             name: "early movement ops",
-            pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_mops()).add(pm_mop_cleanup()),
+            pm: PatternMatcher::new(vec![])
+                .add(&crate::schedule::rangeify::pm_mops())
+                .add(pm_mop_cleanup()),
             bottom_up: true,
         },
-        Stage { name: "load collapse", pm: pm_load_collapse(), bottom_up: false },
-        Stage { name: "split ranges", pm: pm_split_ranges().add(&pm_flatten_range()), bottom_up: false },
-        Stage { name: "initial symbolic", pm: sym().add(&pm_flatten_range()), bottom_up: false },
-        Stage { name: "simplify ranges", pm: pm_flatten_range().add(&crate::codegen::simplify::pm_simplify_ranges()), bottom_up: false },
+        Stage {
+            name: "load collapse",
+            pm: pm_load_collapse(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "split ranges",
+            pm: pm_split_ranges().add(&pm_flatten_range()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "initial symbolic",
+            pm: sym().add(&pm_flatten_range()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "simplify ranges",
+            pm: pm_flatten_range().add(&crate::codegen::simplify::pm_simplify_ranges()),
+            bottom_up: false,
+        },
     ]
 }
 
@@ -63,28 +87,134 @@ fn post_stages(ren: &Renderer) -> Vec<Stage> {
     // `supported_ops = tuple(ren.code_for_op.keys())` (codegen/__init__.py:364).
     let decomp = crate::codegen::decomp::pm_decomp(ren.code_for_op.contains(&crate::uop::Ops::Max));
     vec![
-        Stage { name: "postopt symbolic", pm: sym().add(&pm_move_where_on_load()).add(&pm_flatten_range()).add(&pm_reduce_unparented()), bottom_up: false },
-        Stage { name: "expander", pm: expander_pm(), bottom_up: false },
-        Stage { name: "remove reduces", pm: PatternMatcher::new(vec![]).add(pm_mop_cleanup()).add(&crate::codegen::simplify::pm_reduce_local()), bottom_up: false },
-        Stage { name: "add local buffers", pm: PatternMatcher::new(vec![]).add(&crate::schedule::rangeify::pm_add_local_buffers()).add(&crate::schedule::rangeify::pm_mops()), bottom_up: true },
-        Stage { name: "add gpudims", pm: crate::codegen::gpudims::pm_add_gpudims(), bottom_up: false },
-        Stage { name: "*** expand broadcast / add loads", pm: symbolic_simple().add(&pm_expand_broadcast()).add(&pm_add_loads()), bottom_up: false },
-        Stage { name: "devectorize2", pm: symbolic_simple().add(&devectorizer2()).add(crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
-        Stage { name: "early symbolic", pm: PatternMatcher::new(vec![]).add(sym()), bottom_up: false },
-        Stage { name: "add images", pm: PatternMatcher::new(vec![]), bottom_up: true },
-        Stage { name: "extra symbolic", pm: sym().add(crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
-        Stage { name: "lower all index dtypes", pm: symbolic_simple().add(&crate::uop::weak::pm_lower_index_dtype()).add(crate::codegen::coalesce::indexing_simplify()), bottom_up: false },
-        Stage { name: "final symbolic", pm: PatternMatcher::new(vec![]).add(symbolic()), bottom_up: false },
-        Stage { name: "cast float alu operands", pm: pm_cast_float_alu(), bottom_up: false },
-        Stage { name: "early decompositions", pm: decomp.clone(), bottom_up: false },
-        Stage { name: "decomp dtypes", pm: crate::codegen::decomp_dtype::pm_dtype_decomps().add(&crate::uop::weak::pm_commit_weak()), bottom_up: false },
-        Stage { name: "late decompositions", pm: decomp, bottom_up: false },
-        Stage { name: "move gates from index", pm: crate::codegen::gater::pm_move_gates_from_index(), bottom_up: false },
-        Stage { name: "final rewrite", pm: pm_split_ends().add(&crate::uop::weak::pm_commit_weak()).add(&crate::uop::weak::pm_cast_weak()).add(&ren.extra_matcher).add(&pm_remove_invalid()), bottom_up: false },
-        Stage { name: "casted consts", pm: pm_casted_consts(), bottom_up: false,  },
-        Stage { name: "add implicit barriers", pm: pm_implicit_barriers(), bottom_up: false },
-        Stage { name: "add control flow", pm: PatternMatcher::new(vec![]), bottom_up: true },
-        Stage { name: "number params with -1", pm: PatternMatcher::new(vec![]), bottom_up: false },
+        Stage {
+            name: "postopt symbolic",
+            pm: sym()
+                .add(&pm_move_where_on_load())
+                .add(&pm_flatten_range())
+                .add(&pm_reduce_unparented()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "expander",
+            pm: expander_pm(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "remove reduces",
+            pm: PatternMatcher::new(vec![])
+                .add(pm_mop_cleanup())
+                .add(&crate::codegen::simplify::pm_reduce_local()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "add local buffers",
+            pm: PatternMatcher::new(vec![])
+                .add(&crate::schedule::rangeify::pm_add_local_buffers())
+                .add(&crate::schedule::rangeify::pm_mops()),
+            bottom_up: true,
+        },
+        Stage {
+            name: "add gpudims",
+            pm: crate::codegen::gpudims::pm_add_gpudims(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "*** expand broadcast / add loads",
+            pm: symbolic_simple()
+                .add(&pm_expand_broadcast())
+                .add(&pm_add_loads()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "devectorize2",
+            pm: symbolic_simple()
+                .add(&devectorizer2())
+                .add(crate::codegen::coalesce::indexing_simplify()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "early symbolic",
+            pm: PatternMatcher::new(vec![]).add(sym()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "add images",
+            pm: PatternMatcher::new(vec![]),
+            bottom_up: true,
+        },
+        Stage {
+            name: "extra symbolic",
+            pm: sym().add(crate::codegen::coalesce::indexing_simplify()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "lower all index dtypes",
+            pm: symbolic_simple()
+                .add(&crate::uop::weak::pm_lower_index_dtype())
+                .add(crate::codegen::coalesce::indexing_simplify()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "final symbolic",
+            pm: PatternMatcher::new(vec![]).add(symbolic()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "cast float alu operands",
+            pm: pm_cast_float_alu(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "early decompositions",
+            pm: decomp.clone(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "decomp dtypes",
+            pm: crate::codegen::decomp_dtype::pm_dtype_decomps()
+                .add(&crate::uop::weak::pm_commit_weak()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "late decompositions",
+            pm: decomp,
+            bottom_up: false,
+        },
+        Stage {
+            name: "move gates from index",
+            pm: crate::codegen::gater::pm_move_gates_from_index(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "final rewrite",
+            pm: pm_split_ends()
+                .add(&crate::uop::weak::pm_commit_weak())
+                .add(&crate::uop::weak::pm_cast_weak())
+                .add(&ren.extra_matcher)
+                .add(&pm_remove_invalid()),
+            bottom_up: false,
+        },
+        Stage {
+            name: "casted consts",
+            pm: pm_casted_consts(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "add implicit barriers",
+            pm: pm_implicit_barriers(),
+            bottom_up: false,
+        },
+        Stage {
+            name: "add control flow",
+            pm: PatternMatcher::new(vec![]),
+            bottom_up: true,
+        },
+        Stage {
+            name: "number params with -1",
+            pm: PatternMatcher::new(vec![]),
+            bottom_up: false,
+        },
     ]
 }
 
@@ -117,18 +247,15 @@ fn pm_split_ends() -> PatternMatcher {
             if !backedge.is_empty() {
                 ret = ctx.end(ret, backedge);
             }
-            if ret == e {
-                None
-            } else {
-                Some(ret)
-            }
+            if ret == e { None } else { Some(ret) }
         }),
     )])
 }
 
 /// `_is_local_store` (codegen/__init__.py:259).
 fn is_local_store(ctx: &UOpCtx, x: UopId) -> bool {
-    ctx.op_of(&x) == crate::uop::Ops::Store && ctx.addrspace_derived(x) == Some(dtype::AddrSpace::Local)
+    ctx.op_of(&x) == crate::uop::Ops::Store
+        && ctx.addrspace_derived(x) == Some(dtype::AddrSpace::Local)
 }
 
 /// `add_raw_barrier` (codegen/__init__.py:261): a load from a LOCAL buffer that
@@ -139,11 +266,20 @@ fn add_raw_barrier(ctx: &mut UOpCtx, after: UopId) -> Option<UopId> {
     }
     let srcs = ctx.srcs(&after).to_vec();
     let deps = crate::tensor::sink(ctx, srcs[1..].to_vec());
-    let topo = ctx.toposort_gated(deps, Some(&|x| ctx.op_of(&x) != crate::uop::Ops::Barrier), true);
+    let topo = ctx.toposort_gated(
+        deps,
+        Some(&|x| ctx.op_of(&x) != crate::uop::Ops::Barrier),
+        true,
+    );
     if !topo.iter().any(|x| is_local_store(ctx, x.clone())) {
         return None;
     }
-    let barrier = ctx.uop(crate::uop::Ops::Barrier, None, srcs[1..].to_vec(), Arg::None);
+    let barrier = ctx.uop(
+        crate::uop::Ops::Barrier,
+        None,
+        srcs[1..].to_vec(),
+        Arg::None,
+    );
     Some(crate::tensor::after(ctx, (srcs[0]).clone(), vec![barrier]))
 }
 
@@ -152,14 +288,16 @@ fn add_raw_barrier(ctx: &mut UOpCtx, after: UopId) -> Option<UopId> {
 fn add_war_barrier(ctx: &mut UOpCtx, end: UopId) -> Option<UopId> {
     let srcs = ctx.srcs(&end).to_vec();
     let rngs: Vec<UopId> = srcs[1..]
-        .iter().filter(|&r| {
+        .iter()
+        .filter(|&r| {
             if ctx.op_of(r) != crate::uop::Ops::Range {
                 return false;
             }
             let at = AxisType::range_axis_type(ctx, r.clone());
             (at == AxisType::Reduce || at == AxisType::Weak || at == AxisType::Loop)
                 && matches!(ctx.vmax(r), Ok(v) if v.clone().as_i128_or_panic() > 0)
-        }).cloned()
+        })
+        .cloned()
         .collect();
     if rngs.is_empty() || ctx.op_of(&srcs[0]) == crate::uop::Ops::Barrier {
         return None;
@@ -175,9 +313,12 @@ fn add_war_barrier(ctx: &mut UOpCtx, end: UopId) -> Option<UopId> {
         }
     }
     let loads: Vec<UopId> = sl
-        .iter().filter(|&x| {
-            ctx.op_of(x) == crate::uop::Ops::Load && store_bufs.contains(&ctx.buf_uop(ctx.srcs(x)[0].clone()))
-        }).cloned()
+        .iter()
+        .filter(|&x| {
+            ctx.op_of(x) == crate::uop::Ops::Load
+                && store_bufs.contains(&ctx.buf_uop(ctx.srcs(x)[0].clone()))
+        })
+        .cloned()
         .collect();
     if loads.is_empty() {
         return None;
@@ -195,11 +336,15 @@ fn add_war_barrier(ctx: &mut UOpCtx, end: UopId) -> Option<UopId> {
 pub fn pm_implicit_barriers() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
-            UPat::ops1(crate::uop::Ops::After).allow_all_srcs().named("after"),
+            UPat::ops1(crate::uop::Ops::After)
+                .allow_all_srcs()
+                .named("after"),
             r(|ctx, st, _| add_raw_barrier(ctx, sget(st, "after"))),
         ),
         (
-            UPat::ops1(crate::uop::Ops::End).allow_all_srcs().named("end"),
+            UPat::ops1(crate::uop::Ops::End)
+                .allow_all_srcs()
+                .named("end"),
             r(|ctx, st, _| add_war_barrier(ctx, sget(st, "end"))),
         ),
     ])
@@ -209,7 +354,9 @@ pub fn pm_implicit_barriers() -> PatternMatcher {
 /// `cconst(val, dtype)` = CAST(CONST(val at from_py default), dtype).
 fn pm_casted_consts() -> PatternMatcher {
     PatternMatcher::new(vec![(
-        UPat::ops1(crate::uop::Ops::Const).allow_all_srcs().named("c"),
+        UPat::ops1(crate::uop::Ops::Const)
+            .allow_all_srcs()
+            .named("c"),
         r(|ctx, st, _| {
             let c = sget(st, "c");
             let v = ctx.val(&c);
@@ -242,8 +389,8 @@ fn add_images(ctx: &mut Ctx2, sink: UopId) -> UopId {
 /// `ranges()` include enclosing ranges, so `linearize` orders nested loop
 /// headers outer-first (and lets the interpreter nest loops correctly).
 fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
-    use std::collections::HashSet;
     use crate::uop::ops::Ops;
+    use std::collections::HashSet;
 
     let order = ctx.toposort(&sink);
     let mut deps: HashMap<UopId, Vec<UopId>> = HashMap::new();
@@ -265,20 +412,25 @@ fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         }
         let op = ctx.op_of(u);
         if op == Ops::End || op == Ops::Sink {
-            let endrange = if op == Ops::End { ctx.srcs(u).get(1).cloned() } else { None };
+            let endrange = if op == Ops::End {
+                ctx.srcs(u).get(1).cloned()
+            } else {
+                None
+            };
             for x in &d {
                 let nested = op == Ops::Sink
-                    || endrange.clone().is_some_and(|r| dep_set.get(x).is_some_and(|s| s.contains(&r)));
+                    || endrange
+                        .clone()
+                        .is_some_and(|r| dep_set.get(x).is_some_and(|s| s.contains(&r)));
                 if ctx.op_of(x) == Ops::End && nested && !nesting_set.contains(x) {
                     nesting_set.insert(x.clone());
                     nesting.push((x.clone(), u.clone()));
                 }
             }
         }
-        if (op == Ops::Range || op == Ops::End)
-            && ds.insert(u.clone()) {
-                d.push(u.clone());
-            }
+        if (op == Ops::Range || op == Ops::End) && ds.insert(u.clone()) {
+            d.push(u.clone());
+        }
         deps.insert(u.clone(), d);
         dep_set.insert(u.clone(), ds);
     }
@@ -297,7 +449,11 @@ fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     for k in &sibling_keys {
         let v = siblings.get(k).unwrap();
         let mut ord = v.clone();
-        ord.sort_by_key(|x| v.iter().filter(|&u| dep_set.get(x).is_some_and(|s| s.contains(u))).count());
+        ord.sort_by_key(|x| {
+            v.iter()
+                .filter(|&u| dep_set.get(x).is_some_and(|s| s.contains(u)))
+                .count()
+        });
         if ord.is_empty() {
             continue;
         }
@@ -335,8 +491,17 @@ fn add_control_flow(ctx: &mut UOpCtx, sink: UopId) -> UopId {
             })
         }),
     )]);
-    graph_rewrite(ctx, sink, &pm, true, None, false, false, CtxVal::Dict(edges))
-        .unwrap_or_else(|e| panic!("TGERR: add control flow: {e}"))
+    graph_rewrite(
+        ctx,
+        sink,
+        &pm,
+        true,
+        None,
+        false,
+        false,
+        CtxVal::Dict(edges),
+    )
+    .unwrap_or_else(|e| panic!("TGERR: add control flow: {e}"))
 }
 
 /// `ew_devectorizer` (codegen/__init__.py:143): unpack vectorized elementwise.
@@ -365,9 +530,11 @@ fn pm_simplify_add_image() -> PatternMatcher {
         (
             UPat::ops1(crate::uop::Ops::Load)
                 .with_dtype(Some(vec![crate::dtype::FLOAT16]))
-                .with_src_tup(vec![UPat::ops1(crate::uop::Ops::Index)
-                    .with_dtype(Some(vec![crate::dtype::FLOAT32]))
-                    .named("x")]),
+                .with_src_tup(vec![
+                    UPat::ops1(crate::uop::Ops::Index)
+                        .with_dtype(Some(vec![crate::dtype::FLOAT32]))
+                        .named("x"),
+                ]),
             r(|ctx, st, _| {
                 let x = sget(st, "x");
                 let ld = crate::tensor::load(ctx, x, vec![]);
@@ -400,7 +567,12 @@ fn pm_simplify_add_image() -> PatternMatcher {
 
 /// `do_devectorize` (codegen/__init__.py:107).
 fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
-    let shape = ctx.shape(&b).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+    let shape = ctx
+        .shape(&b)
+        .ok()?
+        .as_ref()
+        .map(|v| v.as_ref().clone())
+        .unwrap_or_default();
     if shape.is_empty() {
         return None;
     }
@@ -410,7 +582,12 @@ fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
         if ctx.is_invalid(&ctx.base(x)) {
             continue;
         }
-        let xs = ctx.shape(x).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+        let xs = ctx
+            .shape(x)
+            .ok()?
+            .as_ref()
+            .map(|v| v.as_ref().clone())
+            .unwrap_or_default();
         if xs != shape {
             return None;
         }
@@ -423,7 +600,9 @@ fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
                 SVal::I(v) => *v as i64,
                 _ => panic!("TGERR: symbolic devectorize"),
             };
-            (0..n).map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), None)).collect()
+            (0..n)
+                .map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), None))
+                .collect()
         })
         .collect();
     let mut elems: Vec<UopId> = Vec::new();
@@ -438,12 +617,27 @@ fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
                 new_srcs.push(ctx.index(x.clone(), idx_c.clone()));
             }
         }
-        elems.push(ctx.uop(ctx.op_of(&b), Some(ctx.dt_of(&b)), new_srcs, ctx.arg_of(&b).clone()));
+        elems.push(ctx.uop(
+            ctx.op_of(&b),
+            Some(ctx.dt_of(&b)),
+            new_srcs,
+            ctx.arg_of(&b).clone(),
+        ));
     }
     if ctx.op_of(&b) == crate::uop::Ops::Store {
-        Some(ctx.uop(crate::uop::Ops::Group, Some(crate::dtype::VOID), elems, Arg::None))
+        Some(ctx.uop(
+            crate::uop::Ops::Group,
+            Some(crate::dtype::VOID),
+            elems,
+            Arg::None,
+        ))
     } else {
-        let stack = ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(&b)), elems, Arg::None);
+        let stack = ctx.uop(
+            crate::uop::Ops::Stack,
+            Some(ctx.dt_of(&b)),
+            elems,
+            Arg::None,
+        );
         Some(crate::tensor::movement::reshape(ctx, stack, &shape))
     }
 }
@@ -451,10 +645,18 @@ fn do_devectorize(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
 /// `do_stack_wmma` (codegen/__init__.py:124) — stack each non-STACK WMMA src.
 fn do_stack_wmma(ctx: &mut Ctx2, u: UopId) -> Option<UopId> {
     let srcs = ctx.srcs(&u).to_vec();
-    if srcs.iter().all(|x| matches!(ctx.op_of(x), crate::uop::Ops::Stack | crate::uop::Ops::Wmma)) {
+    if srcs
+        .iter()
+        .all(|x| matches!(ctx.op_of(x), crate::uop::Ops::Stack | crate::uop::Ops::Wmma))
+    {
         return None;
     }
-    let shape = ctx.shape(&u).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+    let shape = ctx
+        .shape(&u)
+        .ok()?
+        .as_ref()
+        .map(|v| v.as_ref().clone())
+        .unwrap_or_default();
     assert_eq!(shape.len(), 1, "TGERR: do_stack_wmma expects a 1-D value");
     let mut new_srcs: Vec<UopId> = Vec::new();
     for b in &srcs {
@@ -522,7 +724,10 @@ fn devectorizer2() -> PatternMatcher {
         // stacked INDEX is many INDEX
         (
             UPat::ops1(crate::uop::Ops::Index)
-                .with_src_tup(vec![UPat::op_var(vec![crate::uop::Ops::Param, crate::uop::Ops::Buffer]).named("b"), UPat::ops1(crate::uop::Ops::Stack).named("s")])
+                .with_src_tup(vec![
+                    UPat::op_var(vec![crate::uop::Ops::Param, crate::uop::Ops::Buffer]).named("b"),
+                    UPat::ops1(crate::uop::Ops::Stack).named("s"),
+                ])
                 .named("x"),
             r(|ctx, st, _| {
                 let b = sget(st, "b");
@@ -532,9 +737,19 @@ fn devectorizer2() -> PatternMatcher {
                 for u in &ss {
                     let mut srcs = vec![b.clone(), u.clone()];
                     srcs.extend(ctx.srcs(&x)[2..].iter().cloned());
-                    elems.push(ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(&x)), srcs, ctx.arg_of(&x).clone()));
+                    elems.push(ctx.uop(
+                        crate::uop::Ops::Index,
+                        Some(ctx.dt_of(&x)),
+                        srcs,
+                        ctx.arg_of(&x).clone(),
+                    ));
                 }
-                Some(ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(&x)), elems, ctx.arg_of(&x).clone()))
+                Some(ctx.uop(
+                    crate::uop::Ops::Stack,
+                    Some(ctx.dt_of(&x)),
+                    elems,
+                    ctx.arg_of(&x).clone(),
+                ))
             }),
         ),
         // INDEX into RESHAPE moves the RESHAPE
@@ -548,15 +763,27 @@ fn devectorizer2() -> PatternMatcher {
             r(|ctx, st, _| {
                 let b = sget(st, "b");
                 let s = sget(st, "s");
-                let shape = ctx.shape(&s).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+                let shape = ctx
+                    .shape(&s)
+                    .ok()?
+                    .as_ref()
+                    .map(|v| v.as_ref().clone())
+                    .unwrap_or_default();
                 let inner = &ctx.srcs(&s)[0].clone();
-                let idx = ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(&b)), vec![b, inner.clone()], Arg::None);
+                let idx = ctx.uop(
+                    crate::uop::Ops::Index,
+                    Some(ctx.dt_of(&b)),
+                    vec![b, inner.clone()],
+                    Arg::None,
+                );
                 Some(crate::tensor::movement::reshape(ctx, idx, &shape))
             }),
         ),
         // RESHAPE a void is removed
         (
-            UPat::ops1(crate::uop::Ops::Reshape).with_dtype(Some(vec![crate::dtype::VOID])).named("x"),
+            UPat::ops1(crate::uop::Ops::Reshape)
+                .with_dtype(Some(vec![crate::dtype::VOID]))
+                .named("x"),
             r(|ctx, st, _| Some(ctx.srcs(&sget(st, "x"))[0].clone())),
         ),
         // reshape of a single element shaped value to scalar is an index
@@ -564,24 +791,51 @@ fn devectorizer2() -> PatternMatcher {
             UPat::ops1(crate::uop::Ops::Reshape).named("x"),
             r(|ctx, st, _| {
                 let x = sget(st, "x");
-                let shape = ctx.shape(&x).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+                let shape = ctx
+                    .shape(&x)
+                    .ok()?
+                    .as_ref()
+                    .map(|v| v.as_ref().clone())
+                    .unwrap_or_default();
                 let src = &ctx.srcs(&x)[0].clone();
-                let src_shape = ctx.shape(src).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+                let src_shape = ctx
+                    .shape(src)
+                    .ok()?
+                    .as_ref()
+                    .map(|v| v.as_ref().clone())
+                    .unwrap_or_default();
                 if shape.is_empty() && src_shape == vec![SVal::I(1)] {
                     let zero = ctx.const_py(crate::dtype::ConstVal::Int(0), None);
-                    return Some(ctx.uop(crate::uop::Ops::Index, Some(ctx.dt_of(src)), vec![src.clone(), zero], Arg::None));
+                    return Some(ctx.uop(
+                        crate::uop::Ops::Index,
+                        Some(ctx.dt_of(src)),
+                        vec![src.clone(), zero],
+                        Arg::None,
+                    ));
                 }
                 None
             }),
         ),
         // EXPAND on scalar -> STACK
         (
-            UPat::ops1(crate::uop::Ops::Expand).with_src_any_len(true).named("out"),
+            UPat::ops1(crate::uop::Ops::Expand)
+                .with_src_any_len(true)
+                .named("out"),
             r(|ctx, st, _| {
                 let out = sget(st, "out");
                 let x = &ctx.srcs(&out)[0].clone();
-                let xs = ctx.shape(x).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
-                let os = ctx.shape(&out).ok()?.as_ref().map(|v| v.as_ref().clone()).unwrap_or_default();
+                let xs = ctx
+                    .shape(x)
+                    .ok()?
+                    .as_ref()
+                    .map(|v| v.as_ref().clone())
+                    .unwrap_or_default();
+                let os = ctx
+                    .shape(&out)
+                    .ok()?
+                    .as_ref()
+                    .map(|v| v.as_ref().clone())
+                    .unwrap_or_default();
                 if !xs.is_empty() || os.len() != 1 {
                     return None;
                 }
@@ -591,7 +845,12 @@ fn devectorizer2() -> PatternMatcher {
                 };
                 // out.shape == (out.max_numel(),) — 1-D is its own max shape
                 let copies = vec![x.clone(); n as usize];
-                Some(ctx.uop(crate::uop::Ops::Stack, Some(ctx.dt_of(&out)), copies, Arg::None))
+                Some(ctx.uop(
+                    crate::uop::Ops::Stack,
+                    Some(ctx.dt_of(&out)),
+                    copies,
+                    Arg::None,
+                ))
             }),
         ),
     ])
@@ -605,16 +864,17 @@ fn build_range_map(ctx: &mut Ctx2, sink: UopId) -> HashMap<i64, usize> {
     for x in ctx.toposort(&sink).iter() {
         if ctx.op_of(x) == crate::uop::Ops::Range
             && let Arg::Seq { tuple: true, items } = ctx.arg_of(x)
-                && let Arg::Enum(e) = &items[1]
-                    && matches!(e.value, 9 | 8) {
-                        // UNROLL | UPCAST
-                        let axis = match &items[0] {
-                            Arg::Int(i) => *i,
-                            _ => continue,
-                        };
-                        let n = map.len();
-                        map.entry(axis).or_insert(n);
-                    }
+            && let Arg::Enum(e) = &items[1]
+            && matches!(e.value, 9 | 8)
+        {
+            // UNROLL | UPCAST
+            let axis = match &items[0] {
+                Arg::Int(i) => *i,
+                _ => continue,
+            };
+            let n = map.len();
+            map.entry(axis).or_insert(n);
+        }
     }
     map
 }
@@ -645,7 +905,9 @@ fn expander_rules(rm: HashMap<i64, usize>) -> Vec<(UPat, RuleFn)> {
                 let r = sget(st, "r");
                 let (op, dt, srcs, arg, _tag) = ctx.snapshot(&r);
                 let _ = op;
-                let Arg::Seq { tuple: true, items } = &arg else { return None };
+                let Arg::Seq { tuple: true, items } = &arg else {
+                    return None;
+                };
                 let axis = match &items[0] {
                     Arg::Int(i) => *i,
                     _ => return None,
@@ -656,9 +918,13 @@ fn expander_rules(rm: HashMap<i64, usize>) -> Vec<(UPat, RuleFn)> {
                     _ => return None,
                 };
                 // UOp.const(tuple(range(vmax+1)), r.dtype).reshape(...)
-                let consts: Vec<UopId> = (0..=vmax).map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), Some(dt))).collect();
+                let consts: Vec<UopId> = (0..=vmax)
+                    .map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), Some(dt)))
+                    .collect();
                 let stack = ctx.uop(crate::uop::Ops::Stack, Some(dt), consts, Arg::None);
-                let shape: Vec<SVal> = (0..rm.len()).map(|i| SVal::I(if i == pos { vmax + 1 } else { 1 } as i128)).collect();
+                let shape: Vec<SVal> = (0..rm.len())
+                    .map(|i| SVal::I(if i == pos { vmax + 1 } else { 1 } as i128))
+                    .collect();
                 Some(crate::tensor::movement::reshape(ctx, stack, &shape))
             }),
         ),
@@ -698,7 +964,10 @@ fn parse_upcast_triple(a: &Arg) -> Option<[Vec<(i64, i64)>; 3]> {
 fn contract_axis(ctx: &mut Ctx2, u: UopId, arg: &[(i64, i64)], rm: &HashMap<i64, usize>) -> UopId {
     let permute_tail: Vec<usize> = arg
         .iter()
-        .map(|(rn, _)| *rm.get(rn).unwrap_or_else(|| panic!("TGERR: contract_axis rn {rn} not in range map")))
+        .map(|(rn, _)| {
+            *rm.get(rn)
+                .unwrap_or_else(|| panic!("TGERR: contract_axis rn {rn} not in range map"))
+        })
         .collect();
     let n = ctx.shape(&u).unwrap().unwrap_or_default().len();
     let permute_head: Vec<usize> = (0..n).filter(|i| !permute_tail.contains(i)).collect();
@@ -716,7 +985,10 @@ fn contract_axis(ctx: &mut Ctx2, u: UopId, arg: &[(i64, i64)], rm: &HashMap<i64,
 fn unroll_axis(ctx: &mut Ctx2, u: UopId, arg: &[(i64, i64)], rm: &HashMap<i64, usize>) -> UopId {
     let permute_tail: Vec<usize> = arg
         .iter()
-        .map(|(rn, _)| *rm.get(rn).unwrap_or_else(|| panic!("TGERR: unroll_axis rn {rn} not in range map")))
+        .map(|(rn, _)| {
+            *rm.get(rn)
+                .unwrap_or_else(|| panic!("TGERR: unroll_axis rn {rn} not in range map"))
+        })
         .collect();
     let shape = ctx.shape(&u).unwrap().unwrap_or_default();
     let mut new_shape: Vec<SVal> = shape[..shape.len() - 1].iter().cloned().collect();
@@ -750,7 +1022,10 @@ fn expand_wmma(ctx: &mut Ctx2, u: UopId, rm: &HashMap<i64, usize>) -> Option<Uop
         crate::uop::Ops::Wmma,
         Some(dt),
         vec![a, b, srcs[2].clone()],
-        Arg::Seq { tuple: true, items: new_items },
+        Arg::Seq {
+            tuple: true,
+            items: new_items,
+        },
         tag,
     );
     Some(unroll_axis(ctx, wmma, &upcast[2], rm))
@@ -802,7 +1077,8 @@ fn expand_reduce(ctx: &mut Ctx2, r: UopId) -> Option<UopId> {
         }
         other => panic!("TGERR: expand_reduce bad arg {other:?}"),
     };
-    let s0_shape: Vec<crate::uop::sint::SVal> = ctx.shape(&s0).unwrap().unwrap_or_default().as_ref().clone();
+    let s0_shape: Vec<crate::uop::sint::SVal> =
+        ctx.shape(&s0).unwrap().unwrap_or_default().as_ref().clone();
     let perm: Vec<usize> = new_axes
         .iter()
         .cloned()
@@ -813,13 +1089,26 @@ fn expand_reduce(ctx: &mut Ctx2, r: UopId) -> Option<UopId> {
         tuple: true,
         items: vec![red_op, Arg::Int(new_axes.len() as i64)],
     };
-    let red = ctx.uop(crate::uop::Ops::Reduce, Some(dt), [vec![permuted], range_srcs].concat(), red_arg);
+    let red = ctx.uop(
+        crate::uop::Ops::Reduce,
+        Some(dt),
+        [vec![permuted], range_srcs].concat(),
+        red_arg,
+    );
     let out_shape: Vec<crate::uop::sint::SVal> = s0_shape
         .iter()
         .enumerate()
-        .map(|(i, s)| if new_axes.contains(&i) { crate::uop::sint::SVal::I(1) } else { s.clone() })
+        .map(|(i, s)| {
+            if new_axes.contains(&i) {
+                crate::uop::sint::SVal::I(1)
+            } else {
+                s.clone()
+            }
+        })
         .collect();
-    Some(crate::tensor::movement::reshape_internal(ctx, red, &out_shape))
+    Some(crate::tensor::movement::reshape_internal(
+        ctx, red, &out_shape,
+    ))
 }
 
 /// `expand_broadcast` (codegen/__init__.py:97).
@@ -840,7 +1129,12 @@ fn expand_broadcast(ctx: &mut Ctx2, x: UopId) -> Option<UopId> {
     for u in &srcs {
         new_srcs.push(crate::tensor::movement::expand(ctx, u.clone(), &shape));
     }
-    Some(ctx.uop(ctx.op_of(&x), Some(ctx.dt_of(&x)), new_srcs, ctx.arg_of(&x).clone()))
+    Some(ctx.uop(
+        ctx.op_of(&x),
+        Some(ctx.dt_of(&x)),
+        new_srcs,
+        ctx.arg_of(&x).clone(),
+    ))
 }
 
 /// `pm_expand_broadcast` (codegen/__init__.py:106) — corpus subset (no WMMA).
@@ -871,7 +1165,11 @@ fn pm_expand_broadcast() -> PatternMatcher {
 fn broadcast_and_devec_wmma(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
     let srcs = ctx.srcs(&b).to_vec();
     let head_shape = |ctx: &mut Ctx2, u: &UopId| -> Option<Vec<SVal>> {
-        let s = ctx.shape(u).ok()?.map(|v| v.as_ref().clone()).unwrap_or_default();
+        let s = ctx
+            .shape(u)
+            .ok()?
+            .map(|v| v.as_ref().clone())
+            .unwrap_or_default();
         Some(s[..s.len().saturating_sub(1)].to_vec())
     };
     let mut shapes: Vec<Vec<SVal>> = Vec::new();
@@ -884,13 +1182,21 @@ fn broadcast_and_devec_wmma(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
     let shape = ctx.broadcast_shape(&shapes).ok()?;
     let mut src_expanded: Vec<UopId> = Vec::new();
     for u in &srcs {
-        let us = ctx.shape(u).ok()?.map(|v| v.as_ref().clone()).unwrap_or_default();
+        let us = ctx
+            .shape(u)
+            .ok()?
+            .map(|v| v.as_ref().clone())
+            .unwrap_or_default();
         let last = us.last().cloned().unwrap_or(SVal::I(1));
         let mut tgt = shape.clone();
         tgt.push(last);
         src_expanded.push(crate::tensor::movement::expand(ctx, u.clone(), &tgt));
     }
-    let bshape = ctx.shape(&b).ok()?.map(|v| v.as_ref().clone()).unwrap_or_default();
+    let bshape = ctx
+        .shape(&b)
+        .ok()?
+        .map(|v| v.as_ref().clone())
+        .unwrap_or_default();
     let head = &bshape[..bshape.len() - 1];
     let idx_lists: Vec<Vec<UopId>> = head
         .iter()
@@ -899,7 +1205,9 @@ fn broadcast_and_devec_wmma(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
                 SVal::I(v) => *v as i64,
                 _ => 0,
             };
-            (0..n).map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), None)).collect()
+            (0..n)
+                .map(|i| ctx.const_py(crate::dtype::ConstVal::Int(i as i128), None))
+                .collect()
         })
         .collect();
     let dt = ctx.dt_of(&b);
@@ -907,8 +1215,17 @@ fn broadcast_and_devec_wmma(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
     let tag = ctx.tag_of(&b).clone();
     let mut elems: Vec<UopId> = Vec::new();
     for idx in cartesian(&idx_lists) {
-        let new_srcs: Vec<UopId> = src_expanded.iter().map(|x| ctx.index(x.clone(), idx.clone())).collect();
-        elems.push(ctx.uop_tag(crate::uop::Ops::Wmma, Some(dt), new_srcs, arg.clone(), tag.clone()));
+        let new_srcs: Vec<UopId> = src_expanded
+            .iter()
+            .map(|x| ctx.index(x.clone(), idx.clone()))
+            .collect();
+        elems.push(ctx.uop_tag(
+            crate::uop::Ops::Wmma,
+            Some(dt),
+            new_srcs,
+            arg.clone(),
+            tag.clone(),
+        ));
     }
     let stack = crate::tensor::stack(ctx, elems);
     Some(crate::tensor::movement::reshape(ctx, stack, &bshape))
@@ -917,7 +1234,14 @@ fn broadcast_and_devec_wmma(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
 /// `maybe_load` (codegen/__init__.py:245).
 fn maybe_load(ctx: &mut Ctx2, u: UopId) -> UopId {
     match ctx.addrspace_derived(u.clone()) {
-        Some(a) if matches!(a, crate::dtype::AddrSpace::Global | crate::dtype::AddrSpace::Local | crate::dtype::AddrSpace::Reg) => {
+        Some(a)
+            if matches!(
+                a,
+                crate::dtype::AddrSpace::Global
+                    | crate::dtype::AddrSpace::Local
+                    | crate::dtype::AddrSpace::Reg
+            ) =>
+        {
             crate::tensor::load(ctx, u, vec![])
         }
         _ => u,
@@ -929,7 +1253,11 @@ fn pm_add_loads() -> PatternMatcher {
     let elementwise_like: Vec<crate::uop::Ops> = group::ELEMENTWISE
         .iter()
         .cloned()
-        .chain([crate::uop::Ops::Reduce, crate::uop::Ops::Wmma, crate::uop::Ops::Stack])
+        .chain([
+            crate::uop::Ops::Reduce,
+            crate::uop::Ops::Wmma,
+            crate::uop::Ops::Stack,
+        ])
         .collect();
     PatternMatcher::new(vec![
         (
@@ -937,11 +1265,17 @@ fn pm_add_loads() -> PatternMatcher {
             r(|ctx, st, _| {
                 let x = sget(st, "x");
                 let srcs = ctx.srcs(&x).to_vec();
-                let new_srcs: Vec<UopId> = srcs.iter().map(|s| maybe_load(ctx, s.clone())).collect();
+                let new_srcs: Vec<UopId> =
+                    srcs.iter().map(|s| maybe_load(ctx, s.clone())).collect();
                 if new_srcs == srcs {
                     return None;
                 }
-                Some(ctx.uop(ctx.op_of(&x), Some(ctx.dt_of(&x)), new_srcs, ctx.arg_of(&x).clone()))
+                Some(ctx.uop(
+                    ctx.op_of(&x),
+                    Some(ctx.dt_of(&x)),
+                    new_srcs,
+                    ctx.arg_of(&x).clone(),
+                ))
             }),
         ),
         (
@@ -955,7 +1289,12 @@ fn pm_add_loads() -> PatternMatcher {
                 }
                 let mut new_srcs = vec![(srcs[0]).clone(), loaded];
                 new_srcs.extend(srcs[2..].iter().cloned());
-                Some(ctx.uop(crate::uop::Ops::Store, Some(ctx.dt_of(&x)), new_srcs, ctx.arg_of(&x).clone()))
+                Some(ctx.uop(
+                    crate::uop::Ops::Store,
+                    Some(ctx.dt_of(&x)),
+                    new_srcs,
+                    ctx.arg_of(&x).clone(),
+                ))
             }),
         ),
     ])
@@ -976,7 +1315,12 @@ fn dump_ast(ctx: &mut UOpCtx, sink: UopId) -> String {
         let (op, dt, srcs, arg, _tag) = ctx.snapshot(n);
         let dt_s = format!("{dt:?}");
         let src_s: Vec<String> = srcs.iter().map(|s| s.id().to_string()).collect();
-        let shape = ctx.shape(n).ok().flatten().map(|s| format!("{s:?}")).unwrap_or_default();
+        let shape = ctx
+            .shape(n)
+            .ok()
+            .flatten()
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_default();
         out.push_str(&format!(
             "{} = {:?}{} ({}) src=[{}] arg={:?}\n",
             n.id(),
@@ -990,7 +1334,12 @@ fn dump_ast(ctx: &mut UOpCtx, sink: UopId) -> String {
     out
 }
 
-pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, optimize: bool) -> UopId {
+pub fn full_rewrite_to_sink_with(
+    ctx: &mut UOpCtx,
+    ast: UopId,
+    ren: &Renderer,
+    optimize: bool,
+) -> UopId {
     let limit = stage_limit();
     let mut i = 0usize;
     let mut cur = ast;
@@ -998,40 +1347,43 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, o
     // already optimized by BEAM (`get_optimized_ast` tags it) skips the
     // pre-optimization stages and `apply_opts` entirely.
     if optimize {
-    for st in stages() {
+        for st in stages() {
+            if i + 1 > limit {
+                return cur;
+            }
+            let ctxv = if st.name == "split ranges" {
+                CtxVal::Dict(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())))
+            } else {
+                CtxVal::None
+            };
+            cur = graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, ctxv)
+                .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name));
+            if st.name == "simplify ranges" {
+                cur = crate::codegen::simplify::range_gates(ctx, cur);
+            }
+            i += 1;
+            // temporary: dump the pre-expander AST (TG_DUMP_PRE_EXPAND=1)
+            #[cfg(feature = "dump")]
+            if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
+                eprintln!("=== after stage {} ({}) ===", i, st.name);
+                eprintln!("{}", dump_ast(ctx, cur.clone()));
+            }
+        }
         if i + 1 > limit {
             return cur;
         }
-        let ctxv = if st.name == "split ranges" {
-            CtxVal::Dict(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())))
-        } else {
-            CtxVal::None
-        };
-        cur = graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, ctxv)
-            .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name));
-        if st.name == "simplify ranges" {
-            cur = crate::codegen::simplify::range_gates(ctx, cur);
-        }
+        // do postrange optimization, BEAM or hand_coded_optimizations
+        let beam: usize = std::env::var("BEAM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        cur = apply_opts(ctx, cur, ren, beam);
         i += 1;
-        // temporary: dump the pre-expander AST (TG_DUMP_PRE_EXPAND=1)
         #[cfg(feature = "dump")]
         if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
-            eprintln!("=== after stage {} ({}) ===", i, st.name);
+            eprintln!("=== after stage {} (apply_opts) ===", i);
             eprintln!("{}", dump_ast(ctx, cur.clone()));
         }
-    }
-    if i + 1 > limit {
-        return cur;
-    }
-    // do postrange optimization, BEAM or hand_coded_optimizations
-    let beam: usize = std::env::var("BEAM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-    cur = apply_opts(ctx, cur, ren, beam);
-    i += 1;
-    #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
-        eprintln!("=== after stage {} (apply_opts) ===", i);
-        eprintln!("{}", dump_ast(ctx, cur.clone()));
-    }
     } // end `if optimize`
     for st in post_stages(ren) {
         if i + 1 > limit {
@@ -1039,11 +1391,29 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, o
         }
         cur = if st.name == "expander" {
             let (pm, _rm) = expander_pm_with(ctx, cur.clone());
-            graph_rewrite(ctx, cur, &pm, st.bottom_up, None, false, false, CtxVal::None)
-                .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
+            graph_rewrite(
+                ctx,
+                cur,
+                &pm,
+                st.bottom_up,
+                None,
+                false,
+                false,
+                CtxVal::None,
+            )
+            .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "remove reduces" || st.name == "add local buffers" {
-            graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, CtxVal::Cnt(std::rc::Rc::new(std::cell::Cell::new(0i64))))
-                .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
+            graph_rewrite(
+                ctx,
+                cur,
+                &st.pm,
+                st.bottom_up,
+                None,
+                false,
+                false,
+                CtxVal::Cnt(std::rc::Rc::new(std::cell::Cell::new(0i64))),
+            )
+            .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "add images" {
             add_images(ctx, cur)
         } else if st.name == "decomp dtypes" {
@@ -1052,14 +1422,31 @@ pub fn full_rewrite_to_sink_with(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, o
                 supported: ren.supported_dtypes.clone(),
                 emulated: crate::codegen::decomp_dtype::emulated_dtypes(),
             };
-            graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false,
-                          CtxVal::Decomp(std::rc::Rc::new(std::cell::RefCell::new(dctx))))
-                .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
+            graph_rewrite(
+                ctx,
+                cur,
+                &st.pm,
+                st.bottom_up,
+                None,
+                false,
+                false,
+                CtxVal::Decomp(std::rc::Rc::new(std::cell::RefCell::new(dctx))),
+            )
+            .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         } else if st.name == "add control flow" {
             add_control_flow(ctx, cur)
         } else {
-            graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, CtxVal::None)
-                .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
+            graph_rewrite(
+                ctx,
+                cur,
+                &st.pm,
+                st.bottom_up,
+                None,
+                false,
+                false,
+                CtxVal::None,
+            )
+            .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         };
         i += 1;
         #[cfg(feature = "dump")]
@@ -1097,20 +1484,38 @@ pub fn pm_inventory() -> Vec<(&'static str, Vec<String>)> {
     add!("expander2", expander_pm());
     add!("pm_expand_broadcast", pm_expand_broadcast());
     add!("pm_add_loads", pm_add_loads());
-    add!("pm_reduce_local", crate::codegen::simplify::pm_reduce_local());
+    add!(
+        "pm_reduce_local",
+        crate::codegen::simplify::pm_reduce_local()
+    );
     // tinygrad: `pm_add_local_buffers = PatternMatcher([...])+pm_mops`
-    add!("pm_add_local_buffers", crate::schedule::rangeify::pm_add_local_buffers().add(&pm_mops()));
+    add!(
+        "pm_add_local_buffers",
+        crate::schedule::rangeify::pm_add_local_buffers().add(&pm_mops())
+    );
     add!("pm_add_gpudims", crate::codegen::gpudims::pm_add_gpudims());
-    add!("indexing_simplify", crate::codegen::coalesce::indexing_simplify());
+    add!(
+        "indexing_simplify",
+        crate::codegen::coalesce::indexing_simplify()
+    );
     add!("pm_simplify_add_image", pm_simplify_add_image());
     // the bridge differentials use the interpreter op set (python_alu contains MAX)
     add!("pm_decomp", crate::codegen::decomp::pm_decomp(true));
-    add!("pm_dtype_decomps", crate::codegen::decomp_dtype::pm_dtype_decomps());
-    add!("pm_move_gates_from_index", crate::codegen::gater::pm_move_gates_from_index());
+    add!(
+        "pm_dtype_decomps",
+        crate::codegen::decomp_dtype::pm_dtype_decomps()
+    );
+    add!(
+        "pm_move_gates_from_index",
+        crate::codegen::gater::pm_move_gates_from_index()
+    );
     add!("pm_cast_float_alu", pm_cast_float_alu());
     add!("pm_commit_weak", crate::uop::weak::pm_commit_weak());
     add!("pm_cast_weak", crate::uop::weak::pm_cast_weak());
-    add!("pm_lower_index_dtype", crate::uop::weak::pm_lower_index_dtype());
+    add!(
+        "pm_lower_index_dtype",
+        crate::uop::weak::pm_lower_index_dtype()
+    );
     add!("pm_casted_consts", pm_casted_consts());
     add!("pm_implicit_barriers", pm_implicit_barriers());
     add!("pm_split_ends", pm_split_ends());
@@ -1118,7 +1523,10 @@ pub fn pm_inventory() -> Vec<(&'static str, Vec<String>)> {
     add!("pm_flatten_range", pm_flatten_range());
     add!("pm_split_ranges", pm_split_ranges());
     add!("pm_reduce_unparented", pm_reduce_unparented());
-    add!("pm_reduce_load_collapse", crate::codegen::simplify::pm_reduce_load_collapse());
+    add!(
+        "pm_reduce_load_collapse",
+        crate::codegen::simplify::pm_reduce_load_collapse()
+    );
     add!("pm_load_collapse", pm_load_collapse());
     add!("pm_mops", pm_mops());
     v

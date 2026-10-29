@@ -21,15 +21,17 @@ use std::rc::Rc;
 
 use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
-use crate::runtime::buffer::{host_of, OpaqueT};
-use crate::runtime::device::{register_device, Comp, Compiled, IdentityCompiler, LruAllocator, Prog, TinyElf};
+use crate::runtime::buffer::{OpaqueT, host_of};
+use crate::runtime::device::{
+    Comp, Compiled, IdentityCompiler, LruAllocator, Prog, TinyElf, register_device,
+};
 use crate::runtime::ops_interp::InterpProgram;
 use crate::runtime::ray_kernel::{RayKernel, SendMemView};
 use crate::runtime::ray_typed::TypedKernel;
-use crate::uop::ctx::UOpCtx;
-use crate::uop::flat::{parse_flat, FlatGraph};
-use crate::uop::graph::Graph;
 use crate::uop::UopId;
+use crate::uop::ctx::UOpCtx;
+use crate::uop::flat::{FlatGraph, parse_flat};
+use crate::uop::graph::Graph;
 
 /// `RayonRenderer` — the `RAYON` facts. The artifact is the same flat-JSON uop
 /// wire format the interpreter uses (`ops_interp`), so R0 executes through
@@ -46,7 +48,9 @@ impl Default for RayonUopRenderer {
 
 impl RayonUopRenderer {
     pub fn new() -> RayonUopRenderer {
-        RayonUopRenderer { facts: Renderer::rayon() }
+        RayonUopRenderer {
+            facts: Renderer::rayon(),
+        }
     }
 }
 
@@ -113,7 +117,8 @@ fn mode_from_env() -> Mode {
 /// programs using the typed path, and interpreter fallbacks.
 pub static OWNED_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub static TYPED_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-pub static FALLBACK_KERNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static FALLBACK_KERNELS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 impl RayonProgram {
     pub fn new(elf: &TinyElf) -> RayonProgram {
@@ -139,17 +144,32 @@ impl RayonProgram {
             TYPED_KERNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if verbose() {
-            let kind = if typed.is_some() { "typed" } else if f64_kernel.is_some() { "f64" } else { "fallback" };
+            let kind = if typed.is_some() {
+                "typed"
+            } else if f64_kernel.is_some() {
+                "f64"
+            } else {
+                "fallback"
+            };
             eprintln!("[rayon] program {} -> {kind}", elf.name);
         }
-        RayonProgram { typed, f64_kernel, inner: InterpProgram::new(elf), mode: mode() }
+        RayonProgram {
+            typed,
+            f64_kernel,
+            inner: InterpProgram::new(elf),
+            mode: mode(),
+        }
     }
 }
 
 /// Bind signature slots to raw host windows. The `Rc<dyn OpaqueT>`s are
 /// borrowed from `bufs`, which the caller keeps alive until `call` returns; the
 /// rayon scope always joins before then.
-fn bind_views(bufs: &[Rc<dyn OpaqueT>], globals: &[i64], sig: &HashMap<i64, DTypeId>) -> HashMap<i64, SendMemView> {
+fn bind_views(
+    bufs: &[Rc<dyn OpaqueT>],
+    globals: &[i64],
+    sig: &HashMap<i64, DTypeId>,
+) -> HashMap<i64, SendMemView> {
     let mut views: HashMap<i64, SendMemView> = HashMap::new();
     for &slot in globals {
         let o = &bufs[slot as usize];
@@ -191,9 +211,15 @@ impl Prog for RayonProgram {
         let ls_rev = local_size.map(|l| [l[2], l[1], l[0]]);
         let parallel = matches!(self.mode, Mode::Parallel | Mode::F64);
         if use_typed {
-            self.typed.as_ref().unwrap().exec(&views, gs_rev, ls_rev, &vals_f, parallel);
+            self.typed
+                .as_ref()
+                .unwrap()
+                .exec(&views, gs_rev, ls_rev, &vals_f, parallel);
         } else {
-            self.f64_kernel.as_ref().unwrap().exec(&views, gs_rev, ls_rev, &vals_f, parallel);
+            self.f64_kernel
+                .as_ref()
+                .unwrap()
+                .exec(&views, gs_rev, ls_rev, &vals_f, parallel);
         }
         if wait {
             Some(st.elapsed().as_secs_f64())
@@ -234,4 +260,3 @@ pub(crate) fn decode_lib(elf: &TinyElf) -> Option<(UOpCtx, Vec<UopId>)> {
 pub fn num_threads() -> usize {
     rayon::current_num_threads()
 }
-

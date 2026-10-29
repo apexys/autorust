@@ -3,11 +3,10 @@
 
 use autorust::dtype;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 #[test]
 fn from_slice_infers_dtype_from_generic() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let t16 = Tensor::from_slice(&ctx, &[1i16, 2, 3], None, None);
     let t32 = Tensor::from_slice(&ctx, &[1i32, 2, 3], None, None);
     let tu8 = Tensor::from_slice(&ctx, &[1u8, 2, 3], None, None);
@@ -24,7 +23,7 @@ fn from_slice_infers_dtype_from_generic() {
 
 #[test]
 fn to_list_roundtrips_native_dtype() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let a = Tensor::from_slice(&ctx, &[-5i16, 300, -200, 0], None, None);
     assert_eq!(a.to_list_fresh::<i16>(), vec![-5i16, 300, -200, 0]);
 
@@ -40,7 +39,7 @@ fn to_list_roundtrips_native_dtype() {
 
 #[test]
 fn to_bytes_is_native_width_storage() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let t = Tensor::from_slice(&ctx, &[1i16, 2, 3, 4], None, None);
     let bytes = t.to_bytes_fresh();
     assert_eq!(bytes.len(), 4 * dtype::INT16.itemsize());
@@ -49,12 +48,15 @@ fn to_bytes_is_native_width_storage() {
     let big = Tensor::from_slice(&ctx, &[1_000_000i64, -1], None, None);
     let bb = big.to_bytes_fresh();
     assert_eq!(bb.len(), 2 * dtype::INT64.itemsize());
-    assert_eq!(i64::from_le_bytes(bb[..8].try_into().unwrap()), 1_000_000i64);
+    assert_eq!(
+        i64::from_le_bytes(bb[..8].try_into().unwrap()),
+        1_000_000i64
+    );
 }
 
 #[test]
 fn to_list_casts_across_dtypes() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     // widen i16 -> i32
     let t16 = Tensor::from_slice(&ctx, &[-5i16, 300, -200], None, None);
     assert_eq!(t16.to_list_fresh::<i32>(), vec![-5i32, 300, -200]);
@@ -70,7 +72,7 @@ fn to_list_casts_across_dtypes() {
 
 #[test]
 fn item_reads_single_element() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let s = Tensor::from_slice(&ctx, &[42i64], None, None);
     assert_eq!(s.item_fresh::<i64>(), 42i64);
     let f = Tensor::from_slice(&ctx, &[3.5f32], None, None);
@@ -80,7 +82,7 @@ fn item_reads_single_element() {
 #[test]
 #[should_panic(expected = "item() requires exactly one element")]
 fn item_panics_on_multi_element() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let t = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);
     let _ = t.item_fresh::<f32>();
 }

@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::codegen::postrange::{OptOp, Scheduler};
-use crate::engine::realize::{to_program, CompiledProg, ProgCache};
+use crate::engine::realize::{CompiledProg, ProgCache, to_program};
 use crate::runtime::buffer::OpaqueT;
-use crate::runtime::device::{device, Compiled, TinyElf};
+use crate::runtime::device::{Compiled, TinyElf, device};
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
@@ -34,36 +34,67 @@ pub fn actions() -> Vec<Action> {
     let mut a = Vec::new();
     for arg in [0i64, 2, 3, 4, 5, 7] {
         for axis in 0..8 {
-            a.push(Action { op: OptOp::Upcast, axis, arg });
+            a.push(Action {
+                op: OptOp::Upcast,
+                axis,
+                arg,
+            });
         }
     }
     for arg in [0i64, 4, 7] {
         for axis in 0..5 {
-            a.push(Action { op: OptOp::Unroll, axis, arg });
+            a.push(Action {
+                op: OptOp::Unroll,
+                axis,
+                arg,
+            });
         }
     }
     for arg in [2i64, 3, 4, 8, 13, 16, 29] {
         for axis in 0..6 {
-            a.push(Action { op: OptOp::Local, axis, arg });
+            a.push(Action {
+                op: OptOp::Local,
+                axis,
+                arg,
+            });
         }
     }
     for arg in [13i64, 16, 28, 29, 32, 49, 64, 256] {
         for axis in 0..3 {
-            a.push(Action { op: OptOp::GroupTop, axis, arg });
+            a.push(Action {
+                op: OptOp::GroupTop,
+                axis,
+                arg,
+            });
         }
     }
     for arg in [0i64, 4, 8, 16] {
         for axis in 0..3 {
-            a.push(Action { op: OptOp::Group, axis, arg });
+            a.push(Action {
+                op: OptOp::Group,
+                axis,
+                arg,
+            });
         }
     }
-    a.push(Action { op: OptOp::Local, axis: 0, arg: 32 });
-    a.push(Action { op: OptOp::Local, axis: 6, arg: 2 });
+    a.push(Action {
+        op: OptOp::Local,
+        axis: 0,
+        arg: 32,
+    });
+    a.push(Action {
+        op: OptOp::Local,
+        axis: 6,
+        arg: 2,
+    });
     a
 }
 
 fn env_i64(key: &str, default: i64) -> i64 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 /// upcast/unroll product and local/group product (search.py:132-136).
@@ -82,7 +113,13 @@ fn up_lcl(ctx: &mut UOpCtx, s: &Scheduler) -> (i64, i64) {
 }
 
 /// `get_kernel_actions` (search.py:95) — one Scheduler per applicable action.
-pub fn get_kernel_actions<'a>(ctx: &mut UOpCtx, s: &Scheduler<'a>, include_0: bool, max_up: i64, max_lcl: i64) -> Vec<Scheduler<'a>> {
+pub fn get_kernel_actions<'a>(
+    ctx: &mut UOpCtx,
+    s: &Scheduler<'a>,
+    include_0: bool,
+    max_up: i64,
+    max_lcl: i64,
+) -> Vec<Scheduler<'a>> {
     let mut acted: Vec<Scheduler> = Vec::new();
     if include_0 {
         acted.push(s.copy());
@@ -96,14 +133,21 @@ pub fn get_kernel_actions<'a>(ctx: &mut UOpCtx, s: &Scheduler<'a>, include_0: bo
             if ax >= fs.len() {
                 continue;
             }
-            if fs[ax] == a.arg && acts.iter().any(|b| b.op == a.op && b.axis == a.axis && b.arg == 0) {
+            if fs[ax] == a.arg
+                && acts
+                    .iter()
+                    .any(|b| b.op == a.op && b.axis == a.axis && b.arg == 0)
+            {
                 continue;
             }
         } else {
             continue;
         }
         let mut s2 = s.copy();
-        if s2.try_apply_opt(ctx, a.op, Some(a.axis), Some(a.arg)).is_err() {
+        if s2
+            .try_apply_opt(ctx, a.op, Some(a.axis), Some(a.arg))
+            .is_err()
+        {
             continue;
         }
         let (up, lcl) = up_lcl(ctx, &s2);
@@ -116,13 +160,19 @@ pub fn get_kernel_actions<'a>(ctx: &mut UOpCtx, s: &Scheduler<'a>, include_0: bo
 }
 
 /// `args_from_ast` (postrange.py:330) — one dummy buffer per kernel PARAM slot.
-fn rawbufs_from_ast(ctx: &mut UOpCtx, ast: &UopId, dev: &Rc<Compiled>) -> HashMap<i64, Rc<dyn OpaqueT>> {
+fn rawbufs_from_ast(
+    ctx: &mut UOpCtx,
+    ast: &UopId,
+    dev: &Rc<Compiled>,
+) -> HashMap<i64, Rc<dyn OpaqueT>> {
     let mut map: HashMap<i64, Rc<dyn OpaqueT>> = HashMap::new();
     for u in ctx.backward_slice_with_self(ast) {
         if ctx.op_of(&u) != Ops::Param {
             continue;
         }
-        let Arg::Param(p) = ctx.arg_of(&u) else { continue };
+        let Arg::Param(p) = ctx.arg_of(&u) else {
+            continue;
+        };
         if p.slot < 0 || map.contains_key(&p.slot) {
             continue;
         }
@@ -134,7 +184,12 @@ fn rawbufs_from_ast(ctx: &mut UOpCtx, ast: &UopId, dev: &Rc<Compiled>) -> HashMa
             .unwrap_or(1);
         let nbytes = (numel.max(1) as usize) * ctx.dt_of(&u).itemsize();
         if env_flag("BEAM_DUMP_BASE") {
-            eprintln!("[beam] rawbuf slot={} shape={:?} nbytes={}", p.slot, ctx.shape(&u).ok().flatten(), nbytes);
+            eprintln!(
+                "[beam] rawbuf slot={} shape={:?} nbytes={}",
+                p.slot,
+                ctx.shape(&u).ok().flatten(),
+                nbytes
+            );
         }
         let buf = dev.allocator.alloc(nbytes);
         // BEAM times candidates with dummy buffers. Upstream leaves them
@@ -220,7 +275,11 @@ fn estimate_ops(ctx: &mut UOpCtx, ast: &UopId) -> i64 {
                     continue;
                 }
                 let m = if o == Ops::Mulacc { 2 } else { 1 };
-                flops = flops.saturating_add(mults.saturating_mul(ctx.max_numel(u.clone())).saturating_mul(m));
+                flops = flops.saturating_add(
+                    mults
+                        .saturating_mul(ctx.max_numel(u.clone()))
+                        .saturating_mul(m),
+                );
             }
             _ => {}
         }
@@ -249,7 +308,12 @@ fn compile_candidate<'a>(
         let key = ctx.g.content_key(&ast);
         let mut cache = ProgCache::default();
         let cp = to_program(ctx, ast, dev, &mut cache);
-        Some(CompiledCand { s: cand.copy(), cp, ops, key })
+        Some(CompiledCand {
+            s: cand.copy(),
+            cp,
+            ops,
+            key,
+        })
     };
     if strict {
         run(ctx)
@@ -295,7 +359,10 @@ fn time_candidate(
     }
     // `get_test_global_size`: cap the timing launch so a huge candidate can't
     // exhaust the driver; scale the measured time back up.
-    let max_global: usize = std::env::var("BEAM_TEST_GLOBAL_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(65536);
+    let max_global: usize = std::env::var("BEAM_TEST_GLOBAL_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(65536);
     let orig: usize = gs.iter().product();
     while gs.iter().product::<usize>() > max_global {
         let mut shrunk = false;
@@ -311,9 +378,15 @@ fn time_candidate(
         }
     }
     let factor = orig as f64 / gs.iter().product::<usize>() as f64;
-    let elf = TinyElf { lib: cp.elf.lib.clone(), name: cp.elf.name.clone(), signature: cp.elf.signature.clone() };
+    let elf = TinyElf {
+        lib: cp.elf.lib.clone(),
+        name: cp.elf.name.clone(),
+        signature: cp.elf.signature.clone(),
+    };
     let rt = dev.runtime_nocache(&elf);
-    let dur = rt.borrow_mut().call(&bufs, gs, ls, &cp.pi.vals(&var_vals), true)?;
+    let dur = rt
+        .borrow_mut()
+        .call(&bufs, gs, ls, &cp.pi.vals(&var_vals), true)?;
     Some(dur * factor)
 }
 
@@ -324,7 +397,10 @@ fn serialize_opt(op: &Arg) -> Option<String> {
     if d.tag != "Opt" {
         return None;
     }
-    let (Arg::Str(o), Arg::Int(axis), Arg::Int(arg)) = (d.get("op"), d.get("axis"), d.get("arg")) else { return None };
+    let (Arg::Str(o), Arg::Int(axis), Arg::Int(arg)) = (d.get("op"), d.get("axis"), d.get("arg"))
+    else {
+        return None;
+    };
     Some(format!("{o}:{axis}:{arg}"))
 }
 
@@ -364,7 +440,12 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
     // Result cache keyed by (optimized-AST key, width, device) — search.py:112.
     // `IGNORE_BEAM_CACHE` disables both the read and the write.
     let ignore_cache = env_flag("IGNORE_BEAM_CACHE");
-    let cache_key = format!("{:016x}:{}:{}", ctx.g.content_key(&base.ast), amt, base.ren.device);
+    let cache_key = format!(
+        "{:016x}:{}:{}",
+        ctx.g.content_key(&base.ast),
+        amt,
+        base.ren.device
+    );
     if env_flag("BEAM_VERBOSE") {
         let name = match ctx.arg_of(&base.ast) {
             Arg::Data(d) => match d.get("name") {
@@ -385,9 +466,7 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
         );
         crate::codegen::postrange::dump_index_exprs(ctx, base.ast.clone(), "BASE");
     }
-    if !ignore_cache
-        && let Some(v) = crate::engine::disk_cache::get("beam_search", &cache_key)
-    {
+    if !ignore_cache && let Some(v) = crate::engine::disk_cache::get("beam_search", &cache_key) {
         let mut ret = base.copy();
         let skip = base.applied_opts().len();
         for (i, (op, axis, arg)) in parse_opts(&v).into_iter().enumerate() {
@@ -455,23 +534,25 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
                 time_candidate(&c.cp, &rawbufs, &dev)
             } else {
                 let src = String::from_utf8_lossy(&c.cp.elf.lib).to_string();
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| time_candidate(&c.cp, &rawbufs, &dev)))
-                    .map_err(|e| {
-                        if env_flag("BEAM_VERBOSE") {
-                            eprintln!(
-                                "[beam] time skip: {} applied={:?}",
-                                panic_msg(&e),
-                                c.s.applied_opts()
-                            );
-                            if env_flag("BEAM_DUMP_SRC") {
-                                for l in src.lines().take(400) {
-                                    eprintln!("    | {l}");
-                                }
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    time_candidate(&c.cp, &rawbufs, &dev)
+                }))
+                .map_err(|e| {
+                    if env_flag("BEAM_VERBOSE") {
+                        eprintln!(
+                            "[beam] time skip: {} applied={:?}",
+                            panic_msg(&e),
+                            c.s.applied_opts()
+                        );
+                        if env_flag("BEAM_DUMP_SRC") {
+                            for l in src.lines().take(400) {
+                                eprintln!("    | {l}");
                             }
                         }
-                    })
-                    .ok()
-                    .flatten()
+                    }
+                })
+                .ok()
+                .flatten()
             };
             if let Some(t) = timed_c
                 && t.is_finite()
@@ -506,7 +587,11 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
     }
 
     if !ignore_cache {
-        crate::engine::disk_cache::put("beam_search", &cache_key, &serialize_opts(beam[0].0.applied_opts()));
+        crate::engine::disk_cache::put(
+            "beam_search",
+            &cache_key,
+            &serialize_opts(beam[0].0.applied_opts()),
+        );
     }
     beam[0].0.copy()
 }

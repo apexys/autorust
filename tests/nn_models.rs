@@ -7,30 +7,51 @@ use autorust::models::transformer::{Act, TransformerBlock};
 use autorust::models::vit::ViT;
 use autorust::tensor::nn::Module;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 mod models_golden;
 use models_golden::{BLOCK_GOLDEN, VIT_GOLDEN};
 
 fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
-    assert_eq!(got.len(), want.len(), "{name}: length {} != {}", got.len(), want.len());
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "{name}: length {} != {}",
+        got.len(),
+        want.len()
+    );
     for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
         let tol = rtol * b.abs().max(1.0);
-        assert!((a - b).abs() <= tol, "{name}[{i}]: got {a}, want {b} (diff {})", (a - b).abs());
+        assert!(
+            (a - b).abs() <= tol,
+            "{name}[{i}]: got {a}, want {b} (diff {})",
+            (a - b).abs()
+        );
     }
 }
 
 fn shape_of(t: &Tensor) -> Vec<usize> {
-    t.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
+    t.shape()
+        .as_slice()
+        .iter()
+        .map(|s| s.clone().as_i64().unwrap_or(0) as usize)
+        .collect()
 }
 
 #[test]
 fn transformer_block_matches_tinygrad() {
     for g in BLOCK_GOLDEN {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         let mut sess = Session::new();
         Tensor::manual_seed(g.seed);
-        let blk = TransformerBlock::new(&ctx, g.embed_dim, g.num_heads, g.ff_dim, g.prenorm, Act::Gelu, 0.1);
+        let blk = TransformerBlock::new(
+            &ctx,
+            g.embed_dim,
+            g.num_heads,
+            g.ff_dim,
+            g.prenorm,
+            Act::Gelu,
+            0.1,
+        );
         let blk = blk.into_params();
         let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
         let out = blk.forward(&x);
@@ -42,15 +63,29 @@ fn transformer_block_matches_tinygrad() {
 #[test]
 fn vit_matches_tinygrad() {
     for g in VIT_GOLDEN {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         let mut sess = Session::new();
         Tensor::manual_seed(g.seed);
-        let vit = ViT::build(&mut ctx.raw(), g.layers, g.embed_dim, g.num_heads, 3, 224, 16, 1000);
-        let ar = Tensor::arange(&ctx, 0.0, Some(g.num as f64), 1.0, Some(autorust::dtype::FLOAT32));
+        let vit = ViT::build(
+            &mut ctx.raw(),
+            g.layers,
+            g.embed_dim,
+            g.num_heads,
+            3,
+            224,
+            16,
+            1000,
+        );
+        let ar = Tensor::arange(
+            &ctx,
+            0.0,
+            Some(g.num as f64),
+            1.0,
+            Some(autorust::dtype::FLOAT32),
+        );
         let x = ar.mul(g.x_scale).add(g.x_off).reshape(g.x_shape);
         let out = vit.forward(&x);
         assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
         close(&out.to_list::<f32>(&mut sess), g.out, 1e-3, g.name);
     }
 }
-

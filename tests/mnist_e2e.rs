@@ -17,9 +17,8 @@ use autorust::engine::session::Session;
 use autorust::tensor::nn::Module;
 use autorust::tensor::optim::{Adam, Optim};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
-use mnist::{fetch, get_test_acc, load_images, load_labels, mnist_dir, Model};
+use mnist::{Model, fetch, get_test_acc, load_images, load_labels, mnist_dir};
 
 #[test]
 #[ignore = "downloads MNIST and runs a train step (slow on INTERP)"]
@@ -35,13 +34,35 @@ fn mnist_one_step_and_eval() {
         fetch(&format!("{base}{gz}"), &dir.join(raw));
     }
 
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let n = 4;
-    let x = load_images(&mut ctx.raw(), &mut sess, &dir.join("train-images-idx3-ubyte"), n);
-    let y = load_labels(&mut ctx.raw(), &mut sess, &dir.join("train-labels-idx1-ubyte"), n);
-    assert_eq!(x.shape().iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize, 1, 28, 28]);
-    assert_eq!(y.shape().iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize]);
+    let x = load_images(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("train-images-idx3-ubyte"),
+        n,
+    );
+    let y = load_labels(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("train-labels-idx1-ubyte"),
+        n,
+    );
+    assert_eq!(
+        x.shape()
+            .iter()
+            .map(|s| s.clone().as_usize().unwrap())
+            .collect::<Vec<_>>(),
+        vec![n as usize, 1, 28, 28]
+    );
+    assert_eq!(
+        y.shape()
+            .iter()
+            .map(|s| s.clone().as_usize().unwrap())
+            .collect::<Vec<_>>(),
+        vec![n as usize]
+    );
 
     Tensor::manual_seed(0);
     let model = Model::new(&ctx).into_params();
@@ -58,7 +79,10 @@ fn mnist_one_step_and_eval() {
     let l = loss.item::<f32>(&mut sess);
     assert!(l.is_finite(), "loss is not finite: {l}");
     let after = params[0].to_list::<f32>(&mut sess);
-    assert_ne!(before, after, "the first parameter was not updated by the optimizer");
+    assert_ne!(
+        before, after,
+        "the first parameter was not updated by the optimizer"
+    );
 
     let acc = get_test_acc(&model, &x, &y, &ctx, &mut sess).item::<f32>(&mut sess);
     assert!((0.0..=100.0).contains(&acc), "accuracy out of range: {acc}");

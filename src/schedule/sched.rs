@@ -4,12 +4,12 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::dtype::AddrSpace;
+use crate::uop::UopId;
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::sym::r;
-use crate::uop::upat::{graph_rewrite, r_ctx, CtxVal, PatternMatcher, RuleFn, UPat};
-use crate::uop::UopId;
+use crate::uop::upat::{CtxVal, PatternMatcher, RuleFn, UPat, graph_rewrite, r_ctx};
 
 use super::indexing::gate_kernel_sink;
 
@@ -17,7 +17,10 @@ use super::indexing::gate_kernel_sink;
 fn unwrap_src(ctx: &UOpCtx, s: UopId) -> UopId {
     let mut s = s;
     while !ctx.srcs(&s).is_empty()
-        && !matches!(ctx.op_of(&s), Ops::After | Ops::Buffer | Ops::Param | Ops::Mselect | Ops::Mstack)
+        && !matches!(
+            ctx.op_of(&s),
+            Ops::After | Ops::Buffer | Ops::Param | Ops::Mselect | Ops::Mstack
+        )
     {
         s = ctx.srcs(&s)[0].clone();
     }
@@ -63,7 +66,10 @@ fn split_after(ctx: &UOpCtx, after: UopId) -> (Vec<UopId>, Vec<UopId>) {
         }
     }
     if let Some(first) = remaining.first() {
-        panic!("TGERR: AFTER source should be CALL, END, STORE, or AFTER, not {:?}", ctx.op_of(first));
+        panic!(
+            "TGERR: AFTER source should be CALL, END, STORE, or AFTER, not {:?}",
+            ctx.op_of(first)
+        );
     }
     (kernels, deps)
 }
@@ -84,16 +90,33 @@ pub fn create_schedule(ctx: &mut UOpCtx, sched_sink: UopId) -> UopId {
         let (kernels, after_deps) = split_after(ctx, u.clone());
         let buf = ctx.buf_uop(u.clone());
         let prev_state = unwrap_src(ctx, ctx.srcs(&u)[0].clone());
-        let prev_kernels: Vec<UopId> = if ctx.op_of(&prev_state) == Ops::After { split_after(ctx, prev_state.clone()).0 } else { vec![] };
-        let new_kernels: Vec<UopId> = kernels.iter().filter(|k| !prev_kernels.contains(k)).cloned().collect();
-        writes.entry(buf).or_default().push((u.clone(), prev_state, new_kernels));
+        let prev_kernels: Vec<UopId> = if ctx.op_of(&prev_state) == Ops::After {
+            split_after(ctx, prev_state.clone()).0
+        } else {
+            vec![]
+        };
+        let new_kernels: Vec<UopId> = kernels
+            .iter()
+            .filter(|k| !prev_kernels.contains(k))
+            .cloned()
+            .collect();
+        writes
+            .entry(buf)
+            .or_default()
+            .push((u.clone(), prev_state, new_kernels));
         for k in &kernels {
             *in_degree.entry(k.clone()).or_insert(0) += 0;
             if ctx.op_of(k) == Ops::End {
-                assert!(ctx.op_of(&ctx.srcs(k)[0]) == Ops::Call, "TGERR: END src[0] should be KERNEL");
+                assert!(
+                    ctx.op_of(&ctx.srcs(k)[0]) == Ops::Call,
+                    "TGERR: END src[0] should be KERNEL"
+                );
             }
-            let kernel_deps: Vec<UopId> =
-                if ctx.op_of(k) == Ops::End { ctx.srcs(&ctx.srcs(k)[0])[1..].to_vec() } else { ctx.srcs(k)[1..].to_vec() };
+            let kernel_deps: Vec<UopId> = if ctx.op_of(k) == Ops::End {
+                ctx.srcs(&ctx.srcs(k)[0])[1..].to_vec()
+            } else {
+                ctx.srcs(k)[1..].to_vec()
+            };
             let mut read_states = Vec::new();
             for s in &kernel_deps {
                 read_states.extend(states(ctx, s.clone()));
@@ -102,7 +125,11 @@ pub fn create_schedule(ctx: &mut UOpCtx, sched_sink: UopId) -> UopId {
                 reads.push((u.clone(), k.clone(), st.clone()));
             }
             // RAW deps
-            for st in read_states.iter().cloned().chain(after_deps.iter().flat_map(|s| states(ctx, s.clone()))) {
+            for st in read_states
+                .iter()
+                .cloned()
+                .chain(after_deps.iter().flat_map(|s| states(ctx, s.clone())))
+            {
                 if ctx.op_of(&st) == Ops::After {
                     for t in split_after(ctx, st.clone()).0 {
                         children.entry(t).or_default().push(k.clone());
@@ -129,15 +156,27 @@ pub fn create_schedule(ctx: &mut UOpCtx, sched_sink: UopId) -> UopId {
         }
     }
     // Kahn
-    let mut queue: VecDeque<UopId> = in_degree.iter().filter(|(_, v)| **v == 0).map(|(k, _)| k.clone()).collect();
+    let mut queue: VecDeque<UopId> = in_degree
+        .iter()
+        .filter(|(_, v)| **v == 0)
+        .map(|(k, _)| k.clone())
+        .collect();
     queue.make_contiguous();
     let mut linearized: Vec<UopId> = Vec::new();
     while let Some(rk) = queue.pop_front() {
         if ctx.op_of(&rk) == Ops::Linear {
             linearized.extend(ctx.srcs(&rk).iter().cloned());
         } else {
-            let k = if ctx.op_of(&rk) == Ops::End { &ctx.srcs(&rk)[0].clone() } else { &rk.clone() };
-            assert!(ctx.op_of(k) == Ops::Call, "TGERR: unexpected op in queue: {:?}", ctx.op_of(k));
+            let k = if ctx.op_of(&rk) == Ops::End {
+                &ctx.srcs(&rk)[0].clone()
+            } else {
+                &rk.clone()
+            };
+            assert!(
+                ctx.op_of(k) == Ops::Call,
+                "TGERR: unexpected op in queue: {:?}",
+                ctx.op_of(k)
+            );
             let mut buf_uops = Vec::new();
             let ksrcs = ctx.srcs(k)[1..].to_vec();
             for s in ksrcs {
@@ -176,12 +215,20 @@ fn create_new_buffer(map: &mut HashMap<UopId, UopId>, ctx: &mut UOpCtx, b: UopId
     let dev = crate::schedule::indexing::device_of(ctx, b.clone());
     let dev_s = match dev {
         Some(crate::uop::arg::DeviceSpec::Single(s)) => s,
-        Some(crate::uop::arg::DeviceSpec::Multi(_)) => panic!("TGERR: multi-device alloc unsupported"),
+        Some(crate::uop::arg::DeviceSpec::Multi(_)) => {
+            panic!("TGERR: multi-device alloc unsupported")
+        }
         None => panic!("TGERR: buffer without device"),
     };
     let numel = ctx.max_numel(b.clone());
     let dt = ctx.dt_of(&b);
-    let ret = crate::tensor::creation::new_buffer(ctx, &dev_s, crate::uop::sint::SVal::I(numel as i128), dt, None);
+    let ret = crate::tensor::creation::new_buffer(
+        ctx,
+        &dev_s,
+        crate::uop::sint::SVal::I(numel as i128),
+        dt,
+        None,
+    );
     map.insert(b, ret.clone());
     ret
 }
@@ -195,22 +242,29 @@ pub fn pm_post_sched_cache() -> PatternMatcher {
             r_ca(|(_cache, args), ctx, st| {
                 let x = sym_sget(st, "x");
                 if let Arg::Param(p) = ctx.arg_of(&x)
-                    && p.slot >= 0 {
-                        let arg = args.get(p.slot as usize).unwrap_or_else(|| panic!("TGERR: param slot {} out of range", p.slot)).clone();
-                        return Some(arg);
-                    }
+                    && p.slot >= 0
+                {
+                    let arg = args
+                        .get(p.slot as usize)
+                        .unwrap_or_else(|| panic!("TGERR: param slot {} out of range", p.slot))
+                        .clone();
+                    return Some(arg);
+                }
                 None
             }),
         ),
         // create new BUFFERs
         (
-            UPat::ops1(Ops::Buffer).with_src_tup(vec![UPat::var(None, None)]).named("b"),
+            UPat::ops1(Ops::Buffer)
+                .with_src_tup(vec![UPat::var(None, None)])
+                .named("b"),
             r_ca(|(cache, _args), ctx, st| {
                 let b = sym_sget(st, "b");
                 if let Arg::Param(p) = ctx.arg_of(&b)
-                    && p.addrspace == Some(AddrSpace::Global) {
-                        return Some(create_new_buffer(cache, ctx, b));
-                    }
+                    && p.addrspace == Some(AddrSpace::Global)
+                {
+                    return Some(create_new_buffer(cache, ctx, b));
+                }
                 None
             }),
         ),
@@ -227,7 +281,10 @@ fn sym_sget(st: &crate::uop::upat::Store, name: &str) -> UopId {
 /// rule helper over the (cache, args) call context.
 pub fn r_ca<F>(f: F) -> RuleFn
 where
-    F: Fn(&mut CallCtx, &mut UOpCtx, &crate::uop::upat::Store) -> Option<UopId> + Send + Sync + 'static,
+    F: Fn(&mut CallCtx, &mut UOpCtx, &crate::uop::upat::Store) -> Option<UopId>
+        + Send
+        + Sync
+        + 'static,
 {
     std::sync::Arc::new(move |ctx, st, ctxv| match ctxv {
         CtxVal::Ca(c) => f(&mut c.borrow_mut(), ctx, st),
@@ -240,8 +297,20 @@ pub fn resolve_linear_call(ctx: &mut UOpCtx, linear_call: UopId) -> UopId {
     let args = ctx.srcs(&linear_call)[1..].to_vec();
     let pm = pm_post_sched_cache();
     let linear_body = ctx.srcs(&linear_call)[0].clone();
-    let linear = graph_rewrite(ctx, linear_body, &pm, false, None, true, false, CtxVal::Ca(std::rc::Rc::new(std::cell::RefCell::new((HashMap::new(), args)))))
-        .unwrap_or_else(|e| panic!("TGERR: params to buffers: {e}"));
+    let linear = graph_rewrite(
+        ctx,
+        linear_body,
+        &pm,
+        false,
+        None,
+        true,
+        false,
+        CtxVal::Ca(std::rc::Rc::new(std::cell::RefCell::new((
+            HashMap::new(),
+            args,
+        )))),
+    )
+    .unwrap_or_else(|e| panic!("TGERR: params to buffers: {e}"));
     // corpus: no bound variables/scalar binds — srcs pass through unchanged
     let (op, dt, _srcs, arg, _tag) = ctx.snapshot(&linear);
     // python's pm_resolve_linear_call replaces the CALL with the resolved LINEAR
@@ -252,7 +321,10 @@ pub fn resolve_linear_call(ctx: &mut UOpCtx, linear_call: UopId) -> UopId {
 /// `pm_resolve_linear_call` — resolve CALL(LINEAR) nodes.
 pub fn pm_resolve_linear_call() -> PatternMatcher {
     PatternMatcher::new(vec![(
-        UPat::ops1(Ops::Call).with_src_tup(vec![UPat::ops1(Ops::Linear)]).allow_all_srcs().named("lc"),
+        UPat::ops1(Ops::Call)
+            .with_src_tup(vec![UPat::ops1(Ops::Linear)])
+            .allow_all_srcs()
+            .named("lc"),
         r(|_c, st, _| {
             let _ = st;
             None // handled by the direct call in create_linear_with_vars
@@ -266,21 +338,41 @@ pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Uop
     // schedule to linear: pm_schedule lowers the top SINK
     let linear_call = {
         let pm_sched = pm_schedule();
-        graph_rewrite(ctx, big_sink, &pm_sched, false, None, false, true, CtxVal::None)
-            .unwrap_or_else(|e| panic!("TGERR: schedule to linear: {e}"))
+        graph_rewrite(
+            ctx,
+            big_sink,
+            &pm_sched,
+            false,
+            None,
+            false,
+            true,
+            CtxVal::None,
+        )
+        .unwrap_or_else(|e| panic!("TGERR: schedule to linear: {e}"))
     };
 
     // held bufs (schedule/__init__.py:208): the top CALL's direct BUFFER args
     let held_bufs: Vec<UopId> = ctx.srcs(&linear_call)[1..]
-        .iter().filter(|&a| ctx.op_of(a) == Ops::Buffer).cloned()
+        .iter()
+        .filter(|&a| ctx.op_of(a) == Ops::Buffer)
+        .cloned()
         .collect();
 
     // resolve the linear_call (allocates buffers)
     let linear = resolve_linear_call(ctx, linear_call);
 
     // create copies (SDMA) — needed for cross-device (PYTHON->NV) copies
-    let linear = graph_rewrite(ctx, linear, &pm_copy_from_store(), false, None, false, false, CtxVal::None)
-        .unwrap_or_else(|e| panic!("TGERR: create copies: {e}"));
+    let linear = graph_rewrite(
+        ctx,
+        linear,
+        &pm_copy_from_store(),
+        false,
+        None,
+        false,
+        false,
+        CtxVal::None,
+    )
+    .unwrap_or_else(|e| panic!("TGERR: create copies: {e}"));
 
     // vars: corpus is concrete — no var_vals
     let planned = crate::schedule::memory::memory_plan_rewrite(ctx, linear.clone(), &held_bufs);
@@ -295,9 +387,10 @@ pub fn pm_schedule() -> PatternMatcher {
             let function = sym_sget(st, "function");
             // function.arg is KernelInfo for inner kernel sinks — leave those
             if let Arg::Data(d) = ctx.arg_of(&function)
-                && d.tag == "KernelInfo" {
-                    return None;
-                }
+                && d.tag == "KernelInfo"
+            {
+                return None;
+            }
             let sched_sink = super::rangeify::get_kernel_graph(ctx, function);
             Some(create_schedule(ctx, sched_sink))
         }),
@@ -317,10 +410,22 @@ fn copy_kernel_to_copy_uop(ctx: &mut UOpCtx, call: UopId, dst: UopId, src: UopId
         Some(crate::uop::arg::DeviceSpec::Single(s)) => s,
         _ => panic!("TGERR: bad copy dst device"),
     };
-    let copy = ctx.uop_tag(Ops::Copy, Some(ctx.dt_of(&src)), vec![src], Arg::Str(ddev_s), ctx.tag_of(&call).clone());
+    let copy = ctx.uop_tag(
+        Ops::Copy,
+        Some(ctx.dt_of(&src)),
+        vec![src],
+        Arg::Str(ddev_s),
+        ctx.tag_of(&call).clone(),
+    );
     let mut new_srcs = vec![copy];
     new_srcs.extend(ctx.srcs(&call)[1..].iter().cloned());
-    Some(ctx.uop_tag(Ops::Call, Some(ctx.dt_of(&call)), new_srcs, ctx.arg_of(&call).clone(), ctx.tag_of(&call).clone()))
+    Some(ctx.uop_tag(
+        Ops::Call,
+        Some(ctx.dt_of(&call)),
+        new_srcs,
+        ctx.arg_of(&call).clone(),
+        ctx.tag_of(&call).clone(),
+    ))
 }
 
 /// `pm_copy_from_store`.
@@ -335,7 +440,9 @@ pub fn pm_copy_from_store() -> PatternMatcher {
                         .with_src_tup(vec![
                             UPat::ops1(Ops::Param)
                                 .index(vec![zero()])
-                                .store(vec![UPat::ops1(Ops::Param).named("src").index(vec![zero()])])
+                                .store(vec![
+                                    UPat::ops1(Ops::Param).named("src").index(vec![zero()]),
+                                ])
                                 .named("dst"),
                         ])
                         .allow_all_srcs(),
@@ -343,7 +450,11 @@ pub fn pm_copy_from_store() -> PatternMatcher {
                 .allow_all_srcs()
                 .named("call"),
             r_ctx(|ctx, st| {
-                let (call, dst, src) = (sym_sget(st, "call"), sym_sget(st, "dst"), sym_sget(st, "src"));
+                let (call, dst, src) = (
+                    sym_sget(st, "call"),
+                    sym_sget(st, "dst"),
+                    sym_sget(st, "src"),
+                );
                 copy_kernel_to_copy_uop(ctx, call, dst, src)
             }),
         ),
@@ -355,7 +466,11 @@ pub fn pm_copy_from_store() -> PatternMatcher {
                         .with_src_tup(vec![
                             UPat::ops1(Ops::Param)
                                 .index(vec![UPat::ops1(Ops::Range).named("r")])
-                                .store(vec![UPat::ops1(Ops::Param).named("src").index(vec![UPat::ops1(Ops::Range).named("r")])])
+                                .store(vec![
+                                    UPat::ops1(Ops::Param)
+                                        .named("src")
+                                        .index(vec![UPat::ops1(Ops::Range).named("r")]),
+                                ])
                                 .end(vec![UPat::ops1(Ops::Range).named("r")])
                                 .named("dst"),
                         ])
@@ -364,22 +479,30 @@ pub fn pm_copy_from_store() -> PatternMatcher {
                 .allow_all_srcs()
                 .named("call"),
             r_ctx(|ctx, st| {
-                let (call, dst, src) = (sym_sget(st, "call"), sym_sget(st, "dst"), sym_sget(st, "src"));
+                let (call, dst, src) = (
+                    sym_sget(st, "call"),
+                    sym_sget(st, "dst"),
+                    sym_sget(st, "src"),
+                );
                 copy_kernel_to_copy_uop(ctx, call, dst, src)
             }),
         ),
         // all buffers must be on the same device for real kernels
         (
-            UPat::ops1(Ops::Call).with_src_tup(vec![UPat::ops1(Ops::Sink).named("ast")]).allow_all_srcs(),
+            UPat::ops1(Ops::Call)
+                .with_src_tup(vec![UPat::ops1(Ops::Sink).named("ast")])
+                .allow_all_srcs(),
             r_ctx(|ctx, st| {
                 let ast = sym_sget(st, "ast");
                 let mut devs: Vec<String> = Vec::new();
                 for n in ctx.toposort(&ast) {
                     if ctx.op_of(&n) == Ops::Param
-                        && let Some(crate::uop::arg::DeviceSpec::Single(d)) = crate::schedule::indexing::device_of(ctx, n)
-                            && !devs.contains(&d) {
-                                devs.push(d);
-                            }
+                        && let Some(crate::uop::arg::DeviceSpec::Single(d)) =
+                            crate::schedule::indexing::device_of(ctx, n)
+                        && !devs.contains(&d)
+                    {
+                        devs.push(d);
+                    }
                 }
                 if devs.len() >= 2 {
                     panic!("TGERR: all buffers must be on the same device: {devs:?}");
@@ -390,5 +513,3 @@ pub fn pm_copy_from_store() -> PatternMatcher {
     ];
     PatternMatcher::new(rules)
 }
-
-

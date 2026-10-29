@@ -17,9 +17,9 @@ use crate::dtype::{self, AddrSpace, ConstVal, DTypeId};
 use crate::runtime::interp::{from_storage_scalar, to_storage_scalar};
 use crate::runtime::ray_kernel::{RayKernel, SendMemView};
 use crate::runtime::ray_value::{self as rv, Bytes};
-use crate::uop::arg::Arg;
-use crate::uop::ops::{group, Ops};
 use crate::uop::UopId;
+use crate::uop::arg::Arg;
+use crate::uop::ops::{Ops, group};
 
 type Pair = (SendMemView, usize);
 
@@ -28,7 +28,11 @@ enum Slot {
     Empty,
     /// lane-major typed elements: `lanes * wsize`, element `(l,t)` at
     /// `(l*wsize + t) * dt.itemsize()`.
-    Data { buf: Bytes, dt: DTypeId, lanes: usize },
+    Data {
+        buf: Bytes,
+        dt: DTypeId,
+        lanes: usize,
+    },
     P(Vec<Pair>),
     M(Vec<SendMemView>),
 }
@@ -48,7 +52,13 @@ struct Scratch {
 
 impl Scratch {
     fn recycle(&mut self, n: usize) {
-        let Scratch { slots, pool, pool_p, pool_m, owned } = self;
+        let Scratch {
+            slots,
+            pool,
+            pool_p,
+            pool_m,
+            owned,
+        } = self;
         for slot in slots.iter_mut() {
             match slot {
                 Slot::Data { buf, .. } => pool.push(std::mem::take(buf)),
@@ -88,7 +98,12 @@ impl Scratch {
 
     fn put_data(&mut self, i: usize, dt: DTypeId, lanes: usize, wsize: usize) {
         let nbytes = lanes * wsize * dt.itemsize();
-        if let Slot::Data { buf, dt: ddt, lanes: dlanes } = &mut self.slots[i] {
+        if let Slot::Data {
+            buf,
+            dt: ddt,
+            lanes: dlanes,
+        } = &mut self.slots[i]
+        {
             if buf.nbytes() != nbytes {
                 buf.reset(nbytes);
                 buf.as_bytes_mut().fill(0);
@@ -199,7 +214,13 @@ impl Plan {
         let n = instrs.len();
         let real: Vec<Vec<usize>> = instrs
             .iter()
-            .map(|ins| ins.srcs.iter().copied().filter(|&s| instrs[s].dt != dtype::VOID).collect())
+            .map(|ins| {
+                ins.srcs
+                    .iter()
+                    .copied()
+                    .filter(|&s| instrs[s].dt != dtype::VOID)
+                    .collect()
+            })
             .collect();
         let mut range_after = vec![usize::MAX; n];
         for (i, ins) in instrs.iter().enumerate() {
@@ -227,7 +248,13 @@ impl Plan {
                     }
                 }
                 Ops::Buffer => 3,
-                Ops::Const | Ops::Special | Ops::Range | Ops::Load | Ops::Cast | Ops::Bitcast | Ops::Stack => 1,
+                Ops::Const
+                | Ops::Special
+                | Ops::Range
+                | Ops::Load
+                | Ops::Cast
+                | Ops::Bitcast
+                | Ops::Stack => 1,
                 Ops::After => ins
                     .srcs
                     .iter()
@@ -286,10 +313,16 @@ impl Plan {
             .iter()
             .any(|ins| ins.op == Ops::Param && ins.addrspace == Some(AddrSpace::Alu));
         let needs_warp = instrs.iter().any(|ins| {
-            ins.op == Ops::Special
-                && matches!(&ins.arg, Arg::Str(s) if s.starts_with('l'))
+            ins.op == Ops::Special && matches!(&ins.arg, Arg::Str(s) if s.starts_with('l'))
         });
-        Plan { real, range_after, kind, has_if, has_alu_param, needs_warp }
+        Plan {
+            real,
+            range_after,
+            kind,
+            has_if,
+            has_alu_param,
+            needs_warp,
+        }
     }
 
     fn is_supported(&self) -> bool {
@@ -339,7 +372,14 @@ impl TypedKernel {
         &self.kernel.sig_dtypes
     }
 
-    pub fn exec(&self, views: &HashMap<i64, SendMemView>, global: [usize; 3], local: Option<[usize; 3]>, vals: &[f64], parallel: bool) {
+    pub fn exec(
+        &self,
+        views: &HashMap<i64, SendMemView>,
+        global: [usize; 3],
+        local: Option<[usize; 3]>,
+        vals: &[f64],
+        parallel: bool,
+    ) {
         let local = local.unwrap_or([1usize; 3]);
         let mut order: Vec<[usize; 3]> = Vec::new();
         for c in 0..global[2] {
@@ -373,7 +413,14 @@ impl TypedKernel {
         }
     }
 
-    fn exec_launch(&self, gidx: [usize; 3], lsize: [usize; 3], views: &HashMap<i64, SendMemView>, vals: &[f64], sc: &mut Scratch) {
+    fn exec_launch(
+        &self,
+        gidx: [usize; 3],
+        lsize: [usize; 3],
+        views: &HashMap<i64, SendMemView>,
+        vals: &[f64],
+        sc: &mut Scratch,
+    ) {
         let instrs = self.kernel.instrs();
         let wsize = (lsize[0] * lsize[1] * lsize[2]).max(1);
         let mut warp: Vec<[usize; 3]> = Vec::new();
@@ -442,9 +489,20 @@ impl TypedKernel {
                     let n = cl * wsize;
                     let last = masks.last().unwrap().clone();
                     let condv: Vec<bool> = (0..wsize)
-                        .map(|t| rv::truthy(cdt, sc.data(srcs[0]), lane_elem(cl, wsize, t).min(n.saturating_sub(1))))
+                        .map(|t| {
+                            rv::truthy(
+                                cdt,
+                                sc.data(srcs[0]),
+                                lane_elem(cl, wsize, t).min(n.saturating_sub(1)),
+                            )
+                        })
                         .collect();
-                    masks.push(last.iter().zip(condv.iter().chain(std::iter::repeat(&condv[0]))).map(|(a, b)| *a && *b).collect());
+                    masks.push(
+                        last.iter()
+                            .zip(condv.iter().chain(std::iter::repeat(&condv[0])))
+                            .map(|(a, b)| *a && *b)
+                            .collect(),
+                    );
                 }
                 Kind::Endif => {
                     masks.pop();
@@ -465,15 +523,20 @@ impl TypedKernel {
                             Arg::Param(p) => p.slot,
                             _ => panic!("TGERR: typed PARAM arg"),
                         };
-                        let mv = *views.get(&slot).unwrap_or_else(|| panic!("TGERR: typed missing view slot {slot}"));
+                        let mv = *views
+                            .get(&slot)
+                            .unwrap_or_else(|| panic!("TGERR: typed missing view slot {slot}"));
                         let mut vs = sc.take_m(i);
                         vs.clear();
                         vs.resize(wsize, mv);
                         sc.slots[i] = Slot::M(vs);
                     } else if instrs[i].addrspace == Some(AddrSpace::Reg) {
                         let (nel, s) = (instrs[i].numel, isz(dt(i)));
-                        let vs: Vec<SendMemView> =
-                            (0..wsize).map(|_| SendMemView::from_owned(vec![0u8; nel * s], s, nel, &mut sc.owned)).collect();
+                        let vs: Vec<SendMemView> = (0..wsize)
+                            .map(|_| {
+                                SendMemView::from_owned(vec![0u8; nel * s], s, nel, &mut sc.owned)
+                            })
+                            .collect();
                         sc.slots[i] = Slot::M(vs);
                     } else {
                         let (nel, s) = (instrs[i].numel, isz(dt(i)));
@@ -515,7 +578,10 @@ impl TypedKernel {
                     let (sdt, lanes) = sc.meta(srcs[0]);
                     sc.put_data(i, dt(i), lanes, wsize);
                     let src = sc.data(srcs[0]).clone();
-                    assert!(rv::cast(sdt, dt(i), sc.data_mut(i), &src), "TGERR: typed CAST failed");
+                    assert!(
+                        rv::cast(sdt, dt(i), sc.data_mut(i), &src),
+                        "TGERR: typed CAST failed"
+                    );
                 }
                 Kind::Bitcast => {
                     let (sdt, lanes) = sc.meta(srcs[0]);
@@ -525,20 +591,36 @@ impl TypedKernel {
                     sc.data_mut(i).copy_from(&src);
                 }
                 Kind::Stack => self.stack(sc, i, srcs, real, wsize),
-                Kind::AluUnary | Kind::AluBinary | Kind::AluTernary => self.alu(sc, i, o, srcs, real, wsize),
-                Kind::Unsupported => unreachable!("TGERR: typed unsupported op rejected at compile"),
+                Kind::AluUnary | Kind::AluBinary | Kind::AluTernary => {
+                    self.alu(sc, i, o, srcs, real, wsize)
+                }
+                Kind::Unsupported => {
+                    unreachable!("TGERR: typed unsupported op rejected at compile")
+                }
             }
             i += 1;
         }
     }
 
-    fn store(&self, sc: &mut Scratch, _i: usize, srcs: &[usize], _real: &[usize], wsize: usize, masks: &[Vec<bool>]) {
+    fn store(
+        &self,
+        sc: &mut Scratch,
+        _i: usize,
+        srcs: &[usize],
+        _real: &[usize],
+        wsize: usize,
+        masks: &[Vec<bool>],
+    ) {
         let instrs = self.kernel.instrs();
         let gate = masks.last();
         let (val_dt, val_lanes) = sc.meta(srcs[1]);
         let store_dt = instrs[instrs[srcs[0]].srcs[0]].dt;
         let val_isz = val_dt.itemsize();
-        assert_eq!(val_isz, store_dt.itemsize(), "TGERR: typed store dtype mismatch");
+        assert_eq!(
+            val_isz,
+            store_dt.itemsize(),
+            "TGERR: typed store dtype mismatch"
+        );
         let lanes = val_lanes.max(1);
         let vb = sc.data(srcs[1]).as_bytes();
         let gate_at = |t: usize| gate.is_none_or(|g| g[t.min(g.len() - 1)]);
@@ -579,7 +661,11 @@ impl TypedKernel {
         {
             let sb = sc.data(srcs[0]).as_bytes();
             let ib: &Bytes = sc.data(srcs[1]);
-            let ix32: Option<&[i32]> = if b_dt == dtype::INT32 { Some(ib.as_slice::<i32>()) } else { None };
+            let ix32: Option<&[i32]> = if b_dt == dtype::INT32 {
+                Some(ib.as_slice::<i32>())
+            } else {
+                None
+            };
             let db = dest.as_bytes_mut();
             for t in 0..wsize {
                 let be = lane_elem(b_lanes, wsize, t).min(n_b.saturating_sub(1));
@@ -587,7 +673,11 @@ impl TypedKernel {
                     Some(xs) => xs[be] as i128,
                     None => rv::get_i128(b_dt, ib, be),
                 };
-                let alane = if a_lanes > 1 { (ix.max(0) as usize).min(a_lanes - 1) } else { 0 };
+                let alane = if a_lanes > 1 {
+                    (ix.max(0) as usize).min(a_lanes - 1)
+                } else {
+                    0
+                };
                 let so = (alane * wsize + t) * isz;
                 db[t * isz..t * isz + isz].copy_from_slice(&sb[so..so + isz]);
             }
@@ -610,7 +700,11 @@ impl TypedKernel {
         {
             let ib: &Bytes = sc.data(srcs[1]);
             // Fast path for the dominant 32-bit signed index dtype.
-            let ix32: Option<&[i32]> = if b_dt == dtype::INT32 { Some(ib.as_slice::<i32>()) } else { None };
+            let ix32: Option<&[i32]> = if b_dt == dtype::INT32 {
+                Some(ib.as_slice::<i32>())
+            } else {
+                None
+            };
             let read_idx = |be: usize| -> i128 {
                 match ix32 {
                     Some(xs) => xs[be] as i128,
@@ -636,7 +730,15 @@ impl TypedKernel {
         sc.slots[i] = Slot::P(ret);
     }
 
-    fn load(&self, sc: &mut Scratch, i: usize, srcs: &[usize], real: &[usize], wsize: usize, masks: &[Vec<bool>]) {
+    fn load(
+        &self,
+        sc: &mut Scratch,
+        i: usize,
+        srcs: &[usize],
+        real: &[usize],
+        wsize: usize,
+        masks: &[Vec<bool>],
+    ) {
         let instrs = self.kernel.instrs();
         let load_n = instrs[i].numel.max(1);
         let dtv = instrs[i].dt;
@@ -672,7 +774,11 @@ impl TypedKernel {
                 for (t, (m, oo)) in pairs.iter().enumerate() {
                     let d = (j * wsize + t) * isz;
                     let valid = em.is_none_or(|e| e[t.min(e.len() - 1)])
-                        && rv::truthy(gate_dt, gate, lane_elem(gate_lanes, wsize, t).min(gate_n.saturating_sub(1)));
+                        && rv::truthy(
+                            gate_dt,
+                            gate,
+                            lane_elem(gate_lanes, wsize, t).min(gate_n.saturating_sub(1)),
+                        );
                     if valid {
                         read_mem(m, *oo + j, dtv, &mut db[d..d + isz]);
                     } else {
@@ -706,7 +812,12 @@ impl TypedKernel {
                         for t in 0..wsize {
                             let so = start + t * s_isz;
                             let d = t * isz;
-                            read_slice_conv(&b[so..so + s_isz], sdt, dtv, &mut lane_bytes[d..d + isz]);
+                            read_slice_conv(
+                                &b[so..so + s_isz],
+                                sdt,
+                                dtv,
+                                &mut lane_bytes[d..d + isz],
+                            );
                         }
                         payload.push(lane_bytes);
                     }
@@ -730,7 +841,15 @@ impl TypedKernel {
         }
     }
 
-    fn alu(&self, sc: &mut Scratch, i: usize, opv: Ops, srcs: &[usize], real: &[usize], wsize: usize) {
+    fn alu(
+        &self,
+        sc: &mut Scratch,
+        i: usize,
+        opv: Ops,
+        srcs: &[usize],
+        real: &[usize],
+        wsize: usize,
+    ) {
         let instrs = self.kernel.instrs();
         let n = real.len();
         if n == 3 {
@@ -744,24 +863,46 @@ impl TypedKernel {
             let s1b = sc.data(srcs[1]);
             let s2b = sc.data(srcs[2]);
             if opv == Ops::Where {
-                let fast = a_dt == dtype::BOOL && b_dt == dtv && c_dt == dtv && al == lanes && bl == lanes && cl == lanes;
+                let fast = a_dt == dtype::BOOL
+                    && b_dt == dtv
+                    && c_dt == dtv
+                    && al == lanes
+                    && bl == lanes
+                    && cl == lanes;
                 if fast {
-                    assert!(rv::alu_where(dtv, &mut dest, s0b, s1b, s2b), "TGERR: typed WHERE failed");
+                    assert!(
+                        rv::alu_where(dtv, &mut dest, s0b, s1b, s2b),
+                        "TGERR: typed WHERE failed"
+                    );
                 } else {
                     let cond = broadcast(&coerce(s0b, a_dt, dtype::BOOL), al, lanes, wsize);
                     let b = broadcast(&coerce(s1b, b_dt, dtv), bl, lanes, wsize);
                     let c = broadcast(&coerce(s2b, c_dt, dtv), cl, lanes, wsize);
-                    assert!(rv::alu_where(dtv, &mut dest, &cond, &b, &c), "TGERR: typed WHERE failed");
+                    assert!(
+                        rv::alu_where(dtv, &mut dest, &cond, &b, &c),
+                        "TGERR: typed WHERE failed"
+                    );
                 }
             } else {
-                let fast = a_dt == dtv && b_dt == dtv && c_dt == dtv && al == lanes && bl == lanes && cl == lanes;
+                let fast = a_dt == dtv
+                    && b_dt == dtv
+                    && c_dt == dtv
+                    && al == lanes
+                    && bl == lanes
+                    && cl == lanes;
                 if fast {
-                    assert!(rv::alu_mulacc(dtv, &mut dest, s0b, s1b, s2b), "TGERR: typed MULACC failed");
+                    assert!(
+                        rv::alu_mulacc(dtv, &mut dest, s0b, s1b, s2b),
+                        "TGERR: typed MULACC failed"
+                    );
                 } else {
                     let a = broadcast(&coerce(s0b, a_dt, dtv), al, lanes, wsize);
                     let b = broadcast(&coerce(s1b, b_dt, dtv), bl, lanes, wsize);
                     let c = broadcast(&coerce(s2b, c_dt, dtv), cl, lanes, wsize);
-                    assert!(rv::alu_mulacc(dtv, &mut dest, &a, &b, &c), "TGERR: typed MULACC failed");
+                    assert!(
+                        rv::alu_mulacc(dtv, &mut dest, &a, &b, &c),
+                        "TGERR: typed MULACC failed"
+                    );
                 }
             }
             sc.set_data(i, dest, dtv, lanes);
@@ -773,10 +914,16 @@ impl TypedKernel {
             let mut dest = sc.take_sized(i, dtv, sl, wsize);
             let s0b = sc.data(srcs[0]);
             if s_dt == dtv {
-                assert!(rv::alu_unary(opv, dtv, &mut dest, s0b), "TGERR: typed unary ALU {opv:?} failed");
+                assert!(
+                    rv::alu_unary(opv, dtv, &mut dest, s0b),
+                    "TGERR: typed unary ALU {opv:?} failed"
+                );
             } else {
                 let a = coerce(s0b, s_dt, dtv);
-                assert!(rv::alu_unary(opv, dtv, &mut dest, &a), "TGERR: typed unary ALU {opv:?} failed");
+                assert!(
+                    rv::alu_unary(opv, dtv, &mut dest, &a),
+                    "TGERR: typed unary ALU {opv:?} failed"
+                );
             }
             sc.set_data(i, dest, dtv, sl);
             return;
@@ -790,11 +937,17 @@ impl TypedKernel {
         let s0b = sc.data(srcs[0]);
         let s1b = sc.data(srcs[1]);
         if a_dt == op_dt && b_dt == op_dt && al == lanes && bl == lanes {
-            assert!(rv::alu_binary(opv, op_dt, &mut dest, s0b, s1b), "TGERR: typed binary ALU {opv:?} failed");
+            assert!(
+                rv::alu_binary(opv, op_dt, &mut dest, s0b, s1b),
+                "TGERR: typed binary ALU {opv:?} failed"
+            );
         } else {
             let a = broadcast(&coerce(s0b, a_dt, op_dt), al, lanes, wsize);
             let b = broadcast(&coerce(s1b, b_dt, op_dt), bl, lanes, wsize);
-            assert!(rv::alu_binary(opv, op_dt, &mut dest, &a, &b), "TGERR: typed binary ALU {opv:?} failed");
+            assert!(
+                rv::alu_binary(opv, op_dt, &mut dest, &a, &b),
+                "TGERR: typed binary ALU {opv:?} failed"
+            );
         }
         sc.set_data(i, dest, out_dt, lanes);
     }
@@ -861,13 +1014,17 @@ fn broadcast(src: &Bytes, src_lanes: usize, target: usize, wsize: usize) -> Byte
     if src_lanes == target || src_lanes == 0 {
         return src.clone();
     }
-    assert_eq!(src_lanes, 1, "TGERR: typed broadcast expects a scalar source");
+    assert_eq!(
+        src_lanes, 1,
+        "TGERR: typed broadcast expects a scalar source"
+    );
     let per_thread = src.nbytes() / wsize.max(1);
     let mut out = Bytes::zeroed(target * wsize * per_thread);
     let sb = src.as_bytes();
     let db = out.as_bytes_mut();
     for l in 0..target {
-        db[l * wsize * per_thread..(l + 1) * wsize * per_thread].copy_from_slice(&sb[0..wsize * per_thread]);
+        db[l * wsize * per_thread..(l + 1) * wsize * per_thread]
+            .copy_from_slice(&sb[0..wsize * per_thread]);
     }
     out
 }
@@ -878,7 +1035,8 @@ fn read_slice_conv(src: &[u8], src_dt: DTypeId, dst_dt: DTypeId, out: &mut [u8])
         out[..dst_dt.itemsize()].copy_from_slice(&src[..dst_dt.itemsize()]);
     } else {
         let v = from_storage_scalar(&src[..src_dt.itemsize()], src_dt);
-        out[..dst_dt.itemsize()].copy_from_slice(&to_storage_scalar(v, dst_dt)[..dst_dt.itemsize()]);
+        out[..dst_dt.itemsize()]
+            .copy_from_slice(&to_storage_scalar(v, dst_dt)[..dst_dt.itemsize()]);
     }
 }
 
@@ -887,7 +1045,11 @@ fn read_slice_conv(src: &[u8], src_dt: DTypeId, dst_dt: DTypeId, out: &mut [u8])
 /// (a transpose of the lane-major layout); scalar (`lanes == 1`) values are
 /// per-thread directly. Mirror that here.
 fn lane_elem(lanes: usize, wsize: usize, t: usize) -> usize {
-    if lanes > 1 { t.min(lanes - 1) * wsize } else { t }
+    if lanes > 1 {
+        t.min(lanes - 1) * wsize
+    } else {
+        t
+    }
 }
 
 /// Read element `(lane,t)` from a `Data`-style byte buffer, converting dtypes.

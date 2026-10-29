@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 
 use crate::dtype::{self, ConstVal};
+use crate::uop::UopId;
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::sint::SVal;
-use crate::uop::UopId;
 
 /// python float repr (2.0 → "2.0", nan → "nan", inf → "inf").
 fn py_float(v: f64) -> String {
@@ -16,7 +16,11 @@ fn py_float(v: f64) -> String {
         return "nan".to_string();
     }
     if v.is_infinite() {
-        return if v > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+        return if v > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
     }
     let s = format!("{v}");
     if s.contains('.') || s.contains('e') {
@@ -52,8 +56,16 @@ fn prec(op: Option<Ops>) -> i32 {
 fn binary(op: Ops, a: &str, b: &str, left_op: Option<Ops>, right_op: Option<Ops>) -> String {
     let p = prec(Some(op));
     let strip = |s: &str| -> String { s[1..s.len() - 1].to_string() };
-    let left = if a.starts_with('(') && prec(left_op) <= p { strip(a) } else { a.to_string() };
-    let right = if b.starts_with('(') && prec(right_op) < p { strip(b) } else { b.to_string() };
+    let left = if a.starts_with('(') && prec(left_op) <= p {
+        strip(a)
+    } else {
+        a.to_string()
+    };
+    let right = if b.starts_with('(') && prec(right_op) < p {
+        strip(b)
+    } else {
+        b.to_string()
+    };
     format!("({left}{}{right})", sym_of(op))
 }
 
@@ -94,7 +106,8 @@ fn expr_node(ctx: &mut UOpCtx, u: UopId, cache: &mut HashMap<UopId, String>) -> 
         return s.clone();
     }
     let (op, dt, srcs, _arg, _tag) = ctx.snapshot(&u);
-    let s = |ctx: &mut UOpCtx, id: UopId, cache: &mut HashMap<UopId, String>| expr_node(ctx, id, cache);
+    let s =
+        |ctx: &mut UOpCtx, id: UopId, cache: &mut HashMap<UopId, String>| expr_node(ctx, id, cache);
     let out = match op {
         Ops::Param => match ctx.arg_of(&u).clone() {
             Arg::Param(p) => match &p.name {
@@ -118,10 +131,13 @@ fn expr_node(ctx: &mut UOpCtx, u: UopId, cache: &mut HashMap<UopId, String>) -> 
         Ops::Range => {
             if dt == dtype::VOID {
                 let n = match ctx.arg_of(&u) {
-                    Arg::Seq { items, .. } => items.last().map(|it| match it {
-                        Arg::Int(v) => v.to_string(),
-                        _ => "?".to_string(),
-                    }).unwrap_or_else(|| "?".to_string()),
+                    Arg::Seq { items, .. } => items
+                        .last()
+                        .map(|it| match it {
+                            Arg::Int(v) => v.to_string(),
+                            _ => "?".to_string(),
+                        })
+                        .unwrap_or_else(|| "?".to_string()),
                     other => panic!("TGERR: expr_render RANGE {other:?}"),
                 };
                 format!("loop{n}")
@@ -142,12 +158,43 @@ fn expr_node(ctx: &mut UOpCtx, u: UopId, cache: &mut HashMap<UopId, String>) -> 
         }
         Ops::Neg => format!("(-{})", s(ctx, (srcs[0]).clone(), cache)),
         Ops::Reciprocal => format!("(1/{})", s(ctx, (srcs[0]).clone(), cache)),
-        Ops::Max => format!("max({}, {})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache)),
-        Ops::Mulacc => format!("({}*{}+{})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache), s(ctx, (srcs[2]).clone(), cache)),
-        Ops::Where => format!("({} if {} else {})", s(ctx, (srcs[1]).clone(), cache), s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[2]).clone(), cache)),
-        Ops::Cdiv => format!("cdiv({}, {})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache)),
-        Ops::Cmod => format!("cmod({}, {})", s(ctx, (srcs[0]).clone(), cache), s(ctx, (srcs[1]).clone(), cache)),
-        Ops::Add | Ops::Sub | Ops::Mul | Ops::Floordiv | Ops::Floormod | Ops::Shl | Ops::Shr | Ops::And | Ops::Or | Ops::Xor => {
+        Ops::Max => format!(
+            "max({}, {})",
+            s(ctx, (srcs[0]).clone(), cache),
+            s(ctx, (srcs[1]).clone(), cache)
+        ),
+        Ops::Mulacc => format!(
+            "({}*{}+{})",
+            s(ctx, (srcs[0]).clone(), cache),
+            s(ctx, (srcs[1]).clone(), cache),
+            s(ctx, (srcs[2]).clone(), cache)
+        ),
+        Ops::Where => format!(
+            "({} if {} else {})",
+            s(ctx, (srcs[1]).clone(), cache),
+            s(ctx, (srcs[0]).clone(), cache),
+            s(ctx, (srcs[2]).clone(), cache)
+        ),
+        Ops::Cdiv => format!(
+            "cdiv({}, {})",
+            s(ctx, (srcs[0]).clone(), cache),
+            s(ctx, (srcs[1]).clone(), cache)
+        ),
+        Ops::Cmod => format!(
+            "cmod({}, {})",
+            s(ctx, (srcs[0]).clone(), cache),
+            s(ctx, (srcs[1]).clone(), cache)
+        ),
+        Ops::Add
+        | Ops::Sub
+        | Ops::Mul
+        | Ops::Floordiv
+        | Ops::Floormod
+        | Ops::Shl
+        | Ops::Shr
+        | Ops::And
+        | Ops::Or
+        | Ops::Xor => {
             let a = s(ctx, (srcs[0]).clone(), cache);
             let b = s(ctx, (srcs[1]).clone(), cache);
             let (lo, ro) = (Some(ctx.op_of(&srcs[0])), Some(ctx.op_of(&srcs[1])));

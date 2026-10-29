@@ -13,22 +13,29 @@
 //!   `BufTable::prune` before the next read.
 use autorust::engine::session::Session;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 fn approx(a: &[f32], b: &[f32]) {
     assert_eq!(a.len(), b.len(), "length {} != {}", a.len(), b.len());
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
-        assert!((x - y).abs() < 1e-5, "[{i}] {x} != {y} (got {a:?}, want {b:?})");
+        assert!(
+            (x - y).abs() < 1e-5,
+            "[{i}] {x} != {y} (got {a:?}, want {b:?})"
+        );
     }
 }
 
 fn scalar(ctx: &Ctx, v: f64) -> Tensor {
-    Tensor::full_const(ctx, &[] as &[i64], autorust::dtype::ConstVal::Float(v), None)
+    Tensor::full_const(
+        ctx,
+        &[] as &[i64],
+        autorust::dtype::ConstVal::Float(v),
+        None,
+    )
 }
 
 #[test]
 fn assign_updates_in_place() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let p = Tensor::zeros_param(&ctx, [3], None, None);
     approx(&p.to_list::<f32>(&mut sess), &[0.0, 0.0, 0.0]);
@@ -41,7 +48,7 @@ fn assign_updates_in_place() {
 
 #[test]
 fn assign_accumulates_across_steps() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let p = Tensor::zeros_param(&ctx, [3], None, None);
     for step in 1..=5 {
@@ -56,7 +63,7 @@ fn assign_accumulates_across_steps() {
 /// read must see the old value, the write must land (tinygrad's AFTER ordering).
 #[test]
 fn assign_effect_orders_read_before_store() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let p = Tensor::zeros_param(&ctx, [3], None, None);
 
@@ -77,7 +84,7 @@ fn assign_effect_orders_read_before_store() {
 /// optimizer-like co-realization.
 #[test]
 fn assign_effect_with_reduced_read() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let p = Tensor::zeros_param(&ctx, [3], None, None);
 

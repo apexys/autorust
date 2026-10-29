@@ -89,18 +89,85 @@ pub enum Ops {
 }
 
 pub const OPS_ALL: &[Ops] = &[
-    Ops::Special, Ops::Buffer, Ops::Noop, Ops::RewriteError, Ops::Param, Ops::Function,
-    Ops::Call, Ops::Program, Ops::Linear, Ops::Source, Ops::Binary, Ops::Sink, Ops::After,
-    Ops::Group, Ops::Stack, Ops::Tuple, Ops::Gettuple, Ops::Getaddr, Ops::Index, Ops::Shrink,
-    Ops::Load, Ops::Store, Ops::Wmma, Ops::Cast, Ops::Bitcast, Ops::Exp2, Ops::Log2, Ops::Sin,
-    Ops::Sqrt, Ops::Reciprocal, Ops::Neg, Ops::Trunc, Ops::Add, Ops::Mul, Ops::Shl, Ops::Shr,
-    Ops::Cdiv, Ops::Max, Ops::Cmod, Ops::Cmplt, Ops::Cmpne, Ops::Cmpeq, Ops::Xor, Ops::Or,
-    Ops::And, Ops::Threefry, Ops::Sub, Ops::Fdiv, Ops::Pow, Ops::Floordiv, Ops::Floormod,
-    Ops::Where, Ops::Mulacc, Ops::Barrier, Ops::Range, Ops::If, Ops::End, Ops::Endif,
-    Ops::Const, Ops::Custom, Ops::Customi, Ops::Ins, Ops::Contiguous, Ops::ContiguousBackward,
-    Ops::Detach, Ops::Stage, Ops::Copy, Ops::Mselect, Ops::Mstack, Ops::CustomFunction,
-    Ops::Reshape, Ops::Permute, Ops::Expand, Ops::Pad, Ops::Flip, Ops::Unshard, Ops::Reduce,
-    Ops::Allreduce, Ops::Pyliteral,
+    Ops::Special,
+    Ops::Buffer,
+    Ops::Noop,
+    Ops::RewriteError,
+    Ops::Param,
+    Ops::Function,
+    Ops::Call,
+    Ops::Program,
+    Ops::Linear,
+    Ops::Source,
+    Ops::Binary,
+    Ops::Sink,
+    Ops::After,
+    Ops::Group,
+    Ops::Stack,
+    Ops::Tuple,
+    Ops::Gettuple,
+    Ops::Getaddr,
+    Ops::Index,
+    Ops::Shrink,
+    Ops::Load,
+    Ops::Store,
+    Ops::Wmma,
+    Ops::Cast,
+    Ops::Bitcast,
+    Ops::Exp2,
+    Ops::Log2,
+    Ops::Sin,
+    Ops::Sqrt,
+    Ops::Reciprocal,
+    Ops::Neg,
+    Ops::Trunc,
+    Ops::Add,
+    Ops::Mul,
+    Ops::Shl,
+    Ops::Shr,
+    Ops::Cdiv,
+    Ops::Max,
+    Ops::Cmod,
+    Ops::Cmplt,
+    Ops::Cmpne,
+    Ops::Cmpeq,
+    Ops::Xor,
+    Ops::Or,
+    Ops::And,
+    Ops::Threefry,
+    Ops::Sub,
+    Ops::Fdiv,
+    Ops::Pow,
+    Ops::Floordiv,
+    Ops::Floormod,
+    Ops::Where,
+    Ops::Mulacc,
+    Ops::Barrier,
+    Ops::Range,
+    Ops::If,
+    Ops::End,
+    Ops::Endif,
+    Ops::Const,
+    Ops::Custom,
+    Ops::Customi,
+    Ops::Ins,
+    Ops::Contiguous,
+    Ops::ContiguousBackward,
+    Ops::Detach,
+    Ops::Stage,
+    Ops::Copy,
+    Ops::Mselect,
+    Ops::Mstack,
+    Ops::CustomFunction,
+    Ops::Reshape,
+    Ops::Permute,
+    Ops::Expand,
+    Ops::Pad,
+    Ops::Flip,
+    Ops::Unshard,
+    Ops::Reduce,
+    Ops::Allreduce,
+    Ops::Pyliteral,
 ];
 
 impl Ops {
@@ -198,34 +265,147 @@ pub mod group {
     use super::Ops;
 
     pub const UNARY: &[Ops] = &[
-        Ops::Exp2, Ops::Log2, Ops::Sin, Ops::Sqrt, Ops::Reciprocal, Ops::Neg, Ops::Trunc,
+        Ops::Exp2,
+        Ops::Log2,
+        Ops::Sin,
+        Ops::Sqrt,
+        Ops::Reciprocal,
+        Ops::Neg,
+        Ops::Trunc,
     ];
     pub const BINARY: &[Ops] = &[
-        Ops::Add, Ops::Mul, Ops::Cdiv, Ops::Max, Ops::Cmod, Ops::Cmplt, Ops::Cmpne, Ops::Cmpeq,
-        Ops::Xor, Ops::Shl, Ops::Shr, Ops::Or, Ops::And, Ops::Threefry, Ops::Sub, Ops::Fdiv,
-        Ops::Pow, Ops::Floordiv, Ops::Floormod,
+        Ops::Add,
+        Ops::Mul,
+        Ops::Cdiv,
+        Ops::Max,
+        Ops::Cmod,
+        Ops::Cmplt,
+        Ops::Cmpne,
+        Ops::Cmpeq,
+        Ops::Xor,
+        Ops::Shl,
+        Ops::Shr,
+        Ops::Or,
+        Ops::And,
+        Ops::Threefry,
+        Ops::Sub,
+        Ops::Fdiv,
+        Ops::Pow,
+        Ops::Floordiv,
+        Ops::Floormod,
     ];
     pub const TERNARY: &[Ops] = &[Ops::Where, Ops::Mulacc];
-    pub const ALU: &[Ops] = &[Ops::Exp2, Ops::Log2, Ops::Sin, Ops::Sqrt, Ops::Reciprocal, Ops::Neg, Ops::Trunc,
-        Ops::Add, Ops::Mul, Ops::Cdiv, Ops::Max, Ops::Cmod, Ops::Cmplt, Ops::Cmpne, Ops::Cmpeq,
-        Ops::Xor, Ops::Shl, Ops::Shr, Ops::Or, Ops::And, Ops::Threefry, Ops::Sub, Ops::Fdiv,
-        Ops::Pow, Ops::Floordiv, Ops::Floormod, Ops::Where, Ops::Mulacc];
+    pub const ALU: &[Ops] = &[
+        Ops::Exp2,
+        Ops::Log2,
+        Ops::Sin,
+        Ops::Sqrt,
+        Ops::Reciprocal,
+        Ops::Neg,
+        Ops::Trunc,
+        Ops::Add,
+        Ops::Mul,
+        Ops::Cdiv,
+        Ops::Max,
+        Ops::Cmod,
+        Ops::Cmplt,
+        Ops::Cmpne,
+        Ops::Cmpeq,
+        Ops::Xor,
+        Ops::Shl,
+        Ops::Shr,
+        Ops::Or,
+        Ops::And,
+        Ops::Threefry,
+        Ops::Sub,
+        Ops::Fdiv,
+        Ops::Pow,
+        Ops::Floordiv,
+        Ops::Floormod,
+        Ops::Where,
+        Ops::Mulacc,
+    ];
     pub const BROADCASTABLE: &[Ops] = &[
-        Ops::Add, Ops::Mul, Ops::Cdiv, Ops::Max, Ops::Cmod, Ops::Cmplt, Ops::Cmpne, Ops::Cmpeq,
-        Ops::Xor, Ops::Shl, Ops::Shr, Ops::Or, Ops::And, Ops::Threefry, Ops::Sub, Ops::Fdiv,
-        Ops::Pow, Ops::Floordiv, Ops::Floormod, Ops::Where, Ops::Mulacc,
+        Ops::Add,
+        Ops::Mul,
+        Ops::Cdiv,
+        Ops::Max,
+        Ops::Cmod,
+        Ops::Cmplt,
+        Ops::Cmpne,
+        Ops::Cmpeq,
+        Ops::Xor,
+        Ops::Shl,
+        Ops::Shr,
+        Ops::Or,
+        Ops::And,
+        Ops::Threefry,
+        Ops::Sub,
+        Ops::Fdiv,
+        Ops::Pow,
+        Ops::Floordiv,
+        Ops::Floormod,
+        Ops::Where,
+        Ops::Mulacc,
     ];
     pub const ELEMENTWISE: &[Ops] = &[
-        Ops::Exp2, Ops::Log2, Ops::Sin, Ops::Sqrt, Ops::Reciprocal, Ops::Neg, Ops::Trunc,
-        Ops::Add, Ops::Mul, Ops::Cdiv, Ops::Max, Ops::Cmod, Ops::Cmplt, Ops::Cmpne, Ops::Cmpeq,
-        Ops::Xor, Ops::Shl, Ops::Shr, Ops::Or, Ops::And, Ops::Threefry, Ops::Sub, Ops::Fdiv,
-        Ops::Pow, Ops::Floordiv, Ops::Floormod, Ops::Where, Ops::Mulacc, Ops::Cast, Ops::Bitcast,
+        Ops::Exp2,
+        Ops::Log2,
+        Ops::Sin,
+        Ops::Sqrt,
+        Ops::Reciprocal,
+        Ops::Neg,
+        Ops::Trunc,
+        Ops::Add,
+        Ops::Mul,
+        Ops::Cdiv,
+        Ops::Max,
+        Ops::Cmod,
+        Ops::Cmplt,
+        Ops::Cmpne,
+        Ops::Cmpeq,
+        Ops::Xor,
+        Ops::Shl,
+        Ops::Shr,
+        Ops::Or,
+        Ops::And,
+        Ops::Threefry,
+        Ops::Sub,
+        Ops::Fdiv,
+        Ops::Pow,
+        Ops::Floordiv,
+        Ops::Floormod,
+        Ops::Where,
+        Ops::Mulacc,
+        Ops::Cast,
+        Ops::Bitcast,
     ];
     pub const DEFINES: &[Ops] = &[Ops::Param, Ops::Buffer];
-    pub const IRREDUCIBLE: &[Ops] = &[Ops::Const, Ops::Special, Ops::Range, Ops::Param, Ops::Getaddr];
-    pub const MOVEMENT: &[Ops] = &[Ops::Reshape, Ops::Expand, Ops::Permute, Ops::Pad, Ops::Shrink, Ops::Flip];
-    pub const COMMUTATIVE: &[Ops] =
-        &[Ops::Add, Ops::Mul, Ops::Max, Ops::Cmpne, Ops::Cmpeq, Ops::Xor, Ops::And, Ops::Or];
+    pub const IRREDUCIBLE: &[Ops] = &[
+        Ops::Const,
+        Ops::Special,
+        Ops::Range,
+        Ops::Param,
+        Ops::Getaddr,
+    ];
+    pub const MOVEMENT: &[Ops] = &[
+        Ops::Reshape,
+        Ops::Expand,
+        Ops::Permute,
+        Ops::Pad,
+        Ops::Shrink,
+        Ops::Flip,
+    ];
+    pub const COMMUTATIVE: &[Ops] = &[
+        Ops::Add,
+        Ops::Mul,
+        Ops::Max,
+        Ops::Cmpne,
+        Ops::Cmpeq,
+        Ops::Xor,
+        Ops::And,
+        Ops::Or,
+    ];
     pub const ASSOCIATIVE: &[Ops] = &[Ops::Add, Ops::Mul, Ops::And, Ops::Or, Ops::Max];
     pub const IDEMPOTENT: &[Ops] = &[Ops::Or, Ops::And, Ops::Max];
     pub const REDUCE_OPS: &[Ops] = &[Ops::Add, Ops::Mul, Ops::Max];
@@ -238,17 +418,13 @@ pub mod group {
     pub fn is_binary(o: Ops) -> bool {
         in_(BINARY, o)
     }
-
 }
-
-
-
 
 // ---------- pm_contiguous_view_offset (ops.py:1772) ----------
 
+use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
-use crate::uop::arg::Arg;
 use crate::uop::sym::{cvar, r, sget};
 use crate::uop::upat::{PatternMatcher, RuleFn, UPat, UPatOrConst};
 
@@ -271,7 +447,8 @@ pub fn pm_contiguous_view_offset() -> PatternMatcher {
                 let b = sget(st, "b");
                 let shape = ctx.shape(&b).ok().flatten()?;
                 if shape.len() != 1 {
-                    let flat = crate::tensor::movement::flatten(ctx, ctx.srcs(&b)[0].clone(), -1, -1);
+                    let flat =
+                        crate::tensor::movement::flatten(ctx, ctx.srcs(&b)[0].clone(), -1, -1);
                     let bc = ctx.bitcast(flat, ctx.dt_of(&b));
                     Some(crate::tensor::movement::reshape(ctx, bc, &shape))
                 } else {
@@ -286,7 +463,10 @@ pub fn pm_contiguous_view_offset() -> PatternMatcher {
                 .allow_all_srcs(),
             r(|ctx, st, _| {
                 let b = sget(st, "b");
-                let zero = ctx.const_py(crate::dtype::ConstVal::Int(0), Some(crate::dtype::default_int()));
+                let zero = ctx.const_py(
+                    crate::dtype::ConstVal::Int(0),
+                    Some(crate::dtype::default_int()),
+                );
                 let rb = rtag(ctx, b);
                 Some(ctx.index(rb, vec![zero]))
             }),
@@ -296,7 +476,10 @@ pub fn pm_contiguous_view_offset() -> PatternMatcher {
             UPat::ops1(Ops::Index).with_src_tup(vec![UPat::var(Some("b"), None)]),
             r(|ctx, st, _| {
                 let b = sget(st, "b");
-                let zero = ctx.const_py(crate::dtype::ConstVal::Int(0), Some(crate::dtype::default_int()));
+                let zero = ctx.const_py(
+                    crate::dtype::ConstVal::Int(0),
+                    Some(crate::dtype::default_int()),
+                );
                 let rb = rtag(ctx, b);
                 Some(ctx.index(rb, vec![zero]))
             }),

@@ -30,15 +30,25 @@ pub struct TensorCore {
 impl TensorCore {
     /// `get_reduce_axes` — `[(i, 2) for i in range(log2(dims[2]))]`.
     pub fn get_reduce_axes(&self) -> Vec<(usize, usize)> {
-        (0..(self.dims.2 as f64).log2() as usize).map(|i| (i, 2)).collect()
+        (0..(self.dims.2 as f64).log2() as usize)
+            .map(|i| (i, 2))
+            .collect()
     }
 
     pub fn get_upcast_axes(&self) -> Vec<&'static str> {
-        self.opts.iter().copied().filter(|o| o.starts_with('u')).collect()
+        self.opts
+            .iter()
+            .copied()
+            .filter(|o| o.starts_with('u'))
+            .collect()
     }
 
     pub fn get_local_axes(&self) -> Vec<&'static str> {
-        self.opts.iter().copied().filter(|o| o.starts_with('l')).collect()
+        self.opts
+            .iter()
+            .copied()
+            .filter(|o| o.starts_with('l'))
+            .collect()
     }
 
     /// `base_shape_str` — opts in order (`u0`,`l0`,`l0`,…) then `r0..`.
@@ -62,15 +72,27 @@ impl TensorCore {
 
     /// `base_upcast_axes` — `([r0..] + [u0..])[::-1]`.
     pub fn base_upcast_axes(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.get_reduce_axes().iter().map(|(i, _)| format!("r{i}")).collect();
-        v.extend(self.get_upcast_axes().iter().map(|o| format!("u{}", &o[1..])));
+        let mut v: Vec<String> = self
+            .get_reduce_axes()
+            .iter()
+            .map(|(i, _)| format!("r{i}"))
+            .collect();
+        v.extend(
+            self.get_upcast_axes()
+                .iter()
+                .map(|o| format!("u{}", &o[1..])),
+        );
         v.reverse();
         v
     }
 
     /// `_remaps` — map the forward shape string to the flattened swizzle tuples.
     pub fn remaps(&self) -> Vec<HashMap<String, String>> {
-        let (la, ua, ra) = (self.get_local_axes().len(), self.get_upcast_axes().len(), self.get_reduce_axes().len());
+        let (la, ua, ra) = (
+            self.get_local_axes().len(),
+            self.get_upcast_axes().len(),
+            self.get_reduce_axes().len(),
+        );
         let mut fwd: Vec<String> = Vec::new();
         fwd.extend((0..la).map(|i| format!("l{i}")));
         fwd.extend((0..ua).map(|i| format!("u{i}")));
@@ -93,7 +115,9 @@ impl TensorCore {
             for (i, ss) in shape_str.iter().enumerate() {
                 match remap.get(ss) {
                     Some(t) => {
-                        let j = shape_str.iter().position(|x| x == t).unwrap_or_else(|| panic!("TGERR: swizzle target {t} not in shape_str"));
+                        let j = shape_str.iter().position(|x| x == t).unwrap_or_else(|| {
+                            panic!("TGERR: swizzle target {t} not in shape_str")
+                        });
                         p.push(j);
                     }
                     None => p.push(i),
@@ -125,8 +149,16 @@ fn cuda_81616() -> Vec<TensorCore> {
             dtype_out: do_,
             opts: CUDA_TC_OPTS.to_vec(),
             swizzle: [
-                vec![vec!["r1", "r2", "l2", "l3", "l4"], vec!["u1", "r3"], vec!["l0", "l1", "u0", "r0"]],
-                vec![vec!["r1", "r2", "u0", "l0", "l1"], vec!["r0", "r3"], vec!["l2", "l3", "l4", "u1"]],
+                vec![
+                    vec!["r1", "r2", "l2", "l3", "l4"],
+                    vec!["u1", "r3"],
+                    vec!["l0", "l1", "u0", "r0"],
+                ],
+                vec![
+                    vec!["r1", "r2", "u0", "l0", "l1"],
+                    vec!["r0", "r3"],
+                    vec!["l2", "l3", "l4", "u1"],
+                ],
             ],
         })
         .collect()
@@ -143,8 +175,16 @@ fn cuda_81632_f8() -> Vec<TensorCore> {
             dtype_out: do_,
             opts: CUDA_TC_OPTS.to_vec(),
             swizzle: [
-                vec![vec!["r2", "r3", "l2", "l3", "l4"], vec!["u1", "r4"], vec!["l0", "l1", "u0", "r0", "r1"]],
-                vec![vec!["r2", "r3", "u0", "l0", "l1"], vec!["r1", "r4"], vec!["l2", "l3", "l4", "u1", "r0"]],
+                vec![
+                    vec!["r2", "r3", "l2", "l3", "l4"],
+                    vec!["u1", "r4"],
+                    vec!["l0", "l1", "u0", "r0", "r1"],
+                ],
+                vec![
+                    vec!["r2", "r3", "u0", "l0", "l1"],
+                    vec!["r1", "r4"],
+                    vec!["l2", "l3", "l4", "u1", "r0"],
+                ],
             ],
         })
         .collect()
@@ -161,8 +201,16 @@ fn cuda_8168_f16() -> Vec<TensorCore> {
             dtype_out: do_,
             opts: CUDA_TC_OPTS.to_vec(),
             swizzle: [
-                vec![vec!["r1", "r2", "l2", "l3", "l4"], vec!["r0", "u1"], vec!["l0", "l1", "u0"]],
-                vec![vec!["r1", "r2", "u0", "l0", "l1"], vec!["u1", "r0"], vec!["l2", "l3", "l4"]],
+                vec![
+                    vec!["r1", "r2", "l2", "l3", "l4"],
+                    vec!["r0", "u1"],
+                    vec!["l0", "l1", "u0"],
+                ],
+                vec![
+                    vec!["r1", "r2", "u0", "l0", "l1"],
+                    vec!["u1", "r0"],
+                    vec!["l2", "l3", "l4"],
+                ],
             ],
         })
         .collect()
@@ -177,8 +225,16 @@ fn cuda_8168_tf32() -> Vec<TensorCore> {
         dtype_out: D_FLOAT,
         opts: CUDA_TC_OPTS.to_vec(),
         swizzle: [
-            vec![vec!["r0", "r1", "l2", "l3", "l4"], vec!["u1", "r2"], vec!["l0", "l1", "u0"]],
-            vec![vec!["r0", "r1", "u0", "l0", "l1"], vec!["u1", "r2"], vec!["l2", "l3", "l4"]],
+            vec![
+                vec!["r0", "r1", "l2", "l3", "l4"],
+                vec!["u1", "r2"],
+                vec!["l0", "l1", "u0"],
+            ],
+            vec![
+                vec!["r0", "r1", "u0", "l0", "l1"],
+                vec!["u1", "r2"],
+                vec!["l2", "l3", "l4"],
+            ],
         ],
     }]
 }
@@ -202,7 +258,10 @@ fn cuda_sm89() -> Vec<TensorCore> {
 
 /// `get_cuda(arch)` — `sm_89`/`sm_80`/`sm_75` else empty.
 pub fn get_cuda(arch: &str) -> Vec<TensorCore> {
-    let ver: i64 = arch.strip_prefix("sm_").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let ver: i64 = arch
+        .strip_prefix("sm_")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     if ver >= 89 {
         cuda_sm89()
     } else if ver >= 80 {

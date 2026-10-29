@@ -57,10 +57,11 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
                     offset = v as i64;
                 }
             } else if ctx.op_of(&a) == Ops::Const
-                && let ConstVal::Int(v) = ctx.val(&a) {
-                    base_uop = Some(b);
-                    offset = v as i64;
-                }
+                && let ConstVal::Int(v) = ctx.val(&a)
+            {
+                base_uop = Some(b);
+                offset = v as i64;
+            }
             key = match base_uop {
                 Some(u) => Key::Uop(u),
                 None => Key::Uop(idx),
@@ -128,12 +129,17 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
             while !full_grp.is_empty() {
                 let first = full_grp[0];
                 let base_node: UopId = match base {
-                    Key::Const => ctx.const_py(ConstVal::Int(first as i128), Some(crate::dtype::WEAKINT)),
+                    Key::Const => {
+                        ctx.const_py(ConstVal::Int(first as i128), Some(crate::dtype::WEAKINT))
+                    }
                     Key::Uop(u) => {
                         if first == 0 {
                             u.clone()
                         } else {
-                            let c = ctx.const_py(ConstVal::Int(first as i128), Some(crate::dtype::WEAKINT));
+                            let c = ctx.const_py(
+                                ConstVal::Int(first as i128),
+                                Some(crate::dtype::WEAKINT),
+                            );
                             ctx.add(u.clone(), c)
                         }
                     }
@@ -142,20 +148,39 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
                 // divides() gate applies to that offset node.
                 let mut length = 1usize;
                 for &l in lengths.iter() {
-                    if l <= full_grp.len() as i64 && ctx.divides(base_node.clone(), l as i128).is_some() {
+                    if l <= full_grp.len() as i64
+                        && ctx.divides(base_node.clone(), l as i128).is_some()
+                    {
                         length = l as usize;
                         break;
                     }
                 }
                 let grp: Vec<i64> = full_grp[..length].to_vec();
                 // apply valid again after length determination (corpus: const-true valids only)
-                let base_node = if valid_is_true(ctx, valid.clone()) { base_node } else { ctx.valid(base_node, valid.clone()) };
+                let base_node = if valid_is_true(ctx, valid.clone()) {
+                    base_node
+                } else {
+                    ctx.valid(base_node, valid.clone())
+                };
                 let idx: UopId = if grp.len() > 1 {
                     // SHRINK pairs are (start, size): the group is n elements at base.
-                    let n = ctx.const_py(ConstVal::Int(grp.len() as i128), Some(crate::dtype::WEAKINT));
-                    ctx.uop(Ops::Shrink, Some(ctx.dt_of(buf)), vec![buf.clone(), base_node, n], Arg::None)
+                    let n = ctx.const_py(
+                        ConstVal::Int(grp.len() as i128),
+                        Some(crate::dtype::WEAKINT),
+                    );
+                    ctx.uop(
+                        Ops::Shrink,
+                        Some(ctx.dt_of(buf)),
+                        vec![buf.clone(), base_node, n],
+                        Arg::None,
+                    )
                 } else {
-                    ctx.uop(Ops::Index, Some(ctx.dt_of(buf)), vec![buf.clone(), base_node], Arg::None)
+                    ctx.uop(
+                        Ops::Index,
+                        Some(ctx.dt_of(buf)),
+                        vec![buf.clone(), base_node],
+                        Arg::None,
+                    )
                 };
                 if *op == Ops::Store {
                     let mut datas = Vec::new();
@@ -169,7 +194,12 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
                     } else {
                         datas[0].clone()
                     };
-                    let store = ctx.uop(Ops::Store, Some(crate::dtype::VOID), vec![idx, val], Arg::None);
+                    let store = ctx.uop(
+                        Ops::Store,
+                        Some(crate::dtype::VOID),
+                        vec![idx, val],
+                        Arg::None,
+                    );
                     for &g in &grp {
                         for uo in offsets.get(&g).unwrap() {
                             replacements.push((uo.clone(), store.clone()));
@@ -180,8 +210,16 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
                     for (i, &g) in grp.iter().enumerate() {
                         for uo in offsets.get(&g).unwrap() {
                             if grp.len() > 1 {
-                                let ci = ctx.const_py(ConstVal::Int(i as i128), Some(crate::dtype::WEAKINT));
-                                let r = ctx.uop(Ops::Index, Some(ctx.dt_of(&ld)), vec![ld.clone(), ci], Arg::None);
+                                let ci = ctx.const_py(
+                                    ConstVal::Int(i as i128),
+                                    Some(crate::dtype::WEAKINT),
+                                );
+                                let r = ctx.uop(
+                                    Ops::Index,
+                                    Some(ctx.dt_of(&ld)),
+                                    vec![ld.clone(), ci],
+                                    Arg::None,
+                                );
                                 replacements.push((uo.clone(), r));
                             } else {
                                 replacements.push((uo.clone(), ld.clone()));
@@ -213,7 +251,12 @@ enum Key {
 // ---------- indexing_simplify (late/coalesce.py:57) ----------
 
 /// `simplify_valid_load` (late/coalesce.py:40).
-fn simplify_valid_load(ctx: &mut UOpCtx, buf: UopId, start_idx: UopId, valid: UopId) -> Option<UopId> {
+fn simplify_valid_load(
+    ctx: &mut UOpCtx,
+    buf: UopId,
+    start_idx: UopId,
+    valid: UopId,
+) -> Option<UopId> {
     let idx = crate::uop::sym::uop_given_valid(ctx, valid.clone(), start_idx.clone(), true);
     if idx == start_idx {
         return None;
@@ -234,11 +277,10 @@ pub fn indexing_simplify() -> &'static crate::uop::upat::PatternMatcher {
         use crate::uop::sym::{r, sget};
         use crate::uop::upat::{PatternMatcher, UPat};
         PatternMatcher::new(vec![(
-            UPat::op_var(vec![Ops::Index])
-                .with_src_tup(vec![
-                    crate::uop::sym::var("buf"),
-                    crate::uop::sym::invalid_gate(),
-                ]),
+            UPat::op_var(vec![Ops::Index]).with_src_tup(vec![
+                crate::uop::sym::var("buf"),
+                crate::uop::sym::invalid_gate(),
+            ]),
             r(|ctx, st, _| {
                 let (buf, x, cond) = (sget(st, "buf"), sget(st, "x"), sget(st, "cond"));
                 simplify_valid_load(ctx, buf, x, cond)

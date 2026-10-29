@@ -11,7 +11,10 @@ use super::ops::Ops;
 
 /// Helpers from `tinygrad/helpers.py` (int semantics; Python floor division).
 /// Python `+` on ConstVals (int+int -> Int/Big, float wins, bool coerces).
-pub fn py_add_const(x: &crate::dtype::ConstVal, y: &crate::dtype::ConstVal) -> crate::dtype::ConstVal {
+pub fn py_add_const(
+    x: &crate::dtype::ConstVal,
+    y: &crate::dtype::ConstVal,
+) -> crate::dtype::ConstVal {
     use crate::dtype::ConstVal::*;
     match (x, y) {
         (Float(a), b) | (b, Float(a)) => Float(a + b.as_f64()),
@@ -45,11 +48,7 @@ pub fn cdiv(x: i128, y: i128) -> i128 {
         return 0;
     }
     let q = (x.abs()).wrapping_div(y.abs());
-    if (x < 0) ^ (y < 0) {
-        -q
-    } else {
-        q
-    }
+    if (x < 0) ^ (y < 0) { -q } else { q }
 }
 
 pub fn cmod(x: i128, y: i128) -> i128 {
@@ -160,7 +159,12 @@ where
     }
 }
 
-fn big_bin(a: &ConstVal, b: &ConstVal, iop: impl Fn(i128, i128) -> Option<i128>, fop: impl Fn(f64, f64) -> f64) -> Option<ConstVal> {
+fn big_bin(
+    a: &ConstVal,
+    b: &ConstVal,
+    iop: impl Fn(i128, i128) -> Option<i128>,
+    fop: impl Fn(f64, f64) -> f64,
+) -> Option<ConstVal> {
     // try to go through i128 when both fit
     match (const_to_i128_opt(a), const_to_i128_opt(b)) {
         (Some(x), Some(y)) => iop(x, y).map(ConstVal::Int),
@@ -204,7 +208,11 @@ fn safe_pow(x: f64, y: f64) -> f64 {
         if ay == 1.0 {
             return f64::NAN;
         }
-        return if (ay > 1.0) == (y > 0.0) { f64::INFINITY } else { 0.0 };
+        return if (ay > 1.0) == (y > 0.0) {
+            f64::INFINITY
+        } else {
+            0.0
+        };
     }
     x.powf(y)
 }
@@ -242,7 +250,11 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
         Ops::Reciprocal => {
             let x = as_f(&operands[0]);
             if x == 0.0 {
-                ConstVal::Float(if x.is_sign_negative() { f64::NEG_INFINITY } else { f64::INFINITY })
+                ConstVal::Float(if x.is_sign_negative() {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                })
             } else {
                 ConstVal::Float(1.0 / x)
             }
@@ -275,9 +287,24 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
             ConstVal::Float(f) => ConstVal::Float(-f),
             ConstVal::Invalid => ConstVal::Invalid,
         },
-        Ops::Add => num_bin(&operands[0], &operands[1], |x, y| x.checked_add(y), |a, b| a + b),
-        Ops::Sub => num_bin(&operands[0], &operands[1], |x, y| x.checked_sub(y), |a, b| a - b),
-        Ops::Mul => num_bin(&operands[0], &operands[1], |x, y| x.checked_mul(y), |a, b| a * b),
+        Ops::Add => num_bin(
+            &operands[0],
+            &operands[1],
+            |x, y| x.checked_add(y),
+            |a, b| a + b,
+        ),
+        Ops::Sub => num_bin(
+            &operands[0],
+            &operands[1],
+            |x, y| x.checked_sub(y),
+            |a, b| a - b,
+        ),
+        Ops::Mul => num_bin(
+            &operands[0],
+            &operands[1],
+            |x, y| x.checked_mul(y),
+            |a, b| a * b,
+        ),
         Ops::Cmpne => {
             let a = &operands[0];
             let b = &operands[1];
@@ -327,7 +354,10 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
             }
         }
         Ops::Shr => {
-            let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
+            let (x, y) = (
+                const_to_i128_opt(&operands[0]),
+                const_to_i128_opt(&operands[1]),
+            );
             match (x, y) {
                 (Some(x), Some(y)) if (0..512).contains(&y) => ConstVal::Int(x >> y),
                 (Some(x), Some(y)) if y >= 512 => ConstVal::Int(if x < 0 { -1 } else { 0 }),
@@ -335,15 +365,20 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
             }
         }
         Ops::Shl => {
-            let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
+            let (x, y) = (
+                const_to_i128_opt(&operands[0]),
+                const_to_i128_opt(&operands[1]),
+            );
             match (x, y) {
-                (Some(x), Some(y)) if (0..512).contains(&y) => match x.checked_shl(y.min(126) as u32) {
-                    Some(v) if y <= 126 => ConstVal::Int(v),
-                    _ => {
-                        // saturate like huge Python ints would (documented)
-                        ConstVal::Int(if x < 0 { i128::MIN } else { i128::MAX })
+                (Some(x), Some(y)) if (0..512).contains(&y) => {
+                    match x.checked_shl(y.min(126) as u32) {
+                        Some(v) if y <= 126 => ConstVal::Int(v),
+                        _ => {
+                            // saturate like huge Python ints would (documented)
+                            ConstVal::Int(if x < 0 { i128::MIN } else { i128::MAX })
+                        }
                     }
-                },
+                }
                 (Some(_), Some(y)) if y >= 512 => {
                     return Err("python_alu SHL overflow".into());
                 }
@@ -368,28 +403,40 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
             }
         }
         Ops::Cmod => {
-            let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
+            let (x, y) = (
+                const_to_i128_opt(&operands[0]),
+                const_to_i128_opt(&operands[1]),
+            );
             match (x, y) {
                 (Some(x), Some(y)) => ConstVal::Int(cmod(x, y)),
                 _ => return Err("python_alu CMOD".into()),
             }
         }
         Ops::Cdiv => {
-            let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
+            let (x, y) = (
+                const_to_i128_opt(&operands[0]),
+                const_to_i128_opt(&operands[1]),
+            );
             match (x, y) {
                 (Some(x), Some(y)) => ConstVal::Int(cdiv(x, y)),
                 _ => return Err("python_alu CDIV".into()),
             }
         }
         Ops::Floordiv => {
-            let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
+            let (x, y) = (
+                const_to_i128_opt(&operands[0]),
+                const_to_i128_opt(&operands[1]),
+            );
             match (x, y) {
                 (Some(x), Some(y)) => ConstVal::Int(floordiv(x, y)),
                 _ => return Err("python_alu FLOORDIV".into()),
             }
         }
         Ops::Floormod => {
-            let (x, y) = (const_to_i128_opt(&operands[0]), const_to_i128_opt(&operands[1]));
+            let (x, y) = (
+                const_to_i128_opt(&operands[0]),
+                const_to_i128_opt(&operands[1]),
+            );
             match (x, y) {
                 (Some(x), Some(y)) => ConstVal::Int(floormod(x, y)),
                 _ => return Err("python_alu FLOORMOD".into()),
@@ -466,8 +513,15 @@ pub fn python_alu(op: Ops, operands: &[ConstVal]) -> Result<ConstVal, String> {
 
 /// `exec_alu` (scalar operands; vector/tuple expansion handled by callers over STACK consts).
 /// `truncate_output=True` applies `truncate[dtype]` like Python.
-pub fn exec_alu(op: Ops, dtype: DTypeId, operands: &[ConstVal], truncate_output: bool) -> Result<ConstVal, String> {
-    if operands.iter().any(|v| matches!(v, ConstVal::Invalid)) && crate::uop::ops::group::is_binary(op) {
+pub fn exec_alu(
+    op: Ops,
+    dtype: DTypeId,
+    operands: &[ConstVal],
+    truncate_output: bool,
+) -> Result<ConstVal, String> {
+    if operands.iter().any(|v| matches!(v, ConstVal::Invalid))
+        && crate::uop::ops::group::is_binary(op)
+    {
         return Ok(ConstVal::Invalid);
     }
     let alu = python_alu(op, operands)?;

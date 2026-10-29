@@ -17,7 +17,6 @@ use autorust::models::vit::ViT;
 use autorust::tensor::nn::Module;
 use autorust::tensor::optim::{Adam, Optim};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 use vit_mnist::{fetch, load_images, load_labels, mnist_dir, prep};
 
@@ -35,11 +34,21 @@ fn vit_one_step_and_eval() {
         fetch(&format!("{base}{gz}"), &dir.join(raw));
     }
 
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let n = 4;
-    let x = load_images(&mut ctx.raw(), &mut sess, &dir.join("train-images-idx3-ubyte"), n);
-    let y = load_labels(&mut ctx.raw(), &mut sess, &dir.join("train-labels-idx1-ubyte"), n);
+    let x = load_images(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("train-images-idx3-ubyte"),
+        n,
+    );
+    let y = load_labels(
+        &mut ctx.raw(),
+        &mut sess,
+        &dir.join("train-labels-idx1-ubyte"),
+        n,
+    );
 
     Tensor::manual_seed(0);
     let size = 16;
@@ -51,7 +60,14 @@ fn vit_one_step_and_eval() {
     sess.training(true);
     let xp = prep(&x, size, &mut ctx.raw());
     let out = model.forward(&xp);
-    assert_eq!(out.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap()).collect::<Vec<_>>(), vec![n, 10]);
+    assert_eq!(
+        out.shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![n, 10]
+    );
     let loss = out.sparse_categorical_crossentropy(&y, -1, 0.0, "mean");
     loss.backward(&params, None);
     opt.schedule_step(&mut sess, std::slice::from_ref(&loss));
@@ -60,13 +76,20 @@ fn vit_one_step_and_eval() {
     let l = loss.item::<f32>(&mut sess);
     assert!(l.is_finite(), "loss is not finite: {l}");
     let after = params[0].to_list::<f32>(&mut sess);
-    assert_ne!(before, after, "the first parameter was not updated by the optimizer");
+    assert_ne!(
+        before, after,
+        "the first parameter was not updated by the optimizer"
+    );
 
     // eval mode (dropout off) must run
     sess.training(false);
     let xp = prep(&x, size, &mut ctx.raw());
     let eval_out = model.forward(&xp);
-    let acc = eval_out.argmax(Some(1), false).eq(&y).cast(autorust::dtype::FLOAT32).mean(None, false);
+    let acc = eval_out
+        .argmax(Some(1), false)
+        .eq(&y)
+        .cast(autorust::dtype::FLOAT32)
+        .mean(None, false);
     let acc = acc.item::<f32>(&mut sess);
     assert!((0.0..=100.0).contains(&acc), "accuracy out of range: {acc}");
 }

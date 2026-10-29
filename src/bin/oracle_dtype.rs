@@ -40,18 +40,41 @@ fn main() {
         for &b in &all {
             let lu = least_upper_dtype(&[a, b]);
             println!("LU\t{}\t{}\t{}", a.attr(), b.attr(), lu.attr());
-            println!("CL\t{}\t{}\t{}", a.attr(), b.attr(), if can_lossless_cast(a, b) { 1 } else { 0 });
+            println!(
+                "CL\t{}\t{}\t{}",
+                a.attr(),
+                b.attr(),
+                if can_lossless_cast(a, b) { 1 } else { 0 }
+            );
         }
     }
 
     for &d in &all {
         let (mn, mx) = (dtype_min(d), dtype_max(d));
-        println!("MINMAX\t{}\t{}\t{}", d.attr(), fmt_const(&mn), fmt_const(&mx));
+        println!(
+            "MINMAX\t{}\t{}\t{}",
+            d.attr(),
+            fmt_const(&mn),
+            fmt_const(&mx)
+        );
     }
 
     let vals: [f64; 15] = [
-        0.0, -0.0, 1.5, 2.5, -3.75, 300.0, -300.0, 1e9, 1e30, -1e30, 65519.0, 1e-8,
-        f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+        0.0,
+        -0.0,
+        1.5,
+        2.5,
+        -3.75,
+        300.0,
+        -300.0,
+        1e9,
+        1e30,
+        -1e30,
+        65519.0,
+        1e-8,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
     ];
     for &d in &all {
         // skip dtypes without a truncate entry (mirrors Python's truncate dict keys)

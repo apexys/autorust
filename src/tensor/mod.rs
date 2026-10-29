@@ -1033,7 +1033,10 @@ impl Tensor {
     ) -> Tensor {
         let shape = shape.into_shape_vec();
         let numel: i128 = shape.iter().map(|s| s.clone().as_i128_or_panic()).product();
-        assert!(numel >= 0, "TGERR: from_read shape has a negative dimension");
+        assert!(
+            numel >= 0,
+            "TGERR: from_read shape has a negative dimension"
+        );
         let mut bytes = vec![0u8; numel as usize * dtype.itemsize()];
         reader
             .read_exact(&mut bytes)
@@ -1243,7 +1246,8 @@ impl Tensor {
         }
         // (self.rand_like(default_float) >= p).contiguous().where(self, 0) / (1 - p)
         let r = self.rand_like_ctx(ctx, Some(crate::dtype::default_float()));
-        let thr = Tensor::full_const(&mut *ctx,
+        let thr = Tensor::full_const(
+            &mut *ctx,
             &[] as &[i64],
             ConstVal::Float(p),
             Some(crate::dtype::default_float()),
@@ -1262,12 +1266,7 @@ impl Tensor {
 
     /// `Tensor.kaiming_uniform(*shape, a=0.01)` (rand.py:208):
     /// `uniform(-bound, bound)` with `bound = sqrt(6/(1+a^2)/prod(shape[1:]))`.
-    pub fn kaiming_uniform(
-        ctx: impl AsCtx,
-        shape: &[i64],
-        a: f64,
-        device: Option<&str>,
-    ) -> Tensor {
+    pub fn kaiming_uniform(ctx: impl AsCtx, shape: &[i64], a: f64, device: Option<&str>) -> Tensor {
         ctx.with_ctx(|ctx| {
             let bound = (6.0 / (1.0 + a * a) / Tensor::prod_tail(shape)).sqrt();
             let s: Vec<SVal> = shape.iter().map(|&x| SVal::I(x as i128)).collect();
@@ -1562,6 +1561,7 @@ impl Tensor {
         self.where__ctx(&mut self.ctx.borrow_mut(), x, y)
     }
     #[doc(hidden)]
+    #[allow(non_snake_case)]
     pub fn where__ctx(
         &self,
         ctx: &mut UOpCtx,
@@ -1945,7 +1945,8 @@ impl Tensor {
         let qk = if let Some(m) = &mask {
             let m2 = if m.dtype_ctx(ctx) == crate::dtype::BOOL {
                 let zero = Tensor::full_const(&mut *ctx, &[] as &[i64], ConstVal::Float(0.0), None);
-                let neg_inf = Tensor::full_const(&mut *ctx,
+                let neg_inf = Tensor::full_const(
+                    &mut *ctx,
                     &[] as &[i64],
                     ConstVal::Float(f64::NEG_INFINITY),
                     None,
@@ -1958,8 +1959,11 @@ impl Tensor {
         } else {
             qk
         };
-        let sm =
-            crate::tensor::nn::softmax_ctx(&qk.cast_ctx(ctx, self.dtype_ctx(ctx)), ctx, Some(ndim - 1));
+        let sm = crate::tensor::nn::softmax_ctx(
+            &qk.cast_ctx(ctx, self.dtype_ctx(ctx)),
+            ctx,
+            Some(ndim - 1),
+        );
         let sm = sm.dropout_ctx(ctx, dropout_p);
         sm.matmul_ctx(ctx, &value)
     }
@@ -2063,6 +2067,7 @@ impl Tensor {
         self.mod__ctx(&mut self.ctx.borrow_mut(), other)
     }
     #[doc(hidden)]
+    #[allow(non_snake_case)]
     pub fn mod__ctx(&self, ctx: &mut UOpCtx, other: impl Into<TensorAddArg>) -> Tensor {
         match other.into() {
             TensorAddArg::T(o) => {
@@ -2132,8 +2137,12 @@ impl Tensor {
                         .sub_ctx(ctx, TensorAddArg::C(ConstVal::Int(os as i128)));
                     (num, os * 2)
                 };
-                let den =
-                    Tensor::full_const(&mut *ctx, &[] as &[i64], ConstVal::Int(den_val as i128), int_dt);
+                let den = Tensor::full_const(
+                    &mut *ctx,
+                    &[] as &[i64],
+                    ConstVal::Int(den_val as i128),
+                    int_dt,
+                );
                 let num = num.clip_ctx(ctx, Some(0.0), Some(((in_sz - 1) * den_val) as f64));
                 let low = num
                     .floordiv_ctx(ctx, &den)
@@ -2156,8 +2165,13 @@ impl Tensor {
                 x = gl.lerp_ctx(ctx, &gh, &perc);
             } else {
                 let scale = in_sz as f64 / os as f64;
-                let arr =
-                    Tensor::arange(&mut *ctx, 0.0, Some(os as f64), 1.0, Some(crate::dtype::FLOAT32));
+                let arr = Tensor::arange(
+                    &mut *ctx,
+                    0.0,
+                    Some(os as f64),
+                    1.0,
+                    Some(crate::dtype::FLOAT32),
+                );
                 let scaled = if mode == "nearest-exact" {
                     arr.add_ctx(ctx, TensorAddArg::C(ConstVal::Float(0.5)))
                         .mul_ctx(ctx, TensorAddArg::C(ConstVal::Float(scale)))
@@ -2505,7 +2519,9 @@ impl Tensor {
             .unsqueeze_ctx(ctx, -1)
             .transpose_ctx(ctx, -1, d as i64);
         let ncl = self_shape[d].clone().as_i64().unwrap_or(0);
-        let oh = index.unsqueeze_ctx(ctx, -1).one_hot_along_dim_ctx(ctx, ncl, -1);
+        let oh = index
+            .unsqueeze_ctx(ctx, -1)
+            .one_hot_along_dim_ctx(ctx, ncl, -1);
         let zero = Tensor::full_const(&mut *ctx, &[] as &[i64], ConstVal::Float(0.0), None);
         let picked = oh.where__ctx(ctx, &x, zero);
         let last = picked.shape_ctx(ctx).len() - 1;

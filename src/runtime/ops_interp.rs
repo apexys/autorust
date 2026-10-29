@@ -12,13 +12,13 @@ use std::rc::Rc;
 
 use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
-use crate::runtime::device::{register_device, Prog, TinyElf};
-use crate::runtime::interp::{exec_kernel_with_dims, MemView};
-use crate::runtime::buffer::{host_of, OpaqueT};
+use crate::runtime::buffer::{OpaqueT, host_of};
+use crate::runtime::device::{Prog, TinyElf, register_device};
+use crate::runtime::interp::{MemView, exec_kernel_with_dims};
+use crate::uop::UopId;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::flat::FlatGraph;
 use crate::uop::graph::Graph;
-use crate::uop::UopId;
 
 use super::device::Compiled;
 
@@ -35,7 +35,9 @@ impl Default for InterpUopRenderer {
 
 impl InterpUopRenderer {
     pub fn new() -> InterpUopRenderer {
-        InterpUopRenderer { facts: Renderer::cpu_interp() }
+        InterpUopRenderer {
+            facts: Renderer::cpu_interp(),
+        }
     }
 }
 
@@ -75,7 +77,12 @@ impl InterpProgram {
         ctx.g = g;
         let globals: Vec<i64> = elf.signature.iter().map(|(s, _)| *s).collect();
         let sig_dtypes: HashMap<i64, DTypeId> = elf.signature.iter().cloned().collect();
-        InterpProgram { ctx, uops, globals, sig_dtypes }
+        InterpProgram {
+            ctx,
+            uops,
+            globals,
+            sig_dtypes,
+        }
     }
 }
 
@@ -120,9 +127,17 @@ impl Prog for InterpProgram {
 pub fn register() {
     fn make(device: &str) -> Rc<Compiled> {
         let renderer: Box<dyn UopRenderer> = Box::new(InterpUopRenderer::new());
-        let compiler: Rc<dyn crate::runtime::device::Comp> = Rc::new(crate::runtime::device::IdentityCompiler::default());
-        let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> = Rc::new(|elf| Rc::new(RefCell::new(InterpProgram::new(elf))));
-        Compiled::new(device, renderer, crate::runtime::device::LruAllocator::new(), compiler, ctor)
+        let compiler: Rc<dyn crate::runtime::device::Comp> =
+            Rc::new(crate::runtime::device::IdentityCompiler::default());
+        let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> =
+            Rc::new(|elf| Rc::new(RefCell::new(InterpProgram::new(elf))));
+        Compiled::new(
+            device,
+            renderer,
+            crate::runtime::device::LruAllocator::new(),
+            compiler,
+            ctor,
+        )
     }
     register_device("CPU", Rc::new(|| make("CPU")));
     register_device("INTERP", Rc::new(|| make("INTERP")));
@@ -133,7 +148,15 @@ pub fn register() {
 pub fn fallback(device: &str) -> Rc<Compiled> {
     register();
     let renderer: Box<dyn UopRenderer> = Box::new(InterpUopRenderer::new());
-    let compiler: Rc<dyn crate::runtime::device::Comp> = Rc::new(crate::runtime::device::IdentityCompiler::default());
-    let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> = Rc::new(|elf| Rc::new(RefCell::new(InterpProgram::new(elf))));
-    Compiled::new(device, renderer, crate::runtime::device::LruAllocator::new(), compiler, ctor)
+    let compiler: Rc<dyn crate::runtime::device::Comp> =
+        Rc::new(crate::runtime::device::IdentityCompiler::default());
+    let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> =
+        Rc::new(|elf| Rc::new(RefCell::new(InterpProgram::new(elf))));
+    Compiled::new(
+        device,
+        renderer,
+        crate::runtime::device::LruAllocator::new(),
+        compiler,
+        ctor,
+    )
 }

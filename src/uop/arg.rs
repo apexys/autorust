@@ -44,7 +44,10 @@ pub enum Arg {
     Bytes(Vec<u8>),
     Enum(EnumVal),
     Dtype(DTypeId),
-    Seq { tuple: bool, items: Vec<Arg> },
+    Seq {
+        tuple: bool,
+        items: Vec<Arg>,
+    },
     /// Python `ParamArg` dataclass (BUFFER/PARAM args): the Variables/buffers spine.
     Param(ParamArg),
     /// A CONST arg carried as an exact `ConstVal` (ints may exceed i64, and
@@ -69,7 +72,12 @@ pub struct DataArg {
 
 impl DataArg {
     pub fn get(&self, name: &str) -> &Arg {
-        &self.fields.iter().find(|(n, _)| n == name).expect("TGERR: missing dataclass field").1
+        &self
+            .fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("TGERR: missing dataclass field")
+            .1
     }
     pub fn as_bool(&self, name: &str) -> bool {
         match self.get(name) {
@@ -94,10 +102,30 @@ pub fn kernel_info(name: &str, opts_to_apply: Option<Vec<Arg>>) -> DataArg {
         tag: "KernelInfo".into(),
         fields: vec![
             ("name".into(), Arg::Str(name.into())),
-            ("axis_types".into(), Arg::Seq { tuple: true, items: vec![] }),
+            (
+                "axis_types".into(),
+                Arg::Seq {
+                    tuple: true,
+                    items: vec![],
+                },
+            ),
             ("dont_use_locals".into(), Arg::Bool(false)),
-            ("applied_opts".into(), Arg::Seq { tuple: true, items: vec![] }),
-            ("opts_to_apply".into(), opts_to_apply.map(|o| Arg::Seq { tuple: true, items: o }).unwrap_or(Arg::None)),
+            (
+                "applied_opts".into(),
+                Arg::Seq {
+                    tuple: true,
+                    items: vec![],
+                },
+            ),
+            (
+                "opts_to_apply".into(),
+                opts_to_apply
+                    .map(|o| Arg::Seq {
+                        tuple: true,
+                        items: o,
+                    })
+                    .unwrap_or(Arg::None),
+            ),
             ("beam".into(), Arg::Int(0)),
         ],
     }
@@ -108,7 +136,10 @@ pub fn call_info(name: Option<&str>) -> DataArg {
     DataArg {
         tag: "CallInfo".into(),
         fields: vec![
-            ("name".into(), name.map(|n| Arg::Str(n.into())).unwrap_or(Arg::None)),
+            (
+                "name".into(),
+                name.map(|n| Arg::Str(n.into())).unwrap_or(Arg::None),
+            ),
             ("precompile".into(), Arg::Bool(false)),
             ("precompile_backward".into(), Arg::Bool(false)),
         ],
@@ -122,7 +153,17 @@ pub fn bufferize_opts(device: Arg, addrspace: Option<AddrSpace>, removable: bool
         tag: "BufferizeOpts".into(),
         fields: vec![
             ("device".into(), device),
-            ("addrspace".into(), addrspace.map(|a| Arg::Enum(EnumVal { class: EnumClass::AddrSpace, value: a as u16 })).unwrap_or(Arg::None)),
+            (
+                "addrspace".into(),
+                addrspace
+                    .map(|a| {
+                        Arg::Enum(EnumVal {
+                            class: EnumClass::AddrSpace,
+                            value: a as u16,
+                        })
+                    })
+                    .unwrap_or(Arg::None),
+            ),
             ("removable".into(), Arg::Bool(removable)),
         ],
     }
@@ -238,7 +279,10 @@ impl Arg {
 
     pub fn addr_space(&self) -> Option<AddrSpace> {
         match self {
-            Arg::Enum(EnumVal { class: EnumClass::AddrSpace, value }) => AddrSpace::from_u8(*value as u8),
+            Arg::Enum(EnumVal {
+                class: EnumClass::AddrSpace,
+                value,
+            }) => AddrSpace::from_u8(*value as u8),
             _ => None,
         }
     }
@@ -264,7 +308,16 @@ impl PartialEq for Arg {
             (Dtype(a), Dtype(b)) => a == b,
             (Param(a), Param(b)) => a == b,
             (Const(a), Const(b)) => a == b,
-            (Seq { tuple: ta, items: ia }, Seq { tuple: tb, items: ib }) => ta == tb && ia == ib,
+            (
+                Seq {
+                    tuple: ta,
+                    items: ia,
+                },
+                Seq {
+                    tuple: tb,
+                    items: ib,
+                },
+            ) => ta == tb && ia == ib,
             (None, None) => true,
             _ => false,
         }

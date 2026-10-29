@@ -1,10 +1,10 @@
 //! `codegen/late/linearizer.py` port (M5): priority-toposort linearization.
 
 use crate::dtype::AddrSpace;
+use crate::uop::UopId;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::range::AxisType;
-use crate::uop::UopId;
 use std::collections::BinaryHeap;
 
 /// `linearize` (linearizer.py:9) — toposort with priorities (heap by nkey).
@@ -14,7 +14,8 @@ pub fn linearize(ctx: &mut UOpCtx, sink: UopId) -> Vec<UopId> {
     // out_degree
     let mut out_degree: std::collections::HashMap<UopId, usize> = std::collections::HashMap::new();
     // priorities: (run_count, priority, extra)
-    let mut priorities: std::collections::HashMap<UopId, (i64, i32, i64)> = std::collections::HashMap::new();
+    let mut priorities: std::collections::HashMap<UopId, (i64, i32, i64)> =
+        std::collections::HashMap::new();
 
     for u in lst.iter().rev() {
         for s in ctx.srcs(u) {
@@ -38,7 +39,11 @@ pub fn linearize(ctx: &mut UOpCtx, sink: UopId) -> Vec<UopId> {
                 (-20, slot)
             }
             Ops::Buffer => {
-                let p = if ctx.addrspace_of(u.clone()) == Some(AddrSpace::Local) { -17 } else { -18 };
+                let p = if ctx.addrspace_of(u.clone()) == Some(AddrSpace::Local) {
+                    -17
+                } else {
+                    -18
+                };
                 (p, 0)
             }
             Ops::Load => (-1, 0),
@@ -54,8 +59,11 @@ pub fn linearize(ctx: &mut UOpCtx, sink: UopId) -> Vec<UopId> {
     // smaller run_count closer to the top; the heap pops smallest nkey first
     let mut sorted_lst: Vec<UopId> = lst.clone();
     sorted_lst.sort_by_key(|u| priorities[u]);
-    let nkey: std::collections::HashMap<UopId, usize> =
-        sorted_lst.iter().enumerate().map(|(i, u)| (u.clone(), i)).collect();
+    let nkey: std::collections::HashMap<UopId, usize> = sorted_lst
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (u.clone(), i))
+        .collect();
 
     // heap-driven toposort from the sink — python pushes (-nkey, u) and pops the
     // smallest, i.e. LARGEST nkey first

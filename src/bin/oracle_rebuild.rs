@@ -11,7 +11,9 @@ fn main() {
             input = std::fs::read_to_string(&path).expect("failed to read graph file");
         }
         None => {
-            std::io::stdin().read_to_string(&mut input).expect("failed to read stdin");
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .expect("failed to read stdin");
         }
     }
     match autorust::rebuild(&input) {

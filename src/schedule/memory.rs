@@ -4,11 +4,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dtype::ConstVal;
+use crate::uop::UopId;
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::sint::SVal;
-use crate::uop::UopId;
 
 // ---------- TLSFAllocator (runtime/support/memory.py:14-106) ----------
 
@@ -73,7 +73,8 @@ impl TlsfAllocator {
         let (l1, l2) = (self.lv1(size), self.lv2(size));
         self.storage[l1][l2].push(start);
         self.lv1_entries[l1] += 1;
-        self.blocks.insert(start, (size, Some(start + size), prev, true));
+        self.blocks
+            .insert(start, (size, Some(start + size), prev, true));
     }
 
     fn remove_block(&mut self, start: i64, size: i64, prev: Option<i64>) {
@@ -83,7 +84,8 @@ impl TlsfAllocator {
             self.storage[l1][l2].remove(pos);
         }
         self.lv1_entries[l1] -= 1;
-        self.blocks.insert(start, (size, Some(start + size), prev, false));
+        self.blocks
+            .insert(start, (size, Some(start + size), prev, false));
     }
 
     fn split_block(&mut self, start: i64, size: i64, new_size: i64) {
@@ -93,17 +95,20 @@ impl TlsfAllocator {
         self.insert_block(start, new_size, None);
         self.insert_block(start + new_size, size - new_size, Some(start));
         if let Some(n) = nxt
-            && let Some(b) = self.blocks.get_mut(&n) {
-                let (bsize, bnext, _, bfree) = *b;
-                *b = (bsize, bnext, Some(start + new_size), bfree);
-            }
+            && let Some(b) = self.blocks.get_mut(&n)
+        {
+            let (bsize, bnext, _, bfree) = *b;
+            *b = (bsize, bnext, Some(start + new_size), bfree);
+        }
     }
 
     fn merge_right(&mut self, start: i64) {
         let (mut size, mut nxt, _, is_free) = self.blocks[&start];
         assert!(is_free, "TGERR: block must be free");
         while let Some(n) = nxt {
-            let Some(&(bsize, bnext, _, bfree)) = self.blocks.get(&n).cloned().as_ref() else { break };
+            let Some(&(bsize, bnext, _, bfree)) = self.blocks.get(&n).cloned().as_ref() else {
+                break;
+            };
             // python: if the NEIGHBOR is not free, stop merging
             if !bfree {
                 break;
@@ -117,10 +122,11 @@ impl TlsfAllocator {
             nxt = bnext;
         }
         if let Some(n) = nxt
-            && let Some(b) = self.blocks.get_mut(&n) {
-                let (bsize, bnext, _, bfree) = *b;
-                *b = (bsize, bnext, Some(start), bfree);
-            }
+            && let Some(b) = self.blocks.get_mut(&n)
+        {
+            let (bsize, bnext, _, bfree) = *b;
+            *b = (bsize, bnext, Some(start), bfree);
+        }
     }
 
     fn merge_block(&mut self, start: i64) {
@@ -199,8 +205,18 @@ fn can_plan(ctx: &mut UOpCtx, b: UopId, held: &[UopId]) -> bool {
         return false;
     }
     match crate::schedule::indexing::device_of(ctx, b) {
-        Some(crate::uop::arg::DeviceSpec::Single(d)) => !(d.starts_with("DISK") || d.starts_with("TINYFS") || d.starts_with("CL") || d.starts_with("WEBGPU")),
-        Some(crate::uop::arg::DeviceSpec::Multi(v)) => v.iter().all(|d| !(d.starts_with("DISK") || d.starts_with("TINYFS") || d.starts_with("CL") || d.starts_with("WEBGPU"))),
+        Some(crate::uop::arg::DeviceSpec::Single(d)) => {
+            !(d.starts_with("DISK")
+                || d.starts_with("TINYFS")
+                || d.starts_with("CL")
+                || d.starts_with("WEBGPU"))
+        }
+        Some(crate::uop::arg::DeviceSpec::Multi(v)) => v.iter().all(|d| {
+            !(d.starts_with("DISK")
+                || d.starts_with("TINYFS")
+                || d.starts_with("CL")
+                || d.starts_with("WEBGPU"))
+        }),
         None => false,
     }
 }
@@ -261,7 +277,11 @@ pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId])
     let mut events: Vec<(i64, bool, UopId)> = Vec::new();
     for b in &order {
         events.push((first_appearance[b], true, b.clone()));
-        events.push((last_appearance[b] + 1 + buf_hold.get(b).cloned().unwrap_or(0), false, b.clone()));
+        events.push((
+            last_appearance[b] + 1 + buf_hold.get(b).cloned().unwrap_or(0),
+            false,
+            b.clone(),
+        ));
     }
     events.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     let total_memory: i64 = nbytes.values().sum::<i64>() * 2;
@@ -293,13 +313,22 @@ pub fn memory_plan_rewrite(ctx: &mut UOpCtx, linear: UopId, held_bufs: &[UopId])
     for b in &order {
         let key = lane_of(ctx, b.clone());
         let sz = arena_sizes[&key];
-        let arena = arenas.entry(key).or_insert_with(|| {
-            let dev_s = match crate::schedule::indexing::device_of(ctx, b.clone()) {
-                Some(crate::uop::arg::DeviceSpec::Single(s)) => s,
-                _ => String::new(),
-            };
-            crate::tensor::creation::new_buffer(ctx, &dev_s, SVal::I(sz as i128), crate::dtype::INT8, None)
-        }).clone();
+        let arena = arenas
+            .entry(key)
+            .or_insert_with(|| {
+                let dev_s = match crate::schedule::indexing::device_of(ctx, b.clone()) {
+                    Some(crate::uop::arg::DeviceSpec::Single(s)) => s,
+                    _ => String::new(),
+                };
+                crate::tensor::creation::new_buffer(
+                    ctx,
+                    &dev_s,
+                    SVal::I(sz as i128),
+                    crate::dtype::INT8,
+                    None,
+                )
+            })
+            .clone();
         let off = offsets[b];
         let nbytes_b = ctx.max_numel(b.clone()) * ctx.dt_of(b).itemsize() as i64;
         // python: arena[offset:offset+nbytes] — movement::shrink takes (start, stop)

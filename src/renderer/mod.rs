@@ -12,9 +12,32 @@ use crate::uop::Ops;
 /// `python_alu.keys()` (uop/ops.py:1287) — the interp's native ALU ops.
 fn python_alu_keys() -> Vec<Ops> {
     vec![
-        Ops::Log2, Ops::Exp2, Ops::Sqrt, Ops::Reciprocal, Ops::Sin, Ops::Pow, Ops::Trunc, Ops::Neg, Ops::Add, Ops::Sub,
-        Ops::Mul, Ops::Cmpne, Ops::Cmplt, Ops::Xor, Ops::Or, Ops::And, Ops::Shr, Ops::Shl, Ops::Max, Ops::Cmod, Ops::Cdiv,
-        Ops::Floordiv, Ops::Floormod, Ops::Mulacc, Ops::Where, Ops::Cmpeq,
+        Ops::Log2,
+        Ops::Exp2,
+        Ops::Sqrt,
+        Ops::Reciprocal,
+        Ops::Sin,
+        Ops::Pow,
+        Ops::Trunc,
+        Ops::Neg,
+        Ops::Add,
+        Ops::Sub,
+        Ops::Mul,
+        Ops::Cmpne,
+        Ops::Cmplt,
+        Ops::Xor,
+        Ops::Or,
+        Ops::And,
+        Ops::Shr,
+        Ops::Shl,
+        Ops::Max,
+        Ops::Cmod,
+        Ops::Cdiv,
+        Ops::Floordiv,
+        Ops::Floormod,
+        Ops::Mulacc,
+        Ops::Where,
+        Ops::Cmpeq,
     ]
 }
 
@@ -22,8 +45,27 @@ fn python_alu_keys() -> Vec<Ops> {
 fn cstyle_alu_keys() -> Vec<Ops> {
     // python cstyle.py:136 — note NO MAX (max decomposes via WHERE)
     vec![
-        Ops::Sqrt, Ops::Reciprocal, Ops::Neg, Ops::Exp2, Ops::Log2, Ops::Sin, Ops::Trunc, Ops::And, Ops::Xor, Ops::Or,
-        Ops::Add, Ops::Sub, Ops::Mul, Ops::Cmod, Ops::Cdiv, Ops::Cmpne, Ops::Shr, Ops::Shl, Ops::Cmplt, Ops::Where, Ops::Cmpeq,
+        Ops::Sqrt,
+        Ops::Reciprocal,
+        Ops::Neg,
+        Ops::Exp2,
+        Ops::Log2,
+        Ops::Sin,
+        Ops::Trunc,
+        Ops::And,
+        Ops::Xor,
+        Ops::Or,
+        Ops::Add,
+        Ops::Sub,
+        Ops::Mul,
+        Ops::Cmod,
+        Ops::Cdiv,
+        Ops::Cmpne,
+        Ops::Shr,
+        Ops::Shl,
+        Ops::Cmplt,
+        Ops::Where,
+        Ops::Cmpeq,
     ]
 }
 
@@ -32,7 +74,12 @@ fn cstyle_alu_keys() -> Vec<Ops> {
 fn cstyle_alu_keys_clang() -> Vec<Ops> {
     cstyle_alu_keys()
         .into_iter()
-        .filter(|&o| !matches!(o, Ops::Exp2 | Ops::Log2 | Ops::Sin | Ops::Trunc | Ops::Reciprocal))
+        .filter(|&o| {
+            !matches!(
+                o,
+                Ops::Exp2 | Ops::Log2 | Ops::Sin | Ops::Trunc | Ops::Reciprocal
+            )
+        })
         .chain([Ops::Fdiv])
         .collect()
 }
@@ -93,7 +140,8 @@ impl Renderer {
     }
 
     /// `ClangRenderer` — has_local=False, global_max=(NUM_CPU_THREADS, 0, 0).
-    pub fn clang() -> Renderer {        Renderer {
+    pub fn clang() -> Renderer {
+        Renderer {
             device: "CPU".to_string(),
             has_local: false,
             has_shared: true,
@@ -104,7 +152,11 @@ impl Renderer {
             tensor_cores: Vec::new(),
             code_for_op: cstyle_alu_keys_clang(),
             // cstyle.py:300 — fp8s excluded everywhere; bf16 only on x86/arm arch.
-            supported_dtypes: crate::dtype::ALL.iter().cloned().filter(|&d| !in_fp8s(d)).collect(),
+            supported_dtypes: crate::dtype::ALL
+                .iter()
+                .cloned()
+                .filter(|&d| !in_fp8s(d))
+                .collect(),
             extra_matcher: extra::clang_extra_matcher(),
         }
     }
@@ -157,7 +209,10 @@ impl Renderer {
 
 /// cstyle.py:470 — the CUDA dtype gate over the SM version.
 fn cuda_supported_dtypes(arch: &str) -> Vec<crate::dtype::DTypeId> {
-    let ver: i64 = arch.strip_prefix("sm_").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let ver: i64 = arch
+        .strip_prefix("sm_")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     crate::dtype::ALL
         .iter()
         .cloned()
@@ -184,7 +239,8 @@ fn opencl_supported_dtypes(arch: &str) -> Vec<crate::dtype::DTypeId> {
             let fp8 = in_fp8s(d);
             let half = d == crate::dtype::FLOAT16;
             let dbl = d == crate::dtype::FLOAT64;
-            !fp8 && (!half || arch.contains("cl_khr_fp16")) && (!dbl || arch.contains("cl_khr_fp64"))
+            !fp8 && (!half || arch.contains("cl_khr_fp16"))
+                && (!dbl || arch.contains("cl_khr_fp64"))
         })
         .collect()
 }

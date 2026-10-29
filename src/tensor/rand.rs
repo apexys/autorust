@@ -343,7 +343,8 @@ pub fn rand_graph(
     } else {
         let (key, counter) = next_counter(&dev, num as u32);
         let key_t = Tensor::from_slice(&mut *ctx, &[key.0, key.1], Some(dtype::UINT32), Some(&dev));
-        let counter_t = Tensor::from_slice(&mut *ctx,
+        let counter_t = Tensor::from_slice(
+            &mut *ctx,
             &[counter.0, counter.1],
             Some(dtype::UINT32),
             Some(&dev),
@@ -481,7 +482,8 @@ pub fn uniform(
     // `dt`, then shifts by `low` (rand.py:158).
     let r = rand(ctx, shape, None, Some(&dev));
     let fdt = dtype::default_float();
-    let range = Tensor::full(&mut *ctx,
+    let range = Tensor::full(
+        &mut *ctx,
         shape,
         ConstVal::Float(high - low),
         Some(fdt),

@@ -1,12 +1,12 @@
 //! Port of tinygrad codegen/late/gater.py (pm_move_gates_from_index).
 
-use crate::dtype::{ConstVal as CV, BOOL};
+use crate::dtype::{BOOL, ConstVal as CV};
+use crate::uop::UopId;
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::ops::Ops;
 use crate::uop::sym::{invalid_pat, r, sget, var};
 use crate::uop::upat::{PatternMatcher, UPat, UPatOrConst};
-use crate::uop::UopId;
 
 fn vconst_like(ctx: &mut UOpCtx, l: UopId, val: i64) -> UopId {
     let dt = ctx.dt_of(&l);
@@ -35,7 +35,12 @@ fn move_where_load(ctx: &mut UOpCtx, l: UopId, a: UopId, w: UopId) -> Option<Uop
     } else {
         ctx.cast(a, ctx.dt_of(&l))
     };
-    let nl = ctx.uop(Ops::Load, Some(ctx.dt_of(&l)), vec![(lsrc[0]).clone(), alt, (lsrc[2]).clone()], Arg::None);
+    let nl = ctx.uop(
+        Ops::Load,
+        Some(ctx.dt_of(&l)),
+        vec![(lsrc[0]).clone(), alt, (lsrc[2]).clone()],
+        Arg::None,
+    );
     Some(ctx.cast(nl, ctx.dt_of(&w)))
 }
 
@@ -47,7 +52,10 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
             UPat::op_var(vec![Ops::Index, Ops::Shrink])
                 .with_src_tup(vec![
                     UPat::var(None, None),
-                    var("gate").where_(UPatOrConst::Pat(var("idx")), UPatOrConst::Pat(invalid_pat())),
+                    var("gate").where_(
+                        UPatOrConst::Pat(var("idx")),
+                        UPatOrConst::Pat(invalid_pat()),
+                    ),
                 ])
                 .allow_all_srcs()
                 .named("mop")
@@ -66,13 +74,21 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
             (
                 mop(),
                 r(|ctx, st, _| {
-                    let (mop, gate, idx, l) = (sget(st, "mop"), sget(st, "gate"), sget(st, "idx"), sget(st, "l"));
+                    let (mop, gate, idx, l) = (
+                        sget(st, "mop"),
+                        sget(st, "gate"),
+                        sget(st, "idx"),
+                        sget(st, "l"),
+                    );
                     let msrc = ctx.srcs(&mop).to_vec();
                     let new_mop = ctx.replace(
                         &mop,
                         ctx.op_of(&mop),
                         ctx.dt_of(&mop),
-                        std::iter::once((msrc[0]).clone()).chain(std::iter::once(idx)).chain(msrc[2..].iter().cloned()).collect(),
+                        std::iter::once((msrc[0]).clone())
+                            .chain(std::iter::once(idx))
+                            .chain(msrc[2..].iter().cloned())
+                            .collect(),
                         ctx.arg_of(&mop).clone(),
                         Arg::None,
                     );
@@ -85,19 +101,30 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
                 UPat::op_var(vec![Ops::Index, Ops::Shrink])
                     .with_src_tup(vec![
                         UPat::var(None, None),
-                        var("gate").where_(UPatOrConst::Pat(var("idx")), UPatOrConst::Pat(invalid_pat())),
+                        var("gate").where_(
+                            UPatOrConst::Pat(var("idx")),
+                            UPatOrConst::Pat(invalid_pat()),
+                        ),
                     ])
                     .allow_all_srcs()
                     .named("mop")
                     .store(vec![var("data")]),
                 r(|ctx, st, _| {
-                    let (mop, gate, idx, data) = (sget(st, "mop"), sget(st, "gate"), sget(st, "idx"), sget(st, "data"));
+                    let (mop, gate, idx, data) = (
+                        sget(st, "mop"),
+                        sget(st, "gate"),
+                        sget(st, "idx"),
+                        sget(st, "data"),
+                    );
                     let msrc = ctx.srcs(&mop).to_vec();
                     let new_mop = ctx.replace(
                         &mop,
                         ctx.op_of(&mop),
                         ctx.dt_of(&mop),
-                        std::iter::once((msrc[0]).clone()).chain(std::iter::once(idx)).chain(msrc[2..].iter().cloned()).collect(),
+                        std::iter::once((msrc[0]).clone())
+                            .chain(std::iter::once(idx))
+                            .chain(msrc[2..].iter().cloned())
+                            .collect(),
                         ctx.arg_of(&mop).clone(),
                         Arg::None,
                     );
@@ -106,10 +133,12 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
             ),
             // WHERE(gate, gated_load, a) -> alt value moved into the load
             (
-                var("gate").where_(
-                    UPatOrConst::Pat(load_pat(UPat::var(Some("gate"), Some(vec![BOOL])))),
-                    UPatOrConst::Pat(var("a")),
-                ).named("w"),
+                var("gate")
+                    .where_(
+                        UPatOrConst::Pat(load_pat(UPat::var(Some("gate"), Some(vec![BOOL])))),
+                        UPatOrConst::Pat(var("a")),
+                    )
+                    .named("w"),
                 r(|ctx, st, _| {
                     let _ = sget(st, "gate");
                     let (l, a, w) = (sget(st, "l"), sget(st, "a"), sget(st, "w"));
@@ -118,10 +147,15 @@ pub fn pm_move_gates_from_index() -> PatternMatcher {
             ),
             // WHERE(gate, a, gated_load(~gate)) -> alt value moved into the load
             (
-                var("gate").where_(
-                    UPatOrConst::Pat(var("a")),
-                    UPatOrConst::Pat(load_pat(UPat::logical_not(UPat::var(Some("gate"), Some(vec![BOOL]))))),
-                ).named("w"),
+                var("gate")
+                    .where_(
+                        UPatOrConst::Pat(var("a")),
+                        UPatOrConst::Pat(load_pat(UPat::logical_not(UPat::var(
+                            Some("gate"),
+                            Some(vec![BOOL]),
+                        )))),
+                    )
+                    .named("w"),
                 r(|ctx, st, _| {
                     let _ = sget(st, "gate");
                     let (l, a, w) = (sget(st, "l"), sget(st, "a"), sget(st, "w"));

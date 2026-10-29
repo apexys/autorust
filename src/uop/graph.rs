@@ -154,7 +154,10 @@ impl Clone for Graph {
     /// Clone the root list and a fresh (empty) interner: the nodes themselves are
     /// shared via the strong handles in `roots`.
     fn clone(&self) -> Self {
-        Graph { roots: self.roots.clone(), interner: HashMap::new() }
+        Graph {
+            roots: self.roots.clone(),
+            interner: HashMap::new(),
+        }
     }
 }
 
@@ -178,7 +181,14 @@ impl Graph {
 
     /// Insert or find an identical node; returns a strong handle. Floats are
     /// normalized so the internal (and interning) representation is canonical.
-    pub fn intern(&mut self, op: Ops, dtype: DTypeId, srcs: Vec<UopId>, arg: Arg, tag: Arg) -> UopId {
+    pub fn intern(
+        &mut self,
+        op: Ops,
+        dtype: DTypeId,
+        srcs: Vec<UopId>,
+        arg: Arg,
+        tag: Arg,
+    ) -> UopId {
         let arg = normalize_arg(arg);
         let tag = normalize_arg(tag);
         // Opportunistic prune of dead weak entries so the table cannot grow
@@ -188,9 +198,10 @@ impl Graph {
         }
         let k = Self::key_hash(op, dtype, &srcs, &arg, &tag);
         if let Some(w) = self.interner.get(&k)
-            && let Some(n) = w.upgrade() {
-                return UopId { node: n };
-            }
+            && let Some(n) = w.upgrade()
+        {
+            return UopId { node: n };
+        }
         let node = Rc::new(Node {
             id: next_id(),
             op,
@@ -211,11 +222,18 @@ impl Graph {
 
     /// Number of live interned nodes (for diagnostics/tests).
     pub fn live_len(&self) -> usize {
-        self.interner.values().filter(|w| w.strong_count() > 0).count()
+        self.interner
+            .values()
+            .filter(|w| w.strong_count() > 0)
+            .count()
     }
 
     /// Post-order DFS with dedup, mirroring a tinygrad `toposort` (srcs before parents).
-    pub fn toposort_from(root: &UopId, out: &mut Vec<UopId>, seen: &mut std::collections::HashSet<u32>) {
+    pub fn toposort_from(
+        root: &UopId,
+        out: &mut Vec<UopId>,
+        seen: &mut std::collections::HashSet<u32>,
+    ) {
         // iterative post-order
         enum Step {
             Enter(UopId),
@@ -326,7 +344,11 @@ mod tests {
         let root_b = build_target(&mut cb);
 
         assert_ne!(root_a, root_b, "ids must differ for this to prove anything");
-        assert_eq!(ca.g.content_key(&root_a), cb.g.content_key(&root_b), "identical DAGs must share a JIT key");
+        assert_eq!(
+            ca.g.content_key(&root_a),
+            cb.g.content_key(&root_b),
+            "identical DAGs must share a JIT key"
+        );
 
         // structurally different graph -> different key
         let mut cc = UOpCtx::new();
@@ -335,7 +357,11 @@ mod tests {
         let m = cc.uop(Ops::Mul, None, vec![c2a, c3], Arg::None);
         let c2b = cc.cint(2);
         let root_c = cc.uop(Ops::Add, None, vec![m, c2b], Arg::None);
-        assert_ne!(ca.g.content_key(&root_a), cc.g.content_key(&root_c), "different DAGs must not collide");
+        assert_ne!(
+            ca.g.content_key(&root_a),
+            cc.g.content_key(&root_c),
+            "different DAGs must not collide"
+        );
     }
 
     #[test]

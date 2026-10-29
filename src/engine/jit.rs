@@ -31,9 +31,9 @@
 
 use std::collections::HashMap;
 
-use crate::engine::realize::{compile_linear_cached, exec_linear, CompiledLinear};
+use crate::engine::realize::{CompiledLinear, compile_linear_cached, exec_linear};
 use crate::engine::session::Session;
-use crate::runtime::buffer::{buffer_of, Buffer};
+use crate::runtime::buffer::{Buffer, buffer_of};
 use crate::tensor::{Ctx, Tensor};
 use crate::uop::ctx::UOpCtx;
 
@@ -49,7 +49,11 @@ pub struct Jit {
 
 impl Jit {
     pub fn new() -> Self {
-        Jit { linears: Vec::new(), ret: None, held: Vec::new() }
+        Jit {
+            linears: Vec::new(),
+            ret: None,
+            held: Vec::new(),
+        }
     }
 
     /// `TinyJit.reset` (jit.py:230): drop the capture so the next call captures.
@@ -88,7 +92,10 @@ impl Jit {
             // lazy eval graph would otherwise capture nothing). Idempotent.
             ret.realize_ctx(&mut c, sess);
             let planned = sess.end_capture();
-            assert!(!planned.is_empty(), "TGERR: JIT captured no linears (did the step realize anything?)");
+            assert!(
+                !planned.is_empty(),
+                "TGERR: JIT captured no linears (did the step realize anything?)"
+            );
             // `jit_lower`: lower + compile each linear once; replay executes these.
             self.linears = planned
                 .into_iter()
@@ -104,7 +111,9 @@ impl Jit {
             for cl in &self.linears {
                 exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new());
             }
-            self.ret.clone().expect("TGERR: JIT replay missing captured result")
+            self.ret
+                .clone()
+                .expect("TGERR: JIT replay missing captured result")
         }
     }
 }
@@ -119,7 +128,11 @@ impl Default for Jit {
 /// allocation, so the caller can hold them across future realizes (whose `prune`
 /// would otherwise drop an intermediate that only the table references). Each
 /// CALL's args (PARAM-globals plus arena buffers) are walked.
-fn collect_buffers(ctx: &mut UOpCtx, sess: &mut Session, linears: &[CompiledLinear]) -> Vec<Buffer> {
+fn collect_buffers(
+    ctx: &mut UOpCtx,
+    sess: &mut Session,
+    linears: &[CompiledLinear],
+) -> Vec<Buffer> {
     let mut out: Vec<Buffer> = Vec::new();
     let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for c in linears {

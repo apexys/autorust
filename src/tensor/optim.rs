@@ -263,7 +263,9 @@ impl Optim for LARS {
                 g = gr.mul_ctx(ctx, self.lr as f64);
             }
             if !self.pre_wd && self.wd > 0.0 {
-                let wd_t = t.detach_ctx(ctx).mul_ctx(ctx, self.lr as f64 * self.wd as f64);
+                let wd_t = t
+                    .detach_ctx(ctx)
+                    .mul_ctx(ctx, self.lr as f64 * self.wd as f64);
                 g = g.add_ctx(ctx, &wd_t);
             }
             let dt = t.dtype_ctx(ctx);

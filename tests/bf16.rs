@@ -5,22 +5,31 @@
 //! (`create_non_native_float_pats` + `pm_manual_bf16_cast`, renderer/extra.rs),
 //! the OpenCL `as_*` BITCAST rendering, and the OpenCL bf16-const bit pattern.
 
-use autorust::tensor::Ctx;
 use autorust::dtype;
 use autorust::engine::session::Session;
 use autorust::runtime::device::registered_devices;
+use autorust::tensor::Ctx;
 use autorust::tensor::optim::{Adam, Optim};
 use autorust::tensor::{Tensor, TensorAddArg};
-use autorust::uop::ctx::UOpCtx;
 
 /// bf16 multiply + add + comparison/where, read back through an f32 cast.
 /// The inputs (0.1, 0.2) are not exactly bf16, so the cast rounding is real.
 fn program(dev: Option<&str>) -> Vec<f32> {
-    let mut ctx = Ctx::new();
-    let a = Tensor::from_slice(&ctx, &[1.5f32, -2.25, 100.0, 0.5, 0.1], Some(dtype::FLOAT32), dev)
-        .cast(dtype::BFLOAT16);
-    let b = Tensor::from_slice(&ctx, &[0.5f32, 4.0, 100.0, 0.25, 0.2], Some(dtype::FLOAT32), dev)
-        .cast(dtype::BFLOAT16);
+    let ctx = Ctx::new();
+    let a = Tensor::from_slice(
+        &ctx,
+        &[1.5f32, -2.25, 100.0, 0.5, 0.1],
+        Some(dtype::FLOAT32),
+        dev,
+    )
+    .cast(dtype::BFLOAT16);
+    let b = Tensor::from_slice(
+        &ctx,
+        &[0.5f32, 4.0, 100.0, 0.25, 0.2],
+        Some(dtype::FLOAT32),
+        dev,
+    )
+    .cast(dtype::BFLOAT16);
     let m = a.mul(&b);
     let s = m.add(&b);
     // where(s > 0, s, -s) — drives a bf16 comparison + where through the
@@ -52,10 +61,16 @@ fn bf16_matches_interp_on_all_backends() {
 /// param so it is independent of the global default float.
 #[test]
 fn adam_step_with_bf16_param_is_finite() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
-    let p = Tensor::from_slice(&ctx, &[1.0f32, -2.0, 0.5, 3.0], Some(dtype::BFLOAT16), None).to_param();
-    let g = Tensor::from_slice(&ctx, &[0.5f32, 0.25, -0.75, 1.0], Some(dtype::BFLOAT16), None);
+    let p =
+        Tensor::from_slice(&ctx, &[1.0f32, -2.0, 0.5, 3.0], Some(dtype::BFLOAT16), None).to_param();
+    let g = Tensor::from_slice(
+        &ctx,
+        &[0.5f32, 0.25, -0.75, 1.0],
+        Some(dtype::BFLOAT16),
+        None,
+    );
     ctx.raw().set_grad(&p.uop(), g.uop().clone());
     let opt = Adam::new(vec![p.clone()], 0.001);
     for _ in 0..3 {
@@ -63,7 +78,10 @@ fn adam_step_with_bf16_param_is_finite() {
     }
     let got = p.cast(dtype::FLOAT32).to_list::<f32>(&mut sess);
     for (i, v) in got.iter().enumerate() {
-        assert!(v.is_finite(), "bf16 Adam produced non-finite param[{i}] = {v}");
+        assert!(
+            v.is_finite(),
+            "bf16 Adam produced non-finite param[{i}] = {v}"
+        );
     }
 }
 
@@ -73,7 +91,7 @@ fn adam_step_with_bf16_param_is_finite() {
 /// cache is removed this test effectively hangs (2^40 walks).
 #[test]
 fn addrspace_derived_memoizes_shared_subgraphs() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut x = Tensor::from_slice(&ctx, &[1.0f32], None, None);
     for _ in 0..40 {
         x = x.add(TensorAddArg::T(x.clone()));

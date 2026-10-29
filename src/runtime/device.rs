@@ -53,7 +53,11 @@ impl BackendAllocator for MemAllocator {
     fn _offset(&self, buf: &dyn OpaqueT, size: usize, offset: usize) -> Rc<dyn OpaqueT> {
         let b = super::buffer::host_of(buf);
         assert!(offset + size <= b.size, "TGERR: offset out of range");
-        Rc::new(super::buffer::HostOpaque { mem: b.mem.clone(), offset: b.offset + offset, size })
+        Rc::new(super::buffer::HostOpaque {
+            mem: b.mem.clone(),
+            offset: b.offset + offset,
+            size,
+        })
     }
     /// Host memory is already the "device" memory: copy the windows directly.
     fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
@@ -76,17 +80,28 @@ pub struct LruAllocator {
 impl LruAllocator {
     /// The host default (`MemAllocator`-backed).
     pub fn new() -> Self {
-        LruAllocator { inner: Box::new(MemAllocator), cache: RefCell::new(HashMap::new()) }
+        LruAllocator {
+            inner: Box::new(MemAllocator),
+            cache: RefCell::new(HashMap::new()),
+        }
     }
 
     /// Wrap any backend allocator (`CLAllocator` etc).
     pub fn with_backend(inner: Box<dyn BackendAllocator>) -> Self {
-        LruAllocator { inner, cache: RefCell::new(HashMap::new()) }
+        LruAllocator {
+            inner,
+            cache: RefCell::new(HashMap::new()),
+        }
     }
 
     pub fn alloc(&self, size: usize) -> Rc<dyn OpaqueT> {
         assert!(size > 0, "TGERR: alloc size must be positive");
-        if let Some(o) = self.cache.borrow_mut().get_mut(&(size, Default::default())).and_then(|v| v.pop()) {
+        if let Some(o) = self
+            .cache
+            .borrow_mut()
+            .get_mut(&(size, Default::default()))
+            .and_then(|v| v.pop())
+        {
             return o;
         }
         // OOM retry path: our host allocator only fails on OOM, same retry
@@ -95,7 +110,11 @@ impl LruAllocator {
 
     /// `LRUAllocator.free` — push to the cache (LRU on by default).
     pub fn free(&self, opaque: Rc<dyn OpaqueT>, size: usize) {
-        self.cache.borrow_mut().entry((size, Default::default())).or_default().push(opaque);
+        self.cache
+            .borrow_mut()
+            .entry((size, Default::default()))
+            .or_default()
+            .push(opaque);
     }
 
     /// `LRUAllocator.free_cache` — drop every cached opaque.
@@ -171,7 +190,14 @@ pub struct TinyElf {
 /// `Program.__call__(*bufs, global_size, local_size, vals, wait)` — the
 /// runtime launch seam. Returns elapsed seconds when `wait`.
 pub trait Prog {
-    fn call(&mut self, bufs: &[Rc<dyn OpaqueT>], global_size: [usize; 3], local_size: Option<[usize; 3]>, vals: &[i64], wait: bool) -> Option<f64>;
+    fn call(
+        &mut self,
+        bufs: &[Rc<dyn OpaqueT>],
+        global_size: [usize; 3],
+        local_size: Option<[usize; 3]>,
+        vals: &[i64],
+        wait: bool,
+    ) -> Option<f64>;
 }
 
 // ---------------- Compiled device ----------------
@@ -211,7 +237,9 @@ impl Compiled {
     /// `Device[device].runtime(elf)` — construct (or fetch cached) the runtime
     /// for a compiled artifact. Cache key = lib hash (python: (ast.key, device)).
     pub fn runtime(self: &Rc<Self>, elf: TinyElf) -> Rc<RefCell<dyn Prog>> {
-        let key = elf.lib.iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        let key = elf.lib.iter().fold(0xcbf29ce484222325u64, |h, &b| {
+            (h ^ b as u64).wrapping_mul(0x100000001b3)
+        });
         if let Some(rt) = self.runtime_cache.borrow().get(&key) {
             return rt.clone();
         }
@@ -268,7 +296,10 @@ pub fn canonicalize_device_name(device: &str) -> String {
     match device.split_once(':') {
         Some((prefix, rest)) => {
             let joined = format!("{}{rest}", prefix.to_uppercase());
-            joined.strip_suffix(":0").map(str::to_string).unwrap_or(joined)
+            joined
+                .strip_suffix(":0")
+                .map(str::to_string)
+                .unwrap_or(joined)
         }
         None => device.to_uppercase(),
     }
@@ -290,7 +321,6 @@ pub fn is_interp_engine(device: &str) -> bool {
     }
 }
 
-
 pub type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
 
 thread_local! {
@@ -302,7 +332,8 @@ thread_local! {
 /// device name ("CL", "MYDEV", ...). Later registration wins.
 pub fn register_device(name: &str, factory: DeviceFactory) {
     REGISTRY.with(|reg| {
-        reg.borrow_mut().insert(canonicalize_device_name(name), (factory, None));
+        reg.borrow_mut()
+            .insert(canonicalize_device_name(name), (factory, None));
     });
 }
 
@@ -324,7 +355,13 @@ fn ensure_builtins() {
 /// Total runtime constructions across all devices (the no-O(n)-recompiles
 /// gate: identical ASTs must hit the to_program/runtime caches).
 pub fn total_compiles() -> usize {
-    REGISTRY.with(|reg| reg.borrow().values().filter_map(|(_, d)| d.as_ref()).map(|d| d.compile_count()).sum())
+    REGISTRY.with(|reg| {
+        reg.borrow()
+            .values()
+            .filter_map(|(_, d)| d.as_ref())
+            .map(|d| d.compile_count())
+            .sum()
+    })
 }
 
 /// The registered device names (sorted; built-ins included). A device is
@@ -348,7 +385,10 @@ pub fn device(name: &str) -> Rc<Compiled> {
         let mut reg = reg.borrow_mut();
         let fallback_name = canon.clone();
         reg.entry(canon.clone()).or_insert_with(|| {
-            (Rc::new(move || super::ops_interp::fallback(&fallback_name)) as DeviceFactory, None)
+            (
+                Rc::new(move || super::ops_interp::fallback(&fallback_name)) as DeviceFactory,
+                None,
+            )
         });
     });
     loop {

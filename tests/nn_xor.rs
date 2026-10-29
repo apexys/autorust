@@ -21,7 +21,6 @@ use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 struct XorModel {
     l1: Linear,
@@ -44,17 +43,23 @@ impl XorModel {
 
 impl Module for XorModel {
     fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
-        Box::new(nn::scoped("l1", self.l1.named_params()).chain(nn::scoped("l2", self.l2.named_params())))
+        Box::new(
+            nn::scoped("l1", self.l1.named_params())
+                .chain(nn::scoped("l2", self.l2.named_params())),
+        )
     }
 
     fn into_params(self) -> Self {
-        XorModel { l1: self.l1.into_params(), l2: self.l2.into_params() }
+        XorModel {
+            l1: self.l1.into_params(),
+            l2: self.l2.into_params(),
+        }
     }
 }
 
 #[test]
 fn xor_trains_to_convergence() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
 
     // Draw the initial weights once and turn them into buffer-backed leaves so
@@ -69,15 +74,26 @@ fn xor_trains_to_convergence() {
         params.len()
     );
 
-    let lr: f32 = std::env::var("LR").ok().and_then(|s| s.parse().ok()).unwrap_or(0.1);
+    let lr: f32 = std::env::var("LR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.1);
     let sgd = SGD::new(params.clone(), lr);
 
     // The inputs are constant; the graph is reused every step.
-    let x = Tensor::from_slice(&ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
-        .reshape([4, 2]);
+    let x = Tensor::from_slice(
+        &ctx,
+        &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        None,
+        None,
+    )
+    .reshape([4, 2]);
     let t = Tensor::from_slice(&ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape([4, 1]);
 
-    let n: usize = std::env::var("EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+    let n: usize = std::env::var("EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
     let mut first_epoch_misses: Option<u64> = None;
     let mut last_loss = 0.0f32;
     let mut pred: Vec<f32> = Vec::new();
@@ -104,7 +120,12 @@ fn xor_trains_to_convergence() {
             first_epoch_misses = Some(sess.cache.misses);
         }
     }
-    println!("to_program: {} misses / {} hits ({} cached)", sess.cache.misses, sess.cache.hits, sess.cache.len());
+    println!(
+        "to_program: {} misses / {} hits ({} cached)",
+        sess.cache.misses,
+        sess.cache.hits,
+        sess.cache.len()
+    );
 
     let truth = [false, true, true, false];
     for (i, (p, tt)) in pred.iter().zip(truth).enumerate() {
@@ -114,17 +135,26 @@ fn xor_trains_to_convergence() {
     assert!(last_loss < 0.05, "loss did not drop enough: {last_loss}");
     // Every step builds an identical-shaped graph, so no epoch after the first may
     // compile a new kernel (the point of 9.1's persistent, content-keyed ProgCache).
-    assert_eq!(sess.cache.misses, first_epoch_misses.unwrap(), "epochs after the first must not recompile");
-    assert!(sess.cache.hits > sess.cache.misses * 10, "expected heavy program-cache reuse, got {} hits / {} misses", sess.cache.hits, sess.cache.misses);
+    assert_eq!(
+        sess.cache.misses,
+        first_epoch_misses.unwrap(),
+        "epochs after the first must not recompile"
+    );
+    assert!(
+        sess.cache.hits > sess.cache.misses * 10,
+        "expected heavy program-cache reuse, got {} hits / {} misses",
+        sess.cache.hits,
+        sess.cache.misses
+    );
 }
 
 #[test]
 fn micro_seq_kaiming_timed() {
     use std::time::Instant;
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     Tensor::manual_seed(1);
     for i in 0..4 {
-        let t = Tensor::kaiming_uniform(&ctx, &[2,2], (5.0f64).sqrt(), None);
+        let t = Tensor::kaiming_uniform(&ctx, &[2, 2], (5.0f64).sqrt(), None);
         let n_before = ctx.raw().g.live_len();
         let t0 = Instant::now();
         let v = t.to_list_fresh::<f32>();
@@ -137,7 +167,7 @@ fn micro_seq_kaiming_timed() {
 #[test]
 fn micro_repeated_realize() {
     use std::time::Instant;
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     for i in 0..7 {
         let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);

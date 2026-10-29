@@ -5,7 +5,6 @@
 use autorust::engine::session::Session;
 use autorust::helpers::context::with_training;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 mod dropout_golden;
 use dropout_golden::DROPOUT_GOLDEN;
@@ -18,7 +17,7 @@ fn read(t: &Tensor, sess: &mut Session) -> Vec<f32> {
 fn dropout_matches_tinygrad_goldens() {
     // Exact match vs tinygrad: same Threefry RNG, same masked/inverted scaling.
     for g in DROPOUT_GOLDEN {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         let mut sess = Session::new();
         Tensor::manual_seed(g.seed);
         let x = Tensor::ones(&ctx, g.shape.iter().map(|&s| s as i64).collect::<Vec<_>>());
@@ -34,7 +33,7 @@ fn dropout_matches_tinygrad_goldens() {
 #[test]
 fn dropout_eval_is_identity() {
     // Outside training, dropout must be a no-op regardless of p.
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let x = Tensor::ones(&ctx, [7, 5]);
     for p in [0.0, 0.25, 0.5, 1.0] {
@@ -45,7 +44,7 @@ fn dropout_eval_is_identity() {
 
 #[test]
 fn dropout_p0_and_p1() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let x = Tensor::ones(&ctx, [4, 4]);
     with_training(true, || {
@@ -59,7 +58,7 @@ fn dropout_p0_and_p1() {
 #[test]
 fn dropout_training_scales_and_masks() {
     // Input all ones, p=0.5 → every output is 0 or 2, ~half zeros, mean ≈ 1.
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let x = Tensor::ones(&ctx, [200, 50]); // 10_000 elements
     Tensor::manual_seed(1234);
@@ -70,16 +69,22 @@ fn dropout_training_scales_and_masks() {
     let twos = vals.iter().filter(|&&v| v == 2.0).count();
     assert_eq!(zeros + twos, vals.len(), "only 0 or 1/(1-p)=2 values");
     let frac_zero = zeros as f64 / vals.len() as f64;
-    assert!((0.45..0.55).contains(&frac_zero), "zero fraction {frac_zero} should be ~0.5");
+    assert!(
+        (0.45..0.55).contains(&frac_zero),
+        "zero fraction {frac_zero} should be ~0.5"
+    );
 
     let mean = vals.iter().map(|&v| v as f64).sum::<f64>() / vals.len() as f64;
-    assert!((mean - 1.0).abs() < 0.05, "inverted-dropout mean {mean} should be ~1.0");
+    assert!(
+        (mean - 1.0).abs() < 0.05,
+        "inverted-dropout mean {mean} should be ~1.0"
+    );
 }
 
 #[test]
 fn session_training_switch_gates_dropout() {
     // `Session::training(bool)` mirrors the global flag, like `Session::jit`.
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let x = Tensor::ones(&ctx, [1000]);
 
@@ -92,6 +97,8 @@ fn session_training_switch_gates_dropout() {
     assert!(sess.training_enabled());
     let train = x.dropout(0.5);
     let v = read(&train, &mut sess);
-    assert!(v.iter().any(|&x| x == 0.0) && v.iter().any(|&x| x == 2.0), "training masks+scales");
+    assert!(
+        v.iter().any(|&x| x == 0.0) && v.iter().any(|&x| x == 2.0),
+        "training masks+scales"
+    );
 }
-

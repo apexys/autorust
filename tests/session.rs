@@ -5,7 +5,6 @@ use autorust::engine::realize::{buffer_bytes, buffer_copy_into, buffer_copyin};
 use autorust::engine::session::Session;
 use autorust::runtime::buffer::{BufTable, Buffer};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 use autorust::uop::ops::Ops;
 use std::rc::Rc;
 
@@ -13,7 +12,7 @@ use std::rc::Rc;
 /// or allocate new base buffers (the tensor caches its realized buffer).
 #[test]
 fn session_realize_reuses_compile_and_buffers() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
 
     let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);
@@ -24,12 +23,22 @@ fn session_realize_reuses_compile_and_buffers() {
     assert_eq!(v1, vec![5.0, 7.0, 9.0]);
     let bases1 = sess.buffers.n_bases();
     let misses1 = sess.cache.misses;
-    assert_eq!(misses1, 1, "one compute kernel should compile on the first realize");
+    assert_eq!(
+        misses1, 1,
+        "one compute kernel should compile on the first realize"
+    );
 
     let v2 = c.to_list::<f32>(&mut sess);
     assert_eq!(v2, v1);
-    assert_eq!(sess.cache.misses, misses1, "second realize must not recompile");
-    assert_eq!(sess.buffers.n_bases(), bases1, "second realize must not allocate new buffers");
+    assert_eq!(
+        sess.cache.misses, misses1,
+        "second realize must not recompile"
+    );
+    assert_eq!(
+        sess.buffers.n_bases(),
+        bases1,
+        "second realize must not allocate new buffers"
+    );
 }
 
 /// A memoized realize must not be corrupted by later realizes in the same
@@ -37,7 +46,7 @@ fn session_realize_reuses_compile_and_buffers() {
 /// aliasing on the concrete corpus).
 #[test]
 fn session_memo_survives_later_realizes() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
 
     let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
@@ -50,7 +59,11 @@ fn session_memo_survives_later_realizes() {
         let _ = z.to_list::<f32>(&mut sess);
     }
 
-    assert_eq!(a.to_list::<f32>(&mut sess), first, "memoized buffer was corrupted by a later realize");
+    assert_eq!(
+        a.to_list::<f32>(&mut sess),
+        first,
+        "memoized buffer was corrupted by a later realize"
+    );
     assert_eq!(first, vec![1.0, 2.0, 3.0, 4.0]);
 }
 
@@ -62,7 +75,7 @@ fn prog_cache_reuses_across_arenas() {
     let mut sess = Session::new();
     let mut values = Vec::new();
     for _ in 0..3 {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         // Buffers are keyed by arena-local uop ids, so reset them per arena
         // while keeping the content-keyed program cache.
         sess.buffers = BufTable::default();
@@ -74,8 +87,14 @@ fn prog_cache_reuses_across_arenas() {
     assert_eq!(values[0], vec![4.0, 10.0, 18.0]);
     assert_eq!(values[0], values[1]);
     assert_eq!(values[1], values[2]);
-    assert_eq!(sess.cache.misses, 1, "identical ASTs across arenas must compile once");
-    assert_eq!(sess.cache.hits, 2, "the 2nd and 3rd arena must hit the cache");
+    assert_eq!(
+        sess.cache.misses, 1,
+        "identical ASTs across arenas must compile once"
+    );
+    assert_eq!(
+        sess.cache.hits, 2,
+        "the 2nd and 3rd arena must hit the cache"
+    );
     assert_eq!(sess.cache.len(), 1);
 }
 
@@ -117,14 +136,19 @@ fn buffer_offset_view_copy_works_on_host() {
 /// instead of leaking in a ctx-wide side table.
 #[test]
 fn node_side_data_dies_with_the_node() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let t = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
     let bytes = {
         let mut u = t.uop().clone();
         while u.op != Ops::Buffer {
             u = u.srcs[0].clone();
         }
-        Rc::downgrade(u.initial_data.borrow().as_ref().expect("staged bytes on the buffer node"))
+        Rc::downgrade(
+            u.initial_data
+                .borrow()
+                .as_ref()
+                .expect("staged bytes on the buffer node"),
+        )
     };
 
     {
@@ -138,6 +162,12 @@ fn node_side_data_dies_with_the_node() {
     };
 
     drop(t);
-    assert!(bytes.upgrade().is_none(), "initial_data must be freed with its node");
-    assert!(grad_weak.upgrade().is_none(), "grad must be freed with its node");
+    assert!(
+        bytes.upgrade().is_none(),
+        "initial_data must be freed with its node"
+    );
+    assert!(
+        grad_weak.upgrade().is_none(),
+        "grad must be freed with its node"
+    );
 }

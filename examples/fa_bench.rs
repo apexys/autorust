@@ -19,10 +19,12 @@ use autorust::engine::jit::Jit;
 use autorust::engine::session::Session;
 use autorust::models::flash_attention::flash_attention_blocks;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
-    std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+    std::env::var(k)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(d)
 }
 
 /// Build + realize `iters` times (so the kernels actually run each iteration),
@@ -92,12 +94,14 @@ fn main() {
         match mode.as_str() {
             "ones" => vec![1.0f32; n],
             "ramp" => (0..n).map(|i| (i as f32) * 0.001 - 0.05).collect(),
-            _ => (0..n).map(|i| (((i + seed) % 23) as f32) * 0.02 - 0.23).collect(),
+            _ => (0..n)
+                .map(|i| (((i + seed) % 23) as f32) * 0.02 - 0.23)
+                .collect(),
         }
     };
     let (qd, kd, vd) = (mk(0), mk(7), mk(13));
 
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let q = Tensor::from_slice(&ctx, &qd, None, dev.as_deref()).reshape([bs, heads, seq, dim]);
     let k = Tensor::from_slice(&ctx, &kd, None, dev.as_deref()).reshape([bs, heads, seq, dim]);
@@ -108,17 +112,42 @@ fn main() {
     let of = flash_attention_blocks(&q, &k, &v, None, false, bq, bk);
     let ovs = os.to_list::<f32>(&mut sess);
     let ovf = of.to_list::<f32>(&mut sess);
-    let maxd = ovs.iter().zip(&ovf).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let maxd = ovs
+        .iter()
+        .zip(&ovf)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
     let maxo = ovs.iter().map(|a| a.abs()).fold(0.0f32, f32::max);
-    let maxr = ovs.iter().zip(&ovf).map(|(a, b)| (a - b).abs() / a.abs().max(1e-6)).fold(0.0f32, f32::max);
+    let maxr = ovs
+        .iter()
+        .zip(&ovf)
+        .map(|(a, b)| (a - b).abs() / a.abs().max(1e-6))
+        .fold(0.0f32, f32::max);
     let (mut mi, mut mdd) = (0usize, 0.0f32);
-    for (i, (a, b)) in ovs.iter().zip(&ovf).enumerate() { let d = (a - b).abs(); if d > mdd { mdd = d; mi = i; } }
+    for (i, (a, b)) in ovs.iter().zip(&ovf).enumerate() {
+        let d = (a - b).abs();
+        if d > mdd {
+            mdd = d;
+            mi = i;
+        }
+    }
     let (du, su, hu) = (dim as usize, seq as usize, heads as usize);
-    println!("max |SDPA| = {maxo:.3e}   max |SDPA-FA| = {maxd:.3e}   max rel = {maxr:.3e}   at b={} h={} row={} col={} (sdpa={} fa={})",
-        mi/(du*su*hu), (mi/du)%su, (mi/(du*su))%hu, mi%du, ovs[mi], ovf[mi]);
-    if std::env::var("CHECK_ONLY").is_ok() { return; }
+    println!(
+        "max |SDPA| = {maxo:.3e}   max |SDPA-FA| = {maxd:.3e}   max rel = {maxr:.3e}   at b={} h={} row={} col={} (sdpa={} fa={})",
+        mi / (du * su * hu),
+        (mi / du) % su,
+        (mi / (du * su)) % hu,
+        mi % du,
+        ovs[mi],
+        ovf[mi]
+    );
+    if std::env::var("CHECK_ONLY").is_ok() {
+        return;
+    }
 
-    let sdpa = |_c: &Ctx, _s: &mut Session| q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false);
+    let sdpa = |_c: &Ctx, _s: &mut Session| {
+        q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false)
+    };
     let fa = |_c: &Ctx, _s: &mut Session| flash_attention_blocks(&q, &k, &v, None, false, bq, bk);
 
     let t_sdpa_f = bench(sdpa, &ctx, &mut sess, warm, iters);
@@ -141,28 +170,76 @@ fn main() {
             let o = q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false);
             bwd_body(c, s, o)
         },
-        &ctx, &mut sess, warm, iters,
+        &ctx,
+        &mut sess,
+        warm,
+        iters,
     );
     let t_fa_b = bench(
         |c: &Ctx, s: &mut Session| {
             let o = flash_attention_blocks(&q, &k, &v, None, false, bq, bk);
             bwd_body(c, s, o)
         },
-        &ctx, &mut sess, warm, iters,
+        &ctx,
+        &mut sess,
+        warm,
+        iters,
     );
 
     if std::env::var("JIT").is_ok() {
-        let t_sdpa_j = bench_jit(|c, _s| q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false), &ctx, &mut sess, warm, iters);
-        let t_fa_j = bench_jit(|c, _s| flash_attention_blocks(&q, &k, &v, None, false, bq, bk), &ctx, &mut sess, warm, iters);
-        let t_sdpa_bj = bench_jit(|c, s| { let o = q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false); bwd_body(c, s, o) }, &ctx, &mut sess, warm, iters);
-        let t_fa_bj = bench_jit(|c, s| { let o = flash_attention_blocks(&q, &k, &v, None, false, bq, bk); bwd_body(c, s, o) }, &ctx, &mut sess, warm, iters);
+        let t_sdpa_j = bench_jit(
+            |_c, _s| q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false),
+            &ctx,
+            &mut sess,
+            warm,
+            iters,
+        );
+        let t_fa_j = bench_jit(
+            |_c, _s| flash_attention_blocks(&q, &k, &v, None, false, bq, bk),
+            &ctx,
+            &mut sess,
+            warm,
+            iters,
+        );
+        let t_sdpa_bj = bench_jit(
+            |c, s| {
+                let o = q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false);
+                bwd_body(c, s, o)
+            },
+            &ctx,
+            &mut sess,
+            warm,
+            iters,
+        );
+        let t_fa_bj = bench_jit(
+            |c, s| {
+                let o = flash_attention_blocks(&q, &k, &v, None, false, bq, bk);
+                bwd_body(c, s, o)
+            },
+            &ctx,
+            &mut sess,
+            warm,
+            iters,
+        );
         println!("  SDPA fwd (jit) {t_sdpa_j:8.3} ms");
-        println!("  FA   fwd (jit) {t_fa_j:8.3} ms   ({:.2}x)", t_sdpa_j / t_fa_j);
+        println!(
+            "  FA   fwd (jit) {t_fa_j:8.3} ms   ({:.2}x)",
+            t_sdpa_j / t_fa_j
+        );
         println!("  SDPA f+b (jit) {t_sdpa_bj:8.3} ms");
-        println!("  FA   f+b (jit) {t_fa_bj:8.3} ms   ({:.2}x)", t_sdpa_bj / t_fa_bj);
+        println!(
+            "  FA   f+b (jit) {t_fa_bj:8.3} ms   ({:.2}x)",
+            t_sdpa_bj / t_fa_bj
+        );
     }
     println!("  SDPA fwd       {t_sdpa_f:8.3} ms");
-    println!("  FA   fwd       {t_fa_f:8.3} ms   ({:.2}x)", t_sdpa_f / t_fa_f);
+    println!(
+        "  FA   fwd       {t_fa_f:8.3} ms   ({:.2}x)",
+        t_sdpa_f / t_fa_f
+    );
     println!("  SDPA fwd+bwd   {t_sdpa_b:8.3} ms");
-    println!("  FA   fwd+bwd   {t_fa_b:8.3} ms   ({:.2}x)", t_sdpa_b / t_fa_b);
+    println!(
+        "  FA   fwd+bwd   {t_fa_b:8.3} ms   ({:.2}x)",
+        t_sdpa_b / t_fa_b
+    );
 }

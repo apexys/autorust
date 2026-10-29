@@ -12,7 +12,7 @@
 use nanoserde::{DeJson, SerJson};
 use std::collections::HashMap;
 
-use super::arg::{DataArg, Arg, DeviceSpec, EnumVal, NonFinite, ParamArg};
+use super::arg::{Arg, DataArg, DeviceSpec, EnumVal, NonFinite, ParamArg};
 use super::graph::{Graph, UopId};
 use crate::dtype::{self, AddrSpace, ConstVal, DTypeId};
 use crate::helpers::bigint::BigInt;
@@ -45,7 +45,10 @@ pub enum FlatArg {
     Bytes(Vec<u8>),
     Enum(EnumVal),
     Dtype(u16),
-    Seq { tuple: bool, items: Vec<FlatArg> },
+    Seq {
+        tuple: bool,
+        items: Vec<FlatArg>,
+    },
     /// Python `ParamArg` — no Option fields on the wire (nanoserde omits
     /// `None` when serializing, which would make the format non-round-trippable):
     /// presence flags lead each optional value.
@@ -69,14 +72,19 @@ pub enum FlatArg {
         volatile: bool,
     },
     /// Python int beyond i64/u64 (exact, sign + little-endian limbs).
-    Big { neg: bool, limbs: Vec<u64> },
+    Big {
+        neg: bool,
+        limbs: Vec<u64>,
+    },
     /// The `Invalid` const sentinel.
     ConstInvalid,
     Pickle(Vec<u8>),
     /// Named python dataclass (KernelInfo/CallInfo/BufferizeOpts/...).
-    Data { tag: String, fields: Vec<(String, FlatArg)> },
+    Data {
+        tag: String,
+        fields: Vec<(String, FlatArg)>,
+    },
 }
-
 
 pub fn parse_flat(json: &str) -> Result<FlatGraph, String> {
     FlatGraph::deserialize_json(json).map_err(|e| format!("{e:?}"))
@@ -96,7 +104,10 @@ pub fn arg_from_flat(f: &FlatArg) -> Result<Arg, String> {
 
 /// `dtmap` resolves interchange-table indices to interned `DTypeId`s (required
 /// during graph decode; dtype args share the node dtype table).
-pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, String>) -> Result<Arg, String> {
+pub fn arg_from_flat_with(
+    f: &FlatArg,
+    dtmap: &dyn Fn(u16) -> Result<DTypeId, String>,
+) -> Result<Arg, String> {
     Ok(match f {
         FlatArg::None => Arg::None,
         FlatArg::Int(i) => Arg::Int(*i),
@@ -105,7 +116,11 @@ pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, St
             if x.is_nan() {
                 Arg::NonFinite(NonFinite::Nan)
             } else if x.is_infinite() {
-                Arg::NonFinite(if *x > 0.0 { NonFinite::PosInf } else { NonFinite::NegInf })
+                Arg::NonFinite(if *x > 0.0 {
+                    NonFinite::PosInf
+                } else {
+                    NonFinite::NegInf
+                })
             } else {
                 Arg::Float(*x)
             }
@@ -117,22 +132,51 @@ pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, St
         FlatArg::Enum(e) => Arg::Enum(*e),
         FlatArg::Dtype(i) => Arg::Dtype(dtmap(*i)?),
         FlatArg::Seq { tuple, items } => {
-            let items = items.iter().map(|i| arg_from_flat_with(i, dtmap)).collect::<Result<Vec<_>, _>>()?;
-            Arg::Seq { tuple: *tuple, items }
+            let items = items
+                .iter()
+                .map(|i| arg_from_flat_with(i, dtmap))
+                .collect::<Result<Vec<_>, _>>()?;
+            Arg::Seq {
+                tuple: *tuple,
+                items,
+            }
         }
-        FlatArg::Big { neg, limbs } => Arg::Const(ConstVal::Big(BigInt::from_parts(*neg, limbs.clone()))),
+        FlatArg::Big { neg, limbs } => {
+            Arg::Const(ConstVal::Big(BigInt::from_parts(*neg, limbs.clone())))
+        }
         FlatArg::ConstInvalid => Arg::Const(ConstVal::Invalid),
-        FlatArg::Param { slot, dtype, vmin_vmax, multiple_of, multiple_of_val, name, name_val, addrspace, axis, axis_val, device, device_single, device_multi, volatile } => {
+        FlatArg::Param {
+            slot,
+            dtype,
+            vmin_vmax,
+            multiple_of,
+            multiple_of_val,
+            name,
+            name_val,
+            addrspace,
+            axis,
+            axis_val,
+            device,
+            device_single,
+            device_multi,
+            volatile,
+        } => {
             let dtype = dtmap(*dtype)?;
             let vv = if vmin_vmax[0] == Box::new(FlatArg::Bool(true)) {
-                Some((flat_to_constval(&vmin_vmax[1])?, flat_to_constval(&vmin_vmax[2])?))
+                Some((
+                    flat_to_constval(&vmin_vmax[1])?,
+                    flat_to_constval(&vmin_vmax[2])?,
+                ))
             } else {
                 None
             };
             let addrspace = if *addrspace == 0 {
                 None
             } else {
-                Some(AddrSpace::from_u8(*addrspace).ok_or_else(|| format!("bad addrspace {addrspace}"))?)
+                Some(
+                    AddrSpace::from_u8(*addrspace)
+                        .ok_or_else(|| format!("bad addrspace {addrspace}"))?,
+                )
             };
             let device = if device[0] && !device[1] {
                 Some(DeviceSpec::Single(device_single.clone()))
@@ -145,8 +189,16 @@ pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, St
                 slot: *slot,
                 dtype,
                 vmin_vmax: vv,
-                multiple_of: if multiple_of[0] { Some(*multiple_of_val) } else { None },
-                name: if name[0] { Some(name_val.clone()) } else { None },
+                multiple_of: if multiple_of[0] {
+                    Some(*multiple_of_val)
+                } else {
+                    None
+                },
+                name: if name[0] {
+                    Some(name_val.clone())
+                } else {
+                    None
+                },
                 addrspace,
                 axis: if axis[0] { Some(*axis_val) } else { None },
                 device,
@@ -159,7 +211,10 @@ pub fn arg_from_flat_with(f: &FlatArg, dtmap: &dyn Fn(u16) -> Result<DTypeId, St
             for (n, f) in fields {
                 fs.push((n.clone(), arg_from_flat_with(f, dtmap)?));
             }
-            Arg::Data(DataArg { tag: tag.clone(), fields: fs })
+            Arg::Data(DataArg {
+                tag: tag.clone(),
+                fields: fs,
+            })
         }
     })
 }
@@ -184,15 +239,25 @@ fn constval_to_flat(v: &ConstVal) -> FlatArg {
                 FlatArg::Int(*i as i64)
             } else {
                 let b = BigInt::from_i128(*i);
-                FlatArg::Big { neg: b.is_negative(), limbs: b.limbs().to_vec() }
+                FlatArg::Big {
+                    neg: b.is_negative(),
+                    limbs: b.limbs().to_vec(),
+                }
             }
         }
-        ConstVal::Big(b) => FlatArg::Big { neg: b.is_negative(), limbs: b.limbs().to_vec() },
+        ConstVal::Big(b) => FlatArg::Big {
+            neg: b.is_negative(),
+            limbs: b.limbs().to_vec(),
+        },
         ConstVal::Float(f) => {
             if f.is_nan() {
                 FlatArg::NonFinite(NonFinite::Nan)
             } else if f.is_infinite() {
-                FlatArg::NonFinite(if *f > 0.0 { NonFinite::PosInf } else { NonFinite::NegInf })
+                FlatArg::NonFinite(if *f > 0.0 {
+                    NonFinite::PosInf
+                } else {
+                    NonFinite::NegInf
+                })
             } else {
                 FlatArg::Float(*f)
             }
@@ -222,7 +287,11 @@ pub fn arg_to_flat_with(a: &Arg, dtidx: Option<&[u16]>) -> FlatArg {
             if x.is_nan() {
                 FlatArg::NonFinite(NonFinite::Nan)
             } else if x.is_infinite() {
-                FlatArg::NonFinite(if *x > 0.0 { NonFinite::PosInf } else { NonFinite::NegInf })
+                FlatArg::NonFinite(if *x > 0.0 {
+                    NonFinite::PosInf
+                } else {
+                    NonFinite::NegInf
+                })
             } else {
                 FlatArg::Float(*x)
             }
@@ -235,8 +304,16 @@ pub fn arg_to_flat_with(a: &Arg, dtidx: Option<&[u16]>) -> FlatArg {
         Arg::Dtype(d) => FlatArg::Dtype(dmap(*d)),
         Arg::Param(p) => {
             let vv: [Box<FlatArg>; 3] = match &p.vmin_vmax {
-                None => [Box::new(FlatArg::Bool(false)), Box::new(FlatArg::None), Box::new(FlatArg::None)],
-                Some((a, b)) => [Box::new(FlatArg::Bool(true)), Box::new(constval_to_flat(a)), Box::new(constval_to_flat(b))],
+                None => [
+                    Box::new(FlatArg::Bool(false)),
+                    Box::new(FlatArg::None),
+                    Box::new(FlatArg::None),
+                ],
+                Some((a, b)) => [
+                    Box::new(FlatArg::Bool(true)),
+                    Box::new(constval_to_flat(a)),
+                    Box::new(constval_to_flat(b)),
+                ],
             };
             let addrspace = match p.addrspace {
                 None => 0,
@@ -301,20 +378,30 @@ impl Graph {
         let mut idmap: Vec<Option<UopId>> = vec![None; fg.nodes.len()];
         for (i, n) in fg.nodes.iter().enumerate() {
             let op = super::ops::Ops::from_u16(n.op).ok_or_else(|| format!("bad op {}", n.op))?;
-            let dtype = *dtmap.get(n.dtype as usize).ok_or_else(|| format!("bad dtype idx {}", n.dtype))?;
+            let dtype = *dtmap
+                .get(n.dtype as usize)
+                .ok_or_else(|| format!("bad dtype idx {}", n.dtype))?;
             let mut srcs = Vec::with_capacity(n.srcs.len());
             for &s in &n.srcs {
                 let id = idmap
                     .get(s as usize)
                     .and_then(|o| o.clone())
-                    .ok_or_else(|| format!("src {s} referenced before definition (not post-order)"))?;
+                    .ok_or_else(|| {
+                        format!("src {s} referenced before definition (not post-order)")
+                    })?;
                 srcs.push(id);
             }
             let arg = arg_from_flat_with(&n.arg, &|i| {
-                dtmap.get(i as usize).cloned().ok_or_else(|| format!("bad dtype idx {i} in arg"))
+                dtmap
+                    .get(i as usize)
+                    .cloned()
+                    .ok_or_else(|| format!("bad dtype idx {i} in arg"))
             })?;
             let tag = arg_from_flat_with(&n.tag, &|i| {
-                dtmap.get(i as usize).cloned().ok_or_else(|| format!("bad dtype idx {i} in tag"))
+                dtmap
+                    .get(i as usize)
+                    .cloned()
+                    .ok_or_else(|| format!("bad dtype idx {i} in tag"))
             })?;
             let id = g.intern(op, dtype, srcs, arg, tag);
             idmap[i] = Some(id);
@@ -384,12 +471,24 @@ impl Graph {
             .map(|id| FlatNode {
                 op: id.op as u16,
                 dtype: dtidx[id.dtype.0 as usize],
-                srcs: id.srcs.iter().map(|s| *remap.get(&s.id()).unwrap()).collect(),
+                srcs: id
+                    .srcs
+                    .iter()
+                    .map(|s| *remap.get(&s.id()).unwrap())
+                    .collect(),
                 arg: arg_to_flat_with(&id.arg, Some(&dtidx)),
                 tag: arg_to_flat_with(&id.tag, Some(&dtidx)),
             })
             .collect();
-        let roots = self.roots.iter().filter_map(|r| remap.get(&r.id()).cloned()).collect();
-        FlatGraph { dtypes, nodes, roots }
+        let roots = self
+            .roots
+            .iter()
+            .filter_map(|r| remap.get(&r.id()).cloned())
+            .collect();
+        FlatGraph {
+            dtypes,
+            nodes,
+            roots,
+        }
     }
 }

@@ -12,8 +12,8 @@ use std::rc::Rc;
 use crate::codegen::linearize::{linearize, pm_linearize_cleanups};
 use crate::codegen::pipeline::full_rewrite_to_sink_with;
 use crate::renderer::cstyle::to_function_name_pub;
-use crate::runtime::buffer::{buffer_of, BufTable, OpaqueView};
-use crate::runtime::device::{device, TinyElf};
+use crate::runtime::buffer::{BufTable, OpaqueView, buffer_of};
+use crate::runtime::device::{TinyElf, device};
 use crate::uop::arg::{Arg, DataArg};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
@@ -35,7 +35,10 @@ pub struct ProgramInfo {
 }
 
 fn seq(items: Vec<i64>) -> Arg {
-    Arg::Seq { tuple: true, items: items.into_iter().map(Arg::Int).collect() }
+    Arg::Seq {
+        tuple: true,
+        items: items.into_iter().map(Arg::Int).collect(),
+    }
 }
 
 fn seq_of(arg: &Arg) -> Vec<i64> {
@@ -69,7 +72,9 @@ impl ProgramInfo {
     }
 
     pub fn from_arg(arg: &Arg) -> ProgramInfo {
-        let Arg::Data(d) = arg else { panic!("TGERR: PROGRAM arg {arg:?}") };
+        let Arg::Data(d) = arg else {
+            panic!("TGERR: PROGRAM arg {arg:?}")
+        };
         assert!(d.tag == "ProgramInfo", "TGERR: PROGRAM arg tag {}", d.tag);
         ProgramInfo {
             name: d.get("name").as_str().unwrap_or("test").to_string(),
@@ -86,7 +91,10 @@ impl ProgramInfo {
     }
 
     /// `ProgramInfo.launch_dims` (ops.py:1231) — corpus dims are concrete.
-    pub fn launch_dims(&self, _var_vals: &HashMap<String, i64>) -> ([usize; 3], Option<[usize; 3]>) {
+    pub fn launch_dims(
+        &self,
+        _var_vals: &HashMap<String, i64>,
+    ) -> ([usize; 3], Option<[usize; 3]>) {
         let mut gs = [1usize; 3];
         for (i, v) in self.global_size.iter().enumerate().take(3) {
             gs[i] = *v as usize;
@@ -111,7 +119,10 @@ impl ProgramInfo {
 /// Walk a LOAD/STORE src[0] chain (INDEX/SHRINK/CAST/BITCAST) down to the
 /// buffer PARAM uop (python `idx.src[0].buf_uop`).
 fn buf_param_of(ctx: &mut UOpCtx, mut idx: UopId) -> Option<UopId> {
-    while matches!(ctx.op_of(&idx), Ops::Index | Ops::Shrink | Ops::Cast | Ops::Bitcast) {
+    while matches!(
+        ctx.op_of(&idx),
+        Ops::Index | Ops::Shrink | Ops::Cast | Ops::Bitcast
+    ) {
         idx = ctx.srcs(&idx)[0].clone();
     }
     if matches!(ctx.op_of(&idx), Ops::Param | Ops::Buffer) {
@@ -130,13 +141,17 @@ pub fn program_info_from_sink(ctx: &mut UOpCtx, sink: UopId) -> ProgramInfo {
     let mut global_size: Vec<i64> = vec![1, 1, 1];
     let mut local_size: Option<Vec<i64>> = Some(vec![1, 1, 1]);
     let name = match ctx.arg_of(&sink) {
-        Arg::Data(d) if d.tag == "KernelInfo" => d.get("name").as_str().unwrap_or("test").to_string(),
+        Arg::Data(d) if d.tag == "KernelInfo" => {
+            d.get("name").as_str().unwrap_or("test").to_string()
+        }
         _ => "test".to_string(),
     };
     for u in ctx.toposort(&sink).iter() {
         match ctx.op_of(u) {
             Ops::Param => {
-                let Arg::Param(p) = ctx.arg_of(u) else { continue };
+                let Arg::Param(p) = ctx.arg_of(u) else {
+                    continue;
+                };
                 if p.addrspace == Some(crate::dtype::AddrSpace::Alu) {
                     if !vars.contains(&p.slot) {
                         vars.push(p.slot);
@@ -149,12 +164,17 @@ pub fn program_info_from_sink(ctx: &mut UOpCtx, sink: UopId) -> ProgramInfo {
                 let s0 = ctx.srcs(u)[0].clone();
                 if let Some(buf) = buf_param_of(ctx, s0)
                     && let Arg::Param(p) = ctx.arg_of(&buf)
-                        && p.addrspace != Some(crate::dtype::AddrSpace::Alu) {
-                            let list = if ctx.op_of(u) == Ops::Store { &mut outs } else { &mut ins };
-                            if !list.contains(&p.slot) {
-                                list.push(p.slot);
-                            }
-                        }
+                    && p.addrspace != Some(crate::dtype::AddrSpace::Alu)
+                {
+                    let list = if ctx.op_of(u) == Ops::Store {
+                        &mut outs
+                    } else {
+                        &mut ins
+                    };
+                    if !list.contains(&p.slot) {
+                        list.push(p.slot);
+                    }
+                }
             }
             Ops::Special => {
                 let Arg::Str(s) = ctx.arg_of(u) else { continue };
@@ -185,7 +205,15 @@ pub fn program_info_from_sink(ctx: &mut UOpCtx, sink: UopId) -> ProgramInfo {
     outs.dedup();
     ins.sort_unstable();
     ins.dedup();
-    ProgramInfo { name, global_size, local_size, vars, globals, outs, ins }
+    ProgramInfo {
+        name,
+        global_size,
+        local_size,
+        vars,
+        globals,
+        outs,
+        ins,
+    }
 }
 
 // ---------------- to_program ----------------
@@ -223,12 +251,24 @@ impl Default for ProgCache {
 impl ProgCache {
     /// Unbounded cache (no eviction).
     pub fn new() -> Self {
-        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap: usize::MAX, hits: 0, misses: 0 }
+        ProgCache {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            cap: usize::MAX,
+            hits: 0,
+            misses: 0,
+        }
     }
     /// LRU-capped cache: once more than `cap` entries are live, the least-recently
     /// used is dropped.
     pub fn capped(cap: usize) -> Self {
-        ProgCache { map: HashMap::new(), order: std::collections::VecDeque::new(), cap, hits: 0, misses: 0 }
+        ProgCache {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            cap,
+            hits: 0,
+            misses: 0,
+        }
     }
     fn touch(&mut self, key: u64) {
         if let Some(pos) = self.order.iter().position(|&k| k == key) {
@@ -273,7 +313,12 @@ impl ProgCache {
 /// `to_program` (codegen/__init__.py:500) — cached do_to_program. The device
 /// supplies its renderer (facts + render) and compiler through the public
 /// backend seams.
-pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device::Compiled>, cache: &mut ProgCache) -> Rc<CompiledProg> {
+pub fn to_program(
+    ctx: &mut UOpCtx,
+    ast: UopId,
+    dev: &Rc<crate::runtime::device::Compiled>,
+    cache: &mut ProgCache,
+) -> Rc<CompiledProg> {
     let key = ctx.g.content_key(&ast);
     if let Some(p) = cache.get(key) {
         // The cached program may have been compiled in a different arena (the key
@@ -281,8 +326,17 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
         // expensive artifacts (`elf`, `pi`) are arena-independent; re-intern a
         // fresh PROGRAM node in this ctx and reuse them (no re-lower/re-render/
         // re-compile).
-        let prg = ctx.uop(Ops::Program, Some(crate::dtype::VOID), vec![], p.pi.to_arg());
-        return Rc::new(CompiledProg { uop: prg, pi: p.pi.clone(), elf: p.elf.clone() });
+        let prg = ctx.uop(
+            Ops::Program,
+            Some(crate::dtype::VOID),
+            vec![],
+            p.pi.to_arg(),
+        );
+        return Rc::new(CompiledProg {
+            uop: prg,
+            pi: p.pi.clone(),
+            elf: p.elf.clone(),
+        });
     }
     // 1. full_rewrite_to_sink
     let optimize = matches!(ctx.tag_of(&ast), Arg::None);
@@ -317,26 +371,58 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
                 _ => String::new(),
             };
             let srcs: Vec<String> = so.iter().map(|s| s.id().to_string()).collect();
-            eprintln!("LST {} {:?}({}){} arg={:?}", o.id(), op, srcs.join(","), tag_s, arg);
+            eprintln!(
+                "LST {} {:?}({}){} arg={:?}",
+                o.id(),
+                op,
+                srcs.join(","),
+                tag_s,
+                arg
+            );
         }
         eprintln!("LST### END name={}", pname);
     }
     // 5. do_compile: through the device's compiler seam
     let lib = dev.compiler.compile_cached(&src_text);
-    let linear_uop = ctx.uop(Ops::Linear, Some(crate::dtype::VOID), lst.clone(), Arg::None);
-    let source_uop = ctx.uop(Ops::Source, Some(crate::dtype::VOID), vec![], Arg::Str(src_text));
-    let binary_uop = ctx.uop(Ops::Binary, Some(crate::dtype::VOID), vec![source_uop.clone()], Arg::Bytes(lib.clone()));
-    let prg = ctx.uop(Ops::Program, Some(crate::dtype::VOID), vec![sunk, linear_uop, source_uop, binary_uop], pi.to_arg());
+    let linear_uop = ctx.uop(
+        Ops::Linear,
+        Some(crate::dtype::VOID),
+        lst.clone(),
+        Arg::None,
+    );
+    let source_uop = ctx.uop(
+        Ops::Source,
+        Some(crate::dtype::VOID),
+        vec![],
+        Arg::Str(src_text),
+    );
+    let binary_uop = ctx.uop(
+        Ops::Binary,
+        Some(crate::dtype::VOID),
+        vec![source_uop.clone()],
+        Arg::Bytes(lib.clone()),
+    );
+    let prg = ctx.uop(
+        Ops::Program,
+        Some(crate::dtype::VOID),
+        vec![sunk, linear_uop, source_uop, binary_uop],
+        pi.to_arg(),
+    );
     // to_elf signature: non-ALU PARAMs (linear order)
     let mut signature: Vec<(i64, crate::dtype::DTypeId)> = Vec::new();
     for u in &lst {
         if ctx.op_of(u) == Ops::Param
             && let Arg::Param(p) = ctx.arg_of(u)
-                && p.addrspace != Some(crate::dtype::AddrSpace::Alu) {
-                    signature.push((p.slot, ctx.dt_of(u)));
-                }
+            && p.addrspace != Some(crate::dtype::AddrSpace::Alu)
+        {
+            signature.push((p.slot, ctx.dt_of(u)));
+        }
     }
-    let elf = Rc::new(TinyElf { lib, name: to_function_name_pub(&pi.name), signature });
+    let elf = Rc::new(TinyElf {
+        lib,
+        name: to_function_name_pub(&pi.name),
+        signature,
+    });
     let cp = Rc::new(CompiledProg { uop: prg, pi, elf });
     cache.insert(key, cp.clone());
     cp
@@ -347,7 +433,11 @@ pub fn to_program(ctx: &mut UOpCtx, ast: UopId, dev: &Rc<crate::runtime::device:
 /// `lower_and_compile` (realize.py:263) — swap compiled PROGRAMs into every
 /// SINK-ast CALL of the linear. Returns the new linear plus per-call
 /// CompiledProgs (keyed by the new CALL uop).
-pub fn compile_linear(ctx: &mut UOpCtx, linear: UopId, cache: &mut ProgCache) -> (UopId, HashMap<u32, Rc<CompiledProg>>) {
+pub fn compile_linear(
+    ctx: &mut UOpCtx,
+    linear: UopId,
+    cache: &mut ProgCache,
+) -> (UopId, HashMap<u32, Rc<CompiledProg>>) {
     let calls = ctx.srcs(&linear).to_vec();
     let mut replaced = false;
     let mut new_calls: Vec<UopId> = Vec::with_capacity(calls.len());
@@ -357,12 +447,19 @@ pub fn compile_linear(ctx: &mut UOpCtx, linear: UopId, cache: &mut ProgCache) ->
         if ctx.op_of(ast) == Ops::Sink {
             // device from the first global arg's buffer
             let first_arg = &ctx.srcs(c)[1].clone();
-            let dev_name = buffer_of(ctx, &mut BufTable::default(), first_arg.clone()).device().to_string();
+            let dev_name = buffer_of(ctx, &mut BufTable::default(), first_arg.clone())
+                .device()
+                .to_string();
             let dev = device(&dev_name);
             let cp = to_program(ctx, ast.clone(), &dev, cache);
             let mut new_srcs = vec![cp.uop.clone()];
             new_srcs.extend(ctx.srcs(c)[1..].iter().cloned());
-            let new_call = ctx.uop(Ops::Call, Some(ctx.dt_of(c)), new_srcs, ctx.arg_of(c).clone());
+            let new_call = ctx.uop(
+                Ops::Call,
+                Some(ctx.dt_of(c)),
+                new_srcs,
+                ctx.arg_of(c).clone(),
+            );
             progs.insert(new_call.id(), cp);
             new_calls.push(new_call);
             replaced = true;
@@ -404,11 +501,19 @@ fn exec_copy(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId) {
 }
 
 /// `exec_kernel` (realize.py:180) — launch the PROGRAM through the device.
-fn exec_kernel(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId, cp: &Rc<CompiledProg>, var_vals: &HashMap<String, i64>) {
+fn exec_kernel(
+    ctx: &mut UOpCtx,
+    t: &mut BufTable,
+    call: UopId,
+    cp: &Rc<CompiledProg>,
+    var_vals: &HashMap<String, i64>,
+) {
     let resolved = resolve_params(ctx, call);
     // device from the first global arg (python: to_tuple(call.src[1].device))
     let g0 = *cp.pi.globals.first().unwrap_or(&0) as usize;
-    let dev_name = buffer_of(ctx, t, (resolved[g0]).clone()).device().to_string();
+    let dev_name = buffer_of(ctx, t, (resolved[g0]).clone())
+        .device()
+        .to_string();
     let dev = device(&dev_name);
     // `bufs` is indexed by **buffer slot**, not position (tinygrad's `bufs[slot]`
     // contract): a kernel need not use every buffer in the graph, so the used
@@ -427,7 +532,10 @@ fn exec_kernel(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId, cp: &Rc<Compiled
     let fill = by_slot.iter().flatten().next().cloned();
     let bufs: Vec<OpaqueView> = by_slot
         .into_iter()
-        .map(|s| s.or_else(|| fill.clone()).expect("TGERR: kernel has no buffers"))
+        .map(|s| {
+            s.or_else(|| fill.clone())
+                .expect("TGERR: kernel has no buffers")
+        })
         .collect();
     let rt = dev.runtime(TinyElf {
         lib: cp.elf.lib.clone(),
@@ -435,7 +543,8 @@ fn exec_kernel(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId, cp: &Rc<Compiled
         signature: cp.elf.signature.clone(),
     });
     let (gs, ls) = cp.pi.launch_dims(var_vals);
-    rt.borrow_mut().call(&bufs, gs, ls, &cp.pi.vals(var_vals), false);
+    rt.borrow_mut()
+        .call(&bufs, gs, ls, &cp.pi.vals(var_vals), false);
 }
 
 /// A lowered+compiled LINEAR (tinygrad `jit_lower`): every SINK-ast CALL swapped
@@ -448,20 +557,33 @@ pub struct CompiledLinear {
 }
 
 /// Lower + compile a planned LINEAR once, returning the compiled form.
-pub fn compile_linear_cached(ctx: &mut UOpCtx, linear: UopId, cache: &mut ProgCache) -> CompiledLinear {
+pub fn compile_linear_cached(
+    ctx: &mut UOpCtx,
+    linear: UopId,
+    cache: &mut ProgCache,
+) -> CompiledLinear {
     let (line, progs) = compile_linear(ctx, linear, cache);
     CompiledLinear { line, progs }
 }
 
 /// Execute an already-compiled LINEAR (the exec half of `run_linear`).
-pub fn exec_linear(ctx: &mut UOpCtx, t: &mut BufTable, c: &CompiledLinear, var_vals: &HashMap<String, i64>) {
+pub fn exec_linear(
+    ctx: &mut UOpCtx,
+    t: &mut BufTable,
+    c: &CompiledLinear,
+    var_vals: &HashMap<String, i64>,
+) {
     let calls = ctx.srcs(&c.line).to_vec();
     for call in &calls {
         let ast = &ctx.srcs(call)[0].clone();
         match ctx.op_of(ast) {
             Ops::Copy => exec_copy(ctx, t, call.clone()),
             Ops::Program => {
-                let cp = c.progs.get(&call.id()).expect("TGERR: exec_linear missing CompiledProg").clone();
+                let cp = c
+                    .progs
+                    .get(&call.id())
+                    .expect("TGERR: exec_linear missing CompiledProg")
+                    .clone();
                 exec_kernel(ctx, t, call.clone(), &cp, var_vals);
             }
             other => panic!("TGERR: exec_linear call ast op {other:?}"),
@@ -470,7 +592,13 @@ pub fn exec_linear(ctx: &mut UOpCtx, t: &mut BufTable, c: &CompiledLinear, var_v
 }
 
 /// `run_linear` (realize.py:315) — compile then execute every call.
-pub fn run_linear(ctx: &mut UOpCtx, linear: UopId, t: &mut BufTable, var_vals: &HashMap<String, i64>, cache: &mut ProgCache) {
+pub fn run_linear(
+    ctx: &mut UOpCtx,
+    linear: UopId,
+    t: &mut BufTable,
+    var_vals: &HashMap<String, i64>,
+    cache: &mut ProgCache,
+) {
     let compiled = compile_linear_cached(ctx, linear, cache);
     exec_linear(ctx, t, &compiled, var_vals);
 }
@@ -492,7 +620,12 @@ fn materialize_target(ctx: &mut UOpCtx, tensor_uop: UopId) -> UopId {
                 crate::uop::arg::DeviceSpec::Multi(v) => v[0].clone(),
             })
             .unwrap_or_else(|| "PYTHON".to_string());
-        let cont = ctx.uop(Ops::Contiguous, Some(ctx.dt_of(&tensor_uop)), vec![tensor_uop], Arg::None);
+        let cont = ctx.uop(
+            Ops::Contiguous,
+            Some(ctx.dt_of(&tensor_uop)),
+            vec![tensor_uop],
+            Arg::None,
+        );
         crate::tensor::creation::copy_to_device(ctx, cont, &dev)
     } else {
         tensor_uop
@@ -503,10 +636,19 @@ fn materialize_target(ctx: &mut UOpCtx, tensor_uop: UopId) -> UopId {
 /// run the resulting linear once, and return each root's final storage buffer.
 /// This is the co-realization tinygrad uses to fold a loss and its optimizer
 /// updates into a single schedule/launch (see `Optimizer.schedule_step`).
-pub fn realize_many(ctx: &mut UOpCtx, tensor_uops: &[UopId], t: &mut BufTable, cache: &mut ProgCache, mut capture: Option<&mut Vec<UopId>>) -> (Vec<crate::runtime::buffer::Buffer>, Vec<UopId>) {
+pub fn realize_many(
+    ctx: &mut UOpCtx,
+    tensor_uops: &[UopId],
+    t: &mut BufTable,
+    cache: &mut ProgCache,
+    mut capture: Option<&mut Vec<UopId>>,
+) -> (Vec<crate::runtime::buffer::Buffer>, Vec<UopId>) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
-    let targets: Vec<UopId> = tensor_uops.iter().map(|u| materialize_target(ctx, u.clone())).collect();
+    let targets: Vec<UopId> = tensor_uops
+        .iter()
+        .map(|u| materialize_target(ctx, u.clone()))
+        .collect();
     if targets.len() == 1 {
         let (b, u) = realize_tensor(ctx, targets.into_iter().next().unwrap(), t, cache, capture);
         return (vec![b], vec![u]);
@@ -540,19 +682,35 @@ pub fn realize_many(ctx: &mut UOpCtx, tensor_uops: &[UopId], t: &mut BufTable, c
 /// Build a plain device-buffer leaf that aliases the realized `b`, for the tensor
 /// `like` (its shape/dtype) — tinygrad's realized tensor uop is a
 /// `RESHAPE(BUFFER)` reading the allocation. No data moves.
-pub(crate) fn buffer_leaf(ctx: &mut UOpCtx, t: &mut BufTable, b: &crate::runtime::buffer::Buffer, like: &UopId) -> UopId {
+pub(crate) fn buffer_leaf(
+    ctx: &mut UOpCtx,
+    t: &mut BufTable,
+    b: &crate::runtime::buffer::Buffer,
+    like: &UopId,
+) -> UopId {
     let shape = ctx.shape(like).ok().flatten().unwrap_or_default();
     let dt = ctx.dt_of(like);
     let dev = b.device().to_string();
-    let numel: i128 = shape.iter().map(|s| s.clone().as_i64().unwrap_or(1) as i128).product::<i128>().max(1);
-    let buf = crate::tensor::creation::new_buffer(ctx, &dev, crate::uop::sint::SVal::I(numel), dt, None);
+    let numel: i128 = shape
+        .iter()
+        .map(|s| s.clone().as_i64().unwrap_or(1) as i128)
+        .product::<i128>()
+        .max(1);
+    let buf =
+        crate::tensor::creation::new_buffer(ctx, &dev, crate::uop::sint::SVal::I(numel), dt, None);
     t.alias(buf.id(), b);
     crate::tensor::movement::reshape(ctx, buf, &shape)
 }
 
 /// Schedule + run one tensor (python `Tensor.realize` path). Returns the
 /// tensor's realized buffer and the storage uop the tensor becomes.
-pub fn realize_tensor(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache, capture: Option<&mut Vec<UopId>>) -> (crate::runtime::buffer::Buffer, UopId) {
+pub fn realize_tensor(
+    ctx: &mut UOpCtx,
+    tensor_uop: UopId,
+    t: &mut BufTable,
+    cache: &mut ProgCache,
+    capture: Option<&mut Vec<UopId>>,
+) -> (crate::runtime::buffer::Buffer, UopId) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
     let target = materialize_target(ctx, tensor_uop.clone());
@@ -584,7 +742,9 @@ pub fn buffer_values(b: &crate::runtime::buffer::Buffer) -> Vec<f64> {
     let bytes = dev.copyout(&*o);
     let isz = b.dtype.itemsize();
     (0..b.size)
-        .map(|i| crate::runtime::interp::from_storage_scalar(&bytes[i * isz..(i + 1) * isz], b.dtype))
+        .map(|i| {
+            crate::runtime::interp::from_storage_scalar(&bytes[i * isz..(i + 1) * isz], b.dtype)
+        })
         .collect()
 }
 
@@ -614,7 +774,10 @@ pub fn buffer_copyin(b: &crate::runtime::buffer::Buffer, data: &[u8]) {
 /// round-trip. Across devices it falls back to `buffer_bytes` + `buffer_copyin`
 /// (copyout on `src`'s device, copyin on `dst`'s), since the two opaques live on
 /// different allocators. `dst` and `src` must have the same byte length.
-pub fn buffer_copy_into(dst: &crate::runtime::buffer::Buffer, src: &crate::runtime::buffer::Buffer) {
+pub fn buffer_copy_into(
+    dst: &crate::runtime::buffer::Buffer,
+    src: &crate::runtime::buffer::Buffer,
+) {
     use crate::runtime::device::canonicalize_device_name;
     assert_eq!(dst.nbytes(), src.nbytes(), "TGERR: assign size mismatch");
     if canonicalize_device_name(dst.device()) == canonicalize_device_name(src.device()) {
@@ -628,13 +791,23 @@ pub fn buffer_copy_into(dst: &crate::runtime::buffer::Buffer, src: &crate::runti
 }
 
 /// Read a realized tensor's flat values (python `_buffer().as_memoryview()`).
-pub fn tensor_values(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<f64> {
+pub fn tensor_values(
+    ctx: &mut UOpCtx,
+    tensor_uop: UopId,
+    t: &mut BufTable,
+    cache: &mut ProgCache,
+) -> Vec<f64> {
     buffer_values(&realize_tensor(ctx, tensor_uop, t, cache, None).0)
 }
 
 /// Read a realized tensor's raw storage bytes at its own dtype (python
 /// `_buffer()` copyout). `Tensor::to_bytes`/`to_list` build on this so typed
 /// read-out never round-trips through `f64`.
-pub fn tensor_bytes(ctx: &mut UOpCtx, tensor_uop: UopId, t: &mut BufTable, cache: &mut ProgCache) -> Vec<u8> {
+pub fn tensor_bytes(
+    ctx: &mut UOpCtx,
+    tensor_uop: UopId,
+    t: &mut BufTable,
+    cache: &mut ProgCache,
+) -> Vec<u8> {
     buffer_bytes(&realize_tensor(ctx, tensor_uop, t, cache, None).0)
 }

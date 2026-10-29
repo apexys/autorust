@@ -14,8 +14,10 @@ thread_local! {
 
 /// Push a context scope with overrides (key -> value as string).
 pub fn push_context(overrides: &[(&str, String)]) {
-    let map: HashMap<String, String> =
-        overrides.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    let map: HashMap<String, String> = overrides
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
     OVERRIDES.with_borrow_mut(|s| s.push(map));
 }
 
@@ -67,7 +69,9 @@ pub fn getenv_int(name: &str, default: i64) -> i64 {
         None => default,
         // empty string is falsy in tinygrad's getenv for ints
         Some(v) if v.is_empty() => 0,
-        Some(v) => v.parse::<i64>().unwrap_or_else(|_| if v == "1" { 1 } else { 0 }),
+        Some(v) => v
+            .parse::<i64>()
+            .unwrap_or_else(|_| if v == "1" { 1 } else { 0 }),
     }
 }
 

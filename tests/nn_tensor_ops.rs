@@ -4,13 +4,18 @@
 
 use autorust::engine::session::Session;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 mod tensor_golden;
 use tensor_golden::TENSOR_OPS;
 
 fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
-    assert_eq!(got.len(), want.len(), "{name}: length {} != {}", got.len(), want.len());
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "{name}: length {} != {}",
+        got.len(),
+        want.len()
+    );
     for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
         let tol = rtol * b.abs().max(1.0);
         assert!((a - b).abs() <= tol, "{name}[{i}]: got {a}, want {b}");
@@ -18,7 +23,11 @@ fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
 }
 
 fn shape_of(t: &Tensor) -> Vec<usize> {
-    t.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
+    t.shape()
+        .as_slice()
+        .iter()
+        .map(|s| s.clone().as_i64().unwrap_or(0) as usize)
+        .collect()
 }
 
 fn f32_tensor(ctx: &Ctx, vals: &[f32], shape: &[usize]) -> Tensor {
@@ -28,7 +37,7 @@ fn f32_tensor(ctx: &Ctx, vals: &[f32], shape: &[usize]) -> Tensor {
 #[test]
 fn tensor_ops_match_tinygrad() {
     for g in TENSOR_OPS {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         let mut sess = Session::new();
         let a = f32_tensor(&ctx, g.a, g.a_shape);
         let p = g.params;
@@ -58,7 +67,11 @@ fn tensor_ops_match_tinygrad() {
                 a.lerp(&b, p[0])
             }
             "interpolate" => {
-                let mode = match p[0] as i64 { 0 => "linear", 1 => "nearest", _ => "nearest-exact" };
+                let mode = match p[0] as i64 {
+                    0 => "linear",
+                    1 => "nearest",
+                    _ => "nearest-exact",
+                };
                 let align = p[1] != 0.0;
                 let size: Vec<i64> = p[2..].iter().map(|&v| v as i64).collect();
                 a.interpolate(&size, mode, align)

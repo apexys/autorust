@@ -10,13 +10,12 @@
 use autorust::engine::session::Session;
 use autorust::tensor::optim::{Adam, AdamW, LARS, Optim, SGD};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 mod optim_golden;
 use optim_golden::OPTIM_GOLDEN;
 
 fn run_case(init: &[f32], grad: &[f32], lr: f32, steps: usize, name: &str) -> Vec<f32> {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     // Parameters must be buffer-backed leaves so `assign` updates them in place.
     let p = Tensor::from_slice(&ctx, init, None, None).to_param();
@@ -25,7 +24,16 @@ fn run_case(init: &[f32], grad: &[f32], lr: f32, steps: usize, name: &str) -> Ve
 
     let opt: Box<dyn Optim> = match name.split('_').next().unwrap() {
         "sgd" => Box::new(SGD::new(params.clone(), lr)),
-        "lars" => Box::new(LARS::new(params.clone(), lr, 0.9, 1e-4, false, true, true, 0.001)),
+        "lars" => Box::new(LARS::new(
+            params.clone(),
+            lr,
+            0.9,
+            1e-4,
+            false,
+            true,
+            true,
+            0.001,
+        )),
         "adam" => Box::new(Adam::new(params.clone(), lr)),
         "adamw" => Box::new(AdamW::new(params.clone(), lr)),
         other => panic!("unknown optimizer {other}"),
@@ -46,7 +54,11 @@ fn optimizers_match_tinygrad_goldens() {
         for (i, (a, b)) in got.iter().zip(case.expected.iter()).enumerate() {
             let diff = (a - b).abs();
             let tol = 1e-5 * b.abs().max(1.0);
-            assert!(diff <= tol, "{}[{i}]: got {a}, want {b} (diff {diff}, tol {tol})", case.name);
+            assert!(
+                diff <= tol,
+                "{}[{i}]: got {a}, want {b} (diff {diff}, tol {tol})",
+                case.name
+            );
         }
     }
 }
@@ -57,7 +69,7 @@ fn optimizers_match_tinygrad_goldens() {
 /// `zeros(...)` with an in-graph STORE that would reset it" (CURRENT_STATE §9.5).
 #[test]
 fn zero_param_state_persists_across_realizes() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let state = Tensor::zeros_param(&ctx, [4], None, None);
     let value = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
@@ -78,7 +90,7 @@ fn zero_param_state_persists_across_realizes() {
 /// updated. Uses SGD so the expected value is exactly `w - lr*grad`.
 #[test]
 fn schedule_step_co_realizes_loss_and_update() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let w = Tensor::from_slice(&ctx, &[1.0f32, 2.0], None, None).to_param();
     let g = Tensor::from_slice(&ctx, &[0.5f32, -0.5], None, None);
@@ -92,5 +104,8 @@ fn schedule_step_co_realizes_loss_and_update() {
     let loss_v = loss.to_list::<f32>(&mut sess);
     assert_eq!(loss_v, vec![3.0], "loss must be realized by schedule_step");
     let w_v = w.to_list::<f32>(&mut sess);
-    assert!((w_v[0] - 0.95).abs() < 1e-6 && (w_v[1] - 2.05).abs() < 1e-6, "w = {w_v:?}");
+    assert!(
+        (w_v[0] - 0.95).abs() < 1e-6 && (w_v[1] - 2.05).abs() < 1e-6,
+        "w = {w_v:?}"
+    );
 }

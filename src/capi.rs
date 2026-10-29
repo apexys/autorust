@@ -4,7 +4,7 @@
 //! `ctypes` surface with `cargo build --no-default-features` (the `cdylib`
 //! target still builds, just without these symbols).
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 
 use crate::rebuild;
 
@@ -13,7 +13,11 @@ use crate::rebuild;
 /// Returns a malloc'd buffer the caller must free via `autorust_free`, or null
 /// on parse failure.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn autorust_rebuild(in_ptr: *const u8, in_len: usize, out_len: *mut usize) -> *mut u8 {
+pub unsafe extern "C" fn autorust_rebuild(
+    in_ptr: *const u8,
+    in_len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
     let json = unsafe { std::slice::from_raw_parts(in_ptr, in_len) };
     match std::str::from_utf8(json).ok().and_then(|s| rebuild(s).ok()) {
         Some(out) => {

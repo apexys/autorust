@@ -8,15 +8,14 @@
 //! A backend only gets tested for what its facts declare.
 
 use autorust::dtype::{self, ConstVal, DTypeId};
-use autorust::engine::realize::{tensor_values, ProgCache};
+use autorust::engine::realize::{ProgCache, tensor_values};
 use autorust::runtime::buffer::BufTable;
 use autorust::runtime::device::{device, registered_devices};
 use autorust::tensor::elementwise;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 use autorust::uop::Ops;
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod golden;
 use golden::GOLDEN;
@@ -24,13 +23,28 @@ use golden::GOLDEN;
 type Dev<'a> = Option<&'a str>;
 
 fn fx(ctx: &Ctx, dev: Dev) -> Tensor {
-    Tensor::from_slice(ctx, &[-2.0f32, -1.0, 0.5, 1.0, 2.0, 3.5, 4.0, 10.0], None, dev)
+    Tensor::from_slice(
+        ctx,
+        &[-2.0f32, -1.0, 0.5, 1.0, 2.0, 3.5, 4.0, 10.0],
+        None,
+        dev,
+    )
 }
 fn fx2(ctx: &Ctx, dev: Dev) -> Tensor {
-    Tensor::from_slice(ctx, &[3.0f32, -2.0, 2.5, -1.0, 1.0, 0.5, -2.0, 4.0], None, dev)
+    Tensor::from_slice(
+        ctx,
+        &[3.0f32, -2.0, 2.5, -1.0, 1.0, 0.5, -2.0, 4.0],
+        None,
+        dev,
+    )
 }
 fn px(ctx: &Ctx, dev: Dev) -> Tensor {
-    Tensor::from_slice(ctx, &[0.5f32, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0], None, dev)
+    Tensor::from_slice(
+        ctx,
+        &[0.5f32, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0],
+        None,
+        dev,
+    )
 }
 fn ix(ctx: &Ctx, dev: Dev) -> Tensor {
     Tensor::from_slice(ctx, &[3i32, -7, 0, 12, 5, -2, 8, 1], None, dev)
@@ -47,12 +61,27 @@ fn fv(ctx: &Ctx, dev: Dev) -> Tensor {
 
 /// One program: build -> realize -> (values, shape). Mirrors the realize-last
 /// semantics of `py/dump_golden.py`.
-fn run_prog(name: &str, dev: Dev, build: impl FnOnce(&Ctx, Dev) -> Tensor) -> (Vec<f64>, Vec<usize>) {
-    let mut ctx = Ctx::new();
+fn run_prog(
+    name: &str,
+    dev: Dev,
+    build: impl FnOnce(&Ctx, Dev) -> Tensor,
+) -> (Vec<f64>, Vec<usize>) {
+    let ctx = Ctx::new();
     let t = build(&ctx, dev);
     let mut cache = ProgCache::default();
-    let vals = tensor_values(&mut ctx.raw(), t.uop().clone(), &mut BufTable::default(), &mut cache);
-    let shape: Vec<usize> = ctx.raw().shape_of(&t.uop()).expect("shape").iter().map(|s| s.clone().as_usize().expect("static shape")).collect();
+    let vals = tensor_values(
+        &mut ctx.raw(),
+        t.uop().clone(),
+        &mut BufTable::default(),
+        &mut cache,
+    );
+    let shape: Vec<usize> = ctx
+        .raw()
+        .shape_of(&t.uop())
+        .expect("shape")
+        .iter()
+        .map(|s| s.clone().as_usize().expect("static shape"))
+        .collect();
     let _ = name;
     (vals, shape)
 }
@@ -65,69 +94,153 @@ fn op_program(ctx: &Ctx, dev: Dev, op: Ops) -> (Tensor, &'static str) {
         Ops::Neg => (fx(ctx, dev).neg(), "op_neg"),
         Ops::Exp2 => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::exp2(&mut ctx.raw(), x.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_exp2")
+            (
+                {
+                    let __u = elementwise::exp2(&mut ctx.raw(), x.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_exp2",
+            )
         }
         Ops::Log2 => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::log2(&mut ctx.raw(), x.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_log2")
+            (
+                {
+                    let __u = elementwise::log2(&mut ctx.raw(), x.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_log2",
+            )
         }
         Ops::Sqrt => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::sqrt(&mut ctx.raw(), x.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_sqrt")
+            (
+                {
+                    let __u = elementwise::sqrt(&mut ctx.raw(), x.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_sqrt",
+            )
         }
         Ops::Sin => {
             let x = fx(ctx, dev);
-            ({ let __u = elementwise::sin(&mut ctx.raw(), x.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_sin")
+            (
+                {
+                    let __u = elementwise::sin(&mut ctx.raw(), x.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_sin",
+            )
         }
         Ops::Trunc => {
             let x = fx(ctx, dev);
-            ({ let __u = elementwise::trunc(&mut ctx.raw(), x.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_trunc")
+            (
+                {
+                    let __u = elementwise::trunc(&mut ctx.raw(), x.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_trunc",
+            )
         }
         Ops::Reciprocal => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::reciprocal(&mut ctx.raw(), x.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_reciprocal")
+            (
+                {
+                    let __u = elementwise::reciprocal(&mut ctx.raw(), x.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_reciprocal",
+            )
         }
         Ops::Pow => {
             let x = px(ctx, dev);
-            ({ let __u = elementwise::pow_c(&mut ctx.raw(), x.uop(), ConstVal::Float(1.5)); Tensor::from_uop_ctx(ctx, __u) }, "op_pow")
+            (
+                {
+                    let __u = elementwise::pow_c(&mut ctx.raw(), x.uop(), ConstVal::Float(1.5));
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_pow",
+            )
         }
         Ops::Add => {
             let b = fx2(ctx, dev);
-            (fx(ctx, dev).add(autorust::tensor::TensorAddArg::T(b)), "op_add")
+            (
+                fx(ctx, dev).add(autorust::tensor::TensorAddArg::T(b)),
+                "op_add",
+            )
         }
         Ops::Sub => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::sub(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_sub")
+            (
+                {
+                    let __u = elementwise::sub(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_sub",
+            )
         }
         Ops::Mul => {
             let b = fx2(ctx, dev);
-            (fx(ctx, dev).mul(autorust::tensor::TensorAddArg::T(b)), "op_mul")
+            (
+                fx(ctx, dev).mul(autorust::tensor::TensorAddArg::T(b)),
+                "op_mul",
+            )
         }
         Ops::Fdiv => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::div(&mut ctx.raw(), a.uop(), b.uop(), None); Tensor::from_uop_ctx(ctx, __u) }, "op_fdiv")
+            (
+                {
+                    let __u = elementwise::div(&mut ctx.raw(), a.uop(), b.uop(), None);
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_fdiv",
+            )
         }
         Ops::Cmplt => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::lt(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_cmplt")
+            (
+                {
+                    let __u = elementwise::lt(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_cmplt",
+            )
         }
         Ops::Cmpeq => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::eq(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_cmpeq")
+            (
+                {
+                    let __u = elementwise::eq(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_cmpeq",
+            )
         }
         Ops::Cmpne => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::ne(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_cmpne")
+            (
+                {
+                    let __u = elementwise::ne(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_cmpne",
+            )
         }
         Ops::Max => {
             let a = fx(ctx, dev);
             let b = fx2(ctx, dev);
-            ({ let __u = elementwise::maximum(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_max")
+            (
+                {
+                    let __u = elementwise::maximum(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_max",
+            )
         }
         Ops::Where => {
             let a = fx(ctx, dev);
@@ -135,53 +248,106 @@ fn op_program(ctx: &Ctx, dev: Dev, op: Ops) -> (Tensor, &'static str) {
             let c = elementwise::gt(&mut ctx.raw(), a.uop(), z);
             let x = fx2(ctx, dev);
             let y = px(ctx, dev);
-            ({ let __u = elementwise::where_(&mut ctx.raw(), c, x.uop(), y.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_where")
+            (
+                {
+                    let __u = elementwise::where_(&mut ctx.raw(), c, x.uop(), y.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_where",
+            )
         }
         Ops::Shl => {
             let a = ix(ctx, dev);
             let b = sh(ctx, dev);
-            ({ let __u = elementwise::binop(&mut ctx.raw(), Ops::Shl, a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_shl")
+            (
+                {
+                    let __u = elementwise::binop(&mut ctx.raw(), Ops::Shl, a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_shl",
+            )
         }
         Ops::Shr => {
             let a = ix(ctx, dev);
             let b = sh(ctx, dev);
-            ({ let __u = elementwise::binop(&mut ctx.raw(), Ops::Shr, a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_shr")
+            (
+                {
+                    let __u = elementwise::binop(&mut ctx.raw(), Ops::Shr, a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_shr",
+            )
         }
         Ops::And => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::and(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_and")
+            (
+                {
+                    let __u = elementwise::and(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_and",
+            )
         }
         Ops::Or => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::or(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_or")
+            (
+                {
+                    let __u = elementwise::or(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_or",
+            )
         }
         Ops::Xor => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::xor(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_xor")
+            (
+                {
+                    let __u = elementwise::xor(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_xor",
+            )
         }
         Ops::Floordiv => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::div(&mut ctx.raw(), a.uop(), b.uop(), Some("floor")); Tensor::from_uop_ctx(ctx, __u) }, "op_floordiv")
+            (
+                {
+                    let __u = elementwise::div(&mut ctx.raw(), a.uop(), b.uop(), Some("floor"));
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_floordiv",
+            )
         }
         Ops::Floormod => {
             let a = ix(ctx, dev);
             let b = iy(ctx, dev);
-            ({ let __u = elementwise::mod_(&mut ctx.raw(), a.uop(), b.uop()); Tensor::from_uop_ctx(ctx, __u) }, "op_floormod")
+            (
+                {
+                    let __u = elementwise::mod_(&mut ctx.raw(), a.uop(), b.uop());
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                "op_floormod",
+            )
         }
         Ops::Mulacc => {
             let b = fx2(ctx, dev);
-            (fx(ctx, dev).mul(autorust::tensor::TensorAddArg::T(b)).sum(None, false, None), "op_mulacc")
+            (
+                fx(ctx, dev)
+                    .mul(autorust::tensor::TensorAddArg::T(b))
+                    .sum(None, false, None),
+                "op_mulacc",
+            )
         }
         other => panic!("harness gap: no program for declared op {other:?}"),
     }
 }
 
 fn op_golden_name(op: Ops) -> &'static str {
-    let mut c = Ctx::new();
+    let c = Ctx::new();
     op_program(&c, None, op).1
 }
 
@@ -190,7 +356,11 @@ fn dt_program(ctx: &Ctx, dev: Dev, dt: DTypeId, kind: &str) -> (Tensor, String) 
     let name = |kind: &str| format!("dt_{}_{}", dtype_attr(dt), kind);
     // staging values per dtype family (mirror py/dump_golden.py)
     let staging = |ctx: &Ctx, dev: Dev, dt: DTypeId| -> Tensor {
-        if dtype::in_set(dtype::FP8S, dt) || dt == dtype::FLOAT16 || dt == dtype::BFLOAT16 || dt == dtype::FLOAT64 {
+        if dtype::in_set(dtype::FP8S, dt)
+            || dt == dtype::FLOAT16
+            || dt == dtype::BFLOAT16
+            || dt == dtype::FLOAT64
+        {
             fv(ctx, dev)
         } else if dtype::in_set(dtype::SINTS, dt) {
             Tensor::from_slice(ctx, &[-5i32, -1, 0, 7, 100], None, dev)
@@ -204,16 +374,28 @@ fn dt_program(ctx: &Ctx, dev: Dev, dt: DTypeId, kind: &str) -> (Tensor, String) 
     match kind {
         "roundtrip" => {
             let x = staging(ctx, dev, dt);
-            ({ let __u = ctx.raw().cast(x.uop(), dt); Tensor::from_uop_ctx(ctx, __u) }, name(kind))
+            (
+                {
+                    let __u = ctx.raw().cast(x.uop(), dt);
+                    Tensor::from_uop_ctx(ctx, __u)
+                },
+                name(kind),
+            )
         }
         "ew" => {
             let x = fv(ctx, dev);
-            let t = { let __u = ctx.raw().cast(x.uop(), dt); Tensor::from_uop_ctx(ctx, __u) };
+            let t = {
+                let __u = ctx.raw().cast(x.uop(), dt);
+                Tensor::from_uop_ctx(ctx, __u)
+            };
             (t.mul(2.0).add(1.0), name(kind))
         }
         "sum" => {
             let x = fv(ctx, dev);
-            let t = { let __u = ctx.raw().cast(x.uop(), dt); Tensor::from_uop_ctx(ctx, __u) };
+            let t = {
+                let __u = ctx.raw().cast(x.uop(), dt);
+                Tensor::from_uop_ctx(ctx, __u)
+            };
             (t.sum(None, false, None), name(kind))
         }
         other => panic!("unknown dtype program kind {other}"),
@@ -269,14 +451,18 @@ fn goldens() -> HashMap<&'static str, &'static golden::Golden> {
 
 fn assert_golden(backend: &str, g: &golden::Golden, got: &[f64], shape: &[usize]) {
     assert_eq!(
-        shape,
-        g.shape,
+        shape, g.shape,
         "{backend}/{}: shape {:?} != golden {:?}",
-        g.name,
-        shape,
-        g.shape
+        g.name, shape, g.shape
     );
-    assert_eq!(got.len(), g.vals.len(), "{backend}/{}: {} values != golden {}", g.name, got.len(), g.vals.len());
+    assert_eq!(
+        got.len(),
+        g.vals.len(),
+        "{backend}/{}: {} values != golden {}",
+        g.name,
+        got.len(),
+        g.vals.len()
+    );
     for (i, (&got_v, &want)) in got.iter().zip(g.vals.iter()).enumerate() {
         let tol = g.rtol * want.abs().max(1.0);
         assert!(
@@ -293,10 +479,17 @@ fn assert_golden(backend: &str, g: &golden::Golden, got: &[f64], shape: &[usize]
 fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>, names: &[&str]) {
     let dev = staging_dev(backend);
     for name in names {
-        let g = gm.get(name).unwrap_or_else(|| panic!("no golden for {name}"));
+        let g = gm
+            .get(name)
+            .unwrap_or_else(|| panic!("no golden for {name}"));
         let (vals, shape) = run_prog(name, dev, |ctx, dev| match *name {
             "smoke_add" => {
-                let x = Tensor::from_slice(ctx, &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], None, dev);
+                let x = Tensor::from_slice(
+                    ctx,
+                    &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                    None,
+                    dev,
+                );
                 x.add(2.0)
             }
             "smoke_two_tensors" => {
@@ -310,28 +503,37 @@ fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>,
             }
             "arange4" => Tensor::arange(ctx, 0.0, Some(4.0), 1.0, None),
             "arange_step" => Tensor::arange(ctx, 3.0, Some(7.0), 2.0, None),
-            "red_sum_arange" => Tensor::arange(ctx, 0.0, Some(100.0), 1.0, None).sum(None, false, None),
+            "red_sum_arange" => {
+                Tensor::arange(ctx, 0.0, Some(100.0), 1.0, None).sum(None, false, None)
+            }
             "red_mean_arange" => Tensor::arange(ctx, 0.0, Some(100.0), 1.0, None).mean(None, false),
             "red_max_arange" => Tensor::arange(ctx, 0.0, Some(100.0), 1.0, None).max(None, false),
-            "red_sum_axis" => {
-                Tensor::arange(ctx, 0.0, Some(12.0), 1.0, None).reshape([3usize, 4]).sum(Some(&[1]), false, None)
-            }
-            "red_max_axis_keepdim" => {
-                Tensor::arange(ctx, 0.0, Some(12.0), 1.0, None).reshape([3usize, 4]).max(Some(&[0]), true)
-            }
-            "red_sum_2d_all" => Tensor::arange(ctx, 0.0, Some(6.0), 1.0, None).reshape([2usize, 3]).sum(None, false, None),
+            "red_sum_axis" => Tensor::arange(ctx, 0.0, Some(12.0), 1.0, None)
+                .reshape([3usize, 4])
+                .sum(Some(&[1]), false, None),
+            "red_max_axis_keepdim" => Tensor::arange(ctx, 0.0, Some(12.0), 1.0, None)
+                .reshape([3usize, 4])
+                .max(Some(&[0]), true),
+            "red_sum_2d_all" => Tensor::arange(ctx, 0.0, Some(6.0), 1.0, None)
+                .reshape([2usize, 3])
+                .sum(None, false, None),
             "mm_2x3_3x2" => {
-                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape([2usize, 3]);
-                let b = Tensor::from_slice(ctx, &[7i32, 8, 9, 10, 11, 12], None, dev).reshape([3usize, 2]);
+                let a =
+                    Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape([2usize, 3]);
+                let b = Tensor::from_slice(ctx, &[7i32, 8, 9, 10, 11, 12], None, dev)
+                    .reshape([3usize, 2]);
                 a.matmul(b)
             }
             "mm_3x3" => {
-                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6, 7, 8, 9], None, dev).reshape([3usize, 3]);
-                let b = Tensor::from_slice(ctx, &[1i32, 0, 0, 1, 1, 0], None, dev).reshape([3usize, 2]);
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6, 7, 8, 9], None, dev)
+                    .reshape([3usize, 3]);
+                let b =
+                    Tensor::from_slice(ctx, &[1i32, 0, 0, 1, 1, 0], None, dev).reshape([3usize, 2]);
                 a.matmul(b)
             }
             "permute_2x4" => {
-                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6, 7, 8], None, dev).reshape([2usize, 4]);
+                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6, 7, 8], None, dev)
+                    .reshape([2usize, 4]);
                 a.permute(&[1, 0])
             }
             "expand_1x3_2x3" => {
@@ -339,46 +541,83 @@ fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>,
                 a.expand([2usize, 3])
             }
             "cumsum_axis1" => {
-                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape([2usize, 3]);
+                let a =
+                    Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape([2usize, 3]);
                 a.cumsum(1)
             }
             "cumsum_axis0" => {
-                let a = Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape([2usize, 3]);
+                let a =
+                    Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev).reshape([2usize, 3]);
                 a.cumsum(0)
             }
             "cast_f2i" => {
                 let x = Tensor::from_slice(ctx, &[-2.0f32, -1.0, 1.7, 2.5], None, dev);
-                { let __u = ctx.raw().cast(x.uop(), dtype::INT32); Tensor::from_uop_ctx(ctx, __u) }
+                {
+                    let __u = ctx.raw().cast(x.uop(), dtype::INT32);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             "cast_i2f" => {
                 let x = Tensor::from_slice(ctx, &[3i32, -7, 0, 12], None, dev);
-                { let __u = ctx.raw().cast(x.uop(), dtype::FLOAT32); Tensor::from_uop_ctx(ctx, __u) }
+                {
+                    let __u = ctx.raw().cast(x.uop(), dtype::FLOAT32);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             "cast_f2u8" => {
                 let x = Tensor::from_slice(ctx, &[-2.0f32, 3.9, 300.0], None, dev);
-                { let __u = ctx.raw().cast(x.uop(), dtype::UINT8); Tensor::from_uop_ctx(ctx, __u) }
+                {
+                    let __u = ctx.raw().cast(x.uop(), dtype::UINT8);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             "cast_f2i8" => {
                 let x = Tensor::from_slice(ctx, &[-300.0f32, 3.9, 127.0], None, dev);
-                { let __u = ctx.raw().cast(x.uop(), dtype::INT8); Tensor::from_uop_ctx(ctx, __u) }
+                {
+                    let __u = ctx.raw().cast(x.uop(), dtype::INT8);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             "cast_b2i32" => {
                 let x = Tensor::from_slice(ctx, &[1.0f32, 0.0, 2.0, 0.5], None, dev);
-                let b = { let __u = ctx.raw().cast(x.uop(), dtype::BOOL); Tensor::from_uop_ctx(ctx, __u) };
-                { let __u = ctx.raw().cast(b.uop(), dtype::INT32); Tensor::from_uop_ctx(ctx, __u) }
+                let b = {
+                    let __u = ctx.raw().cast(x.uop(), dtype::BOOL);
+                    Tensor::from_uop_ctx(ctx, __u)
+                };
+                {
+                    let __u = ctx.raw().cast(b.uop(), dtype::INT32);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             "cast_f2b" => {
                 let x = Tensor::from_slice(ctx, &[0.0f32, 1.5, -3.0], None, dev);
-                { let __u = ctx.raw().cast(x.uop(), dtype::BOOL); Tensor::from_uop_ctx(ctx, __u) }
+                {
+                    let __u = ctx.raw().cast(x.uop(), dtype::BOOL);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             "cast_f32_f64" => {
                 let x = fx(ctx, dev);
-                { let __u = ctx.raw().cast(x.uop(), dtype::FLOAT64); Tensor::from_uop_ctx(ctx, __u) }
+                {
+                    let __u = ctx.raw().cast(x.uop(), dtype::FLOAT64);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             "cast_f64_f32" => {
-                let d = Tensor::from_slice(ctx, &[1e10f64, -2.5, 3.14159265358979], Some(dtype::FLOAT64), dev);
-                let f = { let __u = ctx.raw().cast(d.uop(), dtype::FLOAT32); Tensor::from_uop_ctx(ctx, __u) };
-                { let __u = ctx.raw().cast(f.uop(), dtype::FLOAT64); Tensor::from_uop_ctx(ctx, __u) }
+                let d = Tensor::from_slice(
+                    ctx,
+                    &[1e10f64, -2.5, 3.14159265358979],
+                    Some(dtype::FLOAT64),
+                    dev,
+                );
+                let f = {
+                    let __u = ctx.raw().cast(d.uop(), dtype::FLOAT32);
+                    Tensor::from_uop_ctx(ctx, __u)
+                };
+                {
+                    let __u = ctx.raw().cast(f.uop(), dtype::FLOAT64);
+                    Tensor::from_uop_ctx(ctx, __u)
+                }
             }
             other => panic!("harness gap: no builder for {other}"),
         });
@@ -390,13 +629,22 @@ fn run_named(backend: &str, gm: &HashMap<&'static str, &'static golden::Golden>,
 fn smoke_all_backends() {
     let gm = goldens();
     for b in backends() {
-        run_named(&b, &gm, &["smoke_add", "smoke_two_tensors", "smoke_mulc_neg"]);
+        run_named(
+            &b,
+            &gm,
+            &["smoke_add", "smoke_two_tensors", "smoke_mulc_neg"],
+        );
         // run-twice: the second realize hits the allocator cache path
         let dev = staging_dev(&b);
         for _ in 0..2 {
             let g = gm["smoke_add"];
             let (vals, shape) = run_prog("smoke_add", dev, |ctx, dev| {
-                let x = Tensor::from_slice(ctx, &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], None, dev);
+                let x = Tensor::from_slice(
+                    ctx,
+                    &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                    None,
+                    dev,
+                );
                 x.add(2.0)
             });
             assert_golden(&b, g, &vals, &shape);
@@ -417,12 +665,17 @@ fn alu_code_for_op_all_backends() {
             // FLOORMOD/FLOORDIV); they appear only inside index math and the
             // floordiv/floormod decompositions of other kernels.
             if matches!(op, Ops::Cdiv | Ops::Cmod) {
-                eprintln!("harness: {b} skipping {:?} (no tensor sugar; reached via decomp)", op);
+                eprintln!(
+                    "harness: {b} skipping {:?} (no tensor sugar; reached via decomp)",
+                    op
+                );
                 continue;
             }
             let gname = op_golden_name(op);
-            let g = gm.get(gname).unwrap_or_else(|| panic!("{b}: no golden for {gname}"));
-            let mut ctx = Ctx::new();
+            let g = gm
+                .get(gname)
+                .unwrap_or_else(|| panic!("{b}: no golden for {gname}"));
+            let ctx = Ctx::new();
             let (t, _) = op_program(&ctx, dev, op);
             // sub-dword outputs (bool/8/16-bit) need bitcast-based memory
             // coalescing on cstyle backends — pending with the M8.5 decomp work
@@ -436,8 +689,19 @@ fn alu_code_for_op_all_backends() {
                 continue;
             }
             let mut cache = ProgCache::default();
-            let vals = tensor_values(&mut ctx.raw(), t.uop().clone(), &mut BufTable::default(), &mut cache);
-            let shape: Vec<usize> = ctx.raw().shape_of(&t.uop()).expect("shape").iter().map(|s| s.clone().as_usize().expect("static")).collect();
+            let vals = tensor_values(
+                &mut ctx.raw(),
+                t.uop().clone(),
+                &mut BufTable::default(),
+                &mut cache,
+            );
+            let shape: Vec<usize> = ctx
+                .raw()
+                .shape_of(&t.uop())
+                .expect("shape")
+                .iter()
+                .map(|s| s.clone().as_usize().expect("static"))
+                .collect();
             assert_golden(&b, g, &vals, &shape);
         }
     }
@@ -455,13 +719,17 @@ fn aranges_all_backends() {
 fn reductions_basic_all_backends() {
     let gm = goldens();
     for b in backends() {
-        run_named(&b, &gm, &[
-            "red_sum_arange",
-            "red_mean_arange",
-            "red_max_arange",
-            "red_sum_axis",
-            "red_max_axis_keepdim",
-        ]);
+        run_named(
+            &b,
+            &gm,
+            &[
+                "red_sum_arange",
+                "red_mean_arange",
+                "red_max_arange",
+                "red_sum_axis",
+                "red_max_axis_keepdim",
+            ],
+        );
     }
 }
 
@@ -469,14 +737,18 @@ fn reductions_basic_all_backends() {
 fn reductions_all_backends() {
     let gm = goldens();
     for b in backends() {
-        run_named(&b, &gm, &[
-            "red_sum_arange",
-            "red_mean_arange",
-            "red_max_arange",
-            "red_sum_axis",
-            "red_max_axis_keepdim",
-            "red_sum_2d_all",
-        ]);
+        run_named(
+            &b,
+            &gm,
+            &[
+                "red_sum_arange",
+                "red_mean_arange",
+                "red_max_arange",
+                "red_sum_axis",
+                "red_max_axis_keepdim",
+                "red_sum_2d_all",
+            ],
+        );
     }
 }
 
@@ -508,16 +780,20 @@ fn cumsum_all_backends() {
 fn casts_all_backends() {
     let gm = goldens();
     for b in backends() {
-        run_named(&b, &gm, &[
-            "cast_f2i",
-            "cast_i2f",
-            "cast_f2u8",
-            "cast_f2i8",
-            "cast_b2i32",
-            "cast_f2b",
-            "cast_f32_f64",
-            "cast_f64_f32",
-        ]);
+        run_named(
+            &b,
+            &gm,
+            &[
+                "cast_f2i",
+                "cast_i2f",
+                "cast_f2u8",
+                "cast_f2i8",
+                "cast_b2i32",
+                "cast_f2b",
+                "cast_f32_f64",
+                "cast_f64_f32",
+            ],
+        );
     }
 }
 
@@ -552,12 +828,17 @@ fn dtype_battery_all_backends() {
                 // non-native-float decomp (compute-through-f32, M8.5). The
                 // roundtrip (pure storage cast) is ported and tested.
                 if kind != "roundtrip" {
-                    eprintln!("harness: {b} skipping {}/{kind} (weak commit passes pending)", dtype_attr(dt));
+                    eprintln!(
+                        "harness: {b} skipping {}/{kind} (weak commit passes pending)",
+                        dtype_attr(dt)
+                    );
                     continue;
                 }
                 let gname = format!("dt_{}_{}", dtype_attr(dt), kind);
-                let g = gm.get(gname.as_str()).unwrap_or_else(|| panic!("{b}: no golden for {gname}"));
-                let mut ctx = Ctx::new();
+                let g = gm
+                    .get(gname.as_str())
+                    .unwrap_or_else(|| panic!("{b}: no golden for {gname}"));
+                let ctx = Ctx::new();
                 let (t, _) = dt_program(&ctx, dev, dt, kind);
                 // sub-dword OUTPUTS (the cast result) need bitcast-based
                 // coalescing on cstyle backends (pending M8.5)
@@ -567,12 +848,25 @@ fn dtype_battery_all_backends() {
                     || out_dt == dtype::BFLOAT16
                     || dtype::in_set(dtype::FP8S, out_dt);
                 if sub_dword_out && b != "INTERP" {
-                    eprintln!("harness: {b} skipping {gname} (sub-dword output coalescing pending)");
+                    eprintln!(
+                        "harness: {b} skipping {gname} (sub-dword output coalescing pending)"
+                    );
                     continue;
                 }
                 let mut cache = ProgCache::default();
-                let vals = tensor_values(&mut ctx.raw(), t.uop().clone(), &mut BufTable::default(), &mut cache);
-                let shape: Vec<usize> = ctx.raw().shape_of(&t.uop()).expect("shape").iter().map(|s| s.clone().as_usize().expect("static")).collect();
+                let vals = tensor_values(
+                    &mut ctx.raw(),
+                    t.uop().clone(),
+                    &mut BufTable::default(),
+                    &mut cache,
+                );
+                let shape: Vec<usize> = ctx
+                    .raw()
+                    .shape_of(&t.uop())
+                    .expect("shape")
+                    .iter()
+                    .map(|s| s.clone().as_usize().expect("static"))
+                    .collect();
                 assert_golden(&b, g, &vals, &shape);
             }
         }
@@ -604,7 +898,11 @@ fn pad_fill_repro() {
     });
     eprintln!("PAD2D shape={shape2:?} vals={vals2:?}");
     assert_eq!(shape2, vec![2, 5], "pad2d shape");
-    assert_eq!(vals2, vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0, 4.0, 5.0, 6.0], "pad2d values");
+    assert_eq!(
+        vals2,
+        vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0, 4.0, 5.0, 6.0],
+        "pad2d values"
+    );
 }
 
 #[test]
@@ -612,10 +910,16 @@ fn expand_all_positions() {
     // _broadcast_to must place a broadcast dim at its OWN position, not at index 0.
     // Regression: middle/trailing size-1 dims used to land at dim 0.
     let a = run_prog("exp_lead", None, |ctx, dev| {
-        Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev).reshape([1usize, 3]).expand([4usize, 3])
+        Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev)
+            .reshape([1usize, 3])
+            .expand([4usize, 3])
     });
     assert_eq!(a.1, vec![4, 3], "expand leading [1,3]->[4,3] shape");
-    assert_eq!(a.0, vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0], "expand leading vals");
+    assert_eq!(
+        a.0,
+        vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+        "expand leading vals"
+    );
 
     let b = run_prog("exp_mid", None, |ctx, dev| {
         Tensor::from_slice(ctx, &[1i32, 2, 3, 4, 5, 6], None, dev)
@@ -627,25 +931,36 @@ fn expand_all_positions() {
     assert_eq!(
         b.0,
         vec![
-            1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0
+            1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 5.0,
+            6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0
         ],
         "expand middle vals"
     );
 
     let c = run_prog("exp_trail", None, |ctx, dev| {
-        Tensor::from_slice(ctx, &[1i32, 2, 3, 4], None, dev).reshape([2usize, 2]).unsqueeze(2).expand([2usize, 2, 3])
+        Tensor::from_slice(ctx, &[1i32, 2, 3, 4], None, dev)
+            .reshape([2usize, 2])
+            .unsqueeze(2)
+            .expand([2usize, 2, 3])
     });
     assert_eq!(c.1, vec![2, 2, 3], "expand trailing [2,2,1]->[2,2,3] shape");
-    assert_eq!(c.0, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0], "expand trailing vals");
+    assert_eq!(
+        c.0,
+        vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0],
+        "expand trailing vals"
+    );
 
     let d = run_prog("exp_multi", None, |ctx, dev| {
-        Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev).reshape([1usize, 1, 3]).expand([2usize, 4, 3])
+        Tensor::from_slice(ctx, &[1i32, 2, 3], None, dev)
+            .reshape([1usize, 1, 3])
+            .expand([2usize, 4, 3])
     });
     assert_eq!(d.1, vec![2, 4, 3], "expand multi [1,1,3]->[2,4,3] shape");
     assert_eq!(
         d.0,
         vec![
-            1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0
+            1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0,
+            3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0
         ],
         "expand multi vals"
     );

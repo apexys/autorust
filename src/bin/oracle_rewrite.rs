@@ -6,11 +6,10 @@
 use std::io::{BufRead, Write};
 
 use autorust::tensor::Ctx;
-use autorust::uop::ctx::UOpCtx;
 use autorust::uop::flat::{parse_flat, to_string_flat};
 use autorust::uop::graph::Graph;
 use autorust::uop::sym::{pm_commutative, pm_mop_cleanup, symbolic, symbolic_simple};
-use autorust::uop::upat::{graph_rewrite, CtxVal};
+use autorust::uop::upat::{CtxVal, graph_rewrite};
 
 static PM_LOAD_COLLAPSE: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
 static PM_REDUCE_LOAD_COLLAPSE: autorust::uop::upat::PmSlot = autorust::uop::upat::PmSlot::new();
@@ -26,12 +25,23 @@ fn pm_by_name(name: &str) -> Option<&'static autorust::uop::upat::PatternMatcher
         "mop_cleanup" => Some(pm_mop_cleanup()),
         "div_and_mod_symbolic" => Some(autorust::uop::divandmod::div_and_mod_symbolic()),
         "symbolic" => Some(symbolic()),
-        "pm_load_collapse" => Some(PM_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_load_collapse)),
-        "pm_reduce_load_collapse" => Some(PM_REDUCE_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_reduce_load_collapse)),
-        "pm_split_ranges" => Some(PM_SPLIT_RANGES.get_or_init(autorust::codegen::simplify::pm_split_ranges)),
-        "pm_add_gpudims" => Some(PM_ADD_GPUDIMS.get_or_init(autorust::codegen::gpudims::pm_add_gpudims)),
+        "pm_load_collapse" => {
+            Some(PM_LOAD_COLLAPSE.get_or_init(autorust::codegen::simplify::pm_load_collapse))
+        }
+        "pm_reduce_load_collapse" => Some(
+            PM_REDUCE_LOAD_COLLAPSE
+                .get_or_init(autorust::codegen::simplify::pm_reduce_load_collapse),
+        ),
+        "pm_split_ranges" => {
+            Some(PM_SPLIT_RANGES.get_or_init(autorust::codegen::simplify::pm_split_ranges))
+        }
+        "pm_add_gpudims" => {
+            Some(PM_ADD_GPUDIMS.get_or_init(autorust::codegen::gpudims::pm_add_gpudims))
+        }
         "pm_decomp" => Some(PM_DECOMP.get_or_init(|| autorust::codegen::decomp::pm_decomp(true))),
-        "pm_dtype_decomps" => Some(PM_DTYPE_DECOMP.get_or_init(autorust::codegen::decomp_dtype::pm_dtype_decomps)),
+        "pm_dtype_decomps" => {
+            Some(PM_DTYPE_DECOMP.get_or_init(autorust::codegen::decomp_dtype::pm_dtype_decomps))
+        }
         _ => None,
     }
 }
@@ -69,7 +79,9 @@ fn serde_json_err(e: &str) -> String {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ")
 }
 
 fn process_line(line: &str) -> String {
@@ -92,10 +104,12 @@ fn process_line(line: &str) -> String {
         Some(r) => r.clone(),
         None => return serde_json_err("no roots"),
     };
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     ctx.raw().g = g;
     let ctxv = if pm_name == "pm_split_ranges" {
-        CtxVal::Dict(std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())))
+        CtxVal::Dict(std::rc::Rc::new(std::cell::RefCell::new(
+            std::collections::HashMap::new(),
+        )))
     } else if pm_name == "pm_dtype_decomps" {
         let dctx = autorust::codegen::decomp_dtype::DtypeDecompCtx {
             dtypes: Default::default(),

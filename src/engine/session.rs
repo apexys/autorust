@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 
 use crate::engine::realize::{self, ProgCache};
-use crate::runtime::buffer::{Buffer, BufTable};
+use crate::runtime::buffer::{BufTable, Buffer};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
 
@@ -107,16 +107,32 @@ impl Session {
     /// (see [`Tensor::to_list`](crate::tensor::Tensor::to_list)).
     pub fn realize_tensor(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> (Buffer, UopId) {
         let mut cap = self.capturing.take();
-        let r = realize::realize_tensor(ctx, tensor_uop, &mut self.buffers, &mut self.cache, cap.as_mut());
+        let r = realize::realize_tensor(
+            ctx,
+            tensor_uop,
+            &mut self.buffers,
+            &mut self.cache,
+            cap.as_mut(),
+        );
         self.capturing = cap;
         r
     }
 
     /// `Tensor.realize(*tensors)`: co-realize every root in one schedule and
     /// return their realized buffers (optimizer co-realization, `schedule_step`).
-    pub fn realize_many(&mut self, ctx: &mut UOpCtx, tensor_uops: &[UopId]) -> (Vec<Buffer>, Vec<UopId>) {
+    pub fn realize_many(
+        &mut self,
+        ctx: &mut UOpCtx,
+        tensor_uops: &[UopId],
+    ) -> (Vec<Buffer>, Vec<UopId>) {
         let mut cap = self.capturing.take();
-        let r = realize::realize_many(ctx, tensor_uops, &mut self.buffers, &mut self.cache, cap.as_mut());
+        let r = realize::realize_many(
+            ctx,
+            tensor_uops,
+            &mut self.buffers,
+            &mut self.cache,
+            cap.as_mut(),
+        );
         self.capturing = cap;
         r
     }

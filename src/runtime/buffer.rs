@@ -49,7 +49,11 @@ pub struct HostOpaque {
 impl HostOpaque {
     pub fn new(mem: Vec<u8>) -> HostOpaque {
         let size = mem.len();
-        HostOpaque { mem: Rc::new(RefCell::new(mem)), offset: 0, size }
+        HostOpaque {
+            mem: Rc::new(RefCell::new(mem)),
+            offset: 0,
+            size,
+        }
     }
     pub fn read(&self) -> Vec<u8> {
         self.mem.borrow()[self.offset..self.offset + self.size].to_vec()
@@ -74,7 +78,9 @@ impl OpaqueT for HostOpaque {
 
 /// Downcast to the host storage (the interp backend only runs on host bytes).
 pub fn host_of(o: &dyn OpaqueT) -> &HostOpaque {
-    o.as_any().downcast_ref::<HostOpaque>().expect("TGERR: expected host opaque")
+    o.as_any()
+        .downcast_ref::<HostOpaque>()
+        .expect("TGERR: expected host opaque")
 }
 
 /// An owned opaque view (`Rc<dyn OpaqueT>`) — `Buffer._buf`.
@@ -100,7 +106,10 @@ impl BufferBase {
         self.buf.borrow().is_some()
     }
     pub fn allocate_with(&self, o: OpaqueView) {
-        assert!(!self.is_allocated(), "TGERR: can't allocate already allocated buffer");
+        assert!(
+            !self.is_allocated(),
+            "TGERR: can't allocate already allocated buffer"
+        );
         if let Some(bytes) = self.pending_copyin.borrow_mut().take() {
             assert_eq!(bytes.len(), o.size(), "TGERR: initial data size mismatch");
             // host fast path keeps byte storage shared with Node.initial_data
@@ -111,13 +120,18 @@ impl BufferBase {
                     h.write(&bytes);
                 }
             } else {
-                panic!("TGERR: pending copyin requires a device — allocate through ensure_allocated");
+                panic!(
+                    "TGERR: pending copyin requires a device — allocate through ensure_allocated"
+                );
             }
         }
         *self.buf.borrow_mut() = Some(o);
     }
     pub fn deallocate(&self) {
-        assert!(self.is_allocated(), "TGERR: buffer must be allocated to deallocate");
+        assert!(
+            self.is_allocated(),
+            "TGERR: buffer must be allocated to deallocate"
+        );
         *self.buf.borrow_mut() = None;
     }
 }
@@ -142,7 +156,12 @@ impl Buffer {
             pending_copyin: RefCell::new(None),
             uop_refcount: Cell::new(0),
         });
-        Buffer { base, size, dtype, offset: 0 }
+        Buffer {
+            base,
+            size,
+            dtype,
+            offset: 0,
+        }
     }
 
     pub fn nbytes(&self) -> usize {
@@ -157,8 +176,16 @@ impl Buffer {
 
     /// `Buffer.view(size, dtype, offset)` — offset in bytes.
     pub fn view(&self, size: usize, dtype: DTypeId, offset: usize) -> Buffer {
-        assert!(offset < self.nbytes(), "TGERR: offset must be less than nbytes");
-        Buffer { base: self.base.clone(), size, dtype, offset: self.offset + offset }
+        assert!(
+            offset < self.nbytes(),
+            "TGERR: offset must be less than nbytes"
+        );
+        Buffer {
+            base: self.base.clone(),
+            size,
+            dtype,
+            offset: self.offset + offset,
+        }
     }
 
     /// `Buffer.ensure_allocated` — allocate on the device if needed.
@@ -177,7 +204,10 @@ impl Buffer {
     /// `Buffer.allocate` — through the device LRU allocator (or an explicit
     /// opaque, the `opaque=` ctor path).
     pub fn allocate(&self, dev: &Compiled, opaque: Option<OpaqueView>) {
-        assert!(!self.is_allocated(), "TGERR: can't allocate already allocated buffer");
+        assert!(
+            !self.is_allocated(),
+            "TGERR: can't allocate already allocated buffer"
+        );
         match opaque {
             Some(o) => self.base.allocate_with(o),
             None => {
@@ -228,10 +258,20 @@ struct WeakBuffer {
 
 impl WeakBuffer {
     fn of(b: &Buffer) -> WeakBuffer {
-        WeakBuffer { base: Rc::downgrade(&b.base), size: b.size, dtype: b.dtype, offset: b.offset }
+        WeakBuffer {
+            base: Rc::downgrade(&b.base),
+            size: b.size,
+            dtype: b.dtype,
+            offset: b.offset,
+        }
     }
     fn upgrade(&self) -> Option<Buffer> {
-        self.base.upgrade().map(|base| Buffer { base, size: self.size, dtype: self.dtype, offset: self.offset })
+        self.base.upgrade().map(|base| Buffer {
+            base,
+            size: self.size,
+            dtype: self.dtype,
+            offset: self.offset,
+        })
     }
 }
 
@@ -239,7 +279,10 @@ impl BufTable {
     /// Number of base allocations still referenced by a live caller (leak
     /// observability: a repeated realize that reuses storage must not grow).
     pub fn n_bases(&self) -> usize {
-        self.bases.values().filter(|b| Rc::strong_count(b) > 1).count()
+        self.bases
+            .values()
+            .filter(|b| Rc::strong_count(b) > 1)
+            .count()
     }
     /// Number of cached view entries (uop id → weak `Buffer`).
     pub fn n_views(&self) -> usize {
@@ -312,10 +355,18 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
             // (through the backend allocator, so any device works).
             if let Some(bytes) = u.node.initial_data.borrow().as_ref() {
                 let nb = size * dt.itemsize();
-                assert!(bytes.borrow().len() == nb, "TGERR: initial data size mismatch");
+                assert!(
+                    bytes.borrow().len() == nb,
+                    "TGERR: initial data size mismatch"
+                );
                 *base.pending_copyin.borrow_mut() = Some(bytes.borrow().clone());
             }
-            let b = Buffer { base: base.clone(), size, dtype: dt, offset: 0 };
+            let b = Buffer {
+                base: base.clone(),
+                size,
+                dtype: dt,
+                offset: 0,
+            };
             t.bases.insert(u.id(), base);
             t.views.insert(u.id(), WeakBuffer::of(&b));
             b

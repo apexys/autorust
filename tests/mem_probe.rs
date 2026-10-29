@@ -12,12 +12,11 @@ use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 #[test]
 fn single_ctx_training_is_memory_bounded() {
     Tensor::manual_seed(42);
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let l1 = Linear::new(&ctx, 2, 4, true).into_params();
     let l2 = Linear::new(&ctx, 4, 1, true).into_params();
@@ -29,8 +28,13 @@ fn single_ctx_training_is_memory_bounded() {
     ];
     let sgd = SGD::new(params.clone(), 0.1);
 
-    let x = Tensor::from_slice(&ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
-        .reshape([4, 2]);
+    let x = Tensor::from_slice(
+        &ctx,
+        &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        None,
+        None,
+    )
+    .reshape([4, 2]);
     let t = Tensor::from_slice(&ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape([4, 1]);
 
     let mut baseline: Option<(usize, usize)> = None;
@@ -53,6 +57,12 @@ fn single_ctx_training_is_memory_bounded() {
     let (base_nodes, base_bases) = baseline.expect("baseline captured at step 10");
     let (nodes, bases) = (ctx.raw().g.live_len(), sess.buffers.n_bases());
     // Nodes may fluctuate by a small constant but must not scale with step count.
-    assert!(nodes <= base_nodes + 64, "live nodes grew with steps: {base_nodes} -> {nodes}");
-    assert!(bases <= base_bases + 4, "buffer bases grew with steps: {base_bases} -> {bases}");
+    assert!(
+        nodes <= base_nodes + 64,
+        "live nodes grew with steps: {base_nodes} -> {nodes}"
+    );
+    assert!(
+        bases <= base_bases + 4,
+        "buffer bases grew with steps: {base_bases} -> {bases}"
+    );
 }

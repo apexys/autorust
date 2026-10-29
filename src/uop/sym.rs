@@ -1,24 +1,24 @@
 //! The symbolic rewrite rule sets (uop/symbolic.py + uop/movement.py +
 //! uop/divandmod.py), ported rule-by-rule in Python order.
-use std::sync::Arc;
 use crate::uop::upat::PmSlot;
+use std::sync::Arc;
 
 use super::alu::exec_alu;
 use super::arg::Arg;
 use super::ctx::UOpCtx;
 use std::collections::HashMap;
 
-use super::graph::UopId;
-use super::ops::{group, Ops};
-pub use super::upat::sget;
-pub use super::upat::{
-    sget_opt, const_arg, opset_diff, opset_union, permutations, ConstArgVal, CtxVal, PatternMatcher, RuleFn, Store, UPat,
-    UPatOrConst,
-};
 use super::ctx::sval_cmp;
+use super::graph::UopId;
+use super::ops::{Ops, group};
 use super::sint::SVal;
+pub use super::upat::sget;
 use super::upat::substitute;
-use crate::dtype::{self, can_lossless_cast, ConstVal, DTypeId, WEAKINT};
+pub use super::upat::{
+    ConstArgVal, CtxVal, PatternMatcher, RuleFn, Store, UPat, UPatOrConst, const_arg, opset_diff,
+    opset_union, permutations, sget_opt,
+};
+use crate::dtype::{self, ConstVal, DTypeId, WEAKINT, can_lossless_cast};
 
 use ConstVal as CV;
 
@@ -34,7 +34,10 @@ pub fn commit_weak(ctx: &mut UOpCtx, s: UopId, dt: DTypeId) -> UopId {
 
 /// `overflows` (ops.py:658).
 fn overflows(ctx: &mut UOpCtx, u: UopId, d: DTypeId) -> bool {
-    let (vmin, vmax) = match ctx.min_max(&u) { Ok(v) => v, Err(_) => return false };
+    let (vmin, vmax) = match ctx.min_max(&u) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
     let (dmin, dmax) = ctx.dtype_bounds(d).unwrap();
     let lo = vmin.as_i128_or_panic();
     let hi = vmax.as_i128_or_panic();
@@ -53,13 +56,20 @@ fn fold_const_alu(ctx: &mut UOpCtx, a: UopId) -> Option<UopId> {
         }
     }
     // vector expansion like Python's exec_alu tuple branch
-    let veclen = vals.iter().flatten().filter_map(|v| match v {
-        ConstArgVal::Vec(vs) => Some(vs.len()),
-        _ => None,
-    }).max();
+    let veclen = vals
+        .iter()
+        .flatten()
+        .filter_map(|v| match v {
+            ConstArgVal::Vec(vs) => Some(vs.len()),
+            _ => None,
+        })
+        .max();
     let result: Result<ConstArgVal, String> = match veclen {
         None => {
-            let scalars: Vec<ConstVal> = vals.iter().map(|v| v.as_ref().unwrap().clone().one().unwrap()).collect();
+            let scalars: Vec<ConstVal> = vals
+                .iter()
+                .map(|v| v.as_ref().unwrap().clone().one().unwrap())
+                .collect();
             match exec_alu(op, dt, &scalars, false) {
                 Ok(v) => Ok(ConstArgVal::One(v)),
                 // Python: an exception inside a rule aborts the rewrite
@@ -96,7 +106,10 @@ fn const_like_cav(ctx: &mut UOpCtx, a: UopId, v: ConstArgVal) -> UopId {
         ConstArgVal::One(c) => ctx.const_like(a, c),
         ConstArgVal::Vec(items) => {
             let dt = ctx.dt_of(&a);
-            let srcs: Vec<UopId> = items.into_iter().map(|c| ctx.const_py(c, Some(dt))).collect();
+            let srcs: Vec<UopId> = items
+                .into_iter()
+                .map(|c| ctx.const_py(c, Some(dt)))
+                .collect();
             ctx.uop(Ops::Stack, None, srcs, Arg::None)
         }
     }
@@ -107,7 +120,10 @@ fn simplify_pow(ctx: &mut UOpCtx, x: UopId, c: UopId) -> Option<UopId> {
     let cv = ctx.val(&c).as_f64();
     if cv < 0.0 {
         let neg = ctx.const_py(CV::Float(-cv), None);
-        { let rx = ctx.reciprocal(x); return Some(ctx.pow(rx, neg)); }
+        {
+            let rx = ctx.reciprocal(x);
+            return Some(ctx.pow(rx, neg));
+        }
     }
     if cv == 0.0 {
         return Some(ctx.const_like(x, CV::Int(1)));
@@ -127,7 +143,10 @@ fn simplify_pow(ctx: &mut UOpCtx, x: UopId, c: UopId) -> Option<UopId> {
         if ci % 2 == 1 {
             Some(ctx.mul(y2, x))
         } else {
-            { let one = ctx.const_like(x, CV::Int(1)); Some(ctx.mul(y2, one))}
+            {
+                let one = ctx.const_like(x, CV::Int(1));
+                Some(ctx.mul(y2, one))
+            }
         }
     } else {
         None
@@ -147,7 +166,13 @@ fn fold_bitcast(ctx: &mut UOpCtx, root: UopId, c: UopId) -> Option<UopId> {
 }
 
 /// `fold_const_where` (symbolic.py:104-107).
-fn fold_const_where(ctx: &mut UOpCtx, _gate: UopId, c0: UopId, c1: UopId, w: UopId) -> Option<UopId> {
+fn fold_const_where(
+    ctx: &mut UOpCtx,
+    _gate: UopId,
+    c0: UopId,
+    c1: UopId,
+    w: UopId,
+) -> Option<UopId> {
     let gate_val = match ctx.val(&_gate) {
         CV::Bool(b) => b,
         CV::Int(i) => i != 0,
@@ -206,7 +231,6 @@ pub fn cvar_arg(name: &'static str, a: CV) -> UPat {
     UPat::cvar(Some(name), None, Some(Arg::Const(a)))
 }
 
-
 // ---------- pm_data_invalid (symbolic.py:74-96) ----------
 
 pub fn invalid_pat() -> UPat {
@@ -230,7 +254,10 @@ fn pm_data_invalid() -> PatternMatcher {
     let bin_no_cmp = opset_diff(group::BINARY, group::COMPARISON);
     let rules: Vec<(UPat, RuleFn)> = vec![
         // STACK(any number of invalid) -> invalid
-        (invalid_pat().broadcast(false), r(|_, st, _| Some(sget(st, "i")))),
+        (
+            invalid_pat().broadcast(false),
+            r(|_, st, _| Some(sget(st, "i"))),
+        ),
         // unary/cast of invalid -> invalid
         (
             UPat::op_var(unary_cast.clone()).with_src_tup(vec![invalid_pat()]),
@@ -238,9 +265,16 @@ fn pm_data_invalid() -> PatternMatcher {
         ),
         // gated unary lifts the gate out
         (
-            UPat::op_var(unary_cast.clone()).with_src_tup(vec![invalid_gate()]).named("op"),
+            UPat::op_var(unary_cast.clone())
+                .with_src_tup(vec![invalid_gate()])
+                .named("op"),
             r(|ctx, st, _| {
-                let (cond, x, op, i) = (sget(st, "cond"), sget(st, "x"), sget(st, "op"), sget(st, "i"));
+                let (cond, x, op, i) = (
+                    sget(st, "cond"),
+                    sget(st, "x"),
+                    sget(st, "op"),
+                    sget(st, "i"),
+                );
                 let (o, d, _, a, t) = ctx.snapshot(&op);
                 let replaced = ctx.replace(&op, o, d, vec![x], a, t);
                 Some(ctx.where_(cond, replaced, i))
@@ -248,17 +282,33 @@ fn pm_data_invalid() -> PatternMatcher {
         ),
         // binary ops move inside the gate
         (
-            UPat::op_var(group::BINARY.to_vec()).with_src_tup(vec![invalid_gate(), var("y")]).named("alu"),
+            UPat::op_var(group::BINARY.to_vec())
+                .with_src_tup(vec![invalid_gate(), var("y")])
+                .named("alu"),
             r(|ctx, st, _| {
-                let (cond, x, y, alu, i) = (sget(st, "cond"), sget(st, "x"), sget(st, "y"), sget(st, "alu"), sget(st, "i"));
+                let (cond, x, y, alu, i) = (
+                    sget(st, "cond"),
+                    sget(st, "x"),
+                    sget(st, "y"),
+                    sget(st, "alu"),
+                    sget(st, "i"),
+                );
                 let inner = ctx.alu2(ctx.op_of(&alu), x, y);
                 Some(ctx.where_(cond, inner, i))
             }),
         ),
         (
-            UPat::op_var(group::BINARY.to_vec()).with_src_tup(vec![var("y"), invalid_gate()]).named("alu"),
+            UPat::op_var(group::BINARY.to_vec())
+                .with_src_tup(vec![var("y"), invalid_gate()])
+                .named("alu"),
             r(|ctx, st, _| {
-                let (cond, x, y, alu, i) = (sget(st, "cond"), sget(st, "x"), sget(st, "y"), sget(st, "alu"), sget(st, "i"));
+                let (cond, x, y, alu, i) = (
+                    sget(st, "cond"),
+                    sget(st, "x"),
+                    sget(st, "y"),
+                    sget(st, "alu"),
+                    sget(st, "i"),
+                );
                 let inner = ctx.alu2(ctx.op_of(&alu), y, x);
                 Some(ctx.where_(cond, inner, i))
             }),
@@ -270,21 +320,33 @@ fn pm_data_invalid() -> PatternMatcher {
         ),
         // invalid condition poisons the whole where
         (
-            invalid_pat().where_(UPatOrConst::Pat(UPat::var(None, None)), UPatOrConst::Pat(UPat::var(None, None))),
+            invalid_pat().where_(
+                UPatOrConst::Pat(UPat::var(None, None)),
+                UPatOrConst::Pat(UPat::var(None, None)),
+            ),
             r(|_, st, _| Some(sget(st, "i"))),
         ),
         // gated invalid condition lifts the gate out
         (
             invalid_gate().where_(UPatOrConst::Pat(var("a")), UPatOrConst::Pat(var("b"))),
             r(|ctx, st, _| {
-                let (cond, x, i, a, b) = (sget(st, "cond"), sget(st, "x"), sget(st, "i"), sget(st, "a"), sget(st, "b"));
+                let (cond, x, i, a, b) = (
+                    sget(st, "cond"),
+                    sget(st, "x"),
+                    sget(st, "i"),
+                    sget(st, "a"),
+                    sget(st, "b"),
+                );
                 let inner = ctx.where_(x, a, b);
                 Some(ctx.where_(cond, inner, i))
             }),
         ),
         // where(cond, Invalid, val) -> where(~cond, val, Invalid)
         (
-            var("cond").where_(UPatOrConst::Pat(invalid_pat()), UPatOrConst::Pat(var("val"))),
+            var("cond").where_(
+                UPatOrConst::Pat(invalid_pat()),
+                UPatOrConst::Pat(var("val")),
+            ),
             r(|ctx, st, _| {
                 let (cond, i, val) = (sget(st, "cond"), sget(st, "i"), sget(st, "val"));
                 if !is_invalid_node(ctx, val.clone()) {
@@ -299,7 +361,13 @@ fn pm_data_invalid() -> PatternMatcher {
         (
             var("a").where_(UPatOrConst::Pat(invalid_gate()), UPatOrConst::Pat(var("c"))),
             r(|ctx, st, _| {
-                let (cond, i, x, a, c) = (sget(st, "cond"), sget(st, "i"), sget(st, "x"), sget(st, "a"), sget(st, "c"));
+                let (cond, i, x, a, c) = (
+                    sget(st, "cond"),
+                    sget(st, "i"),
+                    sget(st, "x"),
+                    sget(st, "a"),
+                    sget(st, "c"),
+                );
                 if !is_invalid_node(ctx, c.clone()) {
                     let na = ctx.logical_not(a.clone());
                     let g = ctx.or_(na, cond);
@@ -313,7 +381,13 @@ fn pm_data_invalid() -> PatternMatcher {
         (
             var("a").where_(UPatOrConst::Pat(var("b")), UPatOrConst::Pat(invalid_gate())),
             r(|ctx, st, _| {
-                let (cond, i, x, a, b) = (sget(st, "cond"), sget(st, "i"), sget(st, "x"), sget(st, "a"), sget(st, "b"));
+                let (cond, i, x, a, b) = (
+                    sget(st, "cond"),
+                    sget(st, "i"),
+                    sget(st, "x"),
+                    sget(st, "a"),
+                    sget(st, "b"),
+                );
                 if !is_invalid_node(ctx, b.clone()) {
                     let g = ctx.or_(a.clone(), cond);
                     let inner = ctx.where_(a, b, x);
@@ -336,10 +410,12 @@ fn pm_data_invalid() -> PatternMatcher {
         ),
         (
             UPat::ops1(Ops::Load)
-                .with_src_tup(vec![UPat::ops1(Ops::Index)
-                    .with_src_tup(vec![UPat::var(None, None), invalid_pat()])
-                    .with_src_any_len(true)
-                    .or_casted(None)])
+                .with_src_tup(vec![
+                    UPat::ops1(Ops::Index)
+                        .with_src_tup(vec![UPat::var(None, None), invalid_pat()])
+                        .with_src_any_len(true)
+                        .or_casted(None),
+                ])
                 .named("x"),
             r(|ctx, st, _| {
                 let (x, _) = (sget(st, "x"), sget(st, "i"));
@@ -384,9 +460,11 @@ impl UPat {
             let mut er = Vec::new();
             for q in &first {
                 if let Some(ops) = &q.op
-                    && ops.len() == 1 && !er.contains(&ops[0]) {
-                        er.push(ops[0]);
-                    }
+                    && ops.len() == 1
+                    && !er.contains(&ops[0])
+                {
+                    er.push(ops[0]);
+                }
             }
             er
         };
@@ -399,19 +477,37 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         // merge adjacent RESHAPES
         (
-            UPat::ops1(Ops::Reshape).with_src_tup(vec![UPat::ops1(Ops::Reshape).named("x2"), UPat::var(None, None)]).named("x"),
+            UPat::ops1(Ops::Reshape)
+                .with_src_tup(vec![
+                    UPat::ops1(Ops::Reshape).named("x2"),
+                    UPat::var(None, None),
+                ])
+                .named("x"),
             r(|ctx, st, _| {
                 let (x, x2) = (sget(st, "x"), sget(st, "x2"));
                 let (_, _, _, arg, _) = ctx.snapshot(&x);
                 let inner = &ctx.srcs(&x2)[0].clone();
                 let (_, d, _, _, _) = ctx.snapshot(&x);
-                let dt = if ctx.dt_of(inner) == ctx.dt_of(&ctx.srcs(&x)[0]) { d } else { ctx.dt_of(inner) };
-                Some(ctx.replace(&x, Ops::Reshape, dt, vec![inner.clone(), ctx.srcs(&x)[1].clone()], arg, Arg::None))
+                let dt = if ctx.dt_of(inner) == ctx.dt_of(&ctx.srcs(&x)[0]) {
+                    d
+                } else {
+                    ctx.dt_of(inner)
+                };
+                Some(ctx.replace(
+                    &x,
+                    Ops::Reshape,
+                    dt,
+                    vec![inner.clone(), ctx.srcs(&x)[1].clone()],
+                    arg,
+                    Arg::None,
+                ))
             }),
         ),
         // remove noop RESHAPES
         (
-            UPat::ops1(Ops::Reshape).with_src_tup(vec![mop_base("x2"), UPat::var(None, None)]).named("x"),
+            UPat::ops1(Ops::Reshape)
+                .with_src_tup(vec![mop_base("x2"), UPat::var(None, None)])
+                .named("x"),
             r(|ctx, st, _| {
                 let (x, x2) = (sget(st, "x"), sget(st, "x2"));
                 if ctx.shape(&x2).ok().flatten().is_some() {
@@ -426,14 +522,26 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
         ),
         // merge PERMUTEs
         (
-            UPat::ops1(Ops::Permute).with_src_tup(vec![UPat::ops1(Ops::Permute).named("x2")]).named("x"),
+            UPat::ops1(Ops::Permute)
+                .with_src_tup(vec![UPat::ops1(Ops::Permute).named("x2")])
+                .named("x"),
             r(|ctx, st, _| {
                 let (x, x2) = (sget(st, "x"), sget(st, "x2"));
                 let perm = ctx.marg_ints(x).ok()?;
                 let arg2: Vec<i64> = ctx.marg_ints(x2.clone()).ok()?;
                 let new: Vec<Arg> = perm.iter().map(|&i| Arg::Int(arg2[i as usize])).collect();
                 let (_, d, _, _, _) = ctx.snapshot(&x2);
-                Some(ctx.replace(&x2, Ops::Permute, d, ctx.srcs(&x2).to_vec(), Arg::Seq { tuple: true, items: new }, Arg::None))
+                Some(ctx.replace(
+                    &x2,
+                    Ops::Permute,
+                    d,
+                    ctx.srcs(&x2).to_vec(),
+                    Arg::Seq {
+                        tuple: true,
+                        items: new,
+                    },
+                    Arg::None,
+                ))
             }),
         ),
         // remove noop PERMUTEs
@@ -452,7 +560,9 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
         // STACK on INDEX CONST
         (
             UPat::ops1(Ops::Stack)
-                .with_src_rep(UPat::ops1(Ops::Index).with_src_tup(vec![var("src"), UPat::ops1(Ops::Const)]))
+                .with_src_rep(
+                    UPat::ops1(Ops::Index).with_src_tup(vec![var("src"), UPat::ops1(Ops::Const)]),
+                )
                 .named("stk"),
             r(|ctx, st, _| {
                 let (src, stk) = (sget(st, "src"), sget(st, "stk"));
@@ -463,15 +573,14 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
                 }
                 let srcs = ctx.srcs(&stk).to_vec();
                 let want: Vec<i64> = (0..srcs.len() as i64).collect();
-                let got: Vec<i64> = srcs.iter().filter_map(|s| {
-                    let idx = &ctx.srcs(s)[1].clone();
-                    ctx.val(idx).as_int_exact().map(|v| v as i64)
-                }).collect();
-                if got == want {
-                    Some(src)
-                } else {
-                    None
-                }
+                let got: Vec<i64> = srcs
+                    .iter()
+                    .filter_map(|s| {
+                        let idx = &ctx.srcs(s)[1].clone();
+                        ctx.val(idx).as_int_exact().map(|v| v as i64)
+                    })
+                    .collect();
+                if got == want { Some(src) } else { None }
             }),
         ),
         // const INDEX into STACK is src
@@ -500,14 +609,19 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
         // INDEX on INDEX is INDEX (all scalar index args)
         (
             UPat::ops1(Ops::Index)
-                .with_src_tup(vec![UPat::ops1(Ops::Index).with_src_any_len(true).named("idx1")])
+                .with_src_tup(vec![
+                    UPat::ops1(Ops::Index).with_src_any_len(true).named("idx1"),
+                ])
                 .with_src_any_len(true)
                 .named("idx2"),
             r(|ctx, st, _| {
                 let (idx1, idx2) = (sget(st, "idx1"), sget(st, "idx2"));
                 let s1 = ctx.srcs(&idx1).to_vec();
                 let s2 = ctx.srcs(&idx2).to_vec();
-                let scalar_ok = s1[1..].iter().chain(s2[1..].iter()).all(|u| *ctx.shape_of(u).unwrap_or_default() == vec![]);
+                let scalar_ok = s1[1..]
+                    .iter()
+                    .chain(s2[1..].iter())
+                    .all(|u| *ctx.shape_of(u).unwrap_or_default() == vec![]);
                 if !scalar_ok {
                     return None;
                 }
@@ -520,11 +634,14 @@ fn pm_mop_cleanup_inner() -> PatternMatcher {
         // INDEX on shaped INDEX
         (
             UPat::ops1(Ops::Index)
-                .with_src_tup(vec![UPat::ops1(Ops::Index).with_src_tup(vec![var("buf"), var("idx1_arg")])])
+                .with_src_tup(vec![
+                    UPat::ops1(Ops::Index).with_src_tup(vec![var("buf"), var("idx1_arg")]),
+                ])
                 .with_src_any_len(true)
                 .named("idx2"),
             r(|ctx, st, _| {
-                let (buf, idx1_arg, idx2) = (sget(st, "buf"), sget(st, "idx1_arg"), sget(st, "idx2"));
+                let (buf, idx1_arg, idx2) =
+                    (sget(st, "buf"), sget(st, "idx1_arg"), sget(st, "idx2"));
                 let s2 = ctx.srcs(&idx2).to_vec();
                 let arg_shape = ctx.shape_of(&idx1_arg).ok()?;
                 if arg_shape.len() == s2.len() - 1 {
@@ -563,7 +680,9 @@ impl UPat {
 /// `commutative` (symbolic.py:214-219).
 fn pm_commutative_inner() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![(
-        UPat::op_var(group::COMMUTATIVE.to_vec()).with_dtype(Some(vec![WEAKINT])).named("x"),
+        UPat::op_var(group::COMMUTATIVE.to_vec())
+            .with_dtype(Some(vec![WEAKINT]))
+            .named("x"),
         r(|ctx, st, _| {
             let x = sget(st, "x");
             let srcs = ctx.srcs(&x).to_vec();
@@ -573,7 +692,14 @@ fn pm_commutative_inner() -> PatternMatcher {
             let (a, b) = (ctx.tuplize(&srcs[0]), ctx.tuplize(&srcs[1]));
             if b < a && !(a < b) {
                 let (_, d, _, _, _) = ctx.snapshot(&x);
-                Some(ctx.replace(&x, ctx.op_of(&x), d, vec![(srcs[1]).clone(), (srcs[0]).clone()], ctx.arg_of(&x).clone(), ctx.tag_of(&x).clone()))
+                Some(ctx.replace(
+                    &x,
+                    ctx.op_of(&x),
+                    d,
+                    vec![(srcs[1]).clone(), (srcs[0]).clone()],
+                    ctx.arg_of(&x).clone(),
+                    ctx.tag_of(&x).clone(),
+                ))
             } else {
                 None
             }
@@ -595,14 +721,19 @@ pub fn symbolic_simple() -> &'static PatternMatcher {
 
 /// `symbolic` = symbolic_simple + commutative + phase-2 (symbolic.py:228-309).
 pub fn symbolic() -> &'static PatternMatcher {
-    SYMBOLIC_PM.get_or_init(|| symbolic_simple().add(pm_commutative()).add(&build_symbolic_phase2()))
+    SYMBOLIC_PM.get_or_init(|| {
+        symbolic_simple()
+            .add(pm_commutative())
+            .add(&build_symbolic_phase2())
+    })
 }
 
 fn build_symbolic_simple() -> PatternMatcher {
     let mut rules: Vec<(UPat, RuleFn)> = Vec::new();
     // ** self folding **
     rules.push((
-        UPat::op_var(vec![Ops::Add, Ops::Xor, Ops::Or]).with_src_list(vec![var("x"), cvar_arg("c", CV::Int(0))]),
+        UPat::op_var(vec![Ops::Add, Ops::Xor, Ops::Or])
+            .with_src_list(vec![var("x"), cvar_arg("c", CV::Int(0))]),
         r(|_, st, _| Some(sget(st, "x"))),
     ));
     rules.push((
@@ -610,26 +741,39 @@ fn build_symbolic_simple() -> PatternMatcher {
             .with_src_tup(vec![var("x"), cvar_arg("c", CV::Int(0))]),
         r(|_, st, _| Some(sget(st, "x"))),
     ));
-    rules.push((var("x").mul(UPatOrConst::Val(CV::Int(1))), r(|_, st, _| Some(sget(st, "x")))));
+    rules.push((
+        var("x").mul(UPatOrConst::Val(CV::Int(1))),
+        r(|_, st, _| Some(sget(st, "x"))),
+    ));
     rules.push((var("x").floordiv(UPatOrConst::Pat(var("x"))), {
         r(|ctx, st, _| Some(ctx.const_like(sget(st, "x"), CV::Int(1))))
     }));
-    rules.push((var("x").floordiv(UPatOrConst::Val(CV::Int(1))), r(|_, st, _| Some(sget(st, "x")))));
+    rules.push((
+        var("x").floordiv(UPatOrConst::Val(CV::Int(1))),
+        r(|_, st, _| Some(sget(st, "x"))),
+    ));
     rules.push((
         var("x").floordiv(UPatOrConst::Val(CV::Int(-1))),
         r(|ctx, st, _| Some(ctx.neg(sget(st, "x")))),
     ));
     rules.push((
-        var("x").xor(UPatOrConst::Pat(var("y"))).xor(UPatOrConst::Pat(var("y"))),
+        var("x")
+            .xor(UPatOrConst::Pat(var("y")))
+            .xor(UPatOrConst::Pat(var("y"))),
         r(|_, st, _| Some(sget(st, "x"))),
     ));
     rules.push((
-        UPat::var(None, None).mod_(UPatOrConst::Pat(var("y"))).named("base").mod_(UPatOrConst::Pat(var("y"))),
+        UPat::var(None, None)
+            .mod_(UPatOrConst::Pat(var("y")))
+            .named("base")
+            .mod_(UPatOrConst::Pat(var("y"))),
         r(|_, st, _| Some(sget(st, "base"))),
     ));
     // variations of (x%c)+(x//c)*c = x — fold_add_divmod_recombine (deferred to phase 2 below)
     rules.push((
-        UPat::ops1(Ops::Add).with_dtype(Some(vec![WEAKINT])).named("x"),
+        UPat::ops1(Ops::Add)
+            .with_dtype(Some(vec![WEAKINT]))
+            .named("x"),
         r(|ctx, st, _| fold_add_divmod_recombine(ctx, sget(st, "x"))),
     ));
     rules.push((
@@ -663,22 +807,46 @@ fn build_symbolic_simple() -> PatternMatcher {
         r(|_, st, _| Some(sget(st, "x"))),
     ));
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL]).logical_not().logical_not(),
+        var_dt("x", vec![crate::dtype::BOOL])
+            .logical_not()
+            .logical_not(),
         r(|_, st, _| Some(sget(st, "x"))),
     ));
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL])
-            .where_(UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(true))))), UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(false)))))),
+        var_dt("x", vec![crate::dtype::BOOL]).where_(
+            UPatOrConst::Pat(UPat::cvar(
+                None,
+                Some(vec![crate::dtype::BOOL]),
+                Some(Arg::Const(CV::Bool(true))),
+            )),
+            UPatOrConst::Pat(UPat::cvar(
+                None,
+                Some(vec![crate::dtype::BOOL]),
+                Some(Arg::Const(CV::Bool(false))),
+            )),
+        ),
         r(|_, st, _| Some(sget(st, "x"))),
     ));
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL])
-            .where_(UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(false))))), UPatOrConst::Pat(UPat::cvar(None, Some(vec![crate::dtype::BOOL]), Some(Arg::Const(CV::Bool(true)))))),
+        var_dt("x", vec![crate::dtype::BOOL]).where_(
+            UPatOrConst::Pat(UPat::cvar(
+                None,
+                Some(vec![crate::dtype::BOOL]),
+                Some(Arg::Const(CV::Bool(false))),
+            )),
+            UPatOrConst::Pat(UPat::cvar(
+                None,
+                Some(vec![crate::dtype::BOOL]),
+                Some(Arg::Const(CV::Bool(true))),
+            )),
+        ),
         r(|ctx, st, _| Some(ctx.logical_not(sget(st, "x")))),
     ));
     // CAST(bool -> int) != const
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL]).cast_dts(ints_plus_weak()).ne(UPatOrConst::Pat(cvar("c"))),
+        var_dt("x", vec![crate::dtype::BOOL])
+            .cast_dts(ints_plus_weak())
+            .ne(UPatOrConst::Pat(cvar("c"))),
         r(|ctx, st, _| {
             let (x, c) = (sget(st, "x"), sget(st, "c"));
             let cv = ctx.val(&c).as_int_exact().unwrap_or(0);
@@ -697,7 +865,9 @@ fn build_symbolic_simple() -> PatternMatcher {
     ));
     // ** zero folding **
     rules.push((var("x").lt(UPatOrConst::Pat(var("x"))), {
-        r(|ctx, st, _| Some(ctx.const_like_dt(sget(st, "x"), CV::Bool(false), Some(crate::dtype::BOOL))))
+        r(|ctx, st, _| {
+            Some(ctx.const_like_dt(sget(st, "x"), CV::Bool(false), Some(crate::dtype::BOOL)))
+        })
     }));
     rules.push((var("x").mod_(UPatOrConst::Pat(var("x"))), {
         r(|ctx, st, _| Some(ctx.const_like(sget(st, "x"), CV::Int(0))))
@@ -710,7 +880,9 @@ fn build_symbolic_simple() -> PatternMatcher {
     }));
     // (x&mask)>>k -> x>>k when mask only clears bits below k
     rules.push((
-        var("x").and_(UPatOrConst::Pat(cvar("mask"))).shr(UPatOrConst::Pat(cvar("k"))),
+        var("x")
+            .and_(UPatOrConst::Pat(cvar("mask")))
+            .shr(UPatOrConst::Pat(cvar("k"))),
         r(|ctx, st, _| {
             let (x, mask, k) = (sget(st, "x"), sget(st, "mask"), sget(st, "k"));
             let m = ctx.val(&mask).as_int_exact()?;
@@ -725,7 +897,9 @@ fn build_symbolic_simple() -> PatternMatcher {
     ));
     // (x&mask)//c -> x//c when c is a power of 2 covering mask
     rules.push((
-        var("x").and_(UPatOrConst::Pat(cvar("mask"))).floordiv(UPatOrConst::Pat(cvar("c"))),
+        var("x")
+            .and_(UPatOrConst::Pat(cvar("mask")))
+            .floordiv(UPatOrConst::Pat(cvar("c"))),
         r(|ctx, st, _| {
             let (x, mask, c) = (sget(st, "x"), sget(st, "mask"), sget(st, "c"));
             let m = ctx.val(&mask).as_int_exact()?;
@@ -740,7 +914,9 @@ fn build_symbolic_simple() -> PatternMatcher {
     ));
     rules.push((
         var_dt("x", ints_plus_weak()).ne(UPatOrConst::Pat(var("x"))),
-        r(|ctx, st, _| Some(ctx.const_like_dt(sget(st, "x"), CV::Bool(false), Some(crate::dtype::BOOL)))),
+        r(|ctx, st, _| {
+            Some(ctx.const_like_dt(sget(st, "x"), CV::Bool(false), Some(crate::dtype::BOOL)))
+        }),
     ));
     // ** constant folding **
     rules.push((
@@ -755,7 +931,9 @@ fn build_symbolic_simple() -> PatternMatcher {
         }),
     ));
     rules.push((
-        UPat::op_var(group::UNARY.to_vec()).with_src_tup(vec![const_folding_pat()]).named("a"),
+        UPat::op_var(group::UNARY.to_vec())
+            .with_src_tup(vec![const_folding_pat()])
+            .named("a"),
         r(|ctx, st, _| fold_const_alu(ctx, sget(st, "a"))),
     ));
     rules.push((
@@ -766,21 +944,28 @@ fn build_symbolic_simple() -> PatternMatcher {
     ));
     rules.push((
         UPat::op_var(group::TERNARY.to_vec())
-            .with_src_tup(vec![const_folding_pat(), const_folding_pat(), const_folding_pat()])
+            .with_src_tup(vec![
+                const_folding_pat(),
+                const_folding_pat(),
+                const_folding_pat(),
+            ])
             .named("a"),
         r(|ctx, st, _| fold_const_alu(ctx, sget(st, "a"))),
     ));
     // bool MUL is AND, ADD/MAX is OR
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL]).mul(UPatOrConst::Pat(var_dt("y", vec![crate::dtype::BOOL]))),
+        var_dt("x", vec![crate::dtype::BOOL])
+            .mul(UPatOrConst::Pat(var_dt("y", vec![crate::dtype::BOOL]))),
         r(|ctx, st, _| Some(ctx.and_(sget(st, "x"), sget(st, "y")))),
     ));
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL]).add(UPatOrConst::Pat(var_dt("y", vec![crate::dtype::BOOL]))),
+        var_dt("x", vec![crate::dtype::BOOL])
+            .add(UPatOrConst::Pat(var_dt("y", vec![crate::dtype::BOOL]))),
         r(|ctx, st, _| Some(ctx.or_(sget(st, "x"), sget(st, "y")))),
     ));
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL]).maximum(UPatOrConst::Pat(var_dt("y", vec![crate::dtype::BOOL]))),
+        var_dt("x", vec![crate::dtype::BOOL])
+            .maximum(UPatOrConst::Pat(var_dt("y", vec![crate::dtype::BOOL]))),
         r(|ctx, st, _| Some(ctx.or_(sget(st, "x"), sget(st, "y")))),
     ));
     // *** div rules ***
@@ -789,14 +974,18 @@ fn build_symbolic_simple() -> PatternMatcher {
         r(|ctx, st, _| Some(ctx.const_like(sget(st, "x"), CV::Float(f64::NAN)))),
     ));
     rules.push((
-        var("x").mul(UPatOrConst::Val(CV::Int(0))).truediv(UPatOrConst::Val(CV::Int(0))),
+        var("x")
+            .mul(UPatOrConst::Val(CV::Int(0)))
+            .truediv(UPatOrConst::Val(CV::Int(0))),
         r(|ctx, st, _| Some(ctx.const_like(sget(st, "x"), CV::Float(f64::NAN)))),
     ));
     rules.push((var("x").truediv(UPatOrConst::Pat(var("x"))), {
         r(|ctx, st, _| Some(ctx.const_like(sget(st, "x"), CV::Int(1))))
     }));
     rules.push((
-        var("x").mul(UPatOrConst::Pat(var("x2"))).truediv(UPatOrConst::Pat(var("x2"))),
+        var("x")
+            .mul(UPatOrConst::Pat(var("x2")))
+            .truediv(UPatOrConst::Pat(var("x2"))),
         r(|_, st, _| Some(sget(st, "x"))),
     ));
     // x*0 -> 0 (nan-aware)
@@ -806,9 +995,10 @@ fn build_symbolic_simple() -> PatternMatcher {
             let x = sget(st, "x");
             if ctx.op_of(&x) == Ops::Const
                 && let CV::Float(f) = ctx.val(&x)
-                    && (f.is_nan() || f.is_infinite()) {
-                        return Some(ctx.const_like(x, CV::Float(f64::NAN)));
-                    }
+                && (f.is_nan() || f.is_infinite())
+            {
+                return Some(ctx.const_like(x, CV::Float(f64::NAN)));
+            }
             Some(ctx.const_like(x, CV::Int(0)))
         }),
     ));
@@ -826,12 +1016,18 @@ fn build_symbolic_simple() -> PatternMatcher {
         }),
     ));
     rules.push((
-        UPat::ops1(Ops::Bitcast).named("root").with_src_tup(vec![cvar("c")]),
+        UPat::ops1(Ops::Bitcast)
+            .named("root")
+            .with_src_tup(vec![cvar("c")]),
         r(|ctx, st, _| fold_bitcast(ctx, sget(st, "root"), sget(st, "c"))),
     ));
     // b.cast(a).cast(b) -> b if a preserves all values in b
     rules.push((
-        var("x").cast(Option::<DTypeId>::None).named("a").cast(Option::<DTypeId>::None).named("b"),
+        var("x")
+            .cast(Option::<DTypeId>::None)
+            .named("a")
+            .cast(Option::<DTypeId>::None)
+            .named("b"),
         r(|ctx, st, _| {
             let (x, a, b) = (sget(st, "x"), sget(st, "a"), sget(st, "b"));
             if ctx.dt_of(&x) == ctx.dt_of(&b) && can_lossless_cast(ctx.dt_of(&b), ctx.dt_of(&a)) {
@@ -898,7 +1094,10 @@ fn build_symbolic_simple() -> PatternMatcher {
         var_dt("x", vec![crate::dtype::UINT32])
             .cast(Some(crate::dtype::UINT64))
             .shl(UPatOrConst::Val(CV::Int(32)))
-            .or_(UPatOrConst::Pat(UPat::var(None, Some(vec![crate::dtype::UINT64]))))
+            .or_(UPatOrConst::Pat(UPat::var(
+                None,
+                Some(vec![crate::dtype::UINT64]),
+            )))
             .shr(UPatOrConst::Val(CV::Int(32))),
         r(|ctx, st, _| {
             let x = sget(st, "x");
@@ -911,11 +1110,26 @@ fn build_symbolic_simple() -> PatternMatcher {
         r(|_, st, _| Some(sget(st, "val"))),
     ));
     rules.push((
-        cvar("gate").where_(UPatOrConst::Pat(var("c0")), UPatOrConst::Pat(var("c1"))).named("w"),
-        r(|ctx, st, _| fold_const_where(ctx, sget(st, "gate"), sget(st, "c0"), sget(st, "c1"), sget(st, "w"))),
+        cvar("gate")
+            .where_(UPatOrConst::Pat(var("c0")), UPatOrConst::Pat(var("c1")))
+            .named("w"),
+        r(|ctx, st, _| {
+            fold_const_where(
+                ctx,
+                sget(st, "gate"),
+                sget(st, "c0"),
+                sget(st, "c1"),
+                sget(st, "w"),
+            )
+        }),
     ));
     rules.push((
-        var("a").where_(UPatOrConst::Pat(var("b").where_(UPatOrConst::Pat(var("c")), UPatOrConst::Pat(var("d")))), UPatOrConst::Pat(var("d"))),
+        var("a").where_(
+            UPatOrConst::Pat(
+                var("b").where_(UPatOrConst::Pat(var("c")), UPatOrConst::Pat(var("d"))),
+            ),
+            UPatOrConst::Pat(var("d")),
+        ),
         r(|ctx, st, _| {
             let (a, b, c, d) = (sget(st, "a"), sget(st, "b"), sget(st, "c"), sget(st, "d"));
             let g = ctx.and_(a, b);
@@ -923,7 +1137,12 @@ fn build_symbolic_simple() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var("a").where_(UPatOrConst::Pat(var("c")), UPatOrConst::Pat(var("b").where_(UPatOrConst::Pat(var("c")), UPatOrConst::Pat(var("d"))))),
+        var("a").where_(
+            UPatOrConst::Pat(var("c")),
+            UPatOrConst::Pat(
+                var("b").where_(UPatOrConst::Pat(var("c")), UPatOrConst::Pat(var("d"))),
+            ),
+        ),
         r(|ctx, st, _| {
             let (a, b, c, d) = (sget(st, "a"), sget(st, "b"), sget(st, "c"), sget(st, "d"));
             let g = ctx.or_(a, b);
@@ -935,8 +1154,6 @@ fn build_symbolic_simple() -> PatternMatcher {
     pm = pm.add(pm_mop_cleanup());
     pm
 }
-
-
 
 // ---------- phase 2 (symbolic.py:193-309) ----------
 
@@ -955,7 +1172,11 @@ fn lt_folding(ctx: &mut UOpCtx, x: UopId, c: i128) -> Option<UopId> {
     if np.is_empty() {
         return None;
     }
-    let factors: Vec<i128> = np.iter().map(|u| ctx.const_factor(u.clone())).chain(std::iter::once(c)).collect();
+    let factors: Vec<i128> = np
+        .iter()
+        .map(|u| ctx.const_factor(u.clone()))
+        .chain(std::iter::once(c))
+        .collect();
     let d = gcd_all_i128(&factors);
     if d > 1 {
         // 0 <= sum(u.vmin for u in p) and sum(u.vmax for u in p) < d
@@ -969,7 +1190,11 @@ fn lt_folding(ctx: &mut UOpCtx, x: UopId, c: i128) -> Option<UopId> {
         if 0 <= smin && smax < d {
             let first = np.first().unwrap().clone();
             let rest = &np[1..];
-            let mut acc = if rest.is_empty() { first } else { ctx.usum(first, rest) };
+            let mut acc = if rest.is_empty() {
+                first
+            } else {
+                ctx.usum(first, rest)
+            };
             acc = ctx.divides(acc, d)?;
             let bound = ctx.const_py(CV::Int(c / d), None);
             return Some(ctx.lt(acc, bound));
@@ -1004,7 +1229,11 @@ fn canonicalize_simplex(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
     if changed {
         let first = ret.first().unwrap().clone();
         let rest = &ret[1..];
-        Some(if rest.is_empty() { first } else { ctx.usum(first, rest) })
+        Some(if rest.is_empty() {
+            first
+        } else {
+            ctx.usum(first, rest)
+        })
     } else {
         None
     }
@@ -1088,20 +1317,29 @@ fn fold_add_divmod_recombine(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
                 // (b*mul).usum(*rest)
                 let mk = ctx.const_like(v.clone(), mul);
                 let bm = ctx.mul(b, mk);
-                return Some(if rest.is_empty() { bm } else { ctx.usum(bm, &rest) });
+                return Some(if rest.is_empty() {
+                    bm
+                } else {
+                    ctx.usum(bm, &rest)
+                });
             }
             let (qop, _, qsrcs, _, _) = ctx.snapshot(&q);
             if qop == Ops::Floormod && ctx.op_of(&qsrcs[1]) == Ops::Const {
                 let d = ctx.val(&qsrcs[1]).as_int_exact()?;
                 if d > 0
-                    && let Some(b) = quotient_base(ctx, (qsrcs[0]).clone(), base.clone(), div) {
-                        // python: `(b % (div*d))*mul`
-                        let dv = ctx.const_py(CV::Int(d * div), None);
-                        let bm = ctx.mod_(b, dv);
-                        let mk2 = ctx.const_like(v.clone(), mul);
-                        let bm = ctx.mul(bm, mk2);
-                        return Some(if rest.is_empty() { bm } else { ctx.usum(bm, &rest) });
-                    }
+                    && let Some(b) = quotient_base(ctx, (qsrcs[0]).clone(), base.clone(), div)
+                {
+                    // python: `(b % (div*d))*mul`
+                    let dv = ctx.const_py(CV::Int(d * div), None);
+                    let bm = ctx.mod_(b, dv);
+                    let mk2 = ctx.const_like(v.clone(), mul);
+                    let bm = ctx.mul(bm, mk2);
+                    return Some(if rest.is_empty() {
+                        bm
+                    } else {
+                        ctx.usum(bm, &rest)
+                    });
+                }
             }
         }
     }
@@ -1151,21 +1389,28 @@ fn build_symbolic_phase2() -> PatternMatcher {
     let mut rules: Vec<(UPat, RuleFn)> = Vec::new();
     // ** boolean algebra **
     rules.push((
-        var_dt("x", vec![crate::dtype::BOOL])
-            .or_(UPatOrConst::Pat(var_dt("x", vec![crate::dtype::BOOL]).logical_not())),
+        var_dt("x", vec![crate::dtype::BOOL]).or_(UPatOrConst::Pat(
+            var_dt("x", vec![crate::dtype::BOOL]).logical_not(),
+        )),
         r(|ctx, st, _| Some(ctx.const_like(sget(st, "x"), CV::Bool(true)))),
     ));
     // ** combine terms **
     rules.push((
-        var("x").mul(UPatOrConst::Pat(cvar("c0"))).add(var("x").mul(UPatOrConst::Pat(cvar("c1")))),
+        var("x")
+            .mul(UPatOrConst::Pat(cvar("c0")))
+            .add(var("x").mul(UPatOrConst::Pat(cvar("c1")))),
         r(|ctx, st, _| {
             let (x, c0, c1) = (sget(st, "x"), sget(st, "c0"), sget(st, "c1"));
             let s = const_add(ctx, ctx.val(&c0), ctx.val(&c1));
-            { let k = ctx.const_like(x.clone(), s); Some(ctx.mul(x, k)) }
+            {
+                let k = ctx.const_like(x.clone(), s);
+                Some(ctx.mul(x, k))
+            }
         }),
     ));
     rules.push((
-        var("y").add(UPatOrConst::Pat(var("x").mul(UPatOrConst::Pat(cvar("c0")))))
+        var("y")
+            .add(UPatOrConst::Pat(var("x").mul(UPatOrConst::Pat(cvar("c0")))))
             .add(UPatOrConst::Pat(var("x").mul(UPatOrConst::Pat(cvar("c1"))))),
         r(|ctx, st, _| {
             let (x, y, c0, c1) = (sget(st, "x"), sget(st, "y"), sget(st, "c0"), sget(st, "c1"));
@@ -1180,11 +1425,16 @@ fn build_symbolic_phase2() -> PatternMatcher {
         r(|ctx, st, _| {
             let (x, c) = (sget(st, "x"), sget(st, "c"));
             let s = const_add(ctx, ctx.val(&c), CV::Int(1));
-            { let k = ctx.const_like(x.clone(), s); Some(ctx.mul(x, k)) }
+            {
+                let k = ctx.const_like(x.clone(), s);
+                Some(ctx.mul(x, k))
+            }
         }),
     ));
     rules.push((
-        var("y").add(UPatOrConst::Pat(var("x"))).add(UPatOrConst::Pat(var("x").mul(UPatOrConst::Pat(cvar("c"))))),
+        var("y")
+            .add(UPatOrConst::Pat(var("x")))
+            .add(UPatOrConst::Pat(var("x").mul(UPatOrConst::Pat(cvar("c"))))),
         r(|ctx, st, _| {
             let (x, y, c) = (sget(st, "x"), sget(st, "y"), sget(st, "c"));
             let s = const_add(ctx, ctx.val(&c), CV::Int(1));
@@ -1194,7 +1444,9 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var("y").add(UPatOrConst::Pat(var("x").mul(UPatOrConst::Pat(cvar("c"))))).add(UPatOrConst::Pat(var("x"))),
+        var("y")
+            .add(UPatOrConst::Pat(var("x").mul(UPatOrConst::Pat(cvar("c")))))
+            .add(UPatOrConst::Pat(var("x"))),
         r(|ctx, st, _| {
             let (x, y, c) = (sget(st, "x"), sget(st, "y"), sget(st, "c"));
             let s = const_add(ctx, ctx.val(&c), CV::Int(1));
@@ -1233,7 +1485,8 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        cvar_arg("neg1", CV::Int(-1)).mul(UPatOrConst::Pat(var("x").add(UPatOrConst::Pat(cvar("c"))))),
+        cvar_arg("neg1", CV::Int(-1))
+            .mul(UPatOrConst::Pat(var("x").add(UPatOrConst::Pat(cvar("c"))))),
         r(|ctx, st, _| {
             let (x, c) = (sget(st, "x"), sget(st, "c"));
             let nx = ctx.neg(x.clone());
@@ -1243,7 +1496,9 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        cvar("y").mul(UPatOrConst::Pat(var_dt("x", weak_int()).add(UPatOrConst::Pat(cvar("c"))))),
+        cvar("y").mul(UPatOrConst::Pat(
+            var_dt("x", weak_int()).add(UPatOrConst::Pat(cvar("c"))),
+        )),
         r(|ctx, st, _| {
             let (x, y, c) = (sget(st, "x"), sget(st, "y"), sget(st, "c"));
             let yx = ctx.mul(y.clone(), x.clone());
@@ -1268,7 +1523,8 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var_dt("cond", vec![crate::dtype::BOOL]).where_(UPatOrConst::Pat(var("t")), UPatOrConst::Pat(var("f"))),
+        var_dt("cond", vec![crate::dtype::BOOL])
+            .where_(UPatOrConst::Pat(var("t")), UPatOrConst::Pat(var("f"))),
         r(|ctx, st, _| fold_where_closure(ctx, sget(st, "cond"), sget(st, "t"), sget(st, "f"))),
     ));
     // alu of two where with same conds
@@ -1280,7 +1536,14 @@ fn build_symbolic_phase2() -> PatternMatcher {
                 var("c").where_(UPatOrConst::Pat(var("tt")), UPatOrConst::Pat(var("ff"))),
             ]),
         r(|ctx, st, _| {
-            let (alu, c, t, tt, f, ff) = (sget(st, "alu"), sget(st, "c"), sget(st, "t"), sget(st, "tt"), sget(st, "f"), sget(st, "ff"));
+            let (alu, c, t, tt, f, ff) = (
+                sget(st, "alu"),
+                sget(st, "c"),
+                sget(st, "t"),
+                sget(st, "tt"),
+                sget(st, "f"),
+                sget(st, "ff"),
+            );
             let tt_const = ctx.op_of(&tt) == Ops::Const;
             let t_const = ctx.op_of(&t) == Ops::Const;
             let f_const = ctx.op_of(&f) == Ops::Const;
@@ -1294,10 +1557,24 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var("y").add(UPatOrConst::Pat(var("c").where_(UPatOrConst::Pat(var("t")), UPatOrConst::Pat(var("f")))))
-            .add(UPatOrConst::Pat(var("c").where_(UPatOrConst::Pat(var("tt")), UPatOrConst::Pat(var("ff"))))),
+        var("y")
+            .add(UPatOrConst::Pat(var("c").where_(
+                UPatOrConst::Pat(var("t")),
+                UPatOrConst::Pat(var("f")),
+            )))
+            .add(UPatOrConst::Pat(var("c").where_(
+                UPatOrConst::Pat(var("tt")),
+                UPatOrConst::Pat(var("ff")),
+            ))),
         r(|ctx, st, _| {
-            let (y, c, t, tt, f, ff) = (sget(st, "y"), sget(st, "c"), sget(st, "t"), sget(st, "tt"), sget(st, "f"), sget(st, "ff"));
+            let (y, c, t, tt, f, ff) = (
+                sget(st, "y"),
+                sget(st, "c"),
+                sget(st, "t"),
+                sget(st, "tt"),
+                sget(st, "f"),
+                sget(st, "ff"),
+            );
             let tt_const = ctx.op_of(&tt) == Ops::Const;
             let t_const = ctx.op_of(&t) == Ops::Const;
             let f_const = ctx.op_of(&f) == Ops::Const;
@@ -1312,8 +1589,12 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var("c").where_(UPatOrConst::Pat(var("t")), UPatOrConst::Val(CV::Int(0)))
-            .add(UPatOrConst::Pat(var("c").where_(UPatOrConst::Val(CV::Int(0)), UPatOrConst::Pat(var("f"))))),
+        var("c")
+            .where_(UPatOrConst::Pat(var("t")), UPatOrConst::Val(CV::Int(0)))
+            .add(UPatOrConst::Pat(var("c").where_(
+                UPatOrConst::Val(CV::Int(0)),
+                UPatOrConst::Pat(var("f")),
+            ))),
         r(|ctx, st, _| {
             let (c, t, f) = (sget(st, "c"), sget(st, "t"), sget(st, "f"));
             Some(ctx.where_(c, t, f))
@@ -1321,7 +1602,16 @@ fn build_symbolic_phase2() -> PatternMatcher {
     ));
     // ALU/variable min==max -> CONST
     rules.push((
-        UPat::op_var(vec![Ops::Cmplt, Ops::Cmpne, Ops::Floordiv, Ops::Floormod, Ops::Param, Ops::After, Ops::Special]).named("x"),
+        UPat::op_var(vec![
+            Ops::Cmplt,
+            Ops::Cmpne,
+            Ops::Floordiv,
+            Ops::Floormod,
+            Ops::Param,
+            Ops::After,
+            Ops::Special,
+        ])
+        .named("x"),
         r(|ctx, st, _| {
             let x = sget(st, "x");
             let (vmin, vmax) = ctx.min_max(&x).ok()?;
@@ -1333,7 +1623,9 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        UPat::ops1(Ops::Range).with_src_tup(vec![UPat::ops1(Ops::Const)]).named("x"),
+        UPat::ops1(Ops::Range)
+            .with_src_tup(vec![UPat::ops1(Ops::Const)])
+            .named("x"),
         r(|ctx, st, _| {
             let x = sget(st, "x");
             let (vmin, vmax) = ctx.min_max(&x).ok()?;
@@ -1346,7 +1638,9 @@ fn build_symbolic_phase2() -> PatternMatcher {
     ));
     // max folding
     rules.push((
-        cvar("a").lt(UPatOrConst::Pat(var("b"))).where_(UPatOrConst::Pat(var("b")), UPatOrConst::Pat(cvar("c"))),
+        cvar("a")
+            .lt(UPatOrConst::Pat(var("b")))
+            .where_(UPatOrConst::Pat(var("b")), UPatOrConst::Pat(cvar("c"))),
         r(|ctx, st, _| {
             let (a, b, c) = (sget(st, "a"), sget(st, "b"), sget(st, "c"));
             if ctx.val(&a) == ctx.val(&c) {
@@ -1357,7 +1651,9 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var("a").lt(UPatOrConst::Pat(cvar("b"))).where_(UPatOrConst::Pat(cvar("c")), UPatOrConst::Pat(var("a"))),
+        var("a")
+            .lt(UPatOrConst::Pat(cvar("b")))
+            .where_(UPatOrConst::Pat(cvar("c")), UPatOrConst::Pat(var("a"))),
         r(|ctx, st, _| {
             let (a, b, c) = (sget(st, "a"), sget(st, "b"), sget(st, "c"));
             if ctx.val(&b) == ctx.val(&c) {
@@ -1385,7 +1681,10 @@ fn build_symbolic_phase2() -> PatternMatcher {
     // ** two stage ALU folding ** (Associative ops)
     for op in group::ASSOCIATIVE {
         rules.push((
-            var("x").alu(*op, vec![cvar("c1")]).alu(*op, vec![cvar("c2")]).named("f"),
+            var("x")
+                .alu(*op, vec![cvar("c1")])
+                .alu(*op, vec![cvar("c2")])
+                .named("f"),
             r(|ctx, st, _| {
                 let (f, x, c1, c2) = (sget(st, "f"), sget(st, "x"), sget(st, "c1"), sget(st, "c2"));
                 let inner = ctx.alu2(ctx.op_of(&f), c1, c2);
@@ -1453,23 +1752,33 @@ fn build_symbolic_phase2() -> PatternMatcher {
     ));
     // ** move add/mul consts to end **
     rules.push((
-        var("x").add(UPatOrConst::Pat(cvar("c1"))).add(UPatOrConst::Pat(var("y"))),
+        var("x")
+            .add(UPatOrConst::Pat(cvar("c1")))
+            .add(UPatOrConst::Pat(var("y"))),
         r(|ctx, st, _| {
             let (x, c1, y) = (sget(st, "x"), sget(st, "c1"), sget(st, "y"));
             if ctx.op_of(&y) != Ops::Const {
                 let xy = ctx.add(x.clone(), y);
-                { let ck = ctx.const_like(x, ctx.val(&c1)); return Some(ctx.add(xy, ck)); }
+                {
+                    let ck = ctx.const_like(x, ctx.val(&c1));
+                    return Some(ctx.add(xy, ck));
+                }
             }
             None
         }),
     ));
     rules.push((
-        var("x").mul(UPatOrConst::Pat(cvar("c1"))).mul(UPatOrConst::Pat(var("y"))),
+        var("x")
+            .mul(UPatOrConst::Pat(cvar("c1")))
+            .mul(UPatOrConst::Pat(var("y"))),
         r(|ctx, st, _| {
             let (x, c1, y) = (sget(st, "x"), sget(st, "c1"), sget(st, "y"));
             if ctx.op_of(&y) != Ops::Const {
                 let xy = ctx.mul(x.clone(), y);
-                { let ck = ctx.const_like(x, ctx.val(&c1)); return Some(ctx.mul(xy, ck)); }
+                {
+                    let ck = ctx.const_like(x, ctx.val(&c1));
+                    return Some(ctx.mul(xy, ck));
+                }
             }
             None
         }),
@@ -1480,17 +1789,15 @@ fn build_symbolic_phase2() -> PatternMatcher {
         r(|ctx, st, _| {
             let (x, c) = (sget(st, "x"), sget(st, "c"));
             let cv = ctx.val(&c).as_int_exact()?;
-            if cv > 0 {
-                lt_folding(ctx, x, cv)
-            } else {
-                None
-            }
+            if cv > 0 { lt_folding(ctx, x, cv) } else { None }
         }),
     ));
     rules.push((
         var_dt("x", weak_int())
             .mul(UPatOrConst::Val(CV::Int(-1)))
-            .lt(UPatOrConst::Pat(var("y").mul(UPatOrConst::Val(CV::Int(-1))))),
+            .lt(UPatOrConst::Pat(
+                var("y").mul(UPatOrConst::Val(CV::Int(-1))),
+            )),
         r(|ctx, st, _| {
             let (x, y) = (sget(st, "x"), sget(st, "y"));
             Some(ctx.lt(y, x))
@@ -1498,29 +1805,44 @@ fn build_symbolic_phase2() -> PatternMatcher {
     ));
     // canonicalize a simplex
     rules.push((
-        var_dt("x", weak_int()).lt(UPatOrConst::Val(CV::Int(1))).ne(UPatOrConst::Val(CV::Bool(true))),
+        var_dt("x", weak_int())
+            .lt(UPatOrConst::Val(CV::Int(1)))
+            .ne(UPatOrConst::Val(CV::Bool(true))),
         r(|ctx, st, _| {
             let x = sget(st, "x");
             if let Some(newx) = canonicalize_simplex(ctx, x) {
                 let one = ctx.const_like(newx.clone(), CV::Int(1));
                 let lt = ctx.lt(newx, one);
-                { let tr = ctx.const_like(lt.clone(), CV::Bool(true)); return Some(ctx.ne(lt, tr)); }
+                {
+                    let tr = ctx.const_like(lt.clone(), CV::Bool(true));
+                    return Some(ctx.ne(lt, tr));
+                }
             }
             None
         }),
     ));
     // a range mod its own upper bound
     rules.push((
-        UPat::ops1(Ops::Range).with_src_tup(vec![var("end")]).named("r").mod_(UPatOrConst::Pat(var("end"))),
+        UPat::ops1(Ops::Range)
+            .with_src_tup(vec![var("end")])
+            .named("r")
+            .mod_(UPatOrConst::Pat(var("end"))),
         r(|_, st, _| Some(sget(st, "r"))),
     ));
     rules.push((
-        UPat::ops1(Ops::Range).with_src_tup(vec![var("end")]).named("r").floordiv(UPatOrConst::Pat(var("end"))),
+        UPat::ops1(Ops::Range)
+            .with_src_tup(vec![var("end")])
+            .named("r")
+            .floordiv(UPatOrConst::Pat(var("end"))),
         r(|ctx, st, _| Some(ctx.const_like(sget(st, "r"), CV::Int(0)))),
     ));
     // cast/long folding
     rules.push((
-        var("x").cast(Option::<DTypeId>::None).named("a").cast(Option::<DTypeId>::None).named("b"),
+        var("x")
+            .cast(Option::<DTypeId>::None)
+            .named("a")
+            .cast(Option::<DTypeId>::None)
+            .named("b"),
         r(|ctx, st, _| {
             let (x, b) = (sget(st, "x"), sget(st, "b"));
             if can_lossless_cast(ctx.dt_of(&x), ctx.dt_of(&sget(st, "a"))) {
@@ -1531,12 +1853,18 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var_dt("x", ints_weak()).cast_dts(ints_weak()).named("a").cast(Option::<DTypeId>::None).named("b"),
+        var_dt("x", ints_weak())
+            .cast_dts(ints_weak())
+            .named("a")
+            .cast(Option::<DTypeId>::None)
+            .named("b"),
         r(|ctx, st, _| {
             let (x, a, b) = (sget(st, "x"), sget(st, "a"), sget(st, "b"));
             let (xmin, xmax) = ctx.min_max(&x).ok()?;
             let (amin, amax) = ctx.dtype_bounds(ctx.dt_of(&a)).ok()?;
-            if sval_cmp(xmin, amin) != std::cmp::Ordering::Less && sval_cmp(xmax, amax) != std::cmp::Ordering::Greater {
+            if sval_cmp(xmin, amin) != std::cmp::Ordering::Less
+                && sval_cmp(xmax, amax) != std::cmp::Ordering::Greater
+            {
                 return Some(ctx.cast(x, ctx.dt_of(&b)));
             }
             None
@@ -1556,7 +1884,10 @@ fn build_symbolic_phase2() -> PatternMatcher {
             if xd != crate::dtype::INT64 && yd != crate::dtype::INT64 {
                 return None;
             }
-            if overflows(ctx, x.clone(), crate::dtype::INT32) || overflows(ctx, y.clone(), crate::dtype::INT32) || overflows(ctx, u.clone(), crate::dtype::INT32) {
+            if overflows(ctx, x.clone(), crate::dtype::INT32)
+                || overflows(ctx, y.clone(), crate::dtype::INT32)
+                || overflows(ctx, u.clone(), crate::dtype::INT32)
+            {
                 return None;
             }
             let xi = if ctx.op_of(&x) == Ops::Const {
@@ -1574,7 +1905,10 @@ fn build_symbolic_phase2() -> PatternMatcher {
         }),
     ));
     rules.push((
-        var_dt("x", weak_int()).add(UPatOrConst::Pat(cvar("c"))).cast_dts(dtype::SINTS.to_vec()).named("cast"),
+        var_dt("x", weak_int())
+            .add(UPatOrConst::Pat(cvar("c")))
+            .cast_dts(dtype::SINTS.to_vec())
+            .named("cast"),
         r(|ctx, st, _| {
             let (x, c, cast) = (sget(st, "x"), sget(st, "c"), sget(st, "cast"));
             let cdt = ctx.dt_of(&cast);
@@ -1589,7 +1923,16 @@ fn build_symbolic_phase2() -> PatternMatcher {
         r(|ctx, st, _| {
             let x = sget(st, "x");
             let srcs = ctx.srcs(&x).to_vec();
-            let side_effect_ops = [Ops::Range, Ops::Store, Ops::Call, Ops::Function, Ops::Barrier, Ops::End, Ops::Linear, Ops::Stage];
+            let side_effect_ops = [
+                Ops::Range,
+                Ops::Store,
+                Ops::Call,
+                Ops::Function,
+                Ops::Barrier,
+                Ops::End,
+                Ops::Linear,
+                Ops::Stage,
+            ];
             let mut new_srcs = vec![(srcs[0]).clone()];
             for y in &srcs[1..] {
                 if group::in_(&side_effect_ops, ctx.op_of(y)) {
@@ -1606,7 +1949,14 @@ fn build_symbolic_phase2() -> PatternMatcher {
                 }
             }
             let (_, d, _, _, _) = ctx.snapshot(&x);
-            Some(ctx.replace(&x, Ops::After, d, deduped, ctx.arg_of(&x).clone(), ctx.tag_of(&x).clone()))
+            Some(ctx.replace(
+                &x,
+                Ops::After,
+                d,
+                deduped,
+                ctx.arg_of(&x).clone(),
+                ctx.tag_of(&x).clone(),
+            ))
         }),
     ));
     // after/end with 1 src is just src[0]
@@ -1661,7 +2011,9 @@ pub fn pm_clean_up_group_sink() -> &'static PatternMatcher {
             ),
             // SINK/GROUP roots: inline sink-like children
             (
-                UPat::op_var(vec![Ops::Sink, Ops::Group]).allow_all_srcs().named("root"),
+                UPat::op_var(vec![Ops::Sink, Ops::Group])
+                    .allow_all_srcs()
+                    .named("root"),
                 r(move |ctx, st, _| {
                     let root = sget(st, "root");
                     let srcs = ctx.srcs(&root).to_vec();
@@ -1748,7 +2100,9 @@ pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simpl
     // all_candidates
     let mut all_candidates: Vec<(UopId, UopId)> = Vec::new();
     for (i, (expr, v)) in bounds.iter().enumerate() {
-        let (vmn, vmx) = ctx.min_max(expr).unwrap_or_else(|e| panic!("TGERR: bounds vmin/vmax: {e}"));
+        let (vmn, vmx) = ctx
+            .min_max(expr)
+            .unwrap_or_else(|e| panic!("TGERR: bounds vmin/vmax: {e}"));
         let v0 = match &v[0] {
             Some(c) => match *c {
                 ConstVal::Int(i) => SVal::I(i),
@@ -1765,14 +2119,22 @@ pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simpl
             },
             None => vmx,
         };
-        let fake = ctx.variable(&format!("fake{i}"), sval_cv(v0.clone()), sval_cv(v1), ctx.dt_of(expr), true);
+        let fake = ctx.variable(
+            &format!("fake{i}"),
+            sval_cv(v0.clone()),
+            sval_cv(v1),
+            ctx.dt_of(expr),
+            true,
+        );
         all_candidates.push((expr.clone(), fake));
 
         if try_simplex {
             // every candidate is a set of constrained UOp based on valid, and if every item
             // in a set simplifies the uop into a same output, we rewrite uop. This runs per
             // bound (inside the loop), matching symbolic.py:344.
-            let mut candidates: Vec<Vec<(UopId, UopId)>> = vec![vec![all_candidates.last().expect("TGERR: no bounds").clone()]];
+            let mut candidates: Vec<Vec<(UopId, UopId)>> = vec![vec![
+                all_candidates.last().expect("TGERR: no bounds").clone(),
+            ]];
             let irreducible = |x: UopId| group::in_(group::IRREDUCIBLE, ctx.op_of(&x));
             if ctx.op_of(expr) == Ops::Add && v0 == SVal::I(1) {
                 let mut parts: Vec<UopId> = Vec::new();
@@ -1783,7 +2145,16 @@ pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simpl
                         .enumerate()
                         .map(|(j, xi)| {
                             let (_, vmx) = ctx.min_max(xi).unwrap_or((SVal::I(0), SVal::I(0)));
-                            (xi.clone(), ctx.variable(&format!("fake{j}"), ConstVal::Int(1), sval_cv(vmx), ctx.dt_of(xi), true))
+                            (
+                                xi.clone(),
+                                ctx.variable(
+                                    &format!("fake{j}"),
+                                    ConstVal::Int(1),
+                                    sval_cv(vmx),
+                                    ctx.dt_of(xi),
+                                    true,
+                                ),
+                            )
                         })
                         .collect();
                     candidates.push(cand);
@@ -1813,11 +2184,21 @@ pub fn uop_given_valid(ctx: &mut UOpCtx, valid: UopId, mut uop: UopId, try_simpl
                     let s1s: Vec<UopId> = newuops.iter().map(|n| ctx.srcs(n)[1].clone()).collect();
                     if s0s.iter().all(|n| *n == s0s[0]) {
                         let srcs = ctx.srcs(&uop).to_vec();
-                        uop = ctx.uop(Ops::Stack, None, vec![(s0s[0]).clone(), (srcs[1]).clone()], Arg::None);
+                        uop = ctx.uop(
+                            Ops::Stack,
+                            None,
+                            vec![(s0s[0]).clone(), (srcs[1]).clone()],
+                            Arg::None,
+                        );
                     }
                     if s1s.iter().all(|n| *n == s1s[0]) {
                         let srcs = ctx.srcs(&uop).to_vec();
-                        uop = ctx.uop(Ops::Stack, None, vec![(srcs[0]).clone(), (s1s[0]).clone()], Arg::None);
+                        uop = ctx.uop(
+                            Ops::Stack,
+                            None,
+                            vec![(srcs[0]).clone(), (s1s[0]).clone()],
+                            Arg::None,
+                        );
                     }
                 }
             }
@@ -1876,9 +2257,16 @@ pub fn simplify_valid(ctx: &mut UOpCtx, valid: UopId) -> Option<UopId> {
     let mut valids: Vec<UopId> = Vec::new();
     ctx.split_uop(valid, Ops::And, &mut valids);
     // sort by priority (stable, like python's sorted)
-    let mut prios: Vec<(i64, usize)> = valids.iter().enumerate().map(|(i, v)| (valid_priority(ctx, v.clone(), &valids), i)).collect();
+    let mut prios: Vec<(i64, usize)> = valids
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (valid_priority(ctx, v.clone(), &valids), i))
+        .collect();
     prios.sort_by_key(|&(p, _)| p);
-    let sorted: Vec<UopId> = prios.into_iter().map(|(_, i)| (valids[i]).clone()).collect();
+    let sorted: Vec<UopId> = prios
+        .into_iter()
+        .map(|(_, i)| (valids[i]).clone())
+        .collect();
     let valids = sorted;
     let mut deduped: Vec<UopId> = Vec::new();
     for v in &valids {
@@ -1889,7 +2277,11 @@ pub fn simplify_valid(ctx: &mut UOpCtx, valid: UopId) -> Option<UopId> {
     let mut ret: Vec<UopId> = Vec::new();
     for stmt in deduped {
         if !ret.is_empty() {
-            let acc = if ret.len() == 1 { ret[0].clone() } else { ctx.uprod((ret[0]).clone(), &ret[1..]) };
+            let acc = if ret.len() == 1 {
+                ret[0].clone()
+            } else {
+                ctx.uprod((ret[0]).clone(), &ret[1..])
+            };
             let s = uop_given_valid(ctx, acc, stmt, true);
             ret.push(s);
         } else {
@@ -1897,7 +2289,11 @@ pub fn simplify_valid(ctx: &mut UOpCtx, valid: UopId) -> Option<UopId> {
         }
     }
     if ret != valids {
-        Some(if ret.len() == 1 { (ret[0]).clone() } else { ctx.uprod((ret[0]).clone(), &ret[1..]) })
+        Some(if ret.len() == 1 {
+            (ret[0]).clone()
+        } else {
+            ctx.uprod((ret[0]).clone(), &ret[1..])
+        })
     } else {
         None
     }
@@ -1905,7 +2301,9 @@ pub fn simplify_valid(ctx: &mut UOpCtx, valid: UopId) -> Option<UopId> {
 
 /// `gated_given_valid` (symbolic.py:418).
 fn gated_given_valid(ctx: &mut UOpCtx, cond: UopId, x: UopId, i: UopId) -> Option<UopId> {
-    if ctx.dt_of(&x) != crate::dtype::WEAKINT || ctx.op_in_backward_slice_with_self(&x, &[Ops::Index]) {
+    if ctx.dt_of(&x) != crate::dtype::WEAKINT
+        || ctx.op_in_backward_slice_with_self(&x, &[Ops::Index])
+    {
         return None;
     }
     let gx = uop_given_valid(ctx, cond.clone(), x, false);
@@ -1931,7 +2329,13 @@ fn drop_and_clauses(ctx: &mut UOpCtx, cond: UopId, x: UopId, i: UopId) -> Option
         return None;
     }
     let t = ctx.const_py(ConstVal::Bool(true), Some(crate::dtype::BOOL));
-    let kept = if keep.is_empty() { t } else if keep.len() == 1 { keep[0].clone() } else { ctx.uprod((keep[0]).clone(), &keep[1..]) };
+    let kept = if keep.is_empty() {
+        t
+    } else if keep.len() == 1 {
+        keep[0].clone()
+    } else {
+        ctx.uprod((keep[0]).clone(), &keep[1..])
+    };
     Some(ctx.where_(kept, x, i))
 }
 
@@ -1967,7 +2371,8 @@ fn build_pm_simplify_valid() -> PatternMatcher {
             invalid_gate(),
             r(|ctx, st, _| {
                 let (cond, x, i) = (sget(st, "cond"), sget(st, "x"), sget(st, "i"));
-                gated_given_valid(ctx, cond.clone(), x.clone(), i.clone()).or_else(|| drop_and_clauses(ctx, cond, x, i))
+                gated_given_valid(ctx, cond.clone(), x.clone(), i.clone())
+                    .or_else(|| drop_and_clauses(ctx, cond, x, i))
             }),
         ),
     ])
@@ -1976,26 +2381,45 @@ fn build_pm_simplify_valid() -> PatternMatcher {
 // ---------- pm_move_where_on_load (symbolic.py:398-423) ----------
 
 /// `where_on_load` (symbolic.py:398).
-pub fn where_on_load(ctx: &mut UOpCtx, cond: UopId, buf: UopId, idx: UopId, or_cast: UopId) -> Option<UopId> {
+pub fn where_on_load(
+    ctx: &mut UOpCtx,
+    cond: UopId,
+    buf: UopId,
+    idx: UopId,
+    or_cast: UopId,
+) -> Option<UopId> {
     let where_clauses = ctx.split_uop_vec(cond, Ops::And);
     let load_valid = ctx.get_valid(idx.clone());
-    let in_load: std::collections::HashSet<UopId> =
-        ctx.split_uop_vec(load_valid.clone(), Ops::And).into_iter().collect();
+    let in_load: std::collections::HashSet<UopId> = ctx
+        .split_uop_vec(load_valid.clone(), Ops::And)
+        .into_iter()
+        .collect();
     let idx_index: std::collections::HashSet<UopId> = ctx
         .backward_slice_with_self(&idx)
         .iter()
         .filter(|&u| ctx.op_of(u) == Ops::Index)
         .cloned()
         .collect();
-    let idx_ranges: std::collections::HashSet<UopId> = ctx.ranges(&idx.clone()).iter().cloned().collect();
+    let idx_ranges: std::collections::HashSet<UopId> =
+        ctx.ranges(&idx.clone()).iter().cloned().collect();
     // can move if: condition's ranges are subset of idx's ranges, and no data dependent INDEX
     let mut moved: Vec<UopId> = Vec::new();
     let mut keep: Vec<UopId> = Vec::new();
-    let cands: Vec<UopId> = where_clauses.iter().filter(|c| !in_load.contains(c)).cloned().collect();
+    let cands: Vec<UopId> = where_clauses
+        .iter()
+        .filter(|c| !in_load.contains(c))
+        .cloned()
+        .collect();
     for c in &cands {
         let cbs = ctx.backward_slice_with_self(c);
-        let sub = ctx.ranges(&c.clone()).iter().all(|r| idx_ranges.contains(r));
-        let no_idx = cbs.iter().filter(|&u| ctx.op_of(u) == Ops::Index).all(|u| idx_index.contains(u));
+        let sub = ctx
+            .ranges(&c.clone())
+            .iter()
+            .all(|r| idx_ranges.contains(r));
+        let no_idx = cbs
+            .iter()
+            .filter(|&u| ctx.op_of(u) == Ops::Index)
+            .all(|u| idx_index.contains(u));
         if sub && no_idx {
             moved.push(c.clone());
         } else {
@@ -2009,7 +2433,11 @@ pub fn where_on_load(ctx: &mut UOpCtx, cond: UopId, buf: UopId, idx: UopId, or_c
     let gi = ctx.get_idx(idx);
     let gv = ctx.valid(gi, new_valid);
     let new_idx = ctx.index(buf, vec![gv]);
-    let ret_idx = if ctx.op_of(&or_cast) == Ops::Cast { ctx.cast(new_idx, ctx.dt_of(&or_cast)) } else { new_idx };
+    let ret_idx = if ctx.op_of(&or_cast) == Ops::Cast {
+        ctx.cast(new_idx, ctx.dt_of(&or_cast))
+    } else {
+        new_idx
+    };
     let ct = ctx.const_bool(true);
     let k = ctx.uprod(ct, &keep);
     let zero = ctx.const_like(ret_idx.clone(), CV::Int(0));
@@ -2026,23 +2454,35 @@ fn build_pm_move_where_on_load() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             var("cond").where_(
-                var("buf").index(vec![var("idx")]).or_casted(Some("or_cast")),
+                var("buf")
+                    .index(vec![var("idx")])
+                    .or_casted(Some("or_cast")),
                 UPatOrConst::Val(CV::Int(0)),
             ),
             r(|ctx, st, _| {
-                let (cond, buf, idx, or_cast) =
-                    (sget(st, "cond"), sget(st, "buf"), sget(st, "idx"), sget(st, "or_cast"));
+                let (cond, buf, idx, or_cast) = (
+                    sget(st, "cond"),
+                    sget(st, "buf"),
+                    sget(st, "idx"),
+                    sget(st, "or_cast"),
+                );
                 where_on_load(ctx, cond, buf, idx, or_cast)
             }),
         ),
         (
             var("cond").where_(
                 UPatOrConst::Val(CV::Int(0)),
-                var("buf").index(vec![var("idx")]).or_casted(Some("or_cast")),
+                var("buf")
+                    .index(vec![var("idx")])
+                    .or_casted(Some("or_cast")),
             ),
             r(|ctx, st, _| {
-                let (cond, buf, idx, or_cast) =
-                    (sget(st, "cond"), sget(st, "buf"), sget(st, "idx"), sget(st, "or_cast"));
+                let (cond, buf, idx, or_cast) = (
+                    sget(st, "cond"),
+                    sget(st, "buf"),
+                    sget(st, "idx"),
+                    sget(st, "or_cast"),
+                );
                 let nc = ctx.logical_not(cond);
                 where_on_load(ctx, nc, buf, idx, or_cast)
             }),
@@ -2067,7 +2507,12 @@ fn build_pm_remove_invalid() -> PatternMatcher {
                 if srcs[0] == cond && srcs[1] == x && srcs[2] == zero {
                     return None;
                 }
-                Some(ctx.uop(Ops::Where, Some(ctx.dt_of(&w)), vec![cond, x, zero], Arg::None))
+                Some(ctx.uop(
+                    Ops::Where,
+                    Some(ctx.dt_of(&w)),
+                    vec![cond, x, zero],
+                    Arg::None,
+                ))
             }),
         ),
         (
@@ -2081,7 +2526,13 @@ fn build_pm_remove_invalid() -> PatternMatcher {
                 let dt = ctx.dt_of(&s);
                 let new_srcs: Vec<UopId> = srcs
                     .iter()
-                    .map(|x| if ctx.is_invalid(x) { ctx.const_py(CV::Int(0), Some(dt)) } else { x.clone() })
+                    .map(|x| {
+                        if ctx.is_invalid(x) {
+                            ctx.const_py(CV::Int(0), Some(dt))
+                        } else {
+                            x.clone()
+                        }
+                    })
                     .collect();
                 Some(ctx.uop(Ops::Stack, Some(dt), new_srcs, Arg::None))
             }),
@@ -2097,9 +2548,15 @@ pub fn pm_cast_float_alu() -> PatternMatcher {
 
 fn build_pm_cast_float_alu() -> PatternMatcher {
     PatternMatcher::new(vec![(
-        UPat::op_var(vec![Ops::Sin, Ops::Log2, Ops::Exp2, Ops::Sqrt, Ops::Reciprocal])
-            .with_src_tup(vec![UPat::var(None, None)])
-            .named("u"),
+        UPat::op_var(vec![
+            Ops::Sin,
+            Ops::Log2,
+            Ops::Exp2,
+            Ops::Sqrt,
+            Ops::Reciprocal,
+        ])
+        .with_src_tup(vec![UPat::var(None, None)])
+        .named("u"),
         r(|ctx, st, _| {
             let u = sget(st, "u");
             let x = ctx.srcs(&u)[0].clone();
@@ -2120,7 +2577,12 @@ fn noop(ctx: &mut UOpCtx) -> UopId {
 }
 
 fn store2(ctx: &mut UOpCtx, idx: UopId, val: UopId) -> UopId {
-    ctx.uop(Ops::Store, Some(crate::dtype::VOID), vec![idx, val], Arg::None)
+    ctx.uop(
+        Ops::Store,
+        Some(crate::dtype::VOID),
+        vec![idx, val],
+        Arg::None,
+    )
 }
 
 /// `reduce_mul_chain` (symbolic.py:381).
@@ -2154,7 +2616,11 @@ fn reduce_mul_chain(ctx: &mut UOpCtx, r: UopId) -> Option<UopId> {
         return None;
     }
     let one = ctx.const_like((srcs[0]).clone(), CV::Int(1));
-    let inner = if inside.is_empty() { one } else { ctx.uprod((inside[0]).clone(), &inside[1..]) };
+    let inner = if inside.is_empty() {
+        one
+    } else {
+        ctx.uprod((inside[0]).clone(), &inside[1..])
+    };
     let new_red = ctx.replace(
         &r,
         rop,
@@ -2177,7 +2643,11 @@ pub fn pm_sym_extra() -> PatternMatcher {
 }
 
 fn build_pm_sym_extra() -> PatternMatcher {
-    let idx_pat = || UPat::op_var(vec![Ops::Index]).allow_all_srcs().named("index");
+    let idx_pat = || {
+        UPat::op_var(vec![Ops::Index])
+            .allow_all_srcs()
+            .named("index")
+    };
     let recip1p = || {
         UPat::op_var(vec![Ops::Add])
             .with_src_tup(vec![UPat::cvar(None, None, Some(Arg::Int(1))), var("x")])
@@ -2195,15 +2665,28 @@ fn build_pm_sym_extra() -> PatternMatcher {
                 .named("alu"),
             r(|ctx, st, _| {
                 let (alu, x, y) = (sget(st, "alu"), sget(st, "x"), sget(st, "y"));
-                let inner = ctx.uop(ctx.op_of(&alu), Some(ctx.dt_of(&alu)), vec![x, y], ctx.arg_of(&alu).clone());
+                let inner = ctx.uop(
+                    ctx.op_of(&alu),
+                    Some(ctx.dt_of(&alu)),
+                    vec![x, y],
+                    ctx.arg_of(&alu).clone(),
+                );
                 Some(ctx.uop(Ops::Stack, Some(ctx.dt_of(&alu)), vec![inner], Arg::None))
             }),
         ),
         // push cast to branches: WHERE(a,b).cast(dt)
         (
-            var("s").where_(UPatOrConst::Pat(var("a")), UPatOrConst::Pat(var("b"))).cast(None).named("cast"),
+            var("s")
+                .where_(UPatOrConst::Pat(var("a")), UPatOrConst::Pat(var("b")))
+                .cast(None)
+                .named("cast"),
             r(|ctx, st, _| {
-                let (s, a, b, cast) = (sget(st, "s"), sget(st, "a"), sget(st, "b"), sget(st, "cast"));
+                let (s, a, b, cast) = (
+                    sget(st, "s"),
+                    sget(st, "a"),
+                    sget(st, "b"),
+                    sget(st, "cast"),
+                );
                 let dt = ctx.dt_of(&cast);
                 let ca = commit_weak(ctx, a, dt);
                 let cb = commit_weak(ctx, b, dt);
@@ -2212,8 +2695,10 @@ fn build_pm_sym_extra() -> PatternMatcher {
         ),
         // load/store folding: STORE(idx, LOAD(idx)) -> NOOP
         (
-            UPat::op_var(vec![Ops::Store])
-                .with_src_tup(vec![idx_pat(), UPat::op_var(vec![Ops::Load]).with_src_tup(vec![idx_pat()])]),
+            UPat::op_var(vec![Ops::Store]).with_src_tup(vec![
+                idx_pat(),
+                UPat::op_var(vec![Ops::Load]).with_src_tup(vec![idx_pat()]),
+            ]),
             r(|ctx, st, _| {
                 let _ = st;
                 Some(noop(ctx))
@@ -2248,7 +2733,10 @@ fn build_pm_sym_extra() -> PatternMatcher {
         (
             UPat::op_var(vec![Ops::Store]).with_src_tup(vec![
                 idx_pat(),
-                var("cond").where_(UPatOrConst::Pat(var("val")), UPatOrConst::Pat(invalid_pat())),
+                var("cond").where_(
+                    UPatOrConst::Pat(var("val")),
+                    UPatOrConst::Pat(invalid_pat()),
+                ),
             ]),
             r(|ctx, st, _| {
                 let (index, cond, val) = (sget(st, "index"), sget(st, "cond"), sget(st, "val"));
@@ -2288,15 +2776,20 @@ fn build_pm_sym_extra() -> PatternMatcher {
             }),
         ),
         // x*(1/(1+x)) -> 1-1/(1+x)
-        (var("x").mul(recip1p()), r(|ctx, st, _| {
-            let d = sget(st, "d");
-            let one = ctx.const_py(CV::Int(1), Some(ctx.dt_of(&d)));
-            Some(ctx.sub(one, d))
-        })),
+        (
+            var("x").mul(recip1p()),
+            r(|ctx, st, _| {
+                let d = sget(st, "d");
+                let one = ctx.const_py(CV::Int(1), Some(ctx.dt_of(&d)));
+                Some(ctx.sub(one, d))
+            }),
+        ),
         // x*(1/(1+x)*y) -> y*(1-1/(1+x))
         (
-            UPat::op_var(vec![Ops::Mul])
-                .with_src_tup(vec![var("x"), UPat::op_var(vec![Ops::Mul]).with_src_tup(vec![recip1p(), var("y")])]),
+            UPat::op_var(vec![Ops::Mul]).with_src_tup(vec![
+                var("x"),
+                UPat::op_var(vec![Ops::Mul]).with_src_tup(vec![recip1p(), var("y")]),
+            ]),
             r(|ctx, st, _| {
                 let (d, y) = (sget(st, "d"), sget(st, "y"));
                 let one = ctx.const_py(CV::Int(1), Some(ctx.dt_of(&d)));
@@ -2306,8 +2799,10 @@ fn build_pm_sym_extra() -> PatternMatcher {
         ),
         // x*(1/(1+x)+y) -> (1-1/(1+x))+x*y
         (
-            UPat::op_var(vec![Ops::Mul])
-                .with_src_tup(vec![var("x"), UPat::op_var(vec![Ops::Add]).with_src_tup(vec![recip1p(), var("y")])]),
+            UPat::op_var(vec![Ops::Mul]).with_src_tup(vec![
+                var("x"),
+                UPat::op_var(vec![Ops::Add]).with_src_tup(vec![recip1p(), var("y")]),
+            ]),
             r(|ctx, st, _| {
                 let (x, d, y) = (sget(st, "x"), sget(st, "d"), sget(st, "y"));
                 let one = ctx.const_py(CV::Int(1), Some(ctx.dt_of(&d)));
@@ -2337,7 +2832,9 @@ fn build_pm_sym_extra() -> PatternMatcher {
                     &r,
                     op,
                     dt,
-                    std::iter::once(x).chain(srcs[1..].iter().cloned()).collect(),
+                    std::iter::once(x)
+                        .chain(srcs[1..].iter().cloned())
+                        .collect(),
                     arg,
                     tag,
                 );
@@ -2348,7 +2845,10 @@ fn build_pm_sym_extra() -> PatternMatcher {
         // reduce mul chain — `UPat(Ops.MUL).reduce(allow_any_len=True)`:
         // the REDUCE's src[0] must be a MUL.
         (
-            UPat::ops1(Ops::Reduce).with_src_tup(vec![UPat::op_var(vec![Ops::Mul])]).allow_all_srcs().named("r"),
+            UPat::ops1(Ops::Reduce)
+                .with_src_tup(vec![UPat::op_var(vec![Ops::Mul])])
+                .allow_all_srcs()
+                .named("r"),
             r(|ctx, st, _| reduce_mul_chain(ctx, sget(st, "r"))),
         ),
     ])

@@ -30,7 +30,8 @@ impl SInt {
     }
 
     pub fn as_i64_or_panic(self) -> i64 {
-        self.as_i64().unwrap_or_else(|| panic!("TGERR: symbolic value where int required"))
+        self.as_i64()
+            .unwrap_or_else(|| panic!("TGERR: symbolic value where int required"))
     }
 
     pub fn as_usize(self) -> Option<usize> {

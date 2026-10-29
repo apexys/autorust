@@ -6,8 +6,8 @@
 //! and takes the `__local ` prefix only from `smem_prefix`.
 #![cfg(feature = "backend_cl")]
 
-use autorust::tensor::{Ctx, Tensor};
 use autorust::tensor::nn::{self, Linear};
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 fn skip() -> bool {
@@ -50,15 +50,33 @@ fn cl_xor_backward_kernels_build_and_run() {
     let mut ctx = Ctx::new();
     let l1 = Linear::new(&ctx, 2, 4, true);
     let l2 = Linear::new(&ctx, 4, 1, true);
-    let x = Tensor::from_slice(&ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, Some("CL")).reshape([4, 2]);
+    let x = Tensor::from_slice(
+        &ctx,
+        &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        None,
+        Some("CL"),
+    )
+    .reshape([4, 2]);
     let t = Tensor::from_slice(&ctx, &[0.0f32, 1.0, 1.0, 0.0], None, Some("CL")).reshape([4, 1]);
     let h = nn::relu(&l1.forward(&x));
     let out = l2.forward(&h);
     let diff = out.sub(&t);
     let loss = diff.mul(&diff).mean(None, false);
-    let params = vec![l1.weight.clone(), l1.bias.clone().unwrap(), l2.weight.clone(), l2.bias.clone().unwrap()];
+    let params = vec![
+        l1.weight.clone(),
+        l1.bias.clone().unwrap(),
+        l2.weight.clone(),
+        l2.bias.clone().unwrap(),
+    ];
     loss.backward(&params, None);
-    assert_eq!(out.device().as_deref(), Some("CL"), "forward must run on CL");
+    assert_eq!(
+        out.device().as_deref(),
+        Some("CL"),
+        "forward must run on CL"
+    );
     let g = params[0].grad().unwrap().to_list_fresh::<f32>();
-    assert!(g.iter().all(|v| v.is_finite()), "CL backward produced non-finite grads: {g:?}");
+    assert!(
+        g.iter().all(|v| v.is_finite()),
+        "CL backward produced non-finite grads: {g:?}"
+    );
 }

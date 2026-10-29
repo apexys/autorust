@@ -14,7 +14,11 @@ use std::path::PathBuf;
 /// `CACHELEVEL` (tinygrad default 1): `>= 1` enables the on-disk cache; `0`
 /// disables it. An unparsable value falls back to the default.
 pub fn cache_enabled() -> bool {
-    std::env::var("CACHELEVEL").ok().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1) >= 1
+    std::env::var("CACHELEVEL")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(1)
+        >= 1
 }
 
 /// The cache root: `AUTORUST_CACHE_DIR`, else `$XDG_CACHE_HOME/autorust`, else
@@ -72,7 +76,9 @@ pub fn put(scope: &str, key: &str, value: &str) {
     if !cache_enabled() {
         return;
     }
-    let Some(path) = entry_path(scope, key) else { return };
+    let Some(path) = entry_path(scope, key) else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

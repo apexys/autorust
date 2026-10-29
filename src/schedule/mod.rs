@@ -8,6 +8,6 @@
 //! Multi-device (`UNSHARD`/`MSELECT`/`MSTACK`) is out of scope; the scheduler
 //! asserts a single device.
 pub mod indexing;
+pub mod memory;
 pub mod rangeify;
 pub mod sched;
-pub mod memory;

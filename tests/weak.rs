@@ -3,19 +3,32 @@
 //! the non-existent `weakint` type (INTERP tolerates it, so this only shows up on
 //! CL — which is why it needs its own gate).
 
-use autorust::tensor::Ctx;
 use autorust::dtype::{self, ConstVal};
-use autorust::uop::ctx::UOpCtx;
-use autorust::uop::upat::{graph_rewrite, CtxVal};
-use autorust::uop::weak::pm_lower_index_dtype;
+use autorust::tensor::Ctx;
 use autorust::uop::UopId;
+use autorust::uop::ctx::UOpCtx;
+use autorust::uop::upat::{CtxVal, graph_rewrite};
+use autorust::uop::weak::pm_lower_index_dtype;
 
 fn lower(ctx: &mut UOpCtx, root: UopId) -> UopId {
-    graph_rewrite(ctx, root, &pm_lower_index_dtype(), false, None, false, false, CtxVal::None).expect("lower weak")
+    graph_rewrite(
+        ctx,
+        root,
+        &pm_lower_index_dtype(),
+        false,
+        None,
+        false,
+        false,
+        CtxVal::None,
+    )
+    .expect("lower weak")
 }
 
 fn assert_no_weak(ctx: &mut UOpCtx, root: &UopId) {
-    let weak = ctx.backward_slice_with_self(root).iter().any(|u| dtype::is_weak(ctx.dt_of(u)));
+    let weak = ctx
+        .backward_slice_with_self(root)
+        .iter()
+        .any(|u| dtype::is_weak(ctx.dt_of(u)));
     assert!(!weak, "a weak dtype survived pm_lower_index_dtype");
 }
 
@@ -23,8 +36,14 @@ fn assert_no_weak(ctx: &mut UOpCtx, root: &UopId) {
 /// `Cmplt(Cast(int), Const(int))` (the cast commits to the unified width).
 #[test]
 fn weak_comparison_is_lowered() {
-    let mut ctx = Ctx::new();
-    let x = ctx.raw().variable("x", ConstVal::Int(0), ConstVal::Int(255), dtype::UINT8, false);
+    let ctx = Ctx::new();
+    let x = ctx.raw().variable(
+        "x",
+        ConstVal::Int(0),
+        ConstVal::Int(255),
+        dtype::UINT8,
+        false,
+    );
     let a = ctx.raw().cast(x, dtype::WEAKINT);
     let b = ctx.raw().const_py(ConstVal::Int(10), Some(dtype::WEAKINT));
     let c = ctx.raw().lt(a, b);
@@ -40,8 +59,14 @@ fn weak_comparison_is_lowered() {
 /// A weak binary consumed by a comparison is committed along the comparison edge.
 #[test]
 fn weak_binary_fed_to_comparison_is_lowered() {
-    let mut ctx = Ctx::new();
-    let x = ctx.raw().variable("x", ConstVal::Int(0), ConstVal::Int(255), dtype::UINT8, false);
+    let ctx = Ctx::new();
+    let x = ctx.raw().variable(
+        "x",
+        ConstVal::Int(0),
+        ConstVal::Int(255),
+        dtype::UINT8,
+        false,
+    );
     let a = ctx.raw().cast(x, dtype::WEAKINT);
     let b = ctx.raw().const_py(ConstVal::Int(10), Some(dtype::WEAKINT));
     let sum = ctx.raw().add(a, b);

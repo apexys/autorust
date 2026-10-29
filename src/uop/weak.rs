@@ -1,12 +1,12 @@
 //! `uop/weak.py` port (M5): weak-dtype commitment and index-dtype lowering.
 
 use crate::dtype::{self, DTypeId};
-use crate::uop::ops::{group, Ops};
-use crate::uop::arg::Arg;
-use crate::uop::sym::{commit_weak, r, sget};
-use crate::uop::upat::{graph_rewrite, CtxVal, PatternMatcher, UPat};
-use crate::uop::ctx::UOpCtx;
 use crate::uop::UopId;
+use crate::uop::arg::Arg;
+use crate::uop::ctx::UOpCtx;
+use crate::uop::ops::{Ops, group};
+use crate::uop::sym::{commit_weak, r, sget};
+use crate::uop::upat::{CtxVal, PatternMatcher, UPat, graph_rewrite};
 use std::collections::HashMap;
 
 /// `default_dtype` (weak.py:8).
@@ -51,7 +51,11 @@ fn commit_srcs_at(ctx: &mut UOpCtx, u: UopId, dt: DTypeId) -> UopId {
         return u;
     }
     // python's replace re-derives the dtype when src dtypes change
-    let dt2 = if new_srcs.iter().zip(srcs.iter()).all(|(a, b)| ctx.dt_of(a) == ctx.dt_of(b)) {
+    let dt2 = if new_srcs
+        .iter()
+        .zip(srcs.iter())
+        .all(|(a, b)| ctx.dt_of(a) == ctx.dt_of(b))
+    {
         old_dt
     } else {
         ctx.dtype_from_uop(op, &new_srcs, &arg).unwrap_or(old_dt)
@@ -90,7 +94,11 @@ pub fn pm_cast_weak() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             UPat::ops1(Ops::Cast)
-                .with_src_tup(vec![UPat::op_var(group::ALU.to_vec()).with_dtype(Some(dtype::WEAKS.to_vec())).named("u")])
+                .with_src_tup(vec![
+                    UPat::op_var(group::ALU.to_vec())
+                        .with_dtype(Some(dtype::WEAKS.to_vec()))
+                        .named("u"),
+                ])
                 .named("c"),
             r(|ctx, st, _| {
                 let c = sget(st, "c");
@@ -100,7 +108,11 @@ pub fn pm_cast_weak() -> PatternMatcher {
         ),
         (
             UPat::ops1(Ops::Cast)
-                .with_src_tup(vec![UPat::ops1(Ops::Const).with_dtype(Some(dtype::WEAKS.to_vec())).named("u")])
+                .with_src_tup(vec![
+                    UPat::ops1(Ops::Const)
+                        .with_dtype(Some(dtype::WEAKS.to_vec()))
+                        .named("u"),
+                ])
                 .named("c"),
             r(|ctx, st, _| {
                 let c = sget(st, "c");
@@ -140,7 +152,9 @@ pub fn pm_commit_weak() -> PatternMatcher {
 /// the comparisons (`CMPLT`/`CMPNE`/`CMPEQ`), so comparisons are lowered here too
 /// — a comparison demands a common operand width and `lower_weak_node` unifies it.
 fn in_lower_weak_ops(op: Ops) -> bool {
-    group::in_(group::BINARY, op) || group::in_(group::UNARY, op) || matches!(op, Ops::Where | Ops::Range | Ops::Stack | Ops::Special)
+    group::in_(group::BINARY, op)
+        || group::in_(group::UNARY, op)
+        || matches!(op, Ops::Where | Ops::Range | Ops::Stack | Ops::Special)
 }
 
 /// `lower_weak_node` (weak.py:47).
@@ -156,7 +170,9 @@ fn lower_weak_node(ctx: &mut UOpCtx, u: UopId) -> Option<UopId> {
     }
     let start = if op == Ops::Where { 1 } else { 0 };
     let unchanged = src == usrcs;
-    let any_weak = src[start.min(src.len())..].iter().any(|s| dtype::is_weak(ctx.dt_of(s)));
+    let any_weak = src[start.min(src.len())..]
+        .iter()
+        .any(|s| dtype::is_weak(ctx.dt_of(s)));
     if unchanged || any_weak {
         return None;
     }
@@ -187,7 +203,9 @@ fn lower_weak_node(ctx: &mut UOpCtx, u: UopId) -> Option<UopId> {
 pub fn pm_lower_weak() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
-            UPat::ops1(Ops::Const).with_dtype(Some(dtype::WEAKS.to_vec())).named("u"),
+            UPat::ops1(Ops::Const)
+                .with_dtype(Some(dtype::WEAKS.to_vec()))
+                .named("u"),
             r(|ctx, st, _| {
                 let u = sget(st, "u");
                 let v = ctx.val(&u);
@@ -200,10 +218,12 @@ pub fn pm_lower_weak() -> PatternMatcher {
         (
             UPat::ops1(Ops::Cast)
                 .with_dtype(Some(dtype::WEAKS.to_vec()))
-                .with_src_tup(vec![UPat::ops1(Ops::Cast)
-                    .with_dtype(Some(dtype::WEAKS.to_vec()))
-                    .with_src_tup(vec![UPat::var(Some("x"), None)])
-                    .named("_inner")])
+                .with_src_tup(vec![
+                    UPat::ops1(Ops::Cast)
+                        .with_dtype(Some(dtype::WEAKS.to_vec()))
+                        .with_src_tup(vec![UPat::var(Some("x"), None)])
+                        .named("_inner"),
+                ])
                 .named("u"),
             r(|ctx, st, _| {
                 let u = sget(st, "u");
@@ -221,7 +241,9 @@ pub fn pm_lower_weak() -> PatternMatcher {
         ),
         // ALU PARAM/BUFFER weakint → commit at the default
         (
-            UPat::op_var(vec![Ops::Param, Ops::Buffer]).with_dtype(Some(vec![dtype::WEAKINT])).named("u"),
+            UPat::op_var(vec![Ops::Param, Ops::Buffer])
+                .with_dtype(Some(vec![dtype::WEAKINT]))
+                .named("u"),
             r(|ctx, st, _| {
                 let u = sget(st, "u");
                 if ctx.addrspace_of(u.clone()) != Some(dtype::AddrSpace::Alu) {
@@ -256,8 +278,17 @@ fn lower_weak_srcs(ctx: &mut UOpCtx, memo: &mut HashMap<UopId, UopId>, u: UopId)
         if let Some(r) = memo.get(&s) {
             return r.clone();
         }
-        let rw = graph_rewrite(ctx, s.clone(), &pm_lower_weak(), false, None, false, false, CtxVal::None)
-            .unwrap_or_else(|e| panic!("TGERR: lower weak: {e}"));
+        let rw = graph_rewrite(
+            ctx,
+            s.clone(),
+            &pm_lower_weak(),
+            false,
+            None,
+            false,
+            false,
+            CtxVal::None,
+        )
+        .unwrap_or_else(|e| panic!("TGERR: lower weak: {e}"));
         // the consumer absorbs the cast on its own edge
         let rw = if ctx.op_of(&rw) == Ops::Cast && dtype::is_weak(ctx.dt_of(&rw)) {
             ctx.srcs(&rw)[0].clone()
@@ -284,7 +315,11 @@ fn lower_weak_srcs(ctx: &mut UOpCtx, memo: &mut HashMap<UopId, UopId>, u: UopId)
         if !changed {
             u
         } else {
-            let dt2 = if new_srcs.iter().zip(srcs.iter()).all(|(a, b)| ctx.dt_of(a) == ctx.dt_of(b)) {
+            let dt2 = if new_srcs
+                .iter()
+                .zip(srcs.iter())
+                .all(|(a, b)| ctx.dt_of(a) == ctx.dt_of(b))
+            {
                 dt
             } else {
                 ctx.dtype_from_uop(op, &new_srcs, &arg).unwrap_or(dt)
@@ -315,11 +350,7 @@ pub fn pm_lower_index_dtype() -> PatternMatcher {
             // python threads a ctx dict through the rewrite; our memo lives per-rule-invocation
             let mut m = HashMap::new();
             let ret = lower_weak_srcs(ctx, &mut m, u.clone());
-            if ret == u {
-                None
-            } else {
-                Some(ret)
-            }
+            if ret == u { None } else { Some(ret) }
         }),
     )]);
     pm_commit_weak().add(&pm_cast_weak()).add(&lower_rule)

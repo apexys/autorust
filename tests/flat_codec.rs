@@ -1,7 +1,10 @@
 use nanoserde::{DeJson, SerJson};
 
-use autorust::uop::{arg_to_flat, parse_flat, to_string_flat, Arg, EnumClass, EnumVal, FlatGraph, Graph, NonFinite, Ops};
-use autorust::dtype::{DTypeId, BOOL, FLOAT32, INT32};
+use autorust::dtype::{BOOL, DTypeId, FLOAT32, INT32};
+use autorust::uop::{
+    Arg, EnumClass, EnumVal, FlatGraph, Graph, NonFinite, Ops, arg_to_flat, parse_flat,
+    to_string_flat,
+};
 
 #[test]
 fn flat_roundtrip_synthetic() {
@@ -9,20 +12,68 @@ fn flat_roundtrip_synthetic() {
     let c1 = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(2.5), Arg::None);
     let c2 = g.intern(Ops::Const, INT32, vec![], Arg::Int(3), Arg::None);
     let c3 = g.intern(Ops::Const, BOOL, vec![], Arg::Bool(true), Arg::None);
-    let w = g.intern(Ops::Where, FLOAT32, vec![c3, c1.clone(), c1], Arg::None, Arg::None);
+    let w = g.intern(
+        Ops::Where,
+        FLOAT32,
+        vec![c3, c1.clone(), c1],
+        Arg::None,
+        Arg::None,
+    );
     let nan = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(f64::NAN), Arg::None);
-    let inf = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(f64::INFINITY), Arg::None);
-    let ninf = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(f64::NEG_INFINITY), Arg::None);
+    let inf = g.intern(
+        Ops::Const,
+        FLOAT32,
+        vec![],
+        Arg::Float(f64::INFINITY),
+        Arg::None,
+    );
+    let ninf = g.intern(
+        Ops::Const,
+        FLOAT32,
+        vec![],
+        Arg::Float(f64::NEG_INFINITY),
+        Arg::None,
+    );
     let neg0 = g.intern(Ops::Const, FLOAT32, vec![], Arg::Float(-0.0), Arg::None);
-    let red = g.intern(Ops::Reduce, BOOL, vec![w], Arg::Seq {
-        tuple: true,
-        items: vec![Arg::Enum(EnumVal { class: EnumClass::Ops, value: Ops::Add as u16 }), Arg::Int(0)],
-    }, Arg::None);
-    let pk = g.intern(Ops::Buffer, BOOL, vec![], Arg::Pickle(vec![1, 2, 3]), Arg::None);
-    let sp = g.intern(Ops::Range, INT32, vec![c2], Arg::Seq {
-        tuple: true,
-        items: vec![Arg::Int(0), Arg::Enum(EnumVal { class: EnumClass::AxisType, value: 11 })],
-    }, Arg::None);
+    let red = g.intern(
+        Ops::Reduce,
+        BOOL,
+        vec![w],
+        Arg::Seq {
+            tuple: true,
+            items: vec![
+                Arg::Enum(EnumVal {
+                    class: EnumClass::Ops,
+                    value: Ops::Add as u16,
+                }),
+                Arg::Int(0),
+            ],
+        },
+        Arg::None,
+    );
+    let pk = g.intern(
+        Ops::Buffer,
+        BOOL,
+        vec![],
+        Arg::Pickle(vec![1, 2, 3]),
+        Arg::None,
+    );
+    let sp = g.intern(
+        Ops::Range,
+        INT32,
+        vec![c2],
+        Arg::Seq {
+            tuple: true,
+            items: vec![
+                Arg::Int(0),
+                Arg::Enum(EnumVal {
+                    class: EnumClass::AxisType,
+                    value: 11,
+                }),
+            ],
+        },
+        Arg::None,
+    );
     g.roots = vec![red, pk, sp, nan, inf, ninf, neg0];
     let _ = DTypeId(0); // keep import used
 
@@ -42,7 +93,12 @@ fn flat_roundtrip_synthetic() {
         assert_eq!(na.dtype, nb.dtype);
         assert_eq!(na.srcs.len(), nb.srcs.len());
         // arg equality through bits (floats)
-        assert!(na.arg == nb.arg, "arg mismatch: {:?} vs {:?}", na.arg, nb.arg);
+        assert!(
+            na.arg == nb.arg,
+            "arg mismatch: {:?} vs {:?}",
+            na.arg,
+            nb.arg
+        );
         assert!(na.tag == nb.tag);
     }
 }
@@ -61,19 +117,51 @@ fn arg_json_shapes() {
         ("bool", Arg::Bool(true)),
         ("str", Arg::Str("hello".into())),
         ("bytes", Arg::Bytes(vec![1, 2, 3])),
-        ("enum_ops", Arg::Enum(EnumVal { class: EnumClass::Ops, value: 33 })),
-        ("enum_axis", Arg::Enum(EnumVal { class: EnumClass::AxisType, value: 11 })),
-        ("enum_addr", Arg::Enum(EnumVal { class: EnumClass::AddrSpace, value: 1 })),
+        (
+            "enum_ops",
+            Arg::Enum(EnumVal {
+                class: EnumClass::Ops,
+                value: 33,
+            }),
+        ),
+        (
+            "enum_axis",
+            Arg::Enum(EnumVal {
+                class: EnumClass::AxisType,
+                value: 11,
+            }),
+        ),
+        (
+            "enum_addr",
+            Arg::Enum(EnumVal {
+                class: EnumClass::AddrSpace,
+                value: 1,
+            }),
+        ),
         ("dtype", Arg::Dtype(FLOAT32)),
-        ("seq", Arg::Seq { tuple: true, items: vec![Arg::Int(1), Arg::Int(2)] }),
-        ("list", Arg::Seq { tuple: false, items: vec![Arg::Bool(false)] }),
+        (
+            "seq",
+            Arg::Seq {
+                tuple: true,
+                items: vec![Arg::Int(1), Arg::Int(2)],
+            },
+        ),
+        (
+            "list",
+            Arg::Seq {
+                tuple: false,
+                items: vec![Arg::Bool(false)],
+            },
+        ),
         ("pickle", Arg::Pickle(vec![0x80, 0x04])),
         ("nonfinite", Arg::NonFinite(NonFinite::Nan)),
     ];
     for (name, a) in cases {
         let j = arg_to_flat(&a).serialize_json();
         println!("{name}: {j}");
-        let back: FlatGraph = FlatGraph::deserialize_json(&"{\"dtypes\":[],\"nodes\":[],\"roots\":[]}".to_string()).unwrap();
+        let back: FlatGraph =
+            FlatGraph::deserialize_json(&"{\"dtypes\":[],\"nodes\":[],\"roots\":[]}".to_string())
+                .unwrap();
         assert!(back.dtypes.is_empty());
     }
 }

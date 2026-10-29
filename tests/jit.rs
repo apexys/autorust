@@ -11,16 +11,24 @@ use autorust::uop::ctx::UOpCtx;
 /// or re-look-up any program (`jit_lower` runs once, jit.py:263).
 #[test]
 fn jit_replay_does_not_recompile() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     sess.enable_jit();
     let w = Tensor::from_slice(&ctx, &[1.0f32, 2.0], None, None).to_param();
     let x = Tensor::from_slice(&ctx, &[3.0f32, 4.0], None, None).to_param();
     let mut jit = Jit::new();
-    let _ = jit.call(&ctx, &mut sess, |ctx, sess| step(ctx, sess, &w, &x)).to_list::<f32>(&mut sess);
+    let _ = jit
+        .call(&ctx, &mut sess, |ctx, sess| step(ctx, sess, &w, &x))
+        .to_list::<f32>(&mut sess);
     let (h0, m0) = (sess.cache.hits, sess.cache.misses);
-    let _ = jit.call(&ctx, &mut sess, |ctx, sess| step(ctx, sess, &w, &x)).to_list::<f32>(&mut sess);
-    assert_eq!((sess.cache.hits, sess.cache.misses), (h0, m0), "replay must not recompile");
+    let _ = jit
+        .call(&ctx, &mut sess, |ctx, sess| step(ctx, sess, &w, &x))
+        .to_list::<f32>(&mut sess);
+    assert_eq!(
+        (sess.cache.hits, sess.cache.misses),
+        (h0, m0),
+        "replay must not recompile"
+    );
 }
 
 /// One manual SGD step: `loss = sum(w*x)`, `w -= 0.1 * dloss/dw`, co-realized.
@@ -37,7 +45,7 @@ fn step(ctx: &Ctx, sess: &mut Session, w: &Tensor, x: &Tensor) -> Tensor {
 
 #[test]
 fn jit_capture_then_replay_updates_params() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     sess.enable_jit();
     assert!(sess.jit_enabled());
@@ -53,15 +61,21 @@ fn jit_capture_then_replay_updates_params() {
     assert!(jit.is_captured() && jit.n_linears() >= 1);
     // loss_0 = 3 + 8 = 11; w <- [0.7, 1.6]; loss_1 = 2.1 + 6.4 = 8.5; …
     for (got, want) in losses.iter().zip([11.0f32, 8.5, 6.0]) {
-        assert!((got - want).abs() < 1e-5, "loss {got} != {want} (all {losses:?})");
+        assert!(
+            (got - want).abs() < 1e-5,
+            "loss {got} != {want} (all {losses:?})"
+        );
     }
     let wv = w.to_list::<f32>(&mut sess);
-    assert!((wv[0] - 0.1).abs() < 1e-5 && (wv[1] - 0.8).abs() < 1e-5, "w = {wv:?}");
+    assert!(
+        (wv[0] - 0.1).abs() < 1e-5 && (wv[1] - 0.8).abs() < 1e-5,
+        "w = {wv:?}"
+    );
 }
 
 #[test]
 fn jit_matches_non_jit() {
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let w0 = Tensor::from_slice(&ctx, &[0.5f32, -0.25, 3.0], None, None).to_param();
     let x0 = Tensor::from_slice(&ctx, &[2.0f32, 5.0, -1.0], None, None).to_param();
@@ -97,7 +111,7 @@ fn jit_rng_advances_on_replay() {
     if autorust::tensor::creation::default_device() != "CL" {
         return;
     }
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     Tensor::manual_seed(42);
     let mut sess = Session::new();
     let plain: Vec<Vec<i32>> = (0..3)
@@ -115,11 +129,16 @@ fn jit_rng_advances_on_replay() {
     for i in 0..3 {
         eprintln!("jit {i}");
         let r = jit.call(&ctx, &mut sess2, |ctx, sess| {
-            Tensor::randint(ctx, &[4], 0, 100, None, None).realize(sess).clone()
+            Tensor::randint(ctx, &[4], 0, 100, None, None)
+                .realize(sess)
+                .clone()
         });
         jitted.push(r.to_list::<i32>(&mut sess2));
     }
-    assert_eq!(plain, jitted, "JIT replay must advance the device RNG like non-JIT");
+    assert_eq!(
+        plain, jitted,
+        "JIT replay must advance the device RNG like non-JIT"
+    );
 }
 
 /// Enabling JIT *after* a pre-JIT draw (model init) must continue the host
@@ -129,7 +148,7 @@ fn jit_rng_continues_from_host_counter() {
     if autorust::tensor::creation::default_device() != "CL" {
         return;
     }
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let mut sess = Session::new();
     let draw = |ctx: &mut UOpCtx, sess: &mut Session| {
         Tensor::randint(ctx, &[6], 0, 50, None, None).to_list::<i32>(sess)
@@ -149,7 +168,9 @@ fn jit_rng_continues_from_host_counter() {
     let b: Vec<Vec<i32>> = (0..3)
         .map(|_| {
             jit.call(&ctx, &mut sess, |ctx, sess| {
-                Tensor::randint(ctx, &[6], 0, 50, None, None).realize(sess).clone()
+                Tensor::randint(ctx, &[6], 0, 50, None, None)
+                    .realize(sess)
+                    .clone()
             })
             .to_list::<i32>(&mut sess)
         })

@@ -4,11 +4,11 @@
 //! rules, index/load/store, ALU, ranges, and the kernel wrapper + defines.
 
 use crate::dtype::{self, AddrSpace, ConstVal, DTypeId};
+use crate::uop::UopId;
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
-use crate::uop::ops::{group, Ops};
+use crate::uop::ops::{Ops, group};
 use crate::uop::range::AxisType;
-use crate::uop::UopId;
 use std::collections::HashMap;
 
 /// One precomputed uop fact (shape/numel lookups need `&mut ctx`, so snapshot).
@@ -162,7 +162,13 @@ impl CStyleLang {
 
     /// `_render_dtype` — type_map lookup (space-normalized), prefix/suffix by
     /// addrspace, vector size suffix.
-    fn render_dtype(&self, dt: DTypeId, sz: i64, addrspace: Option<AddrSpace>, override_ptr: bool) -> String {
+    fn render_dtype(
+        &self,
+        dt: DTypeId,
+        sz: i64,
+        addrspace: Option<AddrSpace>,
+        override_ptr: bool,
+    ) -> String {
         let as_ = addrspace.unwrap_or(AddrSpace::Alu);
         let mut prefix = String::new();
         if matches!(as_, AddrSpace::Local | AddrSpace::Global) {
@@ -173,8 +179,16 @@ impl CStyleLang {
                 prefix = self.buffer_prefix.to_string();
             }
         }
-        let suffix = if matches!(as_, AddrSpace::Local | AddrSpace::Global) || override_ptr { "*" } else { "" };
-        let base = if sz > 1 { self.type_name(dt).replace(' ', "_") } else { self.type_name(dt) };
+        let suffix = if matches!(as_, AddrSpace::Local | AddrSpace::Global) || override_ptr {
+            "*"
+        } else {
+            ""
+        };
+        let base = if sz > 1 {
+            self.type_name(dt).replace(' ', "_")
+        } else {
+            self.type_name(dt)
+        };
         if sz > 1 {
             format!("{prefix}{base}{sz}{suffix}")
         } else {
@@ -205,7 +219,11 @@ impl CStyleLang {
         let src_dt = info[&i.srcs[0]].dt;
         let as_ = i.addrspace.or(i.derived);
         if i.numel > 1 || i.dt != src_dt {
-            format!("*(({})({}))", self.render_dtype(i.dt, i.numel, as_, true), bidx)
+            format!(
+                "*(({})({}))",
+                self.render_dtype(i.dt, i.numel, as_, true),
+                bidx
+            )
         } else {
             format!("*{bidx}")
         }
@@ -317,7 +335,10 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         let (numel, shape) = match ctx.shape(u) {
             Ok(Some(s)) if !s.is_empty() => {
                 let prods: i64 = s.iter().map(|x| x.clone().as_i64_or_panic()).product();
-                (prods, s.iter().map(|x| x.clone().as_i64_or_panic()).collect())
+                (
+                    prods,
+                    s.iter().map(|x| x.clone().as_i64_or_panic()).collect(),
+                )
             }
             _ => (1, vec![]),
         };
@@ -326,7 +347,20 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             Arg::Param(p) => p.volatile,
             _ => false,
         };
-        info.insert(u.clone(), Info { op, dt: ctx.dt_of(u), srcs, addrspace, derived, numel, shape, has_shape, volatile });
+        info.insert(
+            u.clone(),
+            Info {
+                op,
+                dt: ctx.dt_of(u),
+                srcs,
+                addrspace,
+                derived,
+                numel,
+                shape,
+                has_shape,
+                volatile,
+            },
+        );
     }
     let mut child_count: HashMap<UopId, usize> = HashMap::new();
     for u in lst {
@@ -337,7 +371,12 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     // writable params: toposort of STORE src[0]s, gated below END (unused in output)
     let mut writable: std::collections::HashSet<UopId> = std::collections::HashSet::new();
     {
-        let mut stack: Vec<UopId> = lst.iter().filter(|&u| info[u].op == Ops::Store).cloned().map(|u| (info[&u].srcs[0]).clone()).collect();
+        let mut stack: Vec<UopId> = lst
+            .iter()
+            .filter(|&u| info[u].op == Ops::Store)
+            .cloned()
+            .map(|u| (info[&u].srcs[0]).clone())
+            .collect();
         let mut seen = std::collections::HashSet::new();
         while let Some(u) = stack.pop() {
             if !seen.insert(u.id()) {
@@ -384,9 +423,13 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         if i.op == Ops::Sink {
             if let Arg::Data(d) = ctx.arg_of(u)
                 && d.tag == "KernelInfo"
-                    && let Some(Arg::Str(n)) = d.fields.iter().find_map(|(k, v)| if k == "name" { Some(v) } else { None }) {
-                        name = to_function_name(n);
-                    }
+                && let Some(Arg::Str(n)) = d
+                    .fields
+                    .iter()
+                    .find_map(|(k, v)| if k == "name" { Some(v) } else { None })
+            {
+                name = to_function_name(n);
+            }
             continue;
         }
         if i.op == Ops::Param {
@@ -428,7 +471,10 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     AxisType::Unroll => "r",
                     _ => "L",
                 };
-                r.insert(u.clone(), format!("{letter}idx{}", range_str(ctx.arg_of(u))));
+                r.insert(
+                    u.clone(),
+                    format!("{letter}idx{}", range_str(ctx.arg_of(u))),
+                );
                 prefix = None;
             }
             _ => {
@@ -451,13 +497,19 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             match m.get(id).or_else(|| consts.get(id)) {
                 Some(s) => s.clone(),
                 None => {
-                    let op = info.get(id).map(|i| format!("{:?}", i.op)).unwrap_or_else(|| "NOT-IN-LST".to_string());
+                    let op = info
+                        .get(id)
+                        .map(|i| format!("{:?}", i.op))
+                        .unwrap_or_else(|| "NOT-IN-LST".to_string());
                     let parent = info
                         .iter()
                         .find(|(_, inf)| inf.srcs.contains(id))
                         .map(|(_, inf)| format!("{:?}", inf.op))
                         .unwrap_or_else(|| "?".to_string());
-                    panic!("TGERR: cstyle render missing name for node {} op {op}, referenced by {parent}", id.id())
+                    panic!(
+                        "TGERR: cstyle render missing name for node {} op {op}, referenced by {parent}",
+                        id.id()
+                    )
                 }
             }
         };
@@ -467,11 +519,18 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     "for (;;) {".to_string()
                 } else {
                     let nm = &r[u];
-                    format!("for ({} {nm} = 0; {nm} < {}; {nm}++) {{", lang.render_dtype(i.dt, 1, None, false), g(&r, &i.srcs[0]))
+                    format!(
+                        "for ({} {nm} = 0; {nm} < {}; {nm}++) {{",
+                        lang.render_dtype(i.dt, 1, None, false),
+                        g(&r, &i.srcs[0])
+                    )
                 }
             }
             Ops::End => {
-                if i.srcs.len() == 3 && info[&i.srcs[1]].op == Ops::Range && info[&i.srcs[2]].dt == dtype::BOOL {
+                if i.srcs.len() == 3
+                    && info[&i.srcs[1]].op == Ops::Range
+                    && info[&i.srcs[2]].dt == dtype::BOOL
+                {
                     format!("  if (!({})) {{ break; }}\n}}", g(&r, &i.srcs[2]))
                 } else {
                     "}".to_string()
@@ -483,7 +542,11 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             Ops::Cast => {
                 let src0 = &info[&i.srcs[0]];
                 if i.numel > 1 && i.addrspace == Some(AddrSpace::Reg) {
-                    format!("__builtin_convertvector({}, {})", g(&r, &i.srcs[0]), lang.render_type(&i))
+                    format!(
+                        "__builtin_convertvector({}, {})",
+                        g(&r, &i.srcs[0]),
+                        lang.render_type(&i)
+                    )
                 } else if src0.op == Ops::Const {
                     const_text(ctx, i.dt, (i.srcs[0]).clone(), lang)
                 } else {
@@ -493,10 +556,22 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 }
             }
             Ops::Bitcast => {
-                if matches!(i.addrspace, Some(AddrSpace::Global) | Some(AddrSpace::Local)) {
-                    format!("(({})({}))", lang.render_dtype(i.dt, 1, i.addrspace, false), g(&r, &i.srcs[0]))
+                if matches!(
+                    i.addrspace,
+                    Some(AddrSpace::Global) | Some(AddrSpace::Local)
+                ) {
+                    format!(
+                        "(({})({}))",
+                        lang.render_dtype(i.dt, 1, i.addrspace, false),
+                        g(&r, &i.srcs[0])
+                    )
                 } else if lang.bitcast_builtin {
-                    format!("__builtin_bit_cast({}, ({})({}))", lang.render_type(&i), lang.render_type(&info[&i.srcs[0]]), g(&r, &i.srcs[0]))
+                    format!(
+                        "__builtin_bit_cast({}, ({})({}))",
+                        lang.render_type(&i),
+                        lang.render_type(&info[&i.srcs[0]]),
+                        g(&r, &i.srcs[0])
+                    )
                 } else if lang.cuda {
                     // CUDARenderer string_rewrite (cstyle.py:434): tg_bitcast<dst>((src)(x))
                     let dst = lang.render_dtype(i.dt, 1, None, false);
@@ -511,10 +586,15 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             }
             Ops::Special => {
                 // code_for_workitem[arg[0]](arg[-1]) + "; /* {src[0].render()} */"
-                let (gfn, lfn, ifn) = lang.workitem.expect("TGERR: cstyle SPECIAL without code_for_workitem");
+                let (gfn, lfn, ifn) = lang
+                    .workitem
+                    .expect("TGERR: cstyle SPECIAL without code_for_workitem");
                 let arg = ctx.arg_of(u).clone();
                 let (kind, dim) = match &arg {
-                    Arg::Str(s) => (s.as_bytes()[0], s[s.len() - 1..].parse::<usize>().unwrap_or(0)),
+                    Arg::Str(s) => (
+                        s.as_bytes()[0],
+                        s[s.len() - 1..].parse::<usize>().unwrap_or(0),
+                    ),
                     other => panic!("TGERR: cstyle SPECIAL arg {other:?}"),
                 };
                 let f = match kind {
@@ -548,11 +628,20 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 let idx_s = g(&r, &i.srcs[1]);
                 if buf.derived == Some(AddrSpace::Alu) {
                     // lane access
-                    let idx_is_const_lane = idx.op == Ops::Cast && idx.srcs.first().map(|c| info[c].op == Ops::Const).unwrap_or(false);
+                    let idx_is_const_lane = idx.op == Ops::Cast
+                        && idx
+                            .srcs
+                            .first()
+                            .map(|c| info[c].op == Ops::Const)
+                            .unwrap_or(false);
                     if !idx_is_const_lane {
                         format!("({buf_s})[{idx_s}]")
                     } else {
-                        let lane = idx.srcs.first().and_then(|c| const_int(ctx, c.clone())).unwrap_or(0);
+                        let lane = idx
+                            .srcs
+                            .first()
+                            .and_then(|c| const_int(ctx, c.clone()))
+                            .unwrap_or(0);
                         if buf.numel > lang.gep_arr_threshold {
                             format!("{buf_s}[{lane}]")
                         } else {
@@ -582,7 +671,10 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                         g(&r, &i.srcs[1])
                     )
                 } else {
-                    format!("({})", lang.render_access(&info, (i.srcs[0]).clone(), &g(&r, &i.srcs[0])))
+                    format!(
+                        "({})",
+                        lang.render_access(&info, (i.srcs[0]).clone(), &g(&r, &i.srcs[0]))
+                    )
                 }
             }
             Ops::Store => {
@@ -591,7 +683,13 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             }
             Ops::Wmma => {
                 let nm = wmma_name(ctx, u.clone());
-                format!("__{}({}, {}, {})", nm, g(&r, &i.srcs[0]), g(&r, &i.srcs[1]), g(&r, &i.srcs[2]))
+                format!(
+                    "__{}({}, {}, {})",
+                    nm,
+                    g(&r, &i.srcs[0]),
+                    g(&r, &i.srcs[1]),
+                    g(&r, &i.srcs[2])
+                )
             }
             Ops::Buffer => {
                 // render_buffer (cstyle.py:169): the (local) storage declaration.
@@ -602,14 +700,21 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 } else {
                     String::new()
                 };
-                format!("{prefix}{} {}[{}];", lang.render_dtype(i.dt, 1, None, false), r[u], i.numel)
+                format!(
+                    "{prefix}{} {}[{}];",
+                    lang.render_dtype(i.dt, 1, None, false),
+                    r[u],
+                    i.numel
+                )
             }
             _ if group::in_(group::ALU, i.op) => {
                 let args: Vec<String> = i
                     .srcs
                     .iter()
                     .map(|v| {
-                        if info[v].op == i.op && matches!(i.op, Ops::Add | Ops::Mul | Ops::Xor | Ops::Or | Ops::And) {
+                        if info[v].op == i.op
+                            && matches!(i.op, Ops::Add | Ops::Mul | Ops::Xor | Ops::Or | Ops::And)
+                        {
                             strip_parens(&g(&r, v)).to_string()
                         } else {
                             g(&r, v)
@@ -625,8 +730,14 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             depth = depth.saturating_sub(1);
         }
         let is_const_cast = i.op == Ops::Cast && info[&i.srcs[0]].op == Ops::Const;
-        let reg_load = i.op == Ops::Load && info[&i.srcs[0]].derived == Some(AddrSpace::Reg) && child_count[u] == 1;
-        let ptr_cast = matches!(i.op, Ops::Cast | Ops::Bitcast) && matches!(i.addrspace, Some(AddrSpace::Global) | Some(AddrSpace::Local));
+        let reg_load = i.op == Ops::Load
+            && info[&i.srcs[0]].derived == Some(AddrSpace::Reg)
+            && child_count[u] == 1;
+        let ptr_cast = matches!(i.op, Ops::Cast | Ops::Bitcast)
+            && matches!(
+                i.addrspace,
+                Some(AddrSpace::Global) | Some(AddrSpace::Local)
+            );
         let single_use_inline = matches!(i.op, Ops::Stack | Ops::Cast | Ops::Bitcast)
             || (group::in_(group::ALU, i.op) && i.op != Ops::Where);
         let inline = (i.op != Ops::Cast || i.numel == 1)
@@ -638,13 +749,17 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         if inline {
             r.insert(u.clone(), l);
         } else {
-            let full = if !matches!(i.op, Ops::Range | Ops::Store | Ops::Buffer) && i.dt != dtype::VOID {
-                let semi = if i.op == Ops::Special { "" } else { ";" };
-                format!("{} {} = {}{semi}", lang.render_type(&i), r[u], l)
-            } else {
-                l
-            };
-            let indented: Vec<String> = full.split('\n').map(|line| format!("{}{}", "  ".repeat(depth), line)).collect();
+            let full =
+                if !matches!(i.op, Ops::Range | Ops::Store | Ops::Buffer) && i.dt != dtype::VOID {
+                    let semi = if i.op == Ops::Special { "" } else { ";" };
+                    format!("{} {} = {}{semi}", lang.render_type(&i), r[u], l)
+                } else {
+                    l
+                };
+            let indented: Vec<String> = full
+                .split('\n')
+                .map(|line| format!("{}{}", "  ".repeat(depth), line))
+                .collect();
             kernel.push(indented.join("\n"));
             if let Some(p) = prefix {
                 *counters.entry(p).or_insert(0) += 1;
@@ -660,7 +775,10 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     if lang.vector_defines || lang.cuda {
         for u in lst {
             let i = &info[u];
-            if matches!(i.addrspace, None | Some(AddrSpace::Alu)) && i.dt != dtype::VOID && i.has_shape {
+            if matches!(i.addrspace, None | Some(AddrSpace::Alu))
+                && i.dt != dtype::VOID
+                && i.has_shape
+            {
                 let key = (i.dt, i.numel);
                 if !seen_dts.contains(&key) {
                     seen_dts.push(key);
@@ -672,15 +790,16 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     if lang.vector_defines {
         for (dt, count) in &seen_dts {
             if *count > 1 {
-                let alignment = if *dt == dtype::BOOL { 1 } else { 2u64.pow((dt.itemsize() as u32 * *count as u32).ilog2()) };
+                let alignment = if *dt == dtype::BOOL {
+                    1
+                } else {
+                    2u64.pow((dt.itemsize() as u32 * *count as u32).ilog2())
+                };
                 let scal = lang.render_dtype(*dt, 1, Some(AddrSpace::Reg), false);
                 let vec = lang.render_dtype(*dt, *count, Some(AddrSpace::Reg), false);
                 define_lines.push(format!(
                     "typedef {} {} __attribute__((aligned({}),ext_vector_type({})));",
-                    scal,
-                    vec,
-                    alignment,
-                    count
+                    scal, vec, alignment, count
                 ));
             }
         }
@@ -696,7 +815,10 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             } else {
                 ("", lang.buffer_suffix)
             };
-            format!("{vol}{pre}{}{suf} {nm}", lang.render_dtype(i.dt, 1, as_, false))
+            format!(
+                "{vol}{pre}{}{suf} {nm}",
+                lang.render_dtype(i.dt, 1, as_, false)
+            )
         })
         .collect();
     // launch_bounds: product of the local SPECIAL ranges' extents (cstyle.py:158).
@@ -707,13 +829,25 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             && s.starts_with('l')
         {
             let rng = info[u].srcs[0].clone();
-            if let Some(ext) = info.get(&rng).and_then(|ri| ri.srcs.first()).and_then(|e| const_int(ctx, e.clone())) {
+            if let Some(ext) = info
+                .get(&rng)
+                .and_then(|ri| ri.srcs.first())
+                .and_then(|e| const_int(ctx, e.clone()))
+            {
                 launch_bounds *= ext as i64;
             }
         }
     }
-    let ktypedef = lang.kernel_typedef.replace("{launch_bounds}", &launch_bounds.to_string());
-    let prg = format!("{} {}({}) {{\n{}\n}}", ktypedef, name, buftypes.join(", "), kernel.join("\n"));
+    let ktypedef = lang
+        .kernel_typedef
+        .replace("{launch_bounds}", &launch_bounds.to_string());
+    let prg = format!(
+        "{} {}({}) {{\n{}\n}}",
+        ktypedef,
+        name,
+        buftypes.join(", "),
+        kernel.join("\n")
+    );
     if lang.cuda {
         // CUDARenderer.render_kernel prefix (cstyle.py:436-455).
         let mut prefix: Vec<String> = vec![
@@ -734,7 +868,8 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         for (dt, count) in &seen_dts {
             let fp8 = dtype::in_set(dtype::FP8S, *dt);
             let halfbf = *dt == dtype::FLOAT16 || *dt == dtype::BFLOAT16;
-            if (halfbf && (*count == 4 || *count == 8)) || (fp8 && matches!(*count, 2 | 4 | 8 | 16)) {
+            if (halfbf && (*count == 4 || *count == 8)) || (fp8 && matches!(*count, 2 | 4 | 8 | 16))
+            {
                 prefix.push(cuda_vector_prefix(lang, *dt, *count));
             }
         }
@@ -761,7 +896,11 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
 fn cuda_vector_prefix(lang: &CStyleLang, dt: DTypeId, count: i64) -> String {
     let vec = lang.render_dtype(dt, count, Some(AddrSpace::Reg), false);
     let scal = lang.render_dtype(dt, 1, None, false);
-    let nms: Vec<String> = "xyzwabcdefghijkl".chars().map(|c| c.to_string()).chain((16..32).map(|i| format!("v{i}"))).collect();
+    let nms: Vec<String> = "xyzwabcdefghijkl"
+        .chars()
+        .map(|c| c.to_string())
+        .chain((16..32).map(|i| format!("v{i}")))
+        .collect();
     let elems: Vec<String> = nms[..count as usize].to_vec();
     let elems_join = elems.join(", ");
     let header: Vec<String> = elems.iter().map(|e| format!("{scal} {e}")).collect();
@@ -781,7 +920,10 @@ fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
 
 /// `wmma_args` (cstyle.py:112) — the deduped `(name, dims, dtype_in, dtype_out,
 /// upcast_sizes)` per WMMA op in the linear list.
-fn wmma_args(ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<(String, (i64, i64, i64), DTypeId, DTypeId, (i64, i64, i64))> {
+fn wmma_args(
+    ctx: &mut UOpCtx,
+    lst: &[UopId],
+) -> Vec<(String, (i64, i64, i64), DTypeId, DTypeId, (i64, i64, i64))> {
     use crate::uop::Ops;
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
@@ -799,7 +941,11 @@ fn wmma_args(ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<(String, (i64, i64, i64), D
                 let dims = match &items[0] {
                     Arg::Seq { items: d, .. } => {
                         let v: Vec<i64> = d.iter().filter_map(|it| it.as_int()).collect();
-                        if v.len() >= 3 { (v[0], v[1], v[2]) } else { continue }
+                        if v.len() >= 3 {
+                            (v[0], v[1], v[2])
+                        } else {
+                            continue;
+                        }
                     }
                     _ => continue,
                 };
@@ -829,18 +975,43 @@ fn wmma_args(ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<(String, (i64, i64, i64), D
 /// The CUDARenderer `mma.sync.aligned` asm wrapper (cstyle.py:449-455).
 fn wmma_asm_prefix(lang: &CStyleLang, ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<String> {
     let map_in = |d: DTypeId| -> &'static str {
-        if d == dtype::FLOAT32 { "tf32" } else if d == dtype::FLOAT16 { "f16" } else if d == dtype::BFLOAT16 { "bf16" }
-        else if d == dtype::FP8E4M3 { "e4m3" } else if d == dtype::FP8E5M2 { "e5m2" } else { "?" }
+        if d == dtype::FLOAT32 {
+            "tf32"
+        } else if d == dtype::FLOAT16 {
+            "f16"
+        } else if d == dtype::BFLOAT16 {
+            "bf16"
+        } else if d == dtype::FP8E4M3 {
+            "e4m3"
+        } else if d == dtype::FP8E5M2 {
+            "e5m2"
+        } else {
+            "?"
+        }
     };
     let map_out = |d: DTypeId| -> &'static str {
-        if d == dtype::FLOAT32 { "f32" } else if d == dtype::FLOAT16 { "f16" } else { "?" }
+        if d == dtype::FLOAT32 {
+            "f32"
+        } else if d == dtype::FLOAT16 {
+            "f16"
+        } else {
+            "?"
+        }
     };
     let mut out = Vec::new();
     for (name, (n, m, k), dtype_in, dtype_out, upcast) in wmma_args(ctx, lst) {
         let sizes = [upcast.0, upcast.1, upcast.2];
         let dts = [dtype_in, dtype_in, dtype_out];
-        let wd: Vec<String> = dts.iter().zip(sizes.iter()).map(|(d, i)| lang.render_dtype(*d, *i, Some(AddrSpace::Reg), false)).collect();
-        let nops: Vec<i64> = dts.iter().zip(sizes.iter()).map(|(d, i)| i * d.itemsize() as i64 / 4).collect();
+        let wd: Vec<String> = dts
+            .iter()
+            .zip(sizes.iter())
+            .map(|(d, i)| lang.render_dtype(*d, *i, Some(AddrSpace::Reg), false))
+            .collect();
+        let nops: Vec<i64> = dts
+            .iter()
+            .zip(sizes.iter())
+            .map(|(d, i)| i * d.itemsize() as i64 / 4)
+            .collect();
         let total: i64 = nops.iter().sum();
         let operands: Vec<String> = (0..total).map(|i| format!("%{i}")).collect();
         let c = &operands[..nops[2] as usize];
@@ -856,9 +1027,13 @@ fn wmma_asm_prefix(lang: &CStyleLang, ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<St
         let din = map_in(dtype_in);
         let dout = map_out(dtype_out);
         let mut s = String::new();
-        s.push_str(&format!("__device__ {wmc} __{name}({wma} a, {wmb} b, {wmc} c){{\n"));
+        s.push_str(&format!(
+            "__device__ {wmc} __{name}({wma} a, {wmb} b, {wmc} c){{\n"
+        ));
         s.push_str("  int *a_pk = (int *)(&a), *b_pk = (int *)(&b), *c_pk = (int *)(&c);\n");
-        s.push_str(&format!("  asm(\"mma.sync.aligned.m{m}n{n}k{k}.row.col.{dout}.{din}.{din}.{dout}\"\n"));
+        s.push_str(&format!(
+            "  asm(\"mma.sync.aligned.m{m}n{n}k{k}.row.col.{dout}.{din}.{din}.{dout}\"\n"
+        ));
         s.push_str(&format!("      \"{{{c0s}}}, {{{aops}}},\"\n"));
         s.push_str(&format!("      \"{{{bops}}}, {{{c0s}}};\"\n"));
         s.push_str(&format!("    : {}\n", outc.join(", ")));
@@ -924,7 +1099,11 @@ fn const_text(ctx: &mut UOpCtx, dt: DTypeId, c: UopId, lang: &CStyleLang) -> Str
         return format!("{}u", trunc_int(vint.unwrap_or(0), dt));
     }
     if dt == dtype::BOOL {
-        return if vint.unwrap_or(0) != 0 { "1".to_string() } else { "0".to_string() };
+        return if vint.unwrap_or(0) != 0 {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        };
     }
     // tinygrad wraps these as f"({render_cast(x, ...)})" -> ((type)(val))
     if dt == dtype::UINT8 || dt == dtype::UINT16 {
@@ -977,21 +1156,32 @@ fn wmma_name(ctx: &mut UOpCtx, u: UopId) -> String {
     if let Arg::Seq { tuple: true, items } = arg {
         if items.len() >= 2 {
             let dims: Vec<String> = match &items[0] {
-                Arg::Seq { items: d, .. } => d.iter().filter_map(|it| it.as_int()).map(|v| v.to_string()).collect(),
+                Arg::Seq { items: d, .. } => d
+                    .iter()
+                    .filter_map(|it| it.as_int())
+                    .map(|v| v.to_string())
+                    .collect(),
                 _ => vec![],
             };
             let dtype_in = match &items[1] {
                 Arg::Dtype(d) => d.name().to_string(),
                 _ => "?".to_string(),
             };
-            return format!("WMMA_{}_{}_{}", dims.join("_"), dtype_in, dt_out.name()).replace(' ', "_");
+            return format!("WMMA_{}_{}_{}", dims.join("_"), dtype_in, dt_out.name())
+                .replace(' ', "_");
         }
     }
     "WMMA".to_string()
 }
 
 /// `CStyleLanguage.code_for_op` (clang subset + CUDARenderer overrides).
-fn code_for_op(op: Ops, a: &[String], clang: bool, cuda: bool, dt: crate::dtype::DTypeId) -> String {
+fn code_for_op(
+    op: Ops,
+    a: &[String],
+    clang: bool,
+    cuda: bool,
+    dt: crate::dtype::DTypeId,
+) -> String {
     // CUDARenderer (cstyle.py:413): half/bf16 use the `h*` intrinsics.
     let h = cuda && (dt == crate::dtype::FLOAT16 || dt == crate::dtype::BFLOAT16);
     match op {
@@ -999,31 +1189,55 @@ fn code_for_op(op: Ops, a: &[String], clang: bool, cuda: bool, dt: crate::dtype:
             if h {
                 format!("hsqrt({})", a[0])
             } else if clang {
-                if dt == crate::dtype::FLOAT64 { format!("__builtin_sqrt({})", a[0]) } else { format!("__builtin_sqrtf({})", a[0]) }
+                if dt == crate::dtype::FLOAT64 {
+                    format!("__builtin_sqrt({})", a[0])
+                } else {
+                    format!("__builtin_sqrtf({})", a[0])
+                }
             } else {
                 format!("sqrt({})", a[0])
             }
         }
         Ops::Exp2 => {
-            if h { format!("hexp2({})", a[0]) } else { format!("exp2({})", a[0]) }
+            if h {
+                format!("hexp2({})", a[0])
+            } else {
+                format!("exp2({})", a[0])
+            }
         }
         Ops::Log2 => {
-            if h { format!("hlog2({})", a[0]) } else { format!("log2({})", a[0]) }
+            if h {
+                format!("hlog2({})", a[0])
+            } else {
+                format!("log2({})", a[0])
+            }
         }
         Ops::Sin => {
-            if h { format!("hsin({})", a[0]) } else { format!("sin({})", a[0]) }
+            if h {
+                format!("hsin({})", a[0])
+            } else {
+                format!("sin({})", a[0])
+            }
         }
         Ops::Trunc => {
             if h {
                 format!("htrunc({})", a[0])
             } else if clang {
-                if dt == crate::dtype::FLOAT64 { format!("__builtin_trunc({})", a[0]) } else { format!("__builtin_truncf({})", a[0]) }
+                if dt == crate::dtype::FLOAT64 {
+                    format!("__builtin_trunc({})", a[0])
+                } else {
+                    format!("__builtin_truncf({})", a[0])
+                }
             } else {
                 format!("trunc({})", a[0])
             }
         }
         Ops::Reciprocal => {
-            if h { format!("hrcp({})", a[0]) } else { format!("(1/{})", a[0]) }
+            if h {
+                format!("hrcp({})", a[0])
+            } else {
+                format!("(1/{})", a[0])
+            }
         }
         Ops::Neg => format!("-{}", a[0]),
         Ops::And => format!("({}&{})", a[0], a[1]),
@@ -1064,16 +1278,25 @@ mod tests {
         let cl = CStyleLang::opencl();
         assert_eq!(ctext(ConstVal::Int(0), dtype::UINT8, &cl), "((uchar)(0u))");
         assert_eq!(ctext(ConstVal::Int(3), dtype::INT8, &cl), "((char)(3))");
-        assert_eq!(ctext(ConstVal::Int(3), dtype::UINT16, &cl), "((ushort)(3u))");
+        assert_eq!(
+            ctext(ConstVal::Int(3), dtype::UINT16, &cl),
+            "((ushort)(3u))"
+        );
         assert_eq!(ctext(ConstVal::Int(3), dtype::INT16, &cl), "((short)(3))");
         assert_eq!(ctext(ConstVal::Int(3), dtype::UINT32, &cl), "3u");
         assert_eq!(ctext(ConstVal::Int(3), dtype::INT32, &cl), "3");
         assert_eq!(ctext(ConstVal::Bool(true), dtype::BOOL, &cl), "1");
         assert_eq!(ctext(ConstVal::Float(2.0), dtype::FLOAT32, &cl), "2.0f");
         // OpenCL has no half type_map entry -> tinygrad renders `half`; Clang maps it.
-        assert_eq!(ctext(ConstVal::Float(2.0), dtype::FLOAT16, &cl), "((half)(2.0f))");
+        assert_eq!(
+            ctext(ConstVal::Float(2.0), dtype::FLOAT16, &cl),
+            "((half)(2.0f))"
+        );
         let clang = CStyleLang::clang();
-        assert_eq!(ctext(ConstVal::Float(2.0), dtype::FLOAT16, &clang), "((__fp16)(2.0f))");
+        assert_eq!(
+            ctext(ConstVal::Float(2.0), dtype::FLOAT16, &clang),
+            "((__fp16)(2.0f))"
+        );
     }
 
     /// Non-finite float consts are rendered through a cast of the lang's
@@ -1081,10 +1304,22 @@ mod tests {
     #[test]
     fn const_nonfinite_rendering_matches_tinygrad() {
         let cl = CStyleLang::opencl();
-        assert_eq!(ctext(ConstVal::Float(f64::NAN), dtype::FLOAT32, &cl), "((float)(NAN))");
-        assert_eq!(ctext(ConstVal::Float(f64::INFINITY), dtype::FLOAT32, &cl), "((float)(INFINITY))");
-        assert_eq!(ctext(ConstVal::Float(f64::NEG_INFINITY), dtype::FLOAT32, &cl), "((float)(-INFINITY))");
+        assert_eq!(
+            ctext(ConstVal::Float(f64::NAN), dtype::FLOAT32, &cl),
+            "((float)(NAN))"
+        );
+        assert_eq!(
+            ctext(ConstVal::Float(f64::INFINITY), dtype::FLOAT32, &cl),
+            "((float)(INFINITY))"
+        );
+        assert_eq!(
+            ctext(ConstVal::Float(f64::NEG_INFINITY), dtype::FLOAT32, &cl),
+            "((float)(-INFINITY))"
+        );
         let clang = CStyleLang::clang();
-        assert_eq!(ctext(ConstVal::Float(f64::NAN), dtype::FLOAT32, &clang), "((float)(__builtin_nanf(\"\")))");
+        assert_eq!(
+            ctext(ConstVal::Float(f64::NAN), dtype::FLOAT32, &clang),
+            "((float)(__builtin_nanf(\"\")))"
+        );
     }
 }

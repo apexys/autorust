@@ -4,13 +4,18 @@
 
 use autorust::engine::session::Session;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 mod attention_golden;
 use attention_golden::SDPA_GOLDEN;
 
 fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
-    assert_eq!(got.len(), want.len(), "{name}: length {} != {}", got.len(), want.len());
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "{name}: length {} != {}",
+        got.len(),
+        want.len()
+    );
     for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
         let tol = rtol * b.abs().max(1.0);
         assert!((a - b).abs() <= tol, "{name}[{i}]: got {a}, want {b}");
@@ -18,13 +23,17 @@ fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
 }
 
 fn shape_of(t: &Tensor) -> Vec<usize> {
-    t.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
+    t.shape()
+        .as_slice()
+        .iter()
+        .map(|s| s.clone().as_i64().unwrap_or(0) as usize)
+        .collect()
 }
 
 #[test]
 fn sdpa_matches_tinygrad() {
     for g in SDPA_GOLDEN {
-        let mut ctx = Ctx::new();
+        let ctx = Ctx::new();
         let mut sess = Session::new();
         let q = Tensor::from_slice(&ctx, g.q, None, None).reshape(g.q_shape);
         let k = Tensor::from_slice(&ctx, g.k, None, None).reshape(g.k_shape);
@@ -33,11 +42,15 @@ fn sdpa_matches_tinygrad() {
             None
         } else {
             let m = Tensor::from_slice(&ctx, g.mask, None, None).reshape(g.mask_shape);
-            if g.mask_bool { Some(m.cast(autorust::dtype::BOOL)) } else { Some(m) }
+            if g.mask_bool {
+                Some(m.cast(autorust::dtype::BOOL))
+            } else {
+                Some(m)
+            }
         };
-        let out = q.scaled_dot_product_attention(&k, &v, mask.as_ref(), 0.0, g.is_causal, g.enable_gqa);
+        let out =
+            q.scaled_dot_product_attention(&k, &v, mask.as_ref(), 0.0, g.is_causal, g.enable_gqa);
         assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
         close(&out.to_list::<f32>(&mut sess), g.out, 1e-5, g.name);
     }
 }
-

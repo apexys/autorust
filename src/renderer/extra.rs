@@ -8,11 +8,11 @@
 //! runs in the "final rewrite" stage (`codegen/__init__.py:377-379`).
 
 use crate::dtype::{self, ConstVal, DTypeId};
-use crate::uop::ctx::UOpCtx;
-use crate::uop::ops::{group, Ops};
-use crate::uop::sym::{r, sget};
-use crate::uop::upat::{opset_diff, PatternMatcher, RuleFn, UPat};
 use crate::uop::UopId;
+use crate::uop::ctx::UOpCtx;
+use crate::uop::ops::{Ops, group};
+use crate::uop::sym::{r, sget};
+use crate::uop::upat::{PatternMatcher, RuleFn, UPat, opset_diff};
 
 fn f32() -> DTypeId {
     dtype::FLOAT32

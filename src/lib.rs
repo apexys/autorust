@@ -60,10 +60,10 @@
 #![allow(clippy::mutable_key_type)]
 
 pub mod codegen;
-pub mod engine;
-pub mod renderer;
 pub mod dtype;
+pub mod engine;
 pub mod helpers;
+pub mod renderer;
 
 pub mod models;
 pub mod runtime;
@@ -95,7 +95,11 @@ pub fn graph_summary(json: &str) -> Result<String, String> {
             id.id(),
             id.op.pyname(),
             id.dtype.attr(),
-            id.srcs.iter().map(|s| s.id().to_string()).collect::<Vec<_>>().join(","),
+            id.srcs
+                .iter()
+                .map(|s| s.id().to_string())
+                .collect::<Vec<_>>()
+                .join(","),
             id.arg
         ));
     }
