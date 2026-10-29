@@ -66,6 +66,7 @@ pub mod helpers;
 pub mod renderer;
 
 pub mod models;
+pub mod onnx;
 pub mod runtime;
 pub mod schedule;
 pub mod tensor;

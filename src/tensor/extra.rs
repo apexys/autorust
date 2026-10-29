@@ -832,3 +832,60 @@ impl Tensor {
         ret.transpose(-1, axis)
     }
 }
+
+impl Tensor {
+    /// `a <= b` (the port predates the `le` method; ONNX needs it).
+    pub fn le(&self, other: impl Into<crate::tensor::TensorAddArg>) -> Tensor {
+        let other = other.into();
+        let mut ctx = self.ctx().borrow_mut();
+        let ou = match other {
+            crate::tensor::TensorAddArg::T(o) => {
+                self.ctx().ensure_same(o.ctx());
+                o.uop()
+            }
+            crate::tensor::TensorAddArg::C(c) => self.const_like_ctx(&mut ctx, c, None).uop(),
+        };
+        let u = crate::tensor::elementwise::le(&mut ctx, self.uop(), ou);
+        Tensor::from_uop(&ctx, u)
+    }
+
+    /// `a & b` for bools (ONNX `And`).
+    pub fn logical_and(&self, other: &Tensor) -> Tensor {
+        self.ctx().ensure_same(other.ctx());
+        let mut ctx = self.ctx().borrow_mut();
+        let u = crate::tensor::elementwise::and(&mut ctx, self.uop(), other.uop());
+        Tensor::from_uop(&ctx, u)
+    }
+
+    /// `a | b` for bools (ONNX `Or`).
+    pub fn logical_or(&self, other: &Tensor) -> Tensor {
+        self.ctx().ensure_same(other.ctx());
+        let mut ctx = self.ctx().borrow_mut();
+        let u = crate::tensor::elementwise::or(&mut ctx, self.uop(), other.uop());
+        Tensor::from_uop(&ctx, u)
+    }
+
+    /// `a ^ b` for bools (ONNX `Xor`).
+    pub fn logical_xor(&self, other: &Tensor) -> Tensor {
+        self.ctx().ensure_same(other.ctx());
+        let mut ctx = self.ctx().borrow_mut();
+        let u = crate::tensor::elementwise::xor(&mut ctx, self.uop(), other.uop());
+        Tensor::from_uop(&ctx, u)
+    }
+
+    /// `a ** b` (ONNX `Pow`); the output keeps the base dtype, as in ONNX.
+    pub fn pow(&self, other: &Tensor) -> Tensor {
+        self.ctx().ensure_same(other.ctx());
+        let base_dt = self.dtype();
+        let out = {
+            let mut ctx = self.ctx().borrow_mut();
+            let u = crate::tensor::elementwise::pow(&mut ctx, self.uop(), other.uop());
+            Tensor::from_uop(&ctx, u)
+        };
+        if crate::dtype::is_int(base_dt) {
+            out.round().cast(base_dt)
+        } else {
+            out.cast(base_dt)
+        }
+    }
+}
