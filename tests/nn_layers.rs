@@ -5,7 +5,7 @@
 
 use autorust::engine::session::Session;
 use autorust::tensor::nn::{conv1d, conv_transpose1d, ConvTranspose2d, Embedding, InstanceNorm, LayerNorm2d, LSTMCell, RMSNorm};
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 mod nn_golden;
@@ -19,128 +19,128 @@ fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
     }
 }
 
-fn shape_of(t: &Tensor, ctx: &mut UOpCtx) -> Vec<usize> {
-    t.shape(ctx).as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
+fn shape_of(t: &Tensor) -> Vec<usize> {
+    t.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
 }
 
 #[test]
 fn instancenorm_matches_tinygrad() {
     for g in IN_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let x = Tensor::from_slice(&mut ctx, g.x, None, None).reshape(&mut ctx, g.x_shape);
-        let mut m = InstanceNorm::new(&mut ctx, g.num_features, g.eps, true);
-        m.weight = Some(Tensor::from_slice(&mut ctx, g.weight, None, None));
-        m.bias = Some(Tensor::from_slice(&mut ctx, g.bias, None, None));
-        let out = m.forward(&x, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-4, g.name);
+        let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
+        let mut m = InstanceNorm::new(&ctx, g.num_features, g.eps, true);
+        m.weight = Some(Tensor::from_slice(&ctx, g.weight, None, None));
+        m.bias = Some(Tensor::from_slice(&ctx, g.bias, None, None));
+        let out = m.forward(&x);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
 }
 
 #[test]
 fn layernorm2d_matches_tinygrad() {
     for g in L2_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let x = Tensor::from_slice(&mut ctx, g.x, None, None).reshape(&mut ctx, g.x_shape);
-        let mut m = LayerNorm2d::new(&mut ctx, g.num_channels, g.eps, true);
-        m.norm.weight = Some(Tensor::from_slice(&mut ctx, g.weight, None, None));
-        m.norm.bias = Some(Tensor::from_slice(&mut ctx, g.bias, None, None));
-        let out = m.forward(&x, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-4, g.name);
+        let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
+        let mut m = LayerNorm2d::new(&ctx, g.num_channels, g.eps, true);
+        m.norm.weight = Some(Tensor::from_slice(&ctx, g.weight, None, None));
+        m.norm.bias = Some(Tensor::from_slice(&ctx, g.bias, None, None));
+        let out = m.forward(&x);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
 }
 
 #[test]
 fn rmsnorm_matches_tinygrad() {
     for g in RMS_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let x = Tensor::from_slice(&mut ctx, g.x, None, None).reshape(&mut ctx, g.x_shape);
-        let mut m = RMSNorm::new(&mut ctx, g.dim, g.eps, true);
-        m.weight = Some(Tensor::from_slice(&mut ctx, g.weight, None, None));
-        let out = m.forward(&x, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-4, g.name);
+        let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
+        let mut m = RMSNorm::new(&ctx, g.dim, g.eps, true);
+        m.weight = Some(Tensor::from_slice(&ctx, g.weight, None, None));
+        let out = m.forward(&x);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
 }
 
 #[test]
 fn embedding_matches_tinygrad() {
     for g in EMB_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let weight = Tensor::from_slice(&mut ctx, g.weight, None, None).reshape(&mut ctx, g.weight_shape);
-        let idx = Tensor::from_slice(&mut ctx, g.idx, Some(autorust::dtype::INT32), None).reshape(&mut ctx, g.idx_shape);
-        let mut m = Embedding::new(&mut ctx, g.vocab_size, g.embed_size);
+        let weight = Tensor::from_slice(&ctx, g.weight, None, None).reshape(g.weight_shape);
+        let idx = Tensor::from_slice(&ctx, g.idx, Some(autorust::dtype::INT32), None).reshape(g.idx_shape);
+        let mut m = Embedding::new(&ctx, g.vocab_size, g.embed_size);
         m.weight = weight;
-        let out = m.forward(&idx, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-4, g.name);
+        let out = m.forward(&idx);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
 }
 
 #[test]
 fn lstmcell_matches_tinygrad() {
     for g in LSTM_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let x = Tensor::from_slice(&mut ctx, g.x, None, None).reshape(&mut ctx, g.x_shape);
-        let h0 = Tensor::from_slice(&mut ctx, g.h0, None, None).reshape(&mut ctx, g.h0_shape);
-        let c0 = Tensor::from_slice(&mut ctx, g.c0, None, None).reshape(&mut ctx, g.c0_shape);
-        let mut m = LSTMCell::new(&mut ctx, g.input_size, g.hidden_size, true);
-        m.weight_ih = Tensor::from_slice(&mut ctx, g.weight_ih, None, None).reshape(&mut ctx, g.weight_ih_shape);
-        m.weight_hh = Tensor::from_slice(&mut ctx, g.weight_hh, None, None).reshape(&mut ctx, g.weight_hh_shape);
-        m.bias_ih = Some(Tensor::from_slice(&mut ctx, g.bias_ih, None, None));
-        m.bias_hh = Some(Tensor::from_slice(&mut ctx, g.bias_hh, None, None));
-        let (h1, c1) = m.forward(&x, Some((&h0, &c0)), &mut ctx);
-        assert_eq!(shape_of(&h1, &mut ctx), g.h1_shape.to_vec(), "{}: h1 shape", g.name);
-        close(&h1.to_list::<f32>(&mut ctx, &mut sess), g.h1, 1e-4, &format!("{}_h1", g.name));
-        close(&c1.to_list::<f32>(&mut ctx, &mut sess), g.c1, 1e-4, &format!("{}_c1", g.name));
-        let (hz, cz) = m.forward(&x, None, &mut ctx);
-        close(&hz.to_list::<f32>(&mut ctx, &mut sess), g.hz, 1e-4, &format!("{}_hz", g.name));
-        close(&cz.to_list::<f32>(&mut ctx, &mut sess), g.cz, 1e-4, &format!("{}_cz", g.name));
+        let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
+        let h0 = Tensor::from_slice(&ctx, g.h0, None, None).reshape(g.h0_shape);
+        let c0 = Tensor::from_slice(&ctx, g.c0, None, None).reshape(g.c0_shape);
+        let mut m = LSTMCell::new(&ctx, g.input_size, g.hidden_size, true);
+        m.weight_ih = Tensor::from_slice(&ctx, g.weight_ih, None, None).reshape(g.weight_ih_shape);
+        m.weight_hh = Tensor::from_slice(&ctx, g.weight_hh, None, None).reshape(g.weight_hh_shape);
+        m.bias_ih = Some(Tensor::from_slice(&ctx, g.bias_ih, None, None));
+        m.bias_hh = Some(Tensor::from_slice(&ctx, g.bias_hh, None, None));
+        let (h1, c1) = m.forward(&x, Some((&h0, &c0)));
+        assert_eq!(shape_of(&h1), g.h1_shape.to_vec(), "{}: h1 shape", g.name);
+        close(&h1.to_list::<f32>(&mut sess), g.h1, 1e-4, &format!("{}_h1", g.name));
+        close(&c1.to_list::<f32>(&mut sess), g.c1, 1e-4, &format!("{}_c1", g.name));
+        let (hz, cz) = m.forward(&x, None);
+        close(&hz.to_list::<f32>(&mut sess), g.hz, 1e-4, &format!("{}_hz", g.name));
+        close(&cz.to_list::<f32>(&mut sess), g.cz, 1e-4, &format!("{}_cz", g.name));
     }
 }
 
 #[test]
 fn conv1d_matches_tinygrad() {
     for g in C1D_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let x = Tensor::from_slice(&mut ctx, g.x, None, None).reshape(&mut ctx, g.x_shape);
-        let mut m = conv1d(&mut ctx, g.in_channels, g.out_channels, g.kernel_size, g.stride, g.padding, g.dilation, g.groups, !g.bias.is_empty());
-        m.weight = Tensor::from_slice(&mut ctx, g.weight, None, None).reshape(&mut ctx, g.weight_shape);
+        let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
+        let mut m = conv1d(&mut ctx.raw(), g.in_channels, g.out_channels, g.kernel_size, g.stride, g.padding, g.dilation, g.groups, !g.bias.is_empty());
+        m.weight = Tensor::from_slice(&ctx, g.weight, None, None).reshape(g.weight_shape);
         if !g.bias.is_empty() {
-            m.bias = Some(Tensor::from_slice(&mut ctx, g.bias, None, None));
+            m.bias = Some(Tensor::from_slice(&ctx, g.bias, None, None));
         }
-        let out = m.forward(&x, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-4, g.name);
+        let out = m.forward(&x);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
 }
 
 #[test]
 fn convtranspose_matches_tinygrad() {
     for g in CT_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let x = Tensor::from_slice(&mut ctx, g.x, None, None).reshape(&mut ctx, g.x_shape);
+        let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
         let pad = vec![(g.padding, g.padding); g.kernel_size.len()];
         let bias = !g.bias.is_empty();
         let mut m = if g.kernel_size.len() == 1 {
-            conv_transpose1d(&mut ctx, g.in_channels, g.out_channels, g.kernel_size[0], g.stride, g.padding, g.output_padding, g.dilation, g.groups, bias)
+            conv_transpose1d(&mut ctx.raw(), g.in_channels, g.out_channels, g.kernel_size[0], g.stride, g.padding, g.output_padding, g.dilation, g.groups, bias)
         } else {
-            ConvTranspose2d::new(&mut ctx, g.in_channels, g.out_channels, g.kernel_size, g.stride, &pad, g.output_padding, g.dilation, g.groups, bias)
+            ConvTranspose2d::new(&ctx, g.in_channels, g.out_channels, g.kernel_size, g.stride, &pad, g.output_padding, g.dilation, g.groups, bias)
         };
-        m.weight = Tensor::from_slice(&mut ctx, g.weight, None, None).reshape(&mut ctx, g.weight_shape);
+        m.weight = Tensor::from_slice(&ctx, g.weight, None, None).reshape(g.weight_shape);
         if bias {
-            m.bias = Some(Tensor::from_slice(&mut ctx, g.bias, None, None));
+            m.bias = Some(Tensor::from_slice(&ctx, g.bias, None, None));
         }
-        let out = m.forward(&x, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-4, g.name);
+        let out = m.forward(&x);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
 }

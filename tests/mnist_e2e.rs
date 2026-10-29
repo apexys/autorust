@@ -16,7 +16,7 @@ mod mnist;
 use autorust::engine::session::Session;
 use autorust::tensor::nn::Module;
 use autorust::tensor::optim::{Adam, Optim};
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 use mnist::{fetch, get_test_acc, load_images, load_labels, mnist_dir, Model};
@@ -35,31 +35,31 @@ fn mnist_one_step_and_eval() {
         fetch(&format!("{base}{gz}"), &dir.join(raw));
     }
 
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
     let n = 4;
-    let x = load_images(&mut ctx, &mut sess, &dir.join("train-images-idx3-ubyte"), n);
-    let y = load_labels(&mut ctx, &mut sess, &dir.join("train-labels-idx1-ubyte"), n);
-    assert_eq!(x.shape(&mut ctx).iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize, 1, 28, 28]);
-    assert_eq!(y.shape(&mut ctx).iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize]);
+    let x = load_images(&mut ctx.raw(), &mut sess, &dir.join("train-images-idx3-ubyte"), n);
+    let y = load_labels(&mut ctx.raw(), &mut sess, &dir.join("train-labels-idx1-ubyte"), n);
+    assert_eq!(x.shape().iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize, 1, 28, 28]);
+    assert_eq!(y.shape().iter().map(|s| s.clone().as_usize().unwrap()).collect::<Vec<_>>(), vec![n as usize]);
 
     Tensor::manual_seed(0);
-    let model = Model::new(&mut ctx).into_params(&mut ctx);
+    let model = Model::new(&ctx).into_params();
     let params: Vec<Tensor> = model.params().collect();
-    let opt = Adam::new(&mut ctx, params.clone(), 1e-3);
-    let before = params[0].to_list::<f32>(&mut ctx, &mut sess);
+    let opt = Adam::new(params.clone(), 1e-3);
+    let before = params[0].to_list::<f32>(&mut sess);
 
-    let out = model.forward(&x, &mut ctx, &mut sess, true);
-    let loss = out.sparse_categorical_crossentropy(&mut ctx, &y, -1, 0.0, "mean");
-    loss.backward(&mut ctx, &params, None);
-    opt.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
-    opt.zero_grad(&ctx);
+    let out = model.forward(&x, &mut sess, true);
+    let loss = out.sparse_categorical_crossentropy(&y, -1, 0.0, "mean");
+    loss.backward(&params, None);
+    opt.schedule_step(&mut sess, std::slice::from_ref(&loss));
+    opt.zero_grad();
 
-    let l = loss.item::<f32>(&mut ctx, &mut sess);
+    let l = loss.item::<f32>(&mut sess);
     assert!(l.is_finite(), "loss is not finite: {l}");
-    let after = params[0].to_list::<f32>(&mut ctx, &mut sess);
+    let after = params[0].to_list::<f32>(&mut sess);
     assert_ne!(before, after, "the first parameter was not updated by the optimizer");
 
-    let acc = get_test_acc(&model, &x, &y, &mut ctx, &mut sess).item::<f32>(&mut ctx, &mut sess);
+    let acc = get_test_acc(&model, &x, &y, &ctx, &mut sess).item::<f32>(&mut sess);
     assert!((0.0..=100.0).contains(&acc), "accuracy out of range: {acc}");
 }

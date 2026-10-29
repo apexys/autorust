@@ -9,33 +9,33 @@
 
 use autorust::engine::session::Session;
 use autorust::tensor::optim::{Adam, AdamW, LARS, Optim, SGD};
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 mod optim_golden;
 use optim_golden::OPTIM_GOLDEN;
 
 fn run_case(init: &[f32], grad: &[f32], lr: f32, steps: usize, name: &str) -> Vec<f32> {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
     // Parameters must be buffer-backed leaves so `assign` updates them in place.
-    let p = Tensor::from_slice(&mut ctx, init, None, None).to_param(&mut ctx);
-    let g = Tensor::from_slice(&mut ctx, grad, None, None);
+    let p = Tensor::from_slice(&ctx, init, None, None).to_param();
+    let g = Tensor::from_slice(&ctx, grad, None, None);
     let params = vec![p.clone()];
 
     let opt: Box<dyn Optim> = match name.split('_').next().unwrap() {
         "sgd" => Box::new(SGD::new(params.clone(), lr)),
-        "lars" => Box::new(LARS::new(&mut ctx, params.clone(), lr, 0.9, 1e-4, false, true, true, 0.001)),
-        "adam" => Box::new(Adam::new(&mut ctx, params.clone(), lr)),
-        "adamw" => Box::new(AdamW::new(&mut ctx, params.clone(), lr)),
+        "lars" => Box::new(LARS::new(params.clone(), lr, 0.9, 1e-4, false, true, true, 0.001)),
+        "adam" => Box::new(Adam::new(params.clone(), lr)),
+        "adamw" => Box::new(AdamW::new(params.clone(), lr)),
         other => panic!("unknown optimizer {other}"),
     };
 
-    ctx.set_grad(&p.uop(), g.uop().clone());
+    ctx.raw().set_grad(&p.uop(), g.uop().clone());
     for _ in 0..steps {
-        opt.step(&mut ctx, &mut sess);
+        opt.step(&mut sess);
     }
-    p.to_list::<f32>(&mut ctx, &mut sess)
+    p.to_list::<f32>(&mut sess)
 }
 
 #[test]
@@ -57,19 +57,19 @@ fn optimizers_match_tinygrad_goldens() {
 /// `zeros(...)` with an in-graph STORE that would reset it" (CURRENT_STATE §9.5).
 #[test]
 fn zero_param_state_persists_across_realizes() {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let state = Tensor::zeros_param(&mut ctx, [4], None, None);
-    let value = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
-    state.assign(&mut ctx, &mut sess, &value);
+    let state = Tensor::zeros_param(&ctx, [4], None, None);
+    let value = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None);
+    state.assign(&mut sess, &value);
 
     // A derived graph reading the state; realizing it must not re-run a zero store.
-    let derived = state.mul(&mut ctx, 2.0);
-    let d = derived.to_list::<f32>(&mut ctx, &mut sess);
+    let derived = state.mul(2.0);
+    let d = derived.to_list::<f32>(&mut sess);
     assert_eq!(d, vec![2.0, 4.0, 6.0, 8.0]);
 
     // And the state itself still holds the assigned bytes.
-    let again = state.to_list::<f32>(&mut ctx, &mut sess);
+    let again = state.to_list::<f32>(&mut sess);
     assert_eq!(again, vec![1.0, 2.0, 3.0, 4.0]);
 }
 
@@ -78,19 +78,19 @@ fn zero_param_state_persists_across_realizes() {
 /// updated. Uses SGD so the expected value is exactly `w - lr*grad`.
 #[test]
 fn schedule_step_co_realizes_loss_and_update() {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let w = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0], None, None).to_param(&mut ctx);
-    let g = Tensor::from_slice(&mut ctx, &[0.5f32, -0.5], None, None);
-    ctx.set_grad(&w.uop(), g.uop().clone());
+    let w = Tensor::from_slice(&ctx, &[1.0f32, 2.0], None, None).to_param();
+    let g = Tensor::from_slice(&ctx, &[0.5f32, -0.5], None, None);
+    ctx.raw().set_grad(&w.uop(), g.uop().clone());
     let opt = SGD::new(vec![w.clone()], 0.1);
 
     // A loss that reads the parameter; co-realized with the update.
-    let loss = w.sum(&mut ctx, None, false, None);
-    opt.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
+    let loss = w.sum(None, false, None);
+    opt.schedule_step(&mut sess, std::slice::from_ref(&loss));
 
-    let loss_v = loss.to_list::<f32>(&mut ctx, &mut sess);
+    let loss_v = loss.to_list::<f32>(&mut sess);
     assert_eq!(loss_v, vec![3.0], "loss must be realized by schedule_step");
-    let w_v = w.to_list::<f32>(&mut ctx, &mut sess);
+    let w_v = w.to_list::<f32>(&mut sess);
     assert!((w_v[0] - 0.95).abs() < 1e-6 && (w_v[1] - 2.05).abs() < 1e-6, "w = {w_v:?}");
 }

@@ -20,9 +20,9 @@ use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
 use crate::uop::sint::SVal;
 
+use super::Tensor;
 use super::movement;
 use super::reduce;
-use super::Tensor;
 
 const LN_2: f64 = std::f64::consts::LN_2;
 const FRAC_PI_2: f64 = std::f64::consts::FRAC_PI_2;
@@ -43,17 +43,20 @@ fn argsort(a: &[usize]) -> Vec<usize> {
 /// Parse a `REDUCE` node's `(op, num_axes)` argument (`Arg::Seq{[Enum(op), Int(n)]}`).
 fn reduce_arg(ctx: &UOpCtx, ret: UopId) -> (Ops, usize) {
     if let Arg::Seq { items, .. } = ctx.arg_of(&ret)
-        && items.len() == 2 {
-            let op = match &items[0] {
-                Arg::Enum(e) => Ops::from_u16(e.value).unwrap_or_else(|| panic!("TGERR: bad REDUCE op {}", e.value)),
-                _ => panic!("TGERR: REDUCE arg[0] not an op enum"),
-            };
-            let n = match &items[1] {
-                Arg::Int(n) => *n as usize,
-                _ => panic!("TGERR: REDUCE arg[1] not an int"),
-            };
-            return (op, n);
-        }
+        && items.len() == 2
+    {
+        let op = match &items[0] {
+            Arg::Enum(e) => {
+                Ops::from_u16(e.value).unwrap_or_else(|| panic!("TGERR: bad REDUCE op {}", e.value))
+            }
+            _ => panic!("TGERR: REDUCE arg[0] not an op enum"),
+        };
+        let n = match &items[1] {
+            Arg::Int(n) => *n as usize,
+            _ => panic!("TGERR: REDUCE arg[1] not an int"),
+        };
+        return (op, n);
+    }
     panic!("TGERR: malformed REDUCE arg");
 }
 
@@ -78,7 +81,13 @@ fn seq_trues(arg: &Arg) -> Vec<usize> {
         items
             .iter()
             .enumerate()
-            .filter_map(|(i, a)| if matches!(a, Arg::Bool(true)) { Some(i) } else { None })
+            .filter_map(|(i, a)| {
+                if matches!(a, Arg::Bool(true)) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
             .collect()
     } else {
         panic!("TGERR: expected Arg::Seq");
@@ -86,7 +95,13 @@ fn seq_trues(arg: &Arg) -> Vec<usize> {
 }
 
 /// `gradient.py:8 reduce_gradient` — gradient of a `REDUCE` wrt its single source.
-fn reduce_gradient(ctx: &mut UOpCtx, grad: UopId, ret: UopId, op: Ops, naxes: usize) -> Vec<Option<UopId>> {
+fn reduce_gradient(
+    ctx: &mut UOpCtx,
+    grad: UopId,
+    ret: UopId,
+    op: Ops,
+    naxes: usize,
+) -> Vec<Option<UopId>> {
     let x = ctx.srcs(&ret)[0].clone();
     let axes: Vec<usize> = (0..naxes).collect();
     match op {
@@ -287,9 +302,10 @@ fn grad_of_op(ctx: &mut UOpCtx, ret: UopId, g: UopId) -> Option<Vec<Option<UopId
             let shp = ctx.shape_of(&g).unwrap();
             let gs: Vec<Option<UopId>> = (0..n)
                 .map(|i| {
-                    let shr: Vec<(SVal, SVal)> = std::iter::once((SVal::I(i as i128), SVal::I(i as i128 + 1)))
-                        .chain(shp.iter().skip(1).map(|s| (SVal::I(0), s.clone())))
-                        .collect();
+                    let shr: Vec<(SVal, SVal)> =
+                        std::iter::once((SVal::I(i as i128), SVal::I(i as i128 + 1)))
+                            .chain(shp.iter().skip(1).map(|s| (SVal::I(0), s.clone())))
+                            .collect();
                     let sliced = movement::shrink(ctx, g.clone(), &shr);
                     Some(movement::reshape(ctx, sliced, &shp[1..]))
                 })
@@ -302,7 +318,11 @@ fn grad_of_op(ctx: &mut UOpCtx, ret: UopId, g: UopId) -> Option<Vec<Option<UopId
 
 /// `gradient.py:89 _deepwalk` — forward (srcs-before-parent) order restricted to
 /// nodes that can reach a target, skipping `DETACH` and its downstream.
-fn deepwalk(ctx: &UOpCtx, root: UopId, targets: &HashSet<UopId>) -> (Vec<UopId>, HashMap<UopId, bool>) {
+fn deepwalk(
+    ctx: &UOpCtx,
+    root: UopId,
+    targets: &HashSet<UopId>,
+) -> (Vec<UopId>, HashMap<UopId, bool>) {
     enum Step {
         Enter(UopId),
         Emit(UopId),
@@ -326,7 +346,10 @@ fn deepwalk(ctx: &UOpCtx, root: UopId, targets: &HashSet<UopId>) -> (Vec<UopId>,
     }
     let mut in_path: HashMap<UopId, bool> = HashMap::new();
     for u in &order {
-        let v = ctx.srcs(u).iter().any(|s| *in_path.get(s).unwrap_or(&false) || targets.contains(s));
+        let v = ctx
+            .srcs(u)
+            .iter()
+            .any(|s| *in_path.get(s).unwrap_or(&false) || targets.contains(s));
         in_path.insert(u.clone(), v);
     }
     let walk = order
@@ -338,7 +361,12 @@ fn deepwalk(ctx: &UOpCtx, root: UopId, targets: &HashSet<UopId>) -> (Vec<UopId>,
 
 /// `gradient.py:96 compute_gradient`: reverse-walk the forward graph, emitting a
 /// gradient for every source, and return `target uop -> gradient uop`.
-pub fn compute_gradient(ctx: &mut UOpCtx, root: UopId, root_grad: UopId, targets: &HashSet<UopId>) -> HashMap<UopId, UopId> {
+pub fn compute_gradient(
+    ctx: &mut UOpCtx,
+    root: UopId,
+    root_grad: UopId,
+    targets: &HashSet<UopId>,
+) -> HashMap<UopId, UopId> {
     let (walk, in_path) = deepwalk(ctx, root.clone(), targets);
     let mut grads: HashMap<UopId, UopId> = HashMap::new();
     grads.insert(root, root_grad);
@@ -350,10 +378,19 @@ pub fn compute_gradient(ctx: &mut UOpCtx, root: UopId, root_grad: UopId, targets
         };
         let lgrads = match grad_of_op(ctx, t0.clone(), g0.clone()) {
             Some(g) => g,
-            None => panic!("TGERR: failed to compute gradient for {:?}\n  (op not supported by grad_of_op)", ctx.op_of(t0)),
+            None => panic!(
+                "TGERR: failed to compute gradient for {:?}\n  (op not supported by grad_of_op)",
+                ctx.op_of(t0)
+            ),
         };
         let srcs = ctx.srcs(t0).to_vec();
-        assert_eq!(lgrads.len(), srcs.len(), "TGERR: got {} gradient, expected {}", lgrads.len(), srcs.len());
+        assert_eq!(
+            lgrads.len(),
+            srcs.len(),
+            "TGERR: got {} gradient, expected {}",
+            lgrads.len(),
+            srcs.len()
+        );
         for (k, v) in srcs.iter().zip(lgrads) {
             let mut v = match v {
                 Some(v) => v,
@@ -363,14 +400,15 @@ pub fn compute_gradient(ctx: &mut UOpCtx, root: UopId, root_grad: UopId, targets
             let ks = ctx.shape(k).ok().flatten();
             let vs = ctx.shape(&v).ok().flatten();
             if let (Some(ks), Some(vs)) = (ks, vs)
-                && ks.as_ref() != vs.as_ref() {
-                    let dt = ctx.dt_of(&v);
-                    let axes = movement::broadcast_axes(ctx, &ks, &vs);
-                    let vc = ctx.cast(v, reduce::sum_acc_dtype(dt));
-                    let r = reduce::rop(ctx, Ops::Add, vc, &axes);
-                    let rs = movement::reshape(ctx, r, &ks);
-                    v = ctx.cast(rs, dt);
-                }
+                && ks.as_ref() != vs.as_ref()
+            {
+                let dt = ctx.dt_of(&v);
+                let axes = movement::broadcast_axes(ctx, &ks, &vs);
+                let vc = ctx.cast(v, reduce::sum_acc_dtype(dt));
+                let r = reduce::rop(ctx, Ops::Add, vc, &axes);
+                let rs = movement::reshape(ctx, r, &ks);
+                v = ctx.cast(rs, dt);
+            }
             match grads.get(k).cloned() {
                 Some(prev) if ctx.op_of(&prev) != Ops::Noop => {
                     grads.insert(k.clone(), ctx.add(prev, v));
@@ -388,15 +426,34 @@ pub fn compute_gradient(ctx: &mut UOpCtx, root: UopId, root_grad: UopId, targets
 impl Tensor {
     /// `Tensor.detach`: a new tensor with the same data but cut off from the
     /// autograd graph (`elementwise.py:39`, `alu(Ops.DETACH)`).
-    pub fn detach(&self, ctx: &mut UOpCtx) -> Tensor {
+    pub fn detach(&self) -> Tensor {
+        self.detach_ctx(&mut self.ctx.borrow_mut())
+    }
+    #[doc(hidden)]
+    pub fn detach_ctx(&self, ctx: &mut UOpCtx) -> Tensor {
         let dt = ctx.dt_of(&self.uop());
-        { let __u = ctx.uop(Ops::Detach, Some(dt), vec![self.uop().clone()], Arg::None); Tensor::from_uop(ctx, __u) }
+        {
+            let __u = ctx.uop(Ops::Detach, Some(dt), vec![self.uop().clone()], Arg::None);
+            Tensor::from_uop(ctx, __u)
+        }
     }
 
     /// `Tensor.gradient(*targets, gradient)` (`op.py:453`): gradients of `self`
     /// wrt each of `targets` (missing grads become zeros).
-    pub fn gradient(&self, ctx: &mut UOpCtx, targets: &[Tensor], gradient: Option<Tensor>) -> Vec<Tensor> {
-        assert!(self.shape(ctx).numel_int().unwrap_or(0) == 1 || gradient.is_some(), "TGERR: gradient() on a non-scalar needs an explicit gradient");
+    pub fn gradient(&self, targets: &[Tensor], gradient: Option<Tensor>) -> Vec<Tensor> {
+        self.gradient_ctx(&mut self.ctx.borrow_mut(), targets, gradient)
+    }
+    #[doc(hidden)]
+    pub fn gradient_ctx(
+        &self,
+        ctx: &mut UOpCtx,
+        targets: &[Tensor],
+        gradient: Option<Tensor>,
+    ) -> Vec<Tensor> {
+        assert!(
+            self.shape_ctx(ctx).numel_int().unwrap_or(0) == 1 || gradient.is_some(),
+            "TGERR: gradient() on a non-scalar needs an explicit gradient"
+        );
         let root_grad = match gradient {
             Some(gt) => gt.uop(),
             None => ctx.const_like(self.uop().clone(), ConstVal::Float(1.0)),
@@ -406,16 +463,26 @@ impl Tensor {
         targets
             .iter()
             .map(|t| match grads.get(&t.uop()) {
-                Some(g) => { let __u = g; Tensor::from_uop(ctx, __u.clone()) },
-                None => { let __u = ctx.const_like(t.uop().clone(), ConstVal::Float(0.0)); Tensor::from_uop(ctx, __u) },
+                Some(g) => {
+                    let __u = g;
+                    Tensor::from_uop(ctx, __u.clone())
+                }
+                None => {
+                    let __u = ctx.const_like(t.uop().clone(), ConstVal::Float(0.0));
+                    Tensor::from_uop(ctx, __u)
+                }
             })
             .collect()
     }
 
     /// `Tensor.backward(gradient)` (`tensor.py:657`): run `compute_gradient` and
     /// attach each target's gradient to its graph node (accumulating).
-    pub fn backward(&self, ctx: &mut UOpCtx, targets: &[Tensor], gradient: Option<Tensor>) {
-        let gs = self.gradient(ctx, targets, gradient);
+    pub fn backward(&self, targets: &[Tensor], gradient: Option<Tensor>) {
+        self.backward_ctx(&mut self.ctx.borrow_mut(), targets, gradient)
+    }
+    #[doc(hidden)]
+    pub fn backward_ctx(&self, ctx: &mut UOpCtx, targets: &[Tensor], gradient: Option<Tensor>) {
+        let gs = self.gradient_ctx(ctx, targets, gradient);
         for (t, g) in targets.iter().zip(gs) {
             match ctx.grad(&t.uop()) {
                 Some(prev) => {

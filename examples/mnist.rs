@@ -25,7 +25,7 @@ use autorust::engine::jit::Jit;
 use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, BatchNorm, Conv2d, Linear, Module};
 use autorust::tensor::optim::{Adam, Optim};
-use autorust::tensor::{Ix, Tensor};
+use autorust::tensor::{Ctx, Ix, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 /// tinygrad's `Model`: the layer list from `beautiful_mnist.py`.
@@ -40,7 +40,7 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(ctx: &mut UOpCtx) -> Self {
+    pub fn new(ctx: &Ctx) -> Self {
         Model {
             l0: Conv2d::new(ctx, 1, 32, &[5, 5], 1, &[(0, 0), (0, 0)], 1, 1, true),
             l1: Conv2d::new(ctx, 32, 32, &[5, 5], 1, &[(0, 0), (0, 0)], 1, 1, true),
@@ -53,17 +53,17 @@ impl Model {
     }
 
     /// `x.sequential(self.layers)` — written out, since Rust has no `nn.Sequential`.
-    pub fn forward(&self, x: &Tensor, ctx: &mut UOpCtx, sess: &mut Session, training: bool) -> Tensor {
-        let x = nn::relu(&self.l0.forward(x, ctx), ctx);
-        let x = nn::relu(&self.l1.forward(&x, ctx), ctx);
-        let x = self.l2.forward(&x, ctx, sess, training);
-        let (x, _) = x.max_pool2d(ctx, &[2, 2], None, &[1, 1], &[0], false, false);
-        let x = nn::relu(&self.l3.forward(&x, ctx), ctx);
-        let x = nn::relu(&self.l4.forward(&x, ctx), ctx);
-        let x = self.l5.forward(&x, ctx, sess, training);
-        let (x, _) = x.max_pool2d(ctx, &[2, 2], None, &[1, 1], &[0], false, false);
-        let x = x.flatten(ctx, 1, -1);
-        self.l6.forward(&x, ctx)
+    pub fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {
+        let x = nn::relu(&self.l0.forward(x));
+        let x = nn::relu(&self.l1.forward(&x));
+        let x = self.l2.forward(&x, sess, training);
+        let (x, _) = x.max_pool2d(&[2, 2], None, &[1, 1], &[0], false, false);
+        let x = nn::relu(&self.l3.forward(&x));
+        let x = nn::relu(&self.l4.forward(&x));
+        let x = self.l5.forward(&x, sess, training);
+        let (x, _) = x.max_pool2d(&[2, 2], None, &[1, 1], &[0], false, false);
+        let x = x.flatten(1, -1);
+        self.l6.forward(&x)
     }
 }
 
@@ -80,15 +80,15 @@ impl Module for Model {
         )
     }
 
-    fn into_params(self, ctx: &mut UOpCtx) -> Self {
+    fn into_params(self) -> Self {
         Model {
-            l0: self.l0.into_params(ctx),
-            l1: self.l1.into_params(ctx),
-            l2: self.l2.into_params(ctx),
-            l3: self.l3.into_params(ctx),
-            l4: self.l4.into_params(ctx),
-            l5: self.l5.into_params(ctx),
-            l6: self.l6.into_params(ctx),
+            l0: self.l0.into_params(),
+            l1: self.l1.into_params(),
+            l2: self.l2.into_params(),
+            l3: self.l3.into_params(),
+            l4: self.l4.into_params(),
+            l5: self.l5.into_params(),
+            l6: self.l6.into_params(),
         }
     }
 }
@@ -126,13 +126,13 @@ pub fn fetch(url: &str, path: &Path) {
 /// so the per-step graph reads a buffer.
 pub fn load_images(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx images");
-    let x = Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape(ctx, [-1, 1, 28, 28]);
+    let x = Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape([-1, 1, 28, 28]);
     let x = if n < 60_000 {
-        x.getitem(ctx, &[Ix::slice(Some(0), Some(n), 1)])
+        x.getitem(&[Ix::slice(Some(0), Some(n), 1)])
     } else {
         x
     };
-    x.realize(ctx, sess).clone()
+    x.realize(sess).clone()
 }
 
 /// `Tensor.from_url(file, gunzip=True)[8:]` (see [`load_images`] on realization).
@@ -140,11 +140,11 @@ pub fn load_labels(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) ->
     let bytes = std::fs::read(path).expect("read idx labels");
     let y = Tensor::from_slice(ctx, &bytes[8..], Some(dtype::UINT8), None);
     let y = if n < 60_000 {
-        y.getitem(ctx, &[Ix::slice(Some(0), Some(n), 1)])
+        y.getitem(&[Ix::slice(Some(0), Some(n), 1)])
     } else {
         y
     };
-    y.realize(ctx, sess).clone()
+    y.realize(sess).clone()
 }
 
 fn main() {
@@ -183,18 +183,18 @@ fn main() {
         fetch(&format!("{base}{gz}"), &dir.join(raw));
     }
 
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
 
-    let x_train = load_images(&mut ctx, &mut sess, &dir.join("train-images-idx3-ubyte"), train_n);
-    let y_train = load_labels(&mut ctx, &mut sess, &dir.join("train-labels-idx1-ubyte"), train_n);
-    let x_test = load_images(&mut ctx, &mut sess, &dir.join("t10k-images-idx3-ubyte"), test_n);
-    let y_test = load_labels(&mut ctx, &mut sess, &dir.join("t10k-labels-idx1-ubyte"), test_n);
+    let x_train = load_images(&mut ctx.raw(), &mut sess, &dir.join("train-images-idx3-ubyte"), train_n);
+    let y_train = load_labels(&mut ctx.raw(), &mut sess, &dir.join("train-labels-idx1-ubyte"), train_n);
+    let x_test = load_images(&mut ctx.raw(), &mut sess, &dir.join("t10k-images-idx3-ubyte"), test_n);
+    let y_test = load_labels(&mut ctx.raw(), &mut sess, &dir.join("t10k-labels-idx1-ubyte"), test_n);
 
     Tensor::manual_seed(seed);
-    let model = Model::new(&mut ctx).into_params(&mut ctx);
+    let model = Model::new(&ctx).into_params();
     let params: Vec<Tensor> = model.params().collect();
-    let opt = Adam::new(&mut ctx, params.clone(), lr);
+    let opt = Adam::new(params.clone(), lr);
 
     // `JIT=1` (or `sess.enable_jit()`) captures each step's schedule once and
     // replays it — tinygrad's `@TinyJit` (`beautiful_mnist.py:21`). Off by default.
@@ -206,24 +206,24 @@ fn main() {
 
     let mut test_acc = f32::NAN;
     for step in 0..steps {
-        let loss = train_jit.call(&mut ctx, &mut sess, |ctx, sess| {
+        let loss = train_jit.call(&ctx, &mut sess, |ctx, sess| {
             let samples = Tensor::randint(ctx, &[bs], 0, train_n as i32, None, None);
-            let xb = x_train.getitem(ctx, &[Ix::Tensor(samples.clone())]);
-            let yb = y_train.getitem(ctx, &[Ix::Tensor(samples)]);
+            let xb = x_train.getitem(&[Ix::Tensor(samples.clone())]);
+            let yb = y_train.getitem(&[Ix::Tensor(samples)]);
 
-            let out = model.forward(&xb, ctx, sess, true);
-            let loss = out.sparse_categorical_crossentropy(ctx, &yb, -1, 0.0, "mean");
-            loss.backward(ctx, &params, None);
-            opt.schedule_step(ctx, sess, std::slice::from_ref(&loss));
-            opt.zero_grad(ctx);
+            let out = model.forward(&xb, sess, true);
+            let loss = out.sparse_categorical_crossentropy(&yb, -1, 0.0, "mean");
+            loss.backward(&params, None);
+            opt.schedule_step(sess, std::slice::from_ref(&loss));
+            opt.zero_grad();
             loss
         });
 
         if step % 10 == 9 || step == steps - 1 {
             test_acc = test_jit
-                .call(&mut ctx, &mut sess, |ctx, sess| get_test_acc(&model, &x_test, &y_test, ctx, sess))
-                .item::<f32>(&mut ctx, &mut sess);
-            let l = loss.item::<f32>(&mut ctx, &mut sess);
+                .call(&ctx, &mut sess, |ctx, sess| get_test_acc(&model, &x_test, &y_test, ctx, sess))
+                .item::<f32>(&mut sess);
+            let l = loss.item::<f32>(&mut sess);
             println!("step {:>4}: loss {l:6.3}  test_accuracy {test_acc:5.2}%", step + 1);
         }
     }
@@ -243,9 +243,9 @@ fn main() {
 /// `Model.get_test_acc`: `(self(X).argmax(axis=1) == Y).mean()*100`.
 /// Returns the (lazy) accuracy tensor so a `Jit` can capture/replay it; call
 /// `.item()` on the result to read it.
-pub fn get_test_acc(model: &Model, x: &Tensor, y: &Tensor, ctx: &mut UOpCtx, sess: &mut Session) -> Tensor {
-    let out = model.forward(x, ctx, sess, false);
-    let pred = out.argmax(ctx, Some(1), false);
-    let correct = pred.eq(ctx, y).cast(ctx, dtype::FLOAT32).mean(ctx, None, false);
-    correct.mul(ctx, 100.0)
+pub fn get_test_acc(model: &Model, x: &Tensor, y: &Tensor, _ctx: &Ctx, sess: &mut Session) -> Tensor {
+    let out = model.forward(x, sess, false);
+    let pred = out.argmax(Some(1), false);
+    let correct = pred.eq(y).cast(dtype::FLOAT32).mean(None, false);
+    correct.mul(100.0)
 }

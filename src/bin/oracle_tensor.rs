@@ -15,7 +15,7 @@
 
 use autorust::dtype::{self, DTypeId};
 use autorust::tensor::ix::Ix;
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 use autorust::uop::flat::to_string_flat;
 use autorust::uop::sint::SVal;
@@ -79,7 +79,7 @@ fn main() {
         eprintln!("{{\"ok\": false, \"error\": \"parse: {e}\"}}");
         std::process::exit(1);
     });
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut tensors: Vec<Tensor> = Vec::new();
     let none_str: Option<String> = None;
     for (i, st) in prog.prog.iter().enumerate() {
@@ -90,12 +90,12 @@ fn main() {
                 let dt = dtype_from_name(st.dtype.clone());
                 let dev = st.device.as_deref();
                 match kind.as_str() {
-                    "f32" => Tensor::from_slice(&mut ctx, &data.iter().map(|&v| v as f32).collect::<Vec<_>>(), dt, dev),
-                    "f64" => Tensor::from_slice(&mut ctx, &data.iter().copied().collect::<Vec<_>>(), dt, dev),
-                    "i32" => Tensor::from_slice(&mut ctx, &data.iter().map(|&v| v as i32).collect::<Vec<_>>(), dt, dev),
-                    "i64" => Tensor::from_slice(&mut ctx, &data.iter().map(|&v| v as i64).collect::<Vec<_>>(), dt, dev),
-                    "u8" => Tensor::from_slice(&mut ctx, &data.iter().map(|&v| v as u8).collect::<Vec<_>>(), dt, dev),
-                    "bool" => Tensor::from_slice(&mut ctx, &data.iter().map(|&v| v != 0.0).collect::<Vec<_>>(), dt, dev),
+                    "f32" => Tensor::from_slice(&ctx, &data.iter().map(|&v| v as f32).collect::<Vec<_>>(), dt, dev),
+                    "f64" => Tensor::from_slice(&ctx, &data.iter().copied().collect::<Vec<_>>(), dt, dev),
+                    "i32" => Tensor::from_slice(&ctx, &data.iter().map(|&v| v as i32).collect::<Vec<_>>(), dt, dev),
+                    "i64" => Tensor::from_slice(&ctx, &data.iter().map(|&v| v as i64).collect::<Vec<_>>(), dt, dev),
+                    "u8" => Tensor::from_slice(&ctx, &data.iter().map(|&v| v as u8).collect::<Vec<_>>(), dt, dev),
+                    "bool" => Tensor::from_slice(&ctx, &data.iter().map(|&v| v != 0.0).collect::<Vec<_>>(), dt, dev),
                     other => panic!("TGERR: oracle_tensor: unknown slice kind {other} (step {i})"),
                 }
             }
@@ -104,13 +104,13 @@ fn main() {
                 let bytes: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect();
                 let dname = st.dtype.clone().unwrap_or_else(|| "uint8".to_string());
                 let dt = dtype::to_dtype(&dname).unwrap_or_else(|| panic!("TGERR: bad dtype {dname}"));
-                Tensor::from_bytes(&mut ctx, &bytes, dt, st.device.as_deref())
+                Tensor::from_bytes(&ctx, &bytes, dt, st.device.as_deref())
             }
-            "arange" => Tensor::arange(&mut ctx, st.start.unwrap_or(0.0), st.stop, st.step.unwrap_or(1.0), dtype_from_name(st.dtype.clone())),
-            "eye" => Tensor::eye(&mut ctx, st.n.unwrap_or(0), st.m, dtype_from_name(st.dtype.clone())),
-            "zeros" => Tensor::zeros(&mut ctx, sv(&st.shape.clone().unwrap_or_default()).as_slice()),
-            "ones" => Tensor::ones(&mut ctx, sv(&st.shape.clone().unwrap_or_default()).as_slice()),
-            "reshape" => tensors[st.x.unwrap_or(0)].clone().reshape(&mut ctx, sv(&st.shape.clone().unwrap_or_default()).as_slice()),
+            "arange" => Tensor::arange(&ctx, st.start.unwrap_or(0.0), st.stop, st.step.unwrap_or(1.0), dtype_from_name(st.dtype.clone())),
+            "eye" => Tensor::eye(&ctx, st.n.unwrap_or(0), st.m, dtype_from_name(st.dtype.clone())),
+            "zeros" => Tensor::zeros(&ctx, sv(&st.shape.clone().unwrap_or_default()).as_slice()),
+            "ones" => Tensor::ones(&ctx, sv(&st.shape.clone().unwrap_or_default()).as_slice()),
+            "reshape" => tensors[st.x.unwrap_or(0)].clone().reshape(sv(&st.shape.clone().unwrap_or_default()).as_slice()),
             "getitem" => {
                 let parsed: Vec<Ix> = st
                     .ixs
@@ -133,47 +133,43 @@ fn main() {
                         }
                     })
                     .collect();
-                tensors[st.x.unwrap_or(0)].clone().getitem(&mut ctx, &parsed)
+                tensors[st.x.unwrap_or(0)].clone().getitem(&parsed)
             }
-            "add" => tensors[st.x.unwrap_or(0)].clone().add(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
-            "mul" => tensors[st.x.unwrap_or(0)].clone().mul(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
-            "matmul" => tensors[st.x.unwrap_or(0)].clone().matmul(&mut ctx, tensors[st.y.unwrap_or(0)].clone()),
-            "addc" => tensors[st.x.unwrap_or(0)].clone().add(&mut ctx, st.val.unwrap_or(0.0)),
-            "mulc" => tensors[st.x.unwrap_or(0)].clone().mul(&mut ctx, st.val.unwrap_or(1.0)),
-            "neg" => tensors[st.x.unwrap_or(0)].clone().neg(&mut ctx),
-            "sum" => tensors[st.x.unwrap_or(0)].clone().sum(
-                &mut ctx,
-                st.axis.clone().map(|a| a.iter().map(|&v| v as usize).collect::<Vec<_>>()).as_deref(),
+            "add" => tensors[st.x.unwrap_or(0)].clone().add(tensors[st.y.unwrap_or(0)].clone()),
+            "mul" => tensors[st.x.unwrap_or(0)].clone().mul(tensors[st.y.unwrap_or(0)].clone()),
+            "matmul" => tensors[st.x.unwrap_or(0)].clone().matmul(tensors[st.y.unwrap_or(0)].clone()),
+            "addc" => tensors[st.x.unwrap_or(0)].clone().add(st.val.unwrap_or(0.0)),
+            "mulc" => tensors[st.x.unwrap_or(0)].clone().mul(st.val.unwrap_or(1.0)),
+            "neg" => tensors[st.x.unwrap_or(0)].clone().neg(),
+            "sum" => tensors[st.x.unwrap_or(0)].clone().sum(st.axis.clone().map(|a| a.iter().map(|&v| v as usize).collect::<Vec<_>>()).as_deref(),
                 st.keepdim.unwrap_or(false),
                 None,
             ),
-            "max" => tensors[st.x.unwrap_or(0)].clone().max(
-                &mut ctx,
-                st.axis.clone().map(|a| a.iter().map(|&v| v as usize).collect::<Vec<_>>()).as_deref(),
+            "max" => tensors[st.x.unwrap_or(0)].clone().max(st.axis.clone().map(|a| a.iter().map(|&v| v as usize).collect::<Vec<_>>()).as_deref(),
                 st.keepdim.unwrap_or(false),
             ),
-            "contiguous" => tensors[st.x.unwrap_or(0)].clone().contiguous(&mut ctx),
+            "contiguous" => tensors[st.x.unwrap_or(0)].clone().contiguous(),
             "cast" => tensors[st.x.unwrap_or(0)]
                 .clone()
-                .cast(&mut ctx, dtype_from_name(st.dtype.clone()).unwrap_or(dtype::FLOAT32)),
+                .cast(dtype_from_name(st.dtype.clone()).unwrap_or(dtype::FLOAT32)),
             "cat" => {
                 let others: Vec<Tensor> = st.ys.clone().unwrap_or_default().iter().map(|&i| tensors[i].clone()).collect();
-                tensors[st.x.unwrap_or(0)].clone().cat(&mut ctx, &others, 0)
+                tensors[st.x.unwrap_or(0)].clone().cat(&others, 0)
             }
             "rand" => autorust::tensor::rand::rand(
-                &mut ctx,
+                &mut ctx.raw(),
                 sv(&st.shape.clone().unwrap_or_default()).as_slice(),
                 dtype_from_name(st.dtype.clone()),
                 st.device.as_deref(),
             ),
             "randn" => autorust::tensor::rand::randn(
-                &mut ctx,
+                &mut ctx.raw(),
                 sv(&st.shape.clone().unwrap_or_default()).as_slice(),
                 dtype_from_name(st.dtype.clone()),
                 st.device.as_deref(),
             ),
             "randint" => autorust::tensor::rand::randint(
-                &mut ctx,
+                &mut ctx.raw(),
                 sv(&st.shape.clone().unwrap_or_default()).as_slice(),
                 st.low.unwrap_or(0) as i32,
                 st.high.unwrap_or(1) as i32,
@@ -190,8 +186,8 @@ fn main() {
             let mut bufs = autorust::runtime::buffer::BufTable::default();
             let mut cache = autorust::engine::realize::ProgCache::default();
             let last = &tensors.last().expect("TGERR: empty program").uop().clone();
-            let vals1 = autorust::engine::realize::tensor_values(&mut ctx, last.clone(), &mut bufs, &mut cache);
-            let vals2 = autorust::engine::realize::tensor_values(&mut ctx, last.clone(), &mut bufs, &mut cache);
+            let vals1 = autorust::engine::realize::tensor_values(&mut ctx.raw(), last.clone(), &mut bufs, &mut cache);
+            let vals2 = autorust::engine::realize::tensor_values(&mut ctx.raw(), last.clone(), &mut bufs, &mut cache);
             let outs_json: Vec<String> = [&vals1, &vals2]
                 .iter()
                 .map(|vals| format!("[{}]", vals.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join(", ")))
@@ -211,42 +207,42 @@ fn main() {
         } else {
             tensors.iter().map(|t| t.uop().clone()).collect()
         };
-        let big_sink = autorust::tensor::sink(&mut ctx, sink_srcs);
-        let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx, big_sink);
-        let (linear, planned, _held) = autorust::schedule::sched::create_linear_with_vars(&mut ctx, call);
+        let big_sink = autorust::tensor::sink(&mut ctx.raw(), sink_srcs);
+        let (call, _map) = autorust::tensor::callify::transform_to_call(&mut ctx.raw(), big_sink);
+        let (linear, planned, _held) = autorust::schedule::sched::create_linear_with_vars(&mut ctx.raw(), call);
         let root = linear;
         if std::env::var("TG_M5_RENDER").is_ok() {
-            render_calls(&mut ctx, planned);
+            render_calls(&mut ctx.raw(), planned);
             return;
         }
         if std::env::var("TG_OCL_RENDER").is_ok() {
-            render_calls_opencl(&mut ctx, planned);
+            render_calls_opencl(&mut ctx.raw(), planned);
             return;
         }
         if std::env::var("TG_CUDA_RENDER").is_ok() {
-            render_calls_cuda(&mut ctx, planned);
+            render_calls_cuda(&mut ctx.raw(), planned);
             return;
         }
         if std::env::var("TG_M5_EXEC").is_ok() {
             let steps: Vec<ExecStep> = prog.prog.iter().map(|st| ExecStep {
                 op: st.op.clone(), data: st.data.clone(),
             }).collect();
-            exec_linear(&mut ctx, planned, &steps);
+            exec_linear(&mut ctx.raw(), planned, &steps);
             return;
         }
         if std::env::var("TG_M5_CODEGEN").is_ok() {
             // lower the first compute kernel body through the M5 pipeline
             let mut ast: Option<UopId> = None;
-            for c in ctx.srcs(&root).iter() {
-                let body = ctx.srcs(c)[0].clone();
-                if ctx.op_of(&body) == autorust::uop::Ops::Sink {
+            for c in ctx.raw().srcs(&root).iter() {
+                let body = ctx.raw().srcs(c)[0].clone();
+                if ctx.raw().op_of(&body) == autorust::uop::Ops::Sink {
                     let mut stack = vec![body.clone()];
                     let mut seen = std::collections::HashSet::new();
                     let mut has_alu = false;
                     while let Some(n) = stack.pop() {
                         if !seen.insert(n.id()) { continue; }
-                        if matches!(ctx.op_of(&n), autorust::uop::Ops::Add | autorust::uop::Ops::Mul) { has_alu = true; }
-                        stack.extend(ctx.srcs(&n).iter().cloned());
+                        if matches!(ctx.raw().op_of(&n), autorust::uop::Ops::Add | autorust::uop::Ops::Mul) { has_alu = true; }
+                        stack.extend(ctx.raw().srcs(&n).iter().cloned());
                     }
                     if has_alu {
                         ast = Some(body);
@@ -255,20 +251,20 @@ fn main() {
                 }
             }
             let ast = ast.expect("TGERR: no compute kernel body");
-            let lowered = autorust::codegen::pipeline::full_rewrite_to_sink(&mut ctx, ast.clone());
-            ctx.g.roots = vec![lowered];
-            let flat = ctx.g.to_flat();
+            let lowered = autorust::codegen::pipeline::full_rewrite_to_sink(&mut ctx.raw(), ast.clone());
+            ctx.raw().g.roots = vec![lowered];
+            let flat = ctx.raw().g.to_flat();
             println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
             return;
         }
-        ctx.g.roots = vec![root];
-        let flat = ctx.g.to_flat();
+        ctx.raw().g.roots = vec![root];
+        let flat = ctx.raw().g.to_flat();
         println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
         return;
     }
     let root = tensors.last().map(|t| t.uop().clone()).unwrap_or_else(|| panic!("TGERR: empty program"));
-    ctx.g.roots = vec![root];
-    let flat = ctx.g.to_flat();
+    ctx.raw().g.roots = vec![root];
+    let flat = ctx.raw().g.to_flat();
     println!("{{\"ok\": true, \"graph\": {}}}", to_string_flat(&flat));
     let _ = none_str;
 }

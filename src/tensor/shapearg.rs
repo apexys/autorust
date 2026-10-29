@@ -95,17 +95,37 @@ impl<A: SvalLike, B: SvalLike, C: SvalLike> ShapeArg for (A, B, C) {
 }
 impl<A: SvalLike, B: SvalLike, C: SvalLike, D: SvalLike> ShapeArg for (A, B, C, D) {
     fn into_shape_vec(self) -> Vec<SVal> {
-        vec![self.0.into_sval(), self.1.into_sval(), self.2.into_sval(), self.3.into_sval()]
+        vec![
+            self.0.into_sval(),
+            self.1.into_sval(),
+            self.2.into_sval(),
+            self.3.into_sval(),
+        ]
     }
 }
 impl<A: SvalLike, B: SvalLike, C: SvalLike, D: SvalLike, E: SvalLike> ShapeArg for (A, B, C, D, E) {
     fn into_shape_vec(self) -> Vec<SVal> {
-        vec![self.0.into_sval(), self.1.into_sval(), self.2.into_sval(), self.3.into_sval(), self.4.into_sval()]
+        vec![
+            self.0.into_sval(),
+            self.1.into_sval(),
+            self.2.into_sval(),
+            self.3.into_sval(),
+            self.4.into_sval(),
+        ]
     }
 }
-impl<A: SvalLike, B: SvalLike, C: SvalLike, D: SvalLike, E: SvalLike, F: SvalLike> ShapeArg for (A, B, C, D, E, F) {
+impl<A: SvalLike, B: SvalLike, C: SvalLike, D: SvalLike, E: SvalLike, F: SvalLike> ShapeArg
+    for (A, B, C, D, E, F)
+{
     fn into_shape_vec(self) -> Vec<SVal> {
-        vec![self.0.into_sval(), self.1.into_sval(), self.2.into_sval(), self.3.into_sval(), self.4.into_sval(), self.5.into_sval()]
+        vec![
+            self.0.into_sval(),
+            self.1.into_sval(),
+            self.2.into_sval(),
+            self.3.into_sval(),
+            self.4.into_sval(),
+            self.5.into_sval(),
+        ]
     }
 }
 

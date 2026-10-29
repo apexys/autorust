@@ -18,7 +18,7 @@ use std::time::Instant;
 use autorust::engine::jit::Jit;
 use autorust::engine::session::Session;
 use autorust::models::flash_attention::flash_attention_blocks;
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
@@ -27,30 +27,30 @@ fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
 
 /// Build + realize `iters` times (so the kernels actually run each iteration),
 /// after `warm` warmups, and return the mean wall time in milliseconds.
-fn bench<F: FnMut(&mut UOpCtx, &mut Session) -> Tensor>(
+fn bench<F: FnMut(&Ctx, &mut Session) -> Tensor>(
     mut build: F,
-    ctx: &mut UOpCtx,
+    ctx: &Ctx,
     sess: &mut Session,
     warm: usize,
     iters: usize,
 ) -> f64 {
     for _ in 0..warm {
         let o = build(ctx, sess);
-        let _ = o.to_list::<f32>(ctx, sess);
+        let _ = o.to_list::<f32>(sess);
     }
     let t = Instant::now();
     for _ in 0..iters {
         let o = build(ctx, sess);
-        let _ = o.to_list::<f32>(ctx, sess);
+        let _ = o.to_list::<f32>(sess);
     }
     t.elapsed().as_secs_f64() / iters as f64 * 1e3
 }
 
 /// Like [`bench`], but captures the schedule once with `Jit` and replays it, so
 /// the measured time is kernel execution (no per-iteration graph scheduling).
-fn bench_jit<F: Fn(&mut UOpCtx, &mut Session) -> Tensor>(
+fn bench_jit<F: Fn(&Ctx, &mut Session) -> Tensor>(
     build: F,
-    ctx: &mut UOpCtx,
+    ctx: &Ctx,
     sess: &mut Session,
     warm: usize,
     iters: usize,
@@ -59,12 +59,12 @@ fn bench_jit<F: Fn(&mut UOpCtx, &mut Session) -> Tensor>(
     let mut jit = Jit::new();
     for _ in 0..warm {
         let o = jit.call(ctx, sess, |c, s| build(c, s));
-        let _ = o.to_list::<f32>(ctx, sess);
+        let _ = o.to_list::<f32>(sess);
     }
     let t = Instant::now();
     for _ in 0..iters {
         let o = jit.call(ctx, sess, |c, s| build(c, s));
-        let _ = o.to_list::<f32>(ctx, sess);
+        let _ = o.to_list::<f32>(sess);
     }
     sess.jit(false);
     t.elapsed().as_secs_f64() / iters as f64 * 1e3
@@ -97,17 +97,17 @@ fn main() {
     };
     let (qd, kd, vd) = (mk(0), mk(7), mk(13));
 
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let q = Tensor::from_slice(&mut ctx, &qd, None, dev.as_deref()).reshape(&mut ctx, [bs, heads, seq, dim]);
-    let k = Tensor::from_slice(&mut ctx, &kd, None, dev.as_deref()).reshape(&mut ctx, [bs, heads, seq, dim]);
-    let v = Tensor::from_slice(&mut ctx, &vd, None, dev.as_deref()).reshape(&mut ctx, [bs, heads, seq, dim]);
+    let q = Tensor::from_slice(&ctx, &qd, None, dev.as_deref()).reshape([bs, heads, seq, dim]);
+    let k = Tensor::from_slice(&ctx, &kd, None, dev.as_deref()).reshape([bs, heads, seq, dim]);
+    let v = Tensor::from_slice(&ctx, &vd, None, dev.as_deref()).reshape([bs, heads, seq, dim]);
 
     // Correctness: FA must match SDPA.
-    let os = q.scaled_dot_product_attention(&mut ctx, &k, &v, None, 0.0, false, false);
-    let of = flash_attention_blocks(&q, &k, &v, None, false, bq, bk, &mut ctx);
-    let ovs = os.to_list::<f32>(&mut ctx, &mut sess);
-    let ovf = of.to_list::<f32>(&mut ctx, &mut sess);
+    let os = q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false);
+    let of = flash_attention_blocks(&q, &k, &v, None, false, bq, bk);
+    let ovs = os.to_list::<f32>(&mut sess);
+    let ovf = of.to_list::<f32>(&mut sess);
     let maxd = ovs.iter().zip(&ovf).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     let maxo = ovs.iter().map(|a| a.abs()).fold(0.0f32, f32::max);
     let maxr = ovs.iter().zip(&ovf).map(|(a, b)| (a - b).abs() / a.abs().max(1e-6)).fold(0.0f32, f32::max);
@@ -118,44 +118,44 @@ fn main() {
         mi/(du*su*hu), (mi/du)%su, (mi/(du*su))%hu, mi%du, ovs[mi], ovf[mi]);
     if std::env::var("CHECK_ONLY").is_ok() { return; }
 
-    let sdpa = |c: &mut UOpCtx, _s: &mut Session| q.scaled_dot_product_attention(c, &k, &v, None, 0.0, false, false);
-    let fa = |c: &mut UOpCtx, _s: &mut Session| flash_attention_blocks(&q, &k, &v, None, false, bq, bk, c);
+    let sdpa = |_c: &Ctx, _s: &mut Session| q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false);
+    let fa = |_c: &Ctx, _s: &mut Session| flash_attention_blocks(&q, &k, &v, None, false, bq, bk);
 
-    let t_sdpa_f = bench(sdpa, &mut ctx, &mut sess, warm, iters);
-    let t_fa_f = bench(fa, &mut ctx, &mut sess, warm, iters);
+    let t_sdpa_f = bench(sdpa, &ctx, &mut sess, warm, iters);
+    let t_fa_f = bench(fa, &ctx, &mut sess, warm, iters);
 
     // Forward + backward: zero the grads each step so they don't accumulate.
     let targets = [q.clone(), k.clone(), v.clone()];
-    let bwd_body = |c: &mut UOpCtx, s: &mut Session, o: Tensor| -> Tensor {
-        let loss = o.mul(c, &o).sum(c, None, false, None);
-        loss.backward(c, &targets, None);
+    let bwd_body = |_c: &Ctx, s: &mut Session, o: Tensor| -> Tensor {
+        let loss = o.mul(&o).sum(None, false, None);
+        loss.backward(&targets, None);
         for t in [&q, &k, &v] {
-            let g = t.grad(c).unwrap();
-            g.realize(c, s);
-            c.clear_grad(&t.uop());
+            let g = t.grad().unwrap();
+            g.realize(s);
+            t.ctx().raw().clear_grad(&t.uop());
         }
         loss
     };
     let t_sdpa_b = bench(
-        |c: &mut UOpCtx, s: &mut Session| {
-            let o = q.scaled_dot_product_attention(c, &k, &v, None, 0.0, false, false);
+        |c: &Ctx, s: &mut Session| {
+            let o = q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false);
             bwd_body(c, s, o)
         },
-        &mut ctx, &mut sess, warm, iters,
+        &ctx, &mut sess, warm, iters,
     );
     let t_fa_b = bench(
-        |c: &mut UOpCtx, s: &mut Session| {
-            let o = flash_attention_blocks(&q, &k, &v, None, false, bq, bk, c);
+        |c: &Ctx, s: &mut Session| {
+            let o = flash_attention_blocks(&q, &k, &v, None, false, bq, bk);
             bwd_body(c, s, o)
         },
-        &mut ctx, &mut sess, warm, iters,
+        &ctx, &mut sess, warm, iters,
     );
 
     if std::env::var("JIT").is_ok() {
-        let t_sdpa_j = bench_jit(|c, _s| q.scaled_dot_product_attention(c, &k, &v, None, 0.0, false, false), &mut ctx, &mut sess, warm, iters);
-        let t_fa_j = bench_jit(|c, _s| flash_attention_blocks(&q, &k, &v, None, false, bq, bk, c), &mut ctx, &mut sess, warm, iters);
-        let t_sdpa_bj = bench_jit(|c, s| { let o = q.scaled_dot_product_attention(c, &k, &v, None, 0.0, false, false); bwd_body(c, s, o) }, &mut ctx, &mut sess, warm, iters);
-        let t_fa_bj = bench_jit(|c, s| { let o = flash_attention_blocks(&q, &k, &v, None, false, bq, bk, c); bwd_body(c, s, o) }, &mut ctx, &mut sess, warm, iters);
+        let t_sdpa_j = bench_jit(|c, _s| q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false), &ctx, &mut sess, warm, iters);
+        let t_fa_j = bench_jit(|c, _s| flash_attention_blocks(&q, &k, &v, None, false, bq, bk), &ctx, &mut sess, warm, iters);
+        let t_sdpa_bj = bench_jit(|c, s| { let o = q.scaled_dot_product_attention(&k, &v, None, 0.0, false, false); bwd_body(c, s, o) }, &ctx, &mut sess, warm, iters);
+        let t_fa_bj = bench_jit(|c, s| { let o = flash_attention_blocks(&q, &k, &v, None, false, bq, bk); bwd_body(c, s, o) }, &ctx, &mut sess, warm, iters);
         println!("  SDPA fwd (jit) {t_sdpa_j:8.3} ms");
         println!("  FA   fwd (jit) {t_fa_j:8.3} ms   ({:.2}x)", t_sdpa_j / t_fa_j);
         println!("  SDPA f+b (jit) {t_sdpa_bj:8.3} ms");

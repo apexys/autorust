@@ -6,7 +6,7 @@ use autorust::engine::session::Session;
 use autorust::models::transformer::{Act, TransformerBlock};
 use autorust::models::vit::ViT;
 use autorust::tensor::nn::Module;
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 mod models_golden;
@@ -20,37 +20,37 @@ fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
     }
 }
 
-fn shape_of(t: &Tensor, ctx: &mut UOpCtx) -> Vec<usize> {
-    t.shape(ctx).as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
+fn shape_of(t: &Tensor) -> Vec<usize> {
+    t.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
 }
 
 #[test]
 fn transformer_block_matches_tinygrad() {
     for g in BLOCK_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
         Tensor::manual_seed(g.seed);
-        let blk = TransformerBlock::new(&mut ctx, g.embed_dim, g.num_heads, g.ff_dim, g.prenorm, Act::Gelu, 0.1);
-        let blk = blk.into_params(&mut ctx);
-        let x = Tensor::from_slice(&mut ctx, g.x, None, None).reshape(&mut ctx, g.x_shape);
-        let out = blk.forward(&x, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-4, g.name);
+        let blk = TransformerBlock::new(&ctx, g.embed_dim, g.num_heads, g.ff_dim, g.prenorm, Act::Gelu, 0.1);
+        let blk = blk.into_params();
+        let x = Tensor::from_slice(&ctx, g.x, None, None).reshape(g.x_shape);
+        let out = blk.forward(&x);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-4, g.name);
     }
 }
 
 #[test]
 fn vit_matches_tinygrad() {
     for g in VIT_GOLDEN {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
         Tensor::manual_seed(g.seed);
-        let vit = ViT::build(&mut ctx, g.layers, g.embed_dim, g.num_heads, 3, 224, 16, 1000);
-        let ar = Tensor::arange(&mut ctx, 0.0, Some(g.num as f64), 1.0, Some(autorust::dtype::FLOAT32));
-        let x = ar.mul(&mut ctx, g.x_scale).add(&mut ctx, g.x_off).reshape(&mut ctx, g.x_shape);
-        let out = vit.forward(&x, &mut ctx);
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-3, g.name);
+        let vit = ViT::build(&mut ctx.raw(), g.layers, g.embed_dim, g.num_heads, 3, 224, 16, 1000);
+        let ar = Tensor::arange(&ctx, 0.0, Some(g.num as f64), 1.0, Some(autorust::dtype::FLOAT32));
+        let x = ar.mul(g.x_scale).add(g.x_off).reshape(g.x_shape);
+        let out = vit.forward(&x);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-3, g.name);
     }
 }
 

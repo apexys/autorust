@@ -20,7 +20,7 @@
 use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 struct XorModel {
@@ -29,16 +29,16 @@ struct XorModel {
 }
 
 impl XorModel {
-    fn new(ctx: &mut UOpCtx) -> Self {
+    fn new(ctx: &Ctx) -> Self {
         XorModel {
             l1: Linear::new(ctx, 2, 4, true),
             l2: Linear::new(ctx, 4, 1, true),
         }
     }
 
-    fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        let h = nn::relu(&self.l1.forward(x, ctx), ctx);
-        self.l2.forward(&h, ctx)
+    fn forward(&self, x: &Tensor) -> Tensor {
+        let h = nn::relu(&self.l1.forward(x));
+        self.l2.forward(&h)
     }
 }
 
@@ -47,20 +47,20 @@ impl Module for XorModel {
         Box::new(nn::scoped("l1", self.l1.named_params()).chain(nn::scoped("l2", self.l2.named_params())))
     }
 
-    fn into_params(self, ctx: &mut UOpCtx) -> Self {
-        XorModel { l1: self.l1.into_params(ctx), l2: self.l2.into_params(ctx) }
+    fn into_params(self) -> Self {
+        XorModel { l1: self.l1.into_params(), l2: self.l2.into_params() }
     }
 }
 
 #[test]
 fn xor_trains_to_convergence() {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
 
     // Draw the initial weights once and turn them into buffer-backed leaves so
     // the optimizer can store into them in place.
     Tensor::manual_seed(42);
-    let model = XorModel::new(&mut ctx).into_params(&mut ctx);
+    let model = XorModel::new(&ctx).into_params();
     let params: Vec<Tensor> = model.params().collect();
 
     eprintln!(
@@ -73,9 +73,9 @@ fn xor_trains_to_convergence() {
     let sgd = SGD::new(params.clone(), lr);
 
     // The inputs are constant; the graph is reused every step.
-    let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
-        .reshape(&mut ctx, [4, 2]);
-    let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, [4, 1]);
+    let x = Tensor::from_slice(&ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
+        .reshape([4, 2]);
+    let t = Tensor::from_slice(&ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape([4, 1]);
 
     let n: usize = std::env::var("EPOCHS").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
     let mut first_epoch_misses: Option<u64> = None;
@@ -83,19 +83,19 @@ fn xor_trains_to_convergence() {
     let mut pred: Vec<f32> = Vec::new();
 
     for epoch in 0..n {
-        let out = model.forward(&x, &mut ctx);
-        let diff = out.sub(&mut ctx, &t);
-        let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
+        let out = model.forward(&x);
+        let diff = out.sub(&t);
+        let loss = diff.mul(&diff).mean(None, false);
 
-        loss.backward(&mut ctx, &params, None);
+        loss.backward(&params, None);
         // `loss.realize(*opt.schedule_step())`: co-realize the loss and the
         // optimizer update in one schedule; the leaves are unchanged, so the
         // next step's graph is identical.
-        sgd.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
-        sgd.zero_grad(&ctx);
+        sgd.schedule_step(&mut sess, std::slice::from_ref(&loss));
+        sgd.zero_grad();
 
-        pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);
-        last_loss = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx, &mut sess)[0];
+        pred = out.reshape([4]).to_list::<f32>(&mut sess);
+        last_loss = loss.reshape([1]).to_list::<f32>(&mut sess)[0];
 
         if epoch % (n / 10).max(1) == 0 || epoch == n - 1 {
             println!("epoch {epoch}: loss = {last_loss}");
@@ -121,34 +121,34 @@ fn xor_trains_to_convergence() {
 #[test]
 fn micro_seq_kaiming_timed() {
     use std::time::Instant;
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     Tensor::manual_seed(1);
     for i in 0..4 {
-        let t = Tensor::kaiming_uniform(&mut ctx, &[2,2], (5.0f64).sqrt(), None);
-        let n_before = ctx.g.live_len();
+        let t = Tensor::kaiming_uniform(&ctx, &[2,2], (5.0f64).sqrt(), None);
+        let n_before = ctx.raw().g.live_len();
         let t0 = Instant::now();
-        let v = t.to_list_fresh::<f32>(&mut ctx);
+        let v = t.to_list_fresh::<f32>();
         eprintln!("[t] i={i} before={n_before} dt={:?}", t0.elapsed());
         let _ = v;
     }
-    eprintln!("[t] final nodes={}", ctx.g.live_len());
+    eprintln!("[t] final nodes={}", ctx.raw().g.live_len());
 }
 
 #[test]
 fn micro_repeated_realize() {
     use std::time::Instant;
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
     for i in 0..7 {
-        let a = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0], None, None);
-        let b = Tensor::from_slice(&mut ctx, &[4.0f32, 5.0, 6.0], None, None);
-        let c = a.add(&mut ctx, &b);
-        let before = ctx.g.live_len();
+        let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);
+        let b = Tensor::from_slice(&ctx, &[4.0f32, 5.0, 6.0], None, None);
+        let c = a.add(&b);
+        let before = ctx.raw().g.live_len();
         let t0 = Instant::now();
-        let v = c.to_list::<f32>(&mut ctx, &mut sess);
+        let v = c.to_list::<f32>(&mut sess);
         eprintln!(
             "[r] i={i} before={before} after={} bases={} hits={} misses={} dt={:?} v={v:?}",
-            ctx.g.live_len(),
+            ctx.raw().g.live_len(),
             sess.buffers.n_bases(),
             sess.cache.hits,
             sess.cache.misses,

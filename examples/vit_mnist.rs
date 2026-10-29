@@ -23,7 +23,7 @@ use autorust::engine::session::Session;
 use autorust::models::vit::ViT;
 use autorust::tensor::nn::Module;
 use autorust::tensor::optim::{Adam, Optim};
-use autorust::tensor::{Ix, Tensor};
+use autorust::tensor::{Ctx, Ix, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -51,33 +51,33 @@ pub fn fetch(url: &str, path: &Path) {
 
 pub fn load_images(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx images");
-    let x = Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape(ctx, [-1, 1, 28, 28]);
-    let x = if n < 60_000 { x.getitem(ctx, &[Ix::slice(Some(0), Some(n), 1)]) } else { x };
-    x.realize(ctx, sess).clone()
+    let x = Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape([-1, 1, 28, 28]);
+    let x = if n < 60_000 { x.getitem(&[Ix::slice(Some(0), Some(n), 1)]) } else { x };
+    x.realize(sess).clone()
 }
 
 pub fn load_labels(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx labels");
     let y = Tensor::from_slice(ctx, &bytes[8..], Some(dtype::UINT8), None);
-    let y = if n < 60_000 { y.getitem(ctx, &[Ix::slice(Some(0), Some(n), 1)]) } else { y };
-    y.realize(ctx, sess).clone()
+    let y = if n < 60_000 { y.getitem(&[Ix::slice(Some(0), Some(n), 1)]) } else { y };
+    y.realize(sess).clone()
 }
 
 /// 28x28 uint8 -> `(N,3,SIZE,SIZE)` f32 in [0,1]: normalize, bilinear resize,
 /// replicate the single channel to RGB.
 pub fn prep(x: &Tensor, size: i64, ctx: &mut UOpCtx) -> Tensor {
-    let x = x.cast(ctx, dtype::FLOAT32).div(ctx, 255.0f64);
-    let x = x.interpolate(ctx, &[size, size], "linear", false);
-    x.repeat_interleave(ctx, 3, Some(1))
+    let x = x.cast(dtype::FLOAT32).div(255.0f64);
+    let x = x.interpolate(&[size, size], "linear", false);
+    x.repeat_interleave(3, Some(1))
 }
 
 /// `(model(X).argmax(1) == Y).mean() * 100`, read back as a percentage.
 fn test_acc(model: &ViT, x: &Tensor, y: &Tensor, size: i64, ctx: &mut UOpCtx, sess: &mut Session) -> f32 {
     let xp = prep(x, size, ctx);
-    let out = model.forward(&xp, ctx);
-    let pred = out.argmax(ctx, Some(1), false);
-    let correct = pred.eq(ctx, y).cast(ctx, dtype::FLOAT32).mean(ctx, None, false);
-    correct.mul(ctx, 100.0).item::<f32>(ctx, sess)
+    let out = model.forward(&xp);
+    let pred = out.argmax(Some(1), false);
+    let correct = pred.eq(y).cast(dtype::FLOAT32).mean(None, false);
+    correct.mul(100.0).item::<f32>(sess)
 }
 
 fn main() {
@@ -120,40 +120,40 @@ fn main() {
         fetch(&format!("{base}{gz}"), &dir.join(raw));
     }
 
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
 
-    let x_train = load_images(&mut ctx, &mut sess, &dir.join("train-images-idx3-ubyte"), train_n);
-    let y_train = load_labels(&mut ctx, &mut sess, &dir.join("train-labels-idx1-ubyte"), train_n);
-    let x_test = load_images(&mut ctx, &mut sess, &dir.join("t10k-images-idx3-ubyte"), test_n);
-    let y_test = load_labels(&mut ctx, &mut sess, &dir.join("t10k-labels-idx1-ubyte"), test_n);
+    let x_train = load_images(&mut ctx.raw(), &mut sess, &dir.join("train-images-idx3-ubyte"), train_n);
+    let y_train = load_labels(&mut ctx.raw(), &mut sess, &dir.join("train-labels-idx1-ubyte"), train_n);
+    let x_test = load_images(&mut ctx.raw(), &mut sess, &dir.join("t10k-images-idx3-ubyte"), test_n);
+    let y_test = load_labels(&mut ctx.raw(), &mut sess, &dir.join("t10k-labels-idx1-ubyte"), test_n);
 
     Tensor::manual_seed(seed);
-    let model = ViT::build(&mut ctx, layers, embed, heads, 3, size, patch, classes).into_params(&mut ctx);
+    let model = ViT::build(&mut ctx.raw(), layers, embed, heads, 3, size, patch, classes).into_params();
     let params: Vec<Tensor> = model.params().collect();
     println!("params: {} tensors", params.len());
-    let opt = Adam::new(&mut ctx, params.clone(), lr);
+    let opt = Adam::new(params.clone(), lr);
 
     let mut test_accuracy = f32::NAN;
     for step in 0..steps {
         // training mode: dropout is active
         sess.training(true);
-        let samples = Tensor::randint(&mut ctx, &[bs], 0, train_n as i32, None, None);
-        let xb = x_train.getitem(&mut ctx, &[Ix::Tensor(samples.clone())]);
-        let yb = y_train.getitem(&mut ctx, &[Ix::Tensor(samples)]);
-        let xb = prep(&xb, size, &mut ctx);
+        let samples = Tensor::randint(&ctx, &[bs], 0, train_n as i32, None, None);
+        let xb = x_train.getitem(&[Ix::Tensor(samples.clone())]);
+        let yb = y_train.getitem(&[Ix::Tensor(samples)]);
+        let xb = prep(&xb, size, &mut ctx.raw());
 
-        let out = model.forward(&xb, &mut ctx);
-        let loss = out.sparse_categorical_crossentropy(&mut ctx, &yb, -1, 0.0, "mean");
-        loss.backward(&mut ctx, &params, None);
-        opt.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
-        opt.zero_grad(&mut ctx);
+        let out = model.forward(&xb);
+        let loss = out.sparse_categorical_crossentropy(&yb, -1, 0.0, "mean");
+        loss.backward(&params, None);
+        opt.schedule_step(&mut sess, std::slice::from_ref(&loss));
+        opt.zero_grad();
 
         if step % 10 == 9 || step == steps - 1 {
-            let l = loss.item::<f32>(&mut ctx, &mut sess);
+            let l = loss.item::<f32>(&mut sess);
             // eval mode: dropout is the identity
             sess.training(false);
-            test_accuracy = test_acc(&model, &x_test, &y_test, size, &mut ctx, &mut sess);
+            test_accuracy = test_acc(&model, &x_test, &y_test, size, &mut ctx.raw(), &mut sess);
             println!("step {:>4}: loss {l:6.3}  test_accuracy {test_accuracy:5.2}%", step + 1);
         }
     }

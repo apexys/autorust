@@ -138,31 +138,31 @@ fn test_substitute() {
 #[test]
 fn test_getitem_slices() {
     use autorust::s;
-use autorust::tensor::{ix::Ix, movement, Tensor};
+use autorust::tensor::{Ctx, ix::Ix, movement, Tensor};
     use autorust::uop::ctx::UOpCtx;
     use autorust::uop::ops::Ops;
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     // x = STACK of 12 consts reshaped to (3, 4): simple way to get a shaped tensor
-    let vals: Vec<_> = (0..12).map(|i| ctx.cint(i)).collect();
-    let x = ctx.uop(Ops::Stack, None, vals, autorust::uop::arg::Arg::None);
+    let vals: Vec<_> = (0..12).map(|i| ctx.raw().cint(i)).collect();
+    let x = ctx.raw().uop(Ops::Stack, None, vals, autorust::uop::arg::Arg::None);
     let x = movement::reshape(
-        &mut ctx,
+        &mut ctx.raw(),
         x,
         &[autorust::uop::sint::SVal::I(3), autorust::uop::sint::SVal::I(4)],
     );
-    let t = Tensor::from_uop(&ctx, x);
+    let t = Tensor::from_uop(&ctx.raw(), x);
     // t[1] -> shape (4,)
-    let t1 = t.clone().getitem(&mut ctx, &[Ix::Index(1)]);
-    assert_eq!(t1.shape(&mut ctx).as_slice(), &[autorust::uop::sint::SVal::I(4)]);
+    let t1 = t.clone().getitem(&[Ix::Index(1)]);
+    assert_eq!(t1.shape().as_slice(), &[autorust::uop::sint::SVal::I(4)]);
     // t[:, 1] -> shape (3,)
-    let tc = t.clone().getitem(&mut ctx, &s![.., 1]);
-    assert_eq!(tc.shape(&mut ctx).as_slice(), &[autorust::uop::sint::SVal::I(3)]);
+    let tc = t.clone().getitem(&s![.., 1]);
+    assert_eq!(tc.shape().as_slice(), &[autorust::uop::sint::SVal::I(3)]);
     // t[1:3, ::2] -> shape (2, 2)
-    let ts = t.clone().getitem(&mut ctx, &s![1..3, ..;2]);
-    let sh = ts.shape(&mut ctx);
+    let ts = t.clone().getitem(&s![1..3, ..;2]);
+    let sh = ts.shape();
     assert_eq!(sh.as_slice(), &[autorust::uop::sint::SVal::I(2), autorust::uop::sint::SVal::I(2)]);
     // t[NewAxis, 2] -> shape (1, 4)
-    let tn = t.getitem(&mut ctx, &s![NewAxis, 2]);
-    let sh = tn.shape(&mut ctx);
+    let tn = t.getitem(&s![NewAxis, 2]);
+    let sh = tn.shape();
     assert_eq!(sh.as_slice(), &[autorust::uop::sint::SVal::I(1), autorust::uop::sint::SVal::I(4)]);
 }

@@ -18,14 +18,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::dtype::{self, DTypeId};
 use crate::dtype::ConstVal;
+use crate::dtype::{self, DTypeId};
 use crate::tensor::ix::Ix;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::sint::SVal;
 
-use super::creation;
 use super::Tensor;
+use super::creation;
 
 // ---------------------------------------------------------------------------
 // module-level RNG state (thread-local, mirrors tinygrad's class-level state)
@@ -157,14 +157,26 @@ fn bits_to_rand_f32(bits: &[u32], numel: usize) -> Vec<f32> {
 /// uint16 (little-endian), `>> (bitsize-nmant) | float_one_bits`, bitcast to the
 /// float and subtract 1 (rand.py:31).
 fn bits_to_rand_f16(bits: &[u32], numel: usize, dt: DTypeId) -> Vec<f64> {
-    let (nmant, one): (u32, u16) = if dt == dtype::FLOAT16 { (10, 0x3C00) } else { (7, 0x3F80) };
+    let (nmant, one): (u32, u16) = if dt == dtype::FLOAT16 {
+        (10, 0x3C00)
+    } else {
+        (7, 0x3F80)
+    };
     let shift = 16 - nmant;
     (0..numel)
         .map(|i| {
             let w = bits[i / 2];
-            let u = if i % 2 == 0 { (w & 0xffff) as u16 } else { (w >> 16) as u16 };
+            let u = if i % 2 == 0 {
+                (w & 0xffff) as u16
+            } else {
+                (w >> 16) as u16
+            };
             let m = (u >> shift) | one;
-            let f = if dt == dtype::FLOAT16 { dtype::f16_bits_to_f64(m) } else { f32::from_bits((m as u32) << 16) as f64 };
+            let f = if dt == dtype::FLOAT16 {
+                dtype::f16_bits_to_f64(m)
+            } else {
+                f32::from_bits((m as u32) << 16) as f64
+            };
             f - 1.0
         })
         .collect()
@@ -184,7 +196,10 @@ fn bits_to_rand_f64(bits: &[u32], numel: usize) -> Vec<f64> {
 }
 
 fn numel_int(shape: &[SVal]) -> i64 {
-    shape.iter().map(|s| s.clone().as_i64().unwrap_or(1)).product()
+    shape
+        .iter()
+        .map(|s| s.clone().as_i64().unwrap_or(1))
+        .product()
 }
 
 /// `RandMixin.rand(*shape, dtype, device)` (rand.py:50).
@@ -197,43 +212,62 @@ fn numel_int(shape: &[SVal]) -> i64 {
 
 /// `_threefry_random_bits` (rand.py:12): pack two uint32 lane tensors into a
 /// uint64, run `Ops.THREEFRY`, unpack to `[low | high]` uint32.
-fn threefry_random_bits(ctx: &mut UOpCtx, key: &Tensor, counts0: &Tensor, counts1: &Tensor) -> Tensor {
+fn threefry_random_bits(
+    ctx: &mut UOpCtx,
+    key: &Tensor,
+    counts0: &Tensor,
+    counts1: &Tensor,
+) -> Tensor {
     let u64d = dtype::UINT64;
-    let lo_key = key.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]).cast(ctx, u64d);
-    let hi_key = key.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]).cast(ctx, u64d).shl(ctx, 32);
-    let packed_key = hi_key.bitwise_or(ctx, lo_key);
-    let x_hi = counts1.cast(ctx, u64d).shl(ctx, 32);
-    let x_lo = counts0.cast(ctx, u64d);
-    let x = x_hi.bitwise_or(ctx, x_lo);
-    let r = x.threefry(ctx, &packed_key);
-    let lo = r.cast(ctx, dtype::UINT32);
-    let hi = r.rshift(ctx, 32).cast(ctx, dtype::UINT32);
-    lo.cat(ctx, &[hi], 0)
+    let lo_key = key
+        .getitem_ctx(ctx, &[Ix::slice(Some(0), Some(1), 1)])
+        .cast_ctx(ctx, u64d);
+    let hi_key = key
+        .getitem_ctx(ctx, &[Ix::slice(Some(1), Some(2), 1)])
+        .cast_ctx(ctx, u64d)
+        .shl_ctx(ctx, 32);
+    let packed_key = hi_key.bitwise_or_ctx(ctx, lo_key);
+    let x_hi = counts1.cast_ctx(ctx, u64d).shl_ctx(ctx, 32);
+    let x_lo = counts0.cast_ctx(ctx, u64d);
+    let x = x_hi.bitwise_or_ctx(ctx, x_lo);
+    let r = x.threefry_ctx(ctx, &packed_key);
+    let lo = r.cast_ctx(ctx, dtype::UINT32);
+    let hi = r.rshift_ctx(ctx, 32).cast_ctx(ctx, dtype::UINT32);
+    lo.cat_ctx(ctx, &[hi], 0)
 }
 
 /// `RandMixin.random_bits` (rand.py:18) as a device graph. `num` words fit one
 /// `range(0, num, uint32.max)` chunk (the port's tensors are far below 2**32
 /// words).
 fn random_bits_graph(ctx: &mut UOpCtx, key: &Tensor, counter: &Tensor, num: i64) -> Tensor {
-    assert!(num > 0 && num <= u32::MAX as i64, "TGERR: random_bits num {num} out of range");
-    let low = counter.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
-    let high = counter.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
+    assert!(
+        num > 0 && num <= u32::MAX as i64,
+        "TGERR: random_bits num {num} out of range"
+    );
+    let low = counter.getitem_ctx(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
+    let high = counter.getitem_ctx(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
     // i == 0: c_low = low, c_high = high + (low < low == 0)
     let new_key = threefry_random_bits(ctx, key, &low, &high);
     let half = (num + 1) / 2;
-    let counts0 = Tensor::arange(ctx, 0.0, Some(half as f64), 1.0, Some(dtype::UINT32));
-    let counts1 = counts0.add(ctx, half);
+    let counts0 = Tensor::arange(&mut *ctx, 0.0, Some(half as f64), 1.0, Some(dtype::UINT32));
+    let counts1 = counts0.add_ctx(ctx, half);
     let bits = threefry_random_bits(ctx, &new_key, &counts0, &counts1);
-    bits.getitem(ctx, &[Ix::slice(Some(0), Some(num), 1)])
+    bits.getitem_ctx(ctx, &[Ix::slice(Some(0), Some(num), 1)])
 }
 
 /// `dtypes.finfo(dtype)` mantissa width (rand.py:33).
 fn finfo_nmant(dt: DTypeId) -> i64 {
-    if dt == dtype::FLOAT64 { 52 }
-    else if dt == dtype::FLOAT32 { 23 }
-    else if dt == dtype::FLOAT16 { 10 }
-    else if dt == dtype::BFLOAT16 { 7 }
-    else { panic!("TGERR: bits_to_rand unsupported dtype {dt:?}") }
+    if dt == dtype::FLOAT64 {
+        52
+    } else if dt == dtype::FLOAT32 {
+        23
+    } else if dt == dtype::FLOAT16 {
+        10
+    } else if dt == dtype::BFLOAT16 {
+        7
+    } else {
+        panic!("TGERR: bits_to_rand unsupported dtype {dt:?}")
+    }
 }
 
 fn uint_for_itemsize(dt: DTypeId) -> DTypeId {
@@ -248,24 +282,30 @@ fn uint_for_itemsize(dt: DTypeId) -> DTypeId {
 
 /// `bitcast(1.0, dtype, uint_dtype)` (rand.py:36) — bits of one in the target.
 fn float_one_bits(dt: DTypeId) -> i64 {
-    if dt == dtype::FLOAT64 { 0x3FF0_0000_0000_0000u64 as i64 }
-    else if dt == dtype::FLOAT32 { 0x3F80_0000 }
-    else if dt == dtype::FLOAT16 { 0x3C00 }
-    else if dt == dtype::BFLOAT16 { 0x3F80 }
-    else { panic!("TGERR: bits_to_rand unsupported dtype {dt:?}") }
+    if dt == dtype::FLOAT64 {
+        0x3FF0_0000_0000_0000u64 as i64
+    } else if dt == dtype::FLOAT32 {
+        0x3F80_0000
+    } else if dt == dtype::FLOAT16 {
+        0x3C00
+    } else if dt == dtype::BFLOAT16 {
+        0x3F80
+    } else {
+        panic!("TGERR: bits_to_rand unsupported dtype {dt:?}")
+    }
 }
 
 /// `RandMixin._bits_to_rand` (rand.py:31): take the top mantissa bits and OR in
 /// the float exponent, then subtract one to land in `[0, 1)`.
 fn bits_to_rand_graph(ctx: &mut UOpCtx, bits: &Tensor, shape: &[SVal], dt: DTypeId) -> Tensor {
-    let uint_bits = bits.bitcast(ctx, uint_for_itemsize(dt));
-    let shifted = uint_bits.rshift(ctx, dt.bitsize() as i64 - finfo_nmant(dt));
-    let ored = shifted.bitwise_or(ctx, float_one_bits(dt));
+    let uint_bits = bits.bitcast_ctx(ctx, uint_for_itemsize(dt));
+    let shifted = uint_bits.rshift_ctx(ctx, dt.bitsize() as i64 - finfo_nmant(dt));
+    let ored = shifted.bitwise_or_ctx(ctx, float_one_bits(dt));
     let numel = numel_int(shape);
-    ored.bitcast(ctx, dt)
-        .getitem(ctx, &[Ix::slice(Some(0), Some(numel), 1)])
-        .sub(ctx, 1.0)
-        .reshape(ctx, shape)
+    ored.bitcast_ctx(ctx, dt)
+        .getitem_ctx(ctx, &[Ix::slice(Some(0), Some(numel), 1)])
+        .sub_ctx(ctx, 1.0)
+        .reshape_ctx(ctx, shape)
 }
 
 thread_local! {
@@ -288,7 +328,12 @@ pub fn jit_on() -> bool {
 /// seed/counter are device tensors (`_next_counter`, tensor.py:642) so the
 /// captured step advances them on replay; otherwise they are staged as host
 /// constant tensors (same values, no per-step graph growth).
-pub fn rand_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+pub fn rand_graph(
+    ctx: &mut UOpCtx,
+    shape: &[SVal],
+    dtype_opt: Option<DTypeId>,
+    device: Option<&str>,
+) -> Tensor {
     let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
     let numel = numel_int(shape);
@@ -297,12 +342,16 @@ pub fn rand_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, 
         next_counter_graph(ctx, &dev, num as u32)
     } else {
         let (key, counter) = next_counter(&dev, num as u32);
-        let key_t = Tensor::from_slice(ctx, &[key.0, key.1], Some(dtype::UINT32), Some(&dev));
-        let counter_t = Tensor::from_slice(ctx, &[counter.0, counter.1], Some(dtype::UINT32), Some(&dev));
+        let key_t = Tensor::from_slice(&mut *ctx, &[key.0, key.1], Some(dtype::UINT32), Some(&dev));
+        let counter_t = Tensor::from_slice(&mut *ctx,
+            &[counter.0, counter.1],
+            Some(dtype::UINT32),
+            Some(&dev),
+        );
         (key_t, counter_t)
     };
     let bits = random_bits_graph(ctx, &key_t, &counter_t, num);
-    bits_to_rand_graph(ctx, &bits, shape, dt).contiguous(ctx)
+    bits_to_rand_graph(ctx, &bits, shape, dt).contiguous_ctx(ctx)
 }
 
 /// `Tensor._next_counter(device, num)` (tensor.py:642) with device seed/counter
@@ -348,29 +397,34 @@ fn next_counter_graph(ctx: &mut UOpCtx, dev: &str, num: u32) -> (Tensor, Tensor)
     });
     let num_low = num as i64;
     let num_high = 0i64; // num is a u32 word count, so `num >> 32` is always 0
-    let c0 = counter.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
-    let c1 = counter.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
-    let new_low = c0.add(ctx, num_low);
-    let carry = new_low.lt(ctx, &c0).cast(ctx, dtype::UINT32);
-    let new_high = c1.add(ctx, num_high).add(ctx, &carry);
-    let new_counter = new_low.cat(ctx, &[new_high], 0);
-    let eff = counter.assign_effect(ctx, &new_counter);
+    let c0 = counter.getitem_ctx(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
+    let c1 = counter.getitem_ctx(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
+    let new_low = c0.add_ctx(ctx, num_low);
+    let carry = new_low.lt_ctx(ctx, &c0).cast_ctx(ctx, dtype::UINT32);
+    let new_high = c1.add_ctx(ctx, num_high).add_ctx(ctx, &carry);
+    let new_counter = new_low.cat_ctx(ctx, &[new_high], 0);
+    let eff = counter.assign_effect_ctx(ctx, &new_counter);
     counter.set_uop(eff.uop());
     // tensor.py:651: low = counter[0:1] - num, high = counter[1:2] - num_high
     //   - (counter[0:1] < num). Reading the AFTER makes the store a dependency.
-    let a0 = counter.getitem(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
-    let a1 = counter.getitem(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
-    let borrow = a0.lt(ctx, num_low).cast(ctx, dtype::UINT32);
-    let low = a0.sub(ctx, num_low);
-    let high = a1.sub(ctx, num_high).sub(ctx, &borrow);
-    (seed, low.cat(ctx, &[high], 0))
+    let a0 = counter.getitem_ctx(ctx, &[Ix::slice(Some(0), Some(1), 1)]);
+    let a1 = counter.getitem_ctx(ctx, &[Ix::slice(Some(1), Some(2), 1)]);
+    let borrow = a0.lt_ctx(ctx, num_low).cast_ctx(ctx, dtype::UINT32);
+    let low = a0.sub_ctx(ctx, num_low);
+    let high = a1.sub_ctx(ctx, num_high).sub_ctx(ctx, &borrow);
+    (seed, low.cat_ctx(ctx, &[high], 0))
 }
 
 /// Host evaluator (`rand.rs` reference path): INTERP carries f64 lanes and
 /// cannot represent the uint64 threefry pack exactly, so on INTERP the integer
 /// sequence is computed on the host and staged with `from_slice` (the values are
 /// identical to the graph route).
-fn rand_host(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+fn rand_host(
+    ctx: &mut UOpCtx,
+    shape: &[SVal],
+    dtype_opt: Option<DTypeId>,
+    device: Option<&str>,
+) -> Tensor {
     let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
     let isz = dt.itemsize() as i64;
@@ -380,24 +434,29 @@ fn rand_host(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, devic
     let bits = random_bits(key, counter, num as u32);
     let out = if dt == dtype::FLOAT64 {
         let vals = bits_to_rand_f64(&bits, numel as usize);
-        Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
+        Tensor::from_slice(&mut *ctx, &vals, Some(dt), Some(&dev))
     } else if dt == dtype::FLOAT16 || dt == dtype::BFLOAT16 {
         let vals = bits_to_rand_f16(&bits, numel as usize, dt);
-        Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
+        Tensor::from_slice(&mut *ctx, &vals, Some(dt), Some(&dev))
     } else {
         let vals = bits_to_rand_f32(&bits, numel as usize);
-        Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
+        Tensor::from_slice(&mut *ctx, &vals, Some(dt), Some(&dev))
     };
     if shape.len() == 1 && shape[0].clone().as_i64().unwrap_or(1) == numel {
         out
     } else {
-        out.reshape(ctx, shape)
+        out.reshape_ctx(ctx, shape)
     }
 }
 
 /// `Tensor.rand` (rand.py:50): the device-graph route on hardware backends,
 /// where `uint64` is exact; the host evaluator on INTERP (see [`rand_host`]).
-pub fn rand(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+pub fn rand(
+    ctx: &mut UOpCtx,
+    shape: &[SVal],
+    dtype_opt: Option<DTypeId>,
+    device: Option<&str>,
+) -> Tensor {
     let dev = creation::canonicalize_device(device);
     if crate::runtime::device::is_interp_engine(&dev) {
         rand_host(ctx, shape, dtype_opt, Some(&dev))
@@ -422,17 +481,27 @@ pub fn uniform(
     // `dt`, then shifts by `low` (rand.py:158).
     let r = rand(ctx, shape, None, Some(&dev));
     let fdt = dtype::default_float();
-    let range = Tensor::full(ctx, shape, ConstVal::Float(high - low), Some(fdt), Some(&dev));
-    let scaled = r.mul(ctx, range).cast(ctx, dt);
-    let lo = Tensor::full(ctx, shape, ConstVal::Float(low), Some(dt), Some(&dev));
-    scaled.add(ctx, lo)
+    let range = Tensor::full(&mut *ctx,
+        shape,
+        ConstVal::Float(high - low),
+        Some(fdt),
+        Some(&dev),
+    );
+    let scaled = r.mul_ctx(ctx, range).cast_ctx(ctx, dt);
+    let lo = Tensor::full(&mut *ctx, shape, ConstVal::Float(low), Some(dt), Some(&dev));
+    scaled.add_ctx(ctx, lo)
 }
 
 /// `RandMixin.randn(*shape, dtype)` (rand.py:106) via `randn_like` (rand.py:88):
 /// a single `rand` over `[2, *shape]` in float32 feeds the polar Box–Muller
 /// transform `cos(2*pi*u0) * sqrt(-2*ln(1-u1))`, computed on the host (the
 /// graph route can't run under INTERP) and materialized with `from_slice`.
-fn randn_host(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+fn randn_host(
+    ctx: &mut UOpCtx,
+    shape: &[SVal],
+    dtype_opt: Option<DTypeId>,
+    device: Option<&str>,
+) -> Tensor {
     let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
     let mut s2 = shape.to_vec();
@@ -457,37 +526,47 @@ fn randn_host(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, devi
         .collect();
     let out = if dt == dtype::FLOAT64 {
         let d: Vec<f64> = vals.iter().map(|&v| v as f64).collect();
-        Tensor::from_slice(ctx, &d, Some(dt), Some(&dev))
+        Tensor::from_slice(&mut *ctx, &d, Some(dt), Some(&dev))
     } else {
-        Tensor::from_slice(ctx, &vals, Some(dt), Some(&dev))
+        Tensor::from_slice(&mut *ctx, &vals, Some(dt), Some(&dev))
     };
     if shape.len() == 1 && shape[0].clone().as_i64().unwrap_or(1) == n as i64 {
         out
     } else {
-        out.reshape(ctx, shape)
+        out.reshape_ctx(ctx, shape)
     }
 }
 
 /// `RandMixin.randn` (rand.py:106) as a device graph via `randn_like`
 /// (rand.py:88): a `[2, *shape]` float32 `rand`, then the Box–Muller transform
 /// `cos(2*pi*u0) * sqrt(-2*ln(1-u1))`.
-fn randn_graph(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+fn randn_graph(
+    ctx: &mut UOpCtx,
+    shape: &[SVal],
+    dtype_opt: Option<DTypeId>,
+    device: Option<&str>,
+) -> Tensor {
     let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
     let mut s2 = shape.to_vec();
     s2.insert(0, SVal::I(2));
     let src = rand(ctx, &s2, Some(dtype::FLOAT32), Some(&dev));
-    let u0 = src.getitem(ctx, &[Ix::Index(0)]);
-    let u1 = src.getitem(ctx, &[Ix::Index(1)]);
+    let u0 = src.getitem_ctx(ctx, &[Ix::Index(0)]);
+    let u1 = src.getitem_ctx(ctx, &[Ix::Index(1)]);
     let two_pi = 2.0 * std::f64::consts::PI;
-    let a = crate::tensor::nn::cos(&u0.mul(ctx, two_pi), ctx);
-    let one_minus = u1.neg(ctx).add(ctx, 1.0);
-    let b = one_minus.log(ctx).mul(ctx, -2.0).sqrt(ctx);
-    a.mul(ctx, &b).cast(ctx, dt).reshape(ctx, shape)
+    let a = crate::tensor::nn::cos_ctx(&u0.mul_ctx(ctx, two_pi), ctx);
+    let one_minus = u1.neg_ctx(ctx).add_ctx(ctx, 1.0);
+    let b = one_minus.log_ctx(ctx).mul_ctx(ctx, -2.0).sqrt_ctx(ctx);
+    a.mul_ctx(ctx, &b).cast_ctx(ctx, dt).reshape_ctx(ctx, shape)
 }
 
 /// `Tensor.randn` (rand.py:106): graph route on hardware, host on INTERP.
-pub fn randn(ctx: &mut UOpCtx, shape: &[SVal], dtype_opt: Option<DTypeId>, device: Option<&str>) -> Tensor {
+pub fn randn(
+    ctx: &mut UOpCtx,
+    shape: &[SVal],
+    dtype_opt: Option<DTypeId>,
+    device: Option<&str>,
+) -> Tensor {
     let dev = creation::canonicalize_device(device);
     if crate::runtime::device::is_interp_engine(&dev) {
         randn_host(ctx, shape, dtype_opt, Some(&dev))
@@ -508,7 +587,10 @@ pub fn randint(
     dtype_opt: Option<DTypeId>,
     device: Option<&str>,
 ) -> Tensor {
-    assert!(low < high, "TGERR: Tensor.randint requires low < high, got low={low}, high={high}");
+    assert!(
+        low < high,
+        "TGERR: Tensor.randint requires low < high, got low={low}, high={high}"
+    );
     let dt = dtype_opt.unwrap_or(dtype::INT32);
     // `randint` is `uniform(low, high, dtype)` (rand.py:122) =
     // `((high-low) * rand()).cast(dtype) + low`, so it follows `rand`'s
@@ -532,7 +614,10 @@ const K: [u32; 64] = [
 ];
 
 fn sha256(msg: &[u8]) -> [u8; 32] {
-    let mut h: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
     let ml = (msg.len() as u64) * 8;
     let mut data = msg.to_vec();
     data.push(0x80);
@@ -548,15 +633,28 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
         let mut abcdefgh = h;
         for i in 0..64 {
-            let s1 = abcdefgh[4].rotate_right(6) ^ abcdefgh[4].rotate_right(11) ^ abcdefgh[4].rotate_right(25);
+            let s1 = abcdefgh[4].rotate_right(6)
+                ^ abcdefgh[4].rotate_right(11)
+                ^ abcdefgh[4].rotate_right(25);
             let ch = (abcdefgh[4] & abcdefgh[5]) ^ ((!abcdefgh[4]) & abcdefgh[6]);
-            let t1 = abcdefgh[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
-            let s0 = abcdefgh[0].rotate_right(2) ^ abcdefgh[0].rotate_right(13) ^ abcdefgh[0].rotate_right(22);
-            let maj = (abcdefgh[0] & abcdefgh[1]) ^ (abcdefgh[0] & abcdefgh[2]) ^ (abcdefgh[1] & abcdefgh[2]);
+            let t1 = abcdefgh[7]
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = abcdefgh[0].rotate_right(2)
+                ^ abcdefgh[0].rotate_right(13)
+                ^ abcdefgh[0].rotate_right(22);
+            let maj = (abcdefgh[0] & abcdefgh[1])
+                ^ (abcdefgh[0] & abcdefgh[2])
+                ^ (abcdefgh[1] & abcdefgh[2]);
             let t2 = s0.wrapping_add(maj);
             abcdefgh[7] = abcdefgh[6];
             abcdefgh[6] = abcdefgh[5];
@@ -581,7 +679,21 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod sha_tests {
     use super::sha256;
-    fn hex(d:&[u8;32])->String{d.iter().map(|b|format!("{b:02x}")).collect()}
-    #[test] fn abc(){assert_eq!(hex(&sha256(b"abc")),"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");}
-    #[test] fn empty(){assert_eq!(hex(&sha256(b"")),"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");}
+    fn hex(d: &[u8; 32]) -> String {
+        d.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    #[test]
+    fn abc() {
+        assert_eq!(
+            hex(&sha256(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+    #[test]
+    fn empty() {
+        assert_eq!(
+            hex(&sha256(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 }

@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use crate::engine::realize::{compile_linear_cached, exec_linear, CompiledLinear};
 use crate::engine::session::Session;
 use crate::runtime::buffer::{buffer_of, Buffer};
-use crate::tensor::Tensor;
+use crate::tensor::{Ctx, Tensor};
 use crate::uop::ctx::UOpCtx;
 
 /// `_TinyJit` (jit.py:220) — captures the compiled LINEARS of one `call` and
@@ -70,9 +70,9 @@ impl Jit {
 
     /// Run `f` once to capture and execute one step; thereafter replay the
     /// captured schedules and return the captured result tensor.
-    pub fn call<F>(&mut self, ctx: &mut UOpCtx, sess: &mut Session, f: F) -> Tensor
+    pub fn call<F>(&mut self, ctx: &Ctx, sess: &mut Session, f: F) -> Tensor
     where
-        F: FnOnce(&mut UOpCtx, &mut Session) -> Tensor,
+        F: FnOnce(&Ctx, &mut Session) -> Tensor,
     {
         if !sess.jit_enabled() {
             // `if not JIT:` (jit.py:244) — run the step directly, no capture.
@@ -82,25 +82,27 @@ impl Jit {
             // capture: run the step, collecting every planned LINEAR it realizes.
             sess.begin_capture();
             let ret = f(ctx, sess);
+            let mut c = ctx.borrow_mut();
             // `if len(params:=get_parameters(ret)): Tensor.realize(*params)`
             // (jit.py:258): force the return to realize inside the capture (a
             // lazy eval graph would otherwise capture nothing). Idempotent.
-            ret.realize(ctx, sess);
+            ret.realize_ctx(&mut c, sess);
             let planned = sess.end_capture();
             assert!(!planned.is_empty(), "TGERR: JIT captured no linears (did the step realize anything?)");
             // `jit_lower`: lower + compile each linear once; replay executes these.
             self.linears = planned
                 .into_iter()
-                .map(|l| compile_linear_cached(ctx, l, &mut sess.cache))
+                .map(|l| compile_linear_cached(&mut c, l, &mut sess.cache))
                 .collect();
             // hold all buffers the captured linears reference so `prune` keeps them.
-            self.held = collect_buffers(ctx, sess, &self.linears);
+            self.held = collect_buffers(&mut c, sess, &self.linears);
             self.ret = Some(ret.clone());
             ret
         } else {
             // replay: execute the compiled schedules against the live buffers.
-            for c in &self.linears {
-                exec_linear(ctx, &mut sess.buffers, c, &HashMap::new());
+            let mut c = ctx.borrow_mut();
+            for cl in &self.linears {
+                exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new());
             }
             self.ret.clone().expect("TGERR: JIT replay missing captured result")
         }

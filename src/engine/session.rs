@@ -14,7 +14,7 @@
 //! ```ignore
 //! let mut sess = Session::new();
 //! let a = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0], None, None);
-//! let b = a.add(&mut ctx, &a);
+//! let b = a.add_ctx(ctx, &a);
 //! let v = b.to_list::<f32>(&mut ctx, &mut sess);
 //! // second realize: no recompile, no reallocation
 //! let v2 = b.to_list::<f32>(&mut ctx, &mut sess);

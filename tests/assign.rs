@@ -12,7 +12,7 @@
 //! - the parameter owns its buffer, so a schedule that wrote it is not lost to
 //!   `BufTable::prune` before the next read.
 use autorust::engine::session::Session;
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 fn approx(a: &[f32], b: &[f32]) {
@@ -22,33 +22,33 @@ fn approx(a: &[f32], b: &[f32]) {
     }
 }
 
-fn scalar(ctx: &mut UOpCtx, v: f64) -> Tensor {
+fn scalar(ctx: &Ctx, v: f64) -> Tensor {
     Tensor::full_const(ctx, &[] as &[i64], autorust::dtype::ConstVal::Float(v), None)
 }
 
 #[test]
 fn assign_updates_in_place() {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let p = Tensor::zeros_param(&mut ctx, [3], None, None);
-    approx(&p.to_list::<f32>(&mut ctx, &mut sess), &[0.0, 0.0, 0.0]);
+    let p = Tensor::zeros_param(&ctx, [3], None, None);
+    approx(&p.to_list::<f32>(&mut sess), &[0.0, 0.0, 0.0]);
 
-    let one = scalar(&mut ctx, 1.0);
-    let v = p.add(&mut ctx, &one);
-    p.assign(&mut ctx, &mut sess, &v);
-    approx(&p.to_list::<f32>(&mut ctx, &mut sess), &[1.0, 1.0, 1.0]);
+    let one = scalar(&ctx, 1.0);
+    let v = p.add(&one);
+    p.assign(&mut sess, &v);
+    approx(&p.to_list::<f32>(&mut sess), &[1.0, 1.0, 1.0]);
 }
 
 #[test]
 fn assign_accumulates_across_steps() {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let p = Tensor::zeros_param(&mut ctx, [3], None, None);
+    let p = Tensor::zeros_param(&ctx, [3], None, None);
     for step in 1..=5 {
-        let one = scalar(&mut ctx, 1.0);
-        let v = p.add(&mut ctx, &one);
-        p.assign(&mut ctx, &mut sess, &v);
-        approx(&p.to_list::<f32>(&mut ctx, &mut sess), &[step as f32; 3]);
+        let one = scalar(&ctx, 1.0);
+        let v = p.add(&one);
+        p.assign(&mut sess, &v);
+        approx(&p.to_list::<f32>(&mut sess), &[step as f32; 3]);
     }
 }
 
@@ -56,20 +56,20 @@ fn assign_accumulates_across_steps() {
 /// read must see the old value, the write must land (tinygrad's AFTER ordering).
 #[test]
 fn assign_effect_orders_read_before_store() {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let p = Tensor::zeros_param(&mut ctx, [3], None, None);
+    let p = Tensor::zeros_param(&ctx, [3], None, None);
 
-    let two = scalar(&mut ctx, 2.0);
-    let read = p.mul(&mut ctx, &two); // elementwise, not a reduce
-    let one = scalar(&mut ctx, 1.0);
-    let applied = p.add(&mut ctx, &one);
-    let effect = p.assign_effect(&mut ctx, &applied);
-    Tensor::realize_many(&mut ctx, &mut sess, &[read.clone(), effect]);
-    p.pin_buffer(&mut ctx, &mut sess);
+    let two = scalar(&ctx, 2.0);
+    let read = p.mul(&two); // elementwise, not a reduce
+    let one = scalar(&ctx, 1.0);
+    let applied = p.add(&one);
+    let effect = p.assign_effect(&applied);
+    Tensor::realize_many(&mut ctx.raw(), &mut sess, &[read.clone(), effect]);
+    p.pin_buffer(&mut sess);
 
-    approx(&read.to_list::<f32>(&mut ctx, &mut sess), &[0.0, 0.0, 0.0]);
-    approx(&p.to_list::<f32>(&mut ctx, &mut sess), &[1.0, 1.0, 1.0]);
+    approx(&read.to_list::<f32>(&mut sess), &[0.0, 0.0, 0.0]);
+    approx(&p.to_list::<f32>(&mut sess), &[1.0, 1.0, 1.0]);
 }
 
 /// Same but the read is a reduction (exercises the reduce-local path coexisting
@@ -77,17 +77,17 @@ fn assign_effect_orders_read_before_store() {
 /// optimizer-like co-realization.
 #[test]
 fn assign_effect_with_reduced_read() {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let p = Tensor::zeros_param(&mut ctx, [3], None, None);
+    let p = Tensor::zeros_param(&ctx, [3], None, None);
 
-    let loss = p.sum(&mut ctx, None, false, None);
-    let one = scalar(&mut ctx, 1.0);
-    let applied = p.add(&mut ctx, &one);
-    let effect = p.assign_effect(&mut ctx, &applied);
-    Tensor::realize_many(&mut ctx, &mut sess, &[loss.clone(), effect]);
-    p.pin_buffer(&mut ctx, &mut sess);
+    let loss = p.sum(None, false, None);
+    let one = scalar(&ctx, 1.0);
+    let applied = p.add(&one);
+    let effect = p.assign_effect(&applied);
+    Tensor::realize_many(&mut ctx.raw(), &mut sess, &[loss.clone(), effect]);
+    p.pin_buffer(&mut sess);
 
-    approx(&loss.to_list::<f32>(&mut ctx, &mut sess), &[0.0]);
-    approx(&p.to_list::<f32>(&mut ctx, &mut sess), &[1.0, 1.0, 1.0]);
+    approx(&loss.to_list::<f32>(&mut sess), &[0.0]);
+    approx(&p.to_list::<f32>(&mut sess), &[1.0, 1.0, 1.0]);
 }

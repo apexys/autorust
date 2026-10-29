@@ -12,7 +12,9 @@
 //! with a `TGERR:` prefix. The oracle binaries catch these and report the
 //! graph as errored (Python raises → rewrite aborts → differential skips it).
 
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::{Rc, Weak};
 use super::arg::{Arg, DeviceSpec, ParamArg};
 use super::graph::{Graph, UopId};
 use super::ops::{group, Ops};
@@ -34,9 +36,11 @@ pub struct UOpCtx {
     pub g: Graph,
     /// IndexingContext-style range counter (used by new_range)
     pub range_idx: i64,
+    /// Set when the context is owned by a shared [`crate::tensor::Ctx`]; lets
+    /// `Tensor::from_uop` capture the same handle without threading it through
+    /// every internal function.
+    pub(crate) self_ref: Weak<RefCell<UOpCtx>>,
 }
-
-use std::rc::Rc;
 
 impl Default for UOpCtx {
     fn default() -> Self {
@@ -46,7 +50,21 @@ impl Default for UOpCtx {
 
 impl UOpCtx {
     pub fn new() -> Self {
-        UOpCtx { g: Graph::new(), range_idx: 0 }
+        UOpCtx { g: Graph::new(), range_idx: 0, self_ref: Weak::new() }
+    }
+
+    /// Create a context owned by a shared handle. Used by
+    /// [`crate::tensor::Ctx::new`]; a plain [`UOpCtx::new`] cannot back
+    /// `Tensor`s because it has no stable address to hand out.
+    pub fn shared() -> Rc<RefCell<UOpCtx>> {
+        Rc::new_cyclic(|weak| {
+            RefCell::new(UOpCtx { g: Graph::new(), range_idx: 0, self_ref: weak.clone() })
+        })
+    }
+
+    /// The shared handle, if this context was created with [`UOpCtx::shared`].
+    pub(crate) fn handle(&self) -> Option<Rc<RefCell<UOpCtx>>> {
+        self.self_ref.upgrade()
     }
 
     /// No-op retained for the oracle/bridge API (property caches now live on

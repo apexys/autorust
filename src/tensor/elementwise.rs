@@ -3,8 +3,8 @@
 //! Python's `_broadcasted` (weak-CONST-keep) / `_binop` and the ops with
 //! special bodies (sub/div/mod/fmod/minimum/where/pow/exp/ceil/floor/...).
 
-use crate::dtype::{self};
 use crate::dtype::ConstVal;
+use crate::dtype::{self};
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
@@ -166,7 +166,12 @@ pub fn sin(ctx: &mut UOpCtx, x: UopId) -> UopId {
 pub fn tanh(ctx: &mut UOpCtx, x: UopId) -> UopId {
     // exp(2x) == exp2(2x/ln2)
     let two = binop_c(ctx, Ops::Mul, x, ConstVal::Float(2.0));
-    let scaled = binop_c(ctx, Ops::Mul, two, ConstVal::Float(1.0 / std::f64::consts::LN_2));
+    let scaled = binop_c(
+        ctx,
+        Ops::Mul,
+        two,
+        ConstVal::Float(1.0 / std::f64::consts::LN_2),
+    );
     let exp_2x = ctx.alu1(Ops::Exp2, scaled);
     let one = ConstVal::Float(1.0);
     let one_const = ctx.const_py(one, None);
@@ -193,7 +198,12 @@ pub fn exp(ctx: &mut UOpCtx, x: UopId) -> UopId {
     let dt = ctx.dt_of(&x);
     let up = dtype::least_upper_dtype(&[dt, dtype::default_float()]);
     let casted = ctx.cast(x, up);
-    let scaled = binop_c(ctx, Ops::Mul, casted, ConstVal::Float(1.0 / std::f64::consts::LN_2));
+    let scaled = binop_c(
+        ctx,
+        Ops::Mul,
+        casted,
+        ConstVal::Float(1.0 / std::f64::consts::LN_2),
+    );
     let e = ctx.alu1(Ops::Exp2, scaled);
     ctx.cast(e, dt)
 }

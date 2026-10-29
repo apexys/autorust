@@ -3,7 +3,7 @@
 //! `py/dump_tensor_golden.py` into `tests/tensor_golden.rs`.
 
 use autorust::engine::session::Session;
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 mod tensor_golden;
@@ -17,55 +17,55 @@ fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
     }
 }
 
-fn shape_of(t: &Tensor, ctx: &mut UOpCtx) -> Vec<usize> {
-    t.shape(ctx).as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
+fn shape_of(t: &Tensor) -> Vec<usize> {
+    t.shape().as_slice().iter().map(|s| s.clone().as_i64().unwrap_or(0) as usize).collect()
 }
 
-fn f32_tensor(ctx: &mut UOpCtx, vals: &[f32], shape: &[usize]) -> Tensor {
-    Tensor::from_slice(ctx, vals, None, None).reshape(ctx, shape)
+fn f32_tensor(ctx: &Ctx, vals: &[f32], shape: &[usize]) -> Tensor {
+    Tensor::from_slice(ctx, vals, None, None).reshape(shape)
 }
 
 #[test]
 fn tensor_ops_match_tinygrad() {
     for g in TENSOR_OPS {
-        let mut ctx = UOpCtx::new();
+        let mut ctx = Ctx::new();
         let mut sess = Session::new();
-        let a = f32_tensor(&mut ctx, g.a, g.a_shape);
+        let a = f32_tensor(&ctx, g.a, g.a_shape);
         let p = g.params;
         let out = match g.kind {
             "cat" => {
-                let b = f32_tensor(&mut ctx, g.b, g.b_shape);
-                a.cat(&mut ctx, &[b], p[0] as i64)
+                let b = f32_tensor(&ctx, g.b, g.b_shape);
+                a.cat(&[b], p[0] as i64)
             }
-            "tril" => a.tril(&mut ctx, p[0] as i64),
-            "triu" => a.triu(&mut ctx, p[0] as i64),
+            "tril" => a.tril(p[0] as i64),
+            "triu" => a.triu(p[0] as i64),
             "repeat_interleave" => {
                 let dim = if p[1] < 0.0 { None } else { Some(p[1] as i64) };
-                a.repeat_interleave(&mut ctx, p[0] as i64, dim)
+                a.repeat_interleave(p[0] as i64, dim)
             }
             "gather" => {
-                let idx = Tensor::from_slice(&mut ctx, g.idx, Some(autorust::dtype::INT32), None)
-                    .reshape(&mut ctx, g.idx_shape);
-                a.gather(&mut ctx, p[0] as i64, &idx)
+                let idx = Tensor::from_slice(&ctx, g.idx, Some(autorust::dtype::INT32), None)
+                    .reshape(g.idx_shape);
+                a.gather(p[0] as i64, &idx)
             }
             "clip" => {
                 let min_ = if p[0].is_nan() { None } else { Some(p[0]) };
                 let max_ = if p[1].is_nan() { None } else { Some(p[1]) };
-                a.clip(&mut ctx, min_, max_)
+                a.clip(min_, max_)
             }
             "lerp" => {
-                let b = f32_tensor(&mut ctx, g.b, g.b_shape);
-                a.lerp(&mut ctx, &b, p[0])
+                let b = f32_tensor(&ctx, g.b, g.b_shape);
+                a.lerp(&b, p[0])
             }
             "interpolate" => {
                 let mode = match p[0] as i64 { 0 => "linear", 1 => "nearest", _ => "nearest-exact" };
                 let align = p[1] != 0.0;
                 let size: Vec<i64> = p[2..].iter().map(|&v| v as i64).collect();
-                a.interpolate(&mut ctx, &size, mode, align)
+                a.interpolate(&size, mode, align)
             }
             other => panic!("unknown kind {other}"),
         };
-        assert_eq!(shape_of(&out, &mut ctx), g.out_shape.to_vec(), "{}: shape", g.name);
-        close(&out.to_list::<f32>(&mut ctx, &mut sess), g.out, 1e-5, g.name);
+        assert_eq!(shape_of(&out), g.out_shape.to_vec(), "{}: shape", g.name);
+        close(&out.to_list::<f32>(&mut sess), g.out, 1e-5, g.name);
     }
 }

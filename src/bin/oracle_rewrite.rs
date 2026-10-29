@@ -5,6 +5,7 @@
 //! or {"ok": false, "error": "..."}  (panics caught, like Python exceptions).
 use std::io::{BufRead, Write};
 
+use autorust::tensor::Ctx;
 use autorust::uop::ctx::UOpCtx;
 use autorust::uop::flat::{parse_flat, to_string_flat};
 use autorust::uop::graph::Graph;
@@ -91,8 +92,8 @@ fn process_line(line: &str) -> String {
         Some(r) => r.clone(),
         None => return serde_json_err("no roots"),
     };
-    let mut ctx = UOpCtx::new();
-    ctx.g = g;
+    let mut ctx = Ctx::new();
+    ctx.raw().g = g;
     let ctxv = if pm_name == "pm_split_ranges" {
         CtxVal::Dict(std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())))
     } else if pm_name == "pm_dtype_decomps" {
@@ -105,11 +106,11 @@ fn process_line(line: &str) -> String {
     } else {
         CtxVal::None
     };
-    let rewritten = match graph_rewrite(&mut ctx, root, pm, false, None, false, false, ctxv) {
+    let rewritten = match graph_rewrite(&mut ctx.raw(), root, pm, false, None, false, false, ctxv) {
         Ok(r) => r,
         Err(e) => return serde_json_err(&format!("rewrite: {e}")),
     };
-    let out = ctx.g.clone();
+    let out = ctx.raw().g.clone();
     let mut out = out;
     out.roots = vec![rewritten];
     let flat = out.to_flat();

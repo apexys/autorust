@@ -9,15 +9,14 @@
 //!
 //! ```no_run
 //! use autorust::engine::session::Session;
-//! use autorust::tensor::Tensor;
-//! use autorust::uop::ctx::UOpCtx;
+//! use autorust::tensor::{Ctx, Tensor};
 //!
-//! let mut ctx = UOpCtx::new();
+//! let ctx = Ctx::new();
 //! let mut sess = Session::new();
-//! let a = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0], None, None);
-//! let b = Tensor::from_slice(&mut ctx, &[10.0f32, 20.0, 30.0], None, None);
-//! let c = a.add(&mut ctx, &b);
-//! assert_eq!(c.to_list::<f32>(&mut ctx, &mut sess), vec![11.0, 22.0, 33.0]);
+//! let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);
+//! let b = Tensor::from_slice(&ctx, &[10.0f32, 20.0, 30.0], None, None);
+//! let c = a.add(&b);
+//! assert_eq!(c.to_list::<f32>(&mut sess), vec![11.0, 22.0, 33.0]);
 //! ```
 //!
 //! [`UOpCtx`](uop::ctx::UOpCtx) owns the interned graph; [`Session`](engine::session::Session)

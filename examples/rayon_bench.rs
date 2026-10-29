@@ -12,33 +12,33 @@
 //! Times a square matmul and an elementwise chain end-to-end (schedule+exec),
 //! per device, and prints the speedup. `RAYON_NUM_THREADS` controls the pool.
 
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 use std::time::Instant;
 
 fn time_device(dev: &str, n: usize, iters: usize) -> (f64, f64) {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let a_data: Vec<f32> = (0..n * n).map(|i| ((i % 97) as f32 - 48.0) * 0.01).collect();
     let w_data: Vec<f32> = (0..n * n).map(|i| ((i % 89) as f32 - 44.0) * 0.01).collect();
     let x_data: Vec<f32> = (0..n * n).map(|i| (i % 13) as f32 * 0.1).collect();
 
-    let a = Tensor::from_slice(&mut ctx, &a_data, None, Some(dev)).reshape(&mut ctx, [n, n]);
-    let w = Tensor::from_slice(&mut ctx, &w_data, None, Some(dev)).reshape(&mut ctx, [n, n]);
-    let x = Tensor::from_slice(&mut ctx, &x_data, None, Some(dev)).reshape(&mut ctx, [n, n]);
+    let a = Tensor::from_slice(&ctx, &a_data, None, Some(dev)).reshape([n, n]);
+    let w = Tensor::from_slice(&ctx, &w_data, None, Some(dev)).reshape([n, n]);
+    let x = Tensor::from_slice(&ctx, &x_data, None, Some(dev)).reshape([n, n]);
 
     // warm compile
-    let _ = a.dot(&mut ctx, &w).realize_fresh(&mut ctx);
-    let _ = x.add(&mut ctx, 1.0).sqrt(&mut ctx).mul(&mut ctx, 2.0).realize_fresh(&mut ctx);
+    let _ = a.dot(&w).realize_fresh();
+    let _ = x.add(1.0).sqrt().mul(2.0).realize_fresh();
 
     let t = Instant::now();
     for _ in 0..iters {
-        let _ = a.dot(&mut ctx, &w).realize_fresh(&mut ctx);
+        let _ = a.dot(&w).realize_fresh();
     }
     let mm = t.elapsed().as_secs_f64() / iters as f64;
 
     let t = Instant::now();
     for _ in 0..iters {
-        let _ = x.add(&mut ctx, 1.0).sqrt(&mut ctx).mul(&mut ctx, 2.0).realize_fresh(&mut ctx);
+        let _ = x.add(1.0).sqrt().mul(2.0).realize_fresh();
     }
     let ew = t.elapsed().as_secs_f64() / iters as f64;
     (mm, ew)

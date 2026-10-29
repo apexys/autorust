@@ -1,8 +1,8 @@
 //! M3 reduce mixin (mixin/reduce.py + the `_rop`/`_reduce`/`_cumalu`/`_pool`
 //! pieces from mixin/op.py + movement.py).
 
-use crate::dtype::{self, DTypeId};
 use crate::dtype::ConstVal;
+use crate::dtype::{self, DTypeId};
 use crate::uop::arg::Arg;
 use crate::uop::ctx::UOpCtx;
 use crate::uop::graph::UopId;
@@ -23,7 +23,12 @@ pub fn rop(ctx: &mut UOpCtx, op: Ops, x: UopId, axis: &[usize]) -> UopId {
         .filter(|&i| !matches!(shape[i], SVal::I(1)))
         .collect();
     if reduce_axis.is_empty() {
-        let kept: Vec<SVal> = shape.iter().enumerate().filter(|(i, _)| !axis.contains(i)).map(|(_, s)| s.clone()).collect();
+        let kept: Vec<SVal> = shape
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !axis.contains(i))
+            .map(|(_, s)| s.clone())
+            .collect();
         return movement::reshape_internal(ctx, x, &kept);
     }
     // permute so reduced axes are at the front
@@ -37,10 +42,18 @@ pub fn rop(ctx: &mut UOpCtx, op: Ops, x: UopId, axis: &[usize]) -> UopId {
         Ops::Reduce,
         None,
         vec![permuted],
-        Arg::Seq { tuple: true, items: vec![super::op_arg(op), Arg::Int(reduce_axis.len() as i64)] },
+        Arg::Seq {
+            tuple: true,
+            items: vec![super::op_arg(op), Arg::Int(reduce_axis.len() as i64)],
+        },
     );
     if axis != reduce_axis {
-        let kept: Vec<SVal> = shape.iter().enumerate().filter(|(i, _)| !axis.contains(i)).map(|(_, s)| s.clone()).collect();
+        let kept: Vec<SVal> = shape
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !axis.contains(i))
+            .map(|(_, s)| s.clone())
+            .collect();
         movement::reshape_internal(ctx, ret, &kept)
     } else {
         ret
@@ -53,7 +66,10 @@ pub fn reduce(ctx: &mut UOpCtx, x: UopId, op: Ops, axis: Option<&[usize]>, keepd
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let axis: Vec<usize> = match axis {
         None => (0..shape.len()).collect(),
-        Some(a) => a.iter().map(|&d| movement::resolve_dim(shape.len(), d as i64, false)).collect(),
+        Some(a) => a
+            .iter()
+            .map(|&d| movement::resolve_dim(shape.len(), d as i64, false))
+            .collect(),
     };
     let axis: Vec<usize> = if shape.is_empty() { vec![] } else { axis };
     let ret = rop(ctx, op, x.clone(), &axis);
@@ -90,7 +106,13 @@ pub fn sum_acc_dtype(dt: DTypeId) -> DTypeId {
 
 /// `ReduceMixin.sum` (reduce.py:20-45): cast the *input* to the accumulator
 /// dtype, reduce, then cast back for low-precision floats.
-pub fn sum(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> UopId {
+pub fn sum(
+    ctx: &mut UOpCtx,
+    x: UopId,
+    axis: Option<&[usize]>,
+    keepdim: bool,
+    dtype: Option<DTypeId>,
+) -> UopId {
     let self_dt = ctx.dt_of(&x);
     let dt = dtype.unwrap_or_else(|| sum_acc_dtype(self_dt));
     let xc = ctx.cast(x, dt);
@@ -102,7 +124,13 @@ pub fn sum(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, dt
 }
 
 /// `ReduceMixin.prod` (reduce.py:47-71): reduce in the input dtype (or `dtype`).
-pub fn prod(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> UopId {
+pub fn prod(
+    ctx: &mut UOpCtx,
+    x: UopId,
+    axis: Option<&[usize]>,
+    keepdim: bool,
+    dtype: Option<DTypeId>,
+) -> UopId {
     let self_dt = ctx.dt_of(&x);
     let dt = dtype.unwrap_or(self_dt);
     let xc = ctx.cast(x, dt);
@@ -112,12 +140,25 @@ pub fn prod(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, d
 /// sum/prod cast back to the source dtype for low-precision floats
 /// (reduce.py: `self.dtype in (dtypes.float16, dtypes.bfloat16, *dtypes.fp8s)`).
 fn sum_cast_back(dt: DTypeId) -> bool {
-    dtype::in_set(&[dtype::FLOAT16, dtype::BFLOAT16, dtype::FP8E4M3, dtype::FP8E5M2, dtype::FP8E4M3FNUZ, dtype::FP8E5M2FNUZ], dt)
+    dtype::in_set(
+        &[
+            dtype::FLOAT16,
+            dtype::BFLOAT16,
+            dtype::FP8E4M3,
+            dtype::FP8E5M2,
+            dtype::FP8E4M3FNUZ,
+            dtype::FP8E5M2FNUZ,
+        ],
+        dt,
+    )
 }
 
 /// `ReduceMixin.max` (reduce.py:73-94): `max()` over a bool tensor errors in Python.
 pub fn max(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) -> UopId {
-    assert!(!dtype::is_bool(ctx.dt_of(&x)), "TGERR: Tensor.max() not implemented for bool");
+    assert!(
+        !dtype::is_bool(ctx.dt_of(&x)),
+        "TGERR: Tensor.max() not implemented for bool"
+    );
     reduce(ctx, x, Ops::Max, axis, keepdim)
 }
 
@@ -137,7 +178,11 @@ pub fn all(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) ->
 /// `OpMixin.mean` (op.py:499-524).
 pub fn mean(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) -> UopId {
     let self_dt = ctx.dt_of(&x);
-    let output_dtype = if dtype::is_float(self_dt) { self_dt } else { dtype::default_float() };
+    let output_dtype = if dtype::is_float(self_dt) {
+        self_dt
+    } else {
+        dtype::default_float()
+    };
     let numerator = sum(ctx, x.clone(), axis, keepdim, None);
     let denominator = reduce_count(ctx, x, axis);
     let denom_u = ctx.sval_to_uop(denominator);
@@ -153,14 +198,27 @@ fn reduce_count(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>) -> SVal {
         None => (0..shape.len()).collect(),
         Some(a) => a.to_vec(),
     };
-    let dims: Vec<SVal> = (0..shape.len()).filter(|i| axis_vec.contains(i)).map(|i| <SInt as Clone>::clone(&shape[i])).collect();
+    let dims: Vec<SVal> = (0..shape.len())
+        .filter(|i| axis_vec.contains(i))
+        .map(|i| <SInt as Clone>::clone(&shape[i]))
+        .collect();
     movement::prod_sval(ctx, &dims)
 }
 
 /// `OpMixin.var` (op.py:526-552).
-pub fn var(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, correction: i64) -> UopId {
+pub fn var(
+    ctx: &mut UOpCtx,
+    x: UopId,
+    axis: Option<&[usize]>,
+    keepdim: bool,
+    correction: i64,
+) -> UopId {
     let self_dt = ctx.dt_of(&x);
-    let output_dtype = if dtype::is_float(self_dt) { self_dt } else { dtype::default_float() };
+    let output_dtype = if dtype::is_float(self_dt) {
+        self_dt
+    } else {
+        dtype::default_float()
+    };
     let m = mean(ctx, x.clone(), axis, true);
     let diff = super::elementwise::sub(ctx, x.clone(), m);
     let squares = super::elementwise::square(ctx, diff);
@@ -179,9 +237,16 @@ pub fn var(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool, co
 
 /// `OpMixin._pad_constant(pX, value)` (op.py:282-291): shrink negatives, pad
 /// non-negatives, mask-fill with `value` when non-zero.
-pub fn pad_constant(ctx: &mut UOpCtx, x: UopId, px: &[(Option<i64>, Option<i64>)], value: ConstVal) -> UopId {
+pub fn pad_constant(
+    ctx: &mut UOpCtx,
+    x: UopId,
+    px: &[(Option<i64>, Option<i64>)],
+    value: ConstVal,
+) -> UopId {
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
-    let has_neg = px.iter().any(|(a, b)| a.is_some_and(|v| v < 0) || b.is_some_and(|v| v < 0));
+    let has_neg = px
+        .iter()
+        .any(|(a, b)| a.is_some_and(|v| v < 0) || b.is_some_and(|v| v < 0));
     let mut cur = x;
     if has_neg {
         let shr: Vec<(SVal, SVal)> = px
@@ -198,10 +263,22 @@ pub fn pad_constant(ctx: &mut UOpCtx, x: UopId, px: &[(Option<i64>, Option<i64>)
     }
     let pads: Vec<(SVal, SVal)> = if has_neg {
         px.iter()
-            .map(|(pb, pa)| (SVal::I(pb.unwrap_or(0).max(0) as i128), SVal::I(pa.unwrap_or(0).max(0) as i128)))
+            .map(|(pb, pa)| {
+                (
+                    SVal::I(pb.unwrap_or(0).max(0) as i128),
+                    SVal::I(pa.unwrap_or(0).max(0) as i128),
+                )
+            })
             .collect()
     } else {
-        px.iter().map(|(pb, pa)| (SVal::I(pb.unwrap_or(0) as i128), SVal::I(pa.unwrap_or(0) as i128))).collect()
+        px.iter()
+            .map(|(pb, pa)| {
+                (
+                    SVal::I(pb.unwrap_or(0) as i128),
+                    SVal::I(pa.unwrap_or(0) as i128),
+                )
+            })
+            .collect()
     };
     let base = movement::pad(ctx, cur.clone(), &pads);
     // python: `if value == 0` — true for 0.0 as well
@@ -246,7 +323,10 @@ fn identity_const(op: Ops, dt: DTypeId) -> ConstVal {
 /// restricted to the cumsum case (single trailing pooled axis, stride/dilation 1).
 pub fn cumalu(ctx: &mut UOpCtx, x: UopId, axis: usize, op: Ops) -> UopId {
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
-    assert!(!matches!(shape[axis], SVal::I(0)) && matches!(op, Ops::Add | Ops::Max | Ops::Mul), "TGERR: bad _cumalu");
+    assert!(
+        !matches!(shape[axis], SVal::I(0)) && matches!(op, Ops::Add | Ops::Max | Ops::Mul),
+        "TGERR: bad _cumalu"
+    );
     // transpose(axis, -1)
     let t = movement::transpose(ctx, x, axis as i64, -1);
     let tshape = ctx.shape(&t).unwrap().unwrap_or_default();
@@ -317,7 +397,10 @@ fn pool_for_cumalu(ctx: &mut UOpCtx, x: UopId, k: usize, nd: usize) -> UopId {
     // repeats are REPEAT COUNTS (not sizes): _pool uses [1]*len(noop) + [rep].
     let mut rep_shape: Vec<SVal> = vec![one.clone(); noop];
     rep_shape.push(SVal::I(rep));
-    let rep_ints: Vec<i64> = rep_shape.iter().map(|s| s.clone().as_i128_or_panic() as i64).collect();
+    let rep_ints: Vec<i64> = rep_shape
+        .iter()
+        .map(|s| s.clone().as_i128_or_panic() as i64)
+        .collect();
     let mut xx = repeat(ctx, x, &rep_ints);
     // handle dilation: shrink_to(noop + [k*(i*f+d)]) then reshape(noop + (k, i*f+d))
     let seg = k as i128 * (i * f + 1);
@@ -345,7 +428,10 @@ fn pool_for_cumalu(ctx: &mut UOpCtx, x: UopId, k: usize, nd: usize) -> UopId {
     s4.push(SVal::I(o));
     xx = movement::reshape_internal(ctx, xx, &s4);
     // permute to move reduce to the end: noop dims, then the o dim, then k
-    let perm: Vec<usize> = (0..noop).chain(std::iter::once(noop + 1)).chain(std::iter::once(noop)).collect();
+    let perm: Vec<usize> = (0..noop)
+        .chain(std::iter::once(noop + 1))
+        .chain(std::iter::once(noop))
+        .collect();
     movement::permute_internal(ctx, xx, &perm)
 }
 
@@ -354,7 +440,12 @@ fn pool_for_cumalu(ctx: &mut UOpCtx, x: UopId, k: usize, nd: usize) -> UopId {
 pub fn cumsum(ctx: &mut UOpCtx, x: UopId, axis: i64) -> UopId {
     let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let axis = movement::resolve_dim(shape.len(), axis, false);
-    if shape.is_empty() || matches!(shape.iter().find(|s| matches!(s, SVal::I(0))), Some(SVal::I(0))) {
+    if shape.is_empty()
+        || matches!(
+            shape.iter().find(|s| matches!(s, SVal::I(0))),
+            Some(SVal::I(0))
+        )
+    {
         let s = sum(ctx, x, None, false, None);
         return ctx.cast(s.clone(), ctx.dt_of(&s));
     }
@@ -362,4 +453,3 @@ pub fn cumsum(ctx: &mut UOpCtx, x: UopId, axis: i64) -> UopId {
     assert!(s <= 512, "TGERR: _split_cumalu SPLIT path not ported yet");
     cumalu(ctx, x, axis, Ops::Add)
 }
-

@@ -3,7 +3,7 @@
 //! hands out this newtype, which derefs to `[SVal]` for list-like ergonomics:
 //!
 //! ```ignore
-//! let s = t.shape(ctx);      // Shape
+//! let s = t.shape_ctx(ctx);      // Shape
 //! s[0]; s[-1];               // Index<usize> / pythonic Index<isize>
 //! &s[..]; s.len(); s.iter(); // via Deref<Target = [SVal]>
 //! &s;                        // AsRef<[SVal]> -> any &[SVal] parameter
@@ -37,7 +37,12 @@ impl Shape {
     /// Python-style `shape[i]`: negative indices count from the end,
     /// out-of-range panics like `IndexError`.
     pub fn at(&self, i: isize) -> SVal {
-        self.get(i).cloned().unwrap_or_else(|| panic!("TGERR: IndexError shape index {i} out of range for len {}", self.0.len()))
+        self.get(i).cloned().unwrap_or_else(|| {
+            panic!(
+                "TGERR: IndexError shape index {i} out of range for len {}",
+                self.0.len()
+            )
+        })
     }
 
     pub fn get(&self, i: isize) -> Option<&SVal> {
@@ -57,7 +62,9 @@ impl Shape {
 
     /// `prod(shape)` as int when fully static.
     pub fn numel_int(&self) -> Option<i128> {
-        self.0.iter().try_fold(1i128, |a, s| s.clone().as_i64().map(|v| a * v as i128))
+        self.0
+            .iter()
+            .try_fold(1i128, |a, s| s.clone().as_i64().map(|v| a * v as i128))
     }
 
     pub fn is_static(&self) -> bool {
@@ -107,7 +114,12 @@ impl Index<usize> for Shape {
     type Output = SVal;
 
     fn index(&self, i: usize) -> &SVal {
-        self.0.get(i).unwrap_or_else(|| panic!("TGERR: IndexError shape index {i} out of range for len {}", self.0.len()))
+        self.0.get(i).unwrap_or_else(|| {
+            panic!(
+                "TGERR: IndexError shape index {i} out of range for len {}",
+                self.0.len()
+            )
+        })
     }
 }
 
@@ -135,14 +147,65 @@ impl Index<RangeFull> for Shape {
 }
 
 // ranges: `s[1..]`, `s[..2]`, `s[1..3]`, with pythonic negatives
-impl Index<RangeFrom<i32>> for Shape { type Output = [SVal]; fn index(&self, r: RangeFrom<i32>) -> &[SVal] { let n = self.0.len() as isize; let lo = if r.start < 0 { r.start as isize + n } else { r.start as isize }; self.0.index(lo.max(0) as usize..) } }
-impl Index<RangeFrom<usize>> for Shape { type Output = [SVal]; fn index(&self, r: RangeFrom<usize>) -> &[SVal] { self.0.index(r.start..) } }
-impl Index<RangeTo<usize>> for Shape { type Output = [SVal]; fn index(&self, r: RangeTo<usize>) -> &[SVal] { self.0.index(..r.end) } }
-impl Index<RangeTo<i32>> for Shape { type Output = [SVal]; fn index(&self, r: RangeTo<i32>) -> &[SVal] { let n = self.0.len() as isize; let hi = if r.end < 0 { r.end as isize + n } else { r.end as isize }; self.0.index(..hi.clamp(0, n) as usize) } }
-impl Index<Range<i32>> for Shape { type Output = [SVal]; fn index(&self, r: Range<i32>) -> &[SVal] { let n = self.0.len() as isize; let lo = if r.start < 0 { r.start as isize + n } else { r.start as isize }; let hi = if r.end < 0 { r.end as isize + n } else { r.end as isize }; self.0.index(lo.max(0) as usize..hi.clamp(0, n) as usize) } }
-impl Index<Range<usize>> for Shape { type Output = [SVal]; fn index(&self, r: Range<usize>) -> &[SVal] { self.0.index(r) } }
-
-
+impl Index<RangeFrom<i32>> for Shape {
+    type Output = [SVal];
+    fn index(&self, r: RangeFrom<i32>) -> &[SVal] {
+        let n = self.0.len() as isize;
+        let lo = if r.start < 0 {
+            r.start as isize + n
+        } else {
+            r.start as isize
+        };
+        self.0.index(lo.max(0) as usize..)
+    }
+}
+impl Index<RangeFrom<usize>> for Shape {
+    type Output = [SVal];
+    fn index(&self, r: RangeFrom<usize>) -> &[SVal] {
+        self.0.index(r.start..)
+    }
+}
+impl Index<RangeTo<usize>> for Shape {
+    type Output = [SVal];
+    fn index(&self, r: RangeTo<usize>) -> &[SVal] {
+        self.0.index(..r.end)
+    }
+}
+impl Index<RangeTo<i32>> for Shape {
+    type Output = [SVal];
+    fn index(&self, r: RangeTo<i32>) -> &[SVal] {
+        let n = self.0.len() as isize;
+        let hi = if r.end < 0 {
+            r.end as isize + n
+        } else {
+            r.end as isize
+        };
+        self.0.index(..hi.clamp(0, n) as usize)
+    }
+}
+impl Index<Range<i32>> for Shape {
+    type Output = [SVal];
+    fn index(&self, r: Range<i32>) -> &[SVal] {
+        let n = self.0.len() as isize;
+        let lo = if r.start < 0 {
+            r.start as isize + n
+        } else {
+            r.start as isize
+        };
+        let hi = if r.end < 0 {
+            r.end as isize + n
+        } else {
+            r.end as isize
+        };
+        self.0.index(lo.max(0) as usize..hi.clamp(0, n) as usize)
+    }
+}
+impl Index<Range<usize>> for Shape {
+    type Output = [SVal];
+    fn index(&self, r: Range<usize>) -> &[SVal] {
+        self.0.index(r)
+    }
+}
 
 /// Python-like tuple repr: `(2, 3, 'a4')`-style (`int`s bare, Variables rendered
 /// by their UOp debug form).

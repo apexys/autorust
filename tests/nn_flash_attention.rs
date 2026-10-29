@@ -4,7 +4,7 @@
 
 use autorust::engine::session::Session;
 use autorust::models::flash_attention::flash_attention_blocks;
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
@@ -15,8 +15,8 @@ fn close(got: &[f32], want: &[f32], rtol: f32, name: &str) {
     }
 }
 
-fn tensor(ctx: &mut UOpCtx, vals: &[f32], shape: &[usize]) -> Tensor {
-    Tensor::from_slice(ctx, vals, None, None).reshape(ctx, shape)
+fn tensor(ctx: &Ctx, vals: &[f32], shape: &[usize]) -> Tensor {
+    Tensor::from_slice(ctx, vals, None, None).reshape(shape)
 }
 
 /// Returns `(out, gq, gk, gv)` for one attention variant.
@@ -31,26 +31,26 @@ fn run(
     gqa: bool,
     bq: i64, bk: i64,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
-    let qt = tensor(&mut ctx, q, qs);
-    let kt = tensor(&mut ctx, k, ks);
-    let vt = tensor(&mut ctx, v, vs);
+    let qt = tensor(&ctx, q, qs);
+    let kt = tensor(&ctx, k, ks);
+    let vt = tensor(&ctx, v, vs);
     let mt = mask.map(|(ms, mv, mb)| {
-        let m = tensor(&mut ctx, mv, ms);
-        if mb { m.cast(&mut ctx, autorust::dtype::BOOL) } else { m }
+        let m = tensor(&ctx, mv, ms);
+        if mb { m.cast(autorust::dtype::BOOL) } else { m }
     });
     let out = if flash {
-        flash_attention_blocks(&qt, &kt, &vt, mt.as_ref(), is_causal, bq, bk, &mut ctx)
+        flash_attention_blocks(&qt, &kt, &vt, mt.as_ref(), is_causal, bq, bk)
     } else {
-        qt.scaled_dot_product_attention(&mut ctx, &kt, &vt, mt.as_ref(), 0.0, is_causal, gqa)
+        qt.scaled_dot_product_attention(&kt, &vt, mt.as_ref(), 0.0, is_causal, gqa)
     };
-    let loss = out.mul(&mut ctx, &out).sum(&mut ctx, None, false, None);
-    loss.backward(&mut ctx, &[qt.clone(), kt.clone(), vt.clone()], None);
-    let gq = qt.grad(&ctx).unwrap().to_list::<f32>(&mut ctx, &mut sess);
-    let gk = kt.grad(&ctx).unwrap().to_list::<f32>(&mut ctx, &mut sess);
-    let gv = vt.grad(&ctx).unwrap().to_list::<f32>(&mut ctx, &mut sess);
-    let o = out.to_list::<f32>(&mut ctx, &mut sess);
+    let loss = out.mul(&out).sum(None, false, None);
+    loss.backward(&[qt.clone(), kt.clone(), vt.clone()], None);
+    let gq = qt.grad().unwrap().to_list::<f32>(&mut sess);
+    let gk = kt.grad().unwrap().to_list::<f32>(&mut sess);
+    let gv = vt.grad().unwrap().to_list::<f32>(&mut sess);
+    let o = out.to_list::<f32>(&mut sess);
     (o, gq, gk, gv)
 }
 

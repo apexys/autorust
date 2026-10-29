@@ -19,7 +19,7 @@
 use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, Linear, Module};
 use autorust::tensor::optim::{Optim, SGD};
-use autorust::tensor::Tensor;
+use autorust::tensor::{Ctx, Tensor};
 use autorust::uop::ctx::UOpCtx;
 
 /// tinygrad-style model: layers wired by hand in `forward`, mirroring a
@@ -30,16 +30,16 @@ struct XorModel {
 }
 
 impl XorModel {
-    fn new(ctx: &mut UOpCtx) -> Self {
+    fn new(ctx: &Ctx) -> Self {
         XorModel {
             l1: Linear::new(ctx, 2, 4, true),
             l2: Linear::new(ctx, 4, 1, true),
         }
     }
 
-    fn forward(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
-        let h = nn::relu(&self.l1.forward(x, ctx), ctx);
-        self.l2.forward(&h, ctx)
+    fn forward(&self, x: &Tensor) -> Tensor {
+        let h = nn::relu(&self.l1.forward(x));
+        self.l2.forward(&h)
     }
 }
 
@@ -48,8 +48,8 @@ impl Module for XorModel {
         Box::new(nn::scoped("l1", self.l1.named_params()).chain(nn::scoped("l2", self.l2.named_params())))
     }
 
-    fn into_params(self, ctx: &mut UOpCtx) -> Self {
-        XorModel { l1: self.l1.into_params(ctx), l2: self.l2.into_params(ctx) }
+    fn into_params(self) -> Self {
+        XorModel { l1: self.l1.into_params(), l2: self.l2.into_params() }
     }
 }
 
@@ -64,19 +64,19 @@ fn main() {
 
     println!("XOR training: 2->4(relu)->1 MLP, MSE, SGD lr={lr}, epochs={n}, seed={seed}");
 
-    let mut ctx = UOpCtx::new();
+    let mut ctx = Ctx::new();
     let mut sess = Session::new();
 
     // Build the model, make its params updateable buffer leaves, and collect
     // them generically for the optimizer.
     Tensor::manual_seed(seed);
-    let model = XorModel::new(&mut ctx).into_params(&mut ctx);
+    let model = XorModel::new(&ctx).into_params();
     let params: Vec<Tensor> = model.params().collect();
     let sgd = SGD::new(params.clone(), lr);
 
-    let x = Tensor::from_slice(&mut ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
-        .reshape(&mut ctx, [4, 2]);
-    let t = Tensor::from_slice(&mut ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape(&mut ctx, [4, 1]);
+    let x = Tensor::from_slice(&ctx, &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], None, None)
+        .reshape([4, 2]);
+    let t = Tensor::from_slice(&ctx, &[0.0f32, 1.0, 1.0, 0.0], None, None).reshape([4, 1]);
 
     let mut pred = Vec::new();
     let mut last_loss = f32::NAN;
@@ -84,18 +84,18 @@ fn main() {
     let log_every = (n / 10).max(1);
 
     for epoch in 0..n {
-        let out = model.forward(&x, &mut ctx);
-        let diff = out.sub(&mut ctx, &t);
-        let loss = diff.mul(&mut ctx, &diff).mean(&mut ctx, None, false);
+        let out = model.forward(&x);
+        let diff = out.sub(&t);
+        let loss = diff.mul(&diff).mean(None, false);
 
-        loss.backward(&mut ctx, &params, None);
+        loss.backward(&params, None);
         // Co-realize the loss with the optimizer update in one schedule
         // (`loss.realize(*opt.schedule_step())` in tinygrad), then clear grads.
-        sgd.schedule_step(&mut ctx, &mut sess, std::slice::from_ref(&loss));
-        sgd.zero_grad(&ctx);
+        sgd.schedule_step(&mut sess, std::slice::from_ref(&loss));
+        sgd.zero_grad();
 
-        pred = out.reshape(&mut ctx, [4]).to_list::<f32>(&mut ctx, &mut sess);
-        last_loss = loss.reshape(&mut ctx, [1]).to_list::<f32>(&mut ctx, &mut sess)[0];
+        pred = out.reshape([4]).to_list::<f32>(&mut sess);
+        last_loss = loss.reshape([1]).to_list::<f32>(&mut sess)[0];
 
         if epoch == 0 {
             first_epoch_misses = sess.cache.misses;
