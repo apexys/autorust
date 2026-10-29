@@ -1,7 +1,27 @@
-//! M3: the `Tensor` front-end. v0.14's `Tensor` is a thin wrapper over `uop: UOp`
-//! (tensor.py:274); all sugar (movement/elementwise/reduce/creation) is UOp-level
-//! via the mixin chain and returns UOps. Submodules mirror the mixin files.
-
+//! `tensor/` — the user-facing `Tensor` front-end (tinygrad `tensor.py` +
+//! `mixin/`), plus `nn`, optimizers, autograd, RNG, indexing and state loading.
+//!
+//! A [`Tensor`] is a cheap `Clone` handle to an interned UOp plus a shared
+//! realized-buffer cell. Graph-building methods take `&mut UOpCtx` (the
+//! interning arena); reads and realize take a
+//! [`Session`](crate::engine::session::Session) as well. The `Tensor` API
+//! mirrors tinygrad's method names and argument order.
+//!
+//! Module map:
+//!
+//! - [`mod@creation`], [`movement`], [`elementwise`], [`reduce`], [`op`] — the
+//!   mixin ports (factories, movement, ALU, reductions, conv/pool).
+//! - [`nn`] — layers (`Linear`, `Conv*`, norms, `Embedding`, `LSTMCell`) and the
+//!   [`nn::Module`] parameter tree.
+//! - [`optim`] — SGD/LARS/Adam/AdamW/LAMB.
+//! - [`grad`] — reverse-mode autograd.
+//! - [`rand`] — Threefry RNG (host and device-graph paths).
+//! - [`ix`] — the `s![...]` indexing DSL.
+//! - [`state`] — safetensors/state-dict loading and saving.
+//! - [`callify`] — the v0.14 `CALL(FUNCTION(...))` transform.
+//!
+//! This is the stable, user-facing part of the crate; see the crate docs for
+//! the full stability statement.
 
 pub mod callify;
 pub mod ix;

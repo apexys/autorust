@@ -1768,3 +1768,79 @@ showed the cost was framing, not math: `exec_launch` 29%, **`malloc`/`free`/`cal
 - **What's left.** 65% of remaining retired instructions are the interpreter loop itself
   (inlined dispatch + indexing + loads). Cutting that needs instruction-level fusion or
   codegen (R2.3), which this std-only, no-JIT port deliberately avoids.
+
+---
+
+### 9.9 Public-release work (2026-10) — decisions and status
+
+This section records the release-readiness review and the decisions taken
+before the first public release. The engine is unchanged; this is packaging,
+API shape, and missing user-facing features.
+
+**Docs / packaging — done in this pass**
+- `LICENSE` (MIT + tinygrad attribution), `README.md` (draft; the maintainer
+  will rewrite the prose), Cargo metadata (`description`, `license`,
+  `repository`, `homepage`, `documentation`, `readme`, `keywords`,
+  `categories = ["artificial-intelligence", "science", "hardware-support"]`,
+  `rust-version = "1.88"`, `exclude`), docs.rs metadata.
+- Crate-level docs in `src/lib.rs`; module-level docs for `tensor`, `uop`,
+  `codegen`, `schedule`, `engine`, `helpers`, `models`. Public `Tensor`/`nn`
+  item docs are being filled in; `cargo rustdoc -W missing_docs` is the
+  tracker (855 warnings at review time).
+- `ONNX-Compat.md`: the T1/T2 contract, full 170-op matrix, parser/feature
+  matrix, validation plan, and security notes.
+- Edition 2024 is current; `rust-version = "1.88"` is the first release with
+  the edition-2024 let-chains used in the code. CI is deferred by request.
+
+**API decision: `Ctx` lives inside `Tensor`**
+- `Tensor` gains a `Ctx` handle (a shared `Rc<RefCell<UOpCtx>>`), so graph
+  construction no longer needs an explicit `&mut UOpCtx` argument on every
+  call. Constructors take `&Ctx`; methods use `self.ctx`.
+- `Ctx` is created with `Ctx::new()`; `UOpCtx::new()` remains for engine
+  internals that do not build `Tensor`s. `Tensor::from_uop` captures the
+  shared handle from the context (a `Weak` self-reference in `UOpCtx`).
+- `std::ops` overloads (`+ - * /`, `Neg`, scalar variants) use the stored
+  `Ctx`; mixing tensors from different contexts is a hard error.
+- The old explicit-context methods are migrated repo-wide (tests/examples
+  included). This is a **breaking** pre-1.0 API change.
+- Rationale: the `Rc` is already there, the handle is cheap to clone, it makes
+  operator syntax possible, and it removes two mutable contexts from every
+  call site. `Tensor` remains `!Send`/`!Sync`.
+
+**State API (next, before the networks)**
+- `Tensor::from_read(ctx, reader, dtype, shape, device)` — streaming upload
+  from any `std::io::Read`, one tensor at a time.
+- `tensor::state`: `State` map, safetensors read/write (header parser +
+  per-tensor streaming), `get_state_dict`/`load_state_dict` including
+  **buffers** (BatchNorm running stats), `replace`/`assign_many`.
+- Engine memory plumbing: free `Node.initial_data` after a device upload,
+  avoid the `to_param` host round-trip and the `pending_copyin` clone; this is
+  required for the 6.76 GB DA3 checkpoint.
+- nn constructors that accept loaded tensors (`from_parts`/state-driven), so
+  large models do not initialize random weights first.
+- `Tensor::to(device)` and `numel`/`size`/`zeros_like`-class conveniences.
+
+**Tensor long tail (next)**
+- The review found ~157 names in the raw Python/Rust method diff (~90 genuine
+  user-facing ops). Implement the missing reductions/sorting, activations,
+  movement/indexing, pooling/linalg, and creation helpers. Network-critical
+  ones: `silu`, `min`, `argmin`, `sort`/`argsort`, `tan`, `erf`, `normalize`,
+  `quick_gelu`, `logsumexp`, `einsum`.
+- `from_url`/download is **descoped**: users fetch weights themselves. The
+  library will not grow an opaque download API.
+
+**Environment configuration**
+- Runtime knobs (device, dtype, `BEAM`, `JIT`, `FA`, `RAYON_*`, cache dirs)
+  stay environment variables for now, but must be read **once and cached**
+  (a `config` module + `OnceLock`), not re-read on every call. Build-time
+  diagnostics/backends remain Cargo features (`trace`, `dump`, `backend_*`).
+  This is a hybrid by design: features select code, env selects runtime
+  behavior.
+- The hot `DEFAULT_FLOAT`/`DEFAULT_INT`/`SUM_DTYPE` reads in `dtype` are the
+  first caching targets.
+
+**Codegen**
+- The missing `get_late_rewrite_patterns`/`get_transcendental_patterns` and
+  `pm_number_params` stages, image path, multi-device, BEAM worker pool and
+  `TC_OPT=2` typedefs are documented in the README as known limitations; no
+  codegen work in this pass.

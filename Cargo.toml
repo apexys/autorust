@@ -2,6 +2,29 @@
 name = "autorust"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "A faithful Rust port of tinygrad: UOp graphs, a rangeify scheduler, codegen and CPU/OpenCL/CUDA backends"
+license = "MIT"
+repository = "https://github.com/apexys/autorust"
+homepage = "https://github.com/apexys/autorust"
+documentation = "https://docs.rs/autorust"
+readme = "README.md"
+keywords = ["tinygrad", "tensor", "autograd", "gpu", "compiler"]
+categories = ["artificial-intelligence", "science", "hardware-support"]
+authors = ["Valentin Buck"]
+exclude = [
+    "py/",
+    "CURRENT_STATE.md",
+    "INDEXING.md",
+    "AGENTS.md",
+    ".github/",
+]
+
+[package.metadata.docs.rs]
+# The default feature set (capi + backend_rayon) is the portable docs build;
+# CL/CUDA need runtime driver libraries and are not built on docs.rs.
+features = ["capi", "backend_rayon"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
