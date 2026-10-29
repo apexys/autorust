@@ -69,7 +69,7 @@ Sizes are LOC of the v0.14.0 tree. Decision key: **PORT** (must exist in Rust),
 | engine | `engine/{realize,jit}.py`, `engine/worker.py` | 677 | PORT subset (P6) | `run_linear`/`compile_linear`/`exec_*`, `TinyJit` stretch, SKIP worker pool |
 | rng / autograd | `mixin/rand.py`, `mixin/gradient.py` | 462 | PORT (P6) | after native execution works |
 | nn core | `nn/__init__.py` (420), `nn/state.py` (352), `nn/optim.py` (179) | ~950 | **PORT (M7e)** | the M7 integrator: exercises custom_kernel (Embedding), rand, gradient, conv ops together |
-| llm / viz / nn extras | `llm/`, `viz/`, `nn/onnx.py`, `nn/torch.py`, disk cache, process replay | huge | SKIP | ONNX import stays out |
+| llm / viz / nn extras | `llm/`, `viz/`, `nn/torch.py`, disk cache, process replay | huge | SKIP | `nn/onnx.py` is **ported** (T0/T1) in `src/onnx/`; torch import stays out |
 | `fetch` / `Tensor.from_url` | **DESCOPED** (2026-10): weight/data download is left to the user; `examples/mnist.rs` shells out to `curl` once | — | **DESCOPED** | no opaque download API in the library |
 
 MVP port budget ≈ **10–11k lines of Python** (of ~19k core), plus tests.
@@ -355,18 +355,19 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **172 passed, 9 ignored, 0 failed** (2026-10 release pass). The
-  ignored = 1 `backend_harness` (`#[ignore = "M7 gate: XOR training via tinygrad.nn
-  (Gradient/Adam)"]`), 1 `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `mnist_e2e`
-  (downloads data + a CNN train step), 1 `vit_e2e`, and 5 doc-tests.
+- `cargo test` → **197 passed, 11 ignored, 0 failed** (2026-10, with the ONNX
+  importer). The ignored = 1 `backend_harness` (`#[ignore = "M7 gate: XOR training
+  via tinygrad.nn (Gradient/Adam)"]`), 1 `nn_xor_parity::xor_parity_tinygrad_seed42`,
+  1 `mnist_e2e` (downloads data + a CNN train step), 1 `vit_e2e`, 1
+  `onnx::external_checkpoint_smoke` (needs `ONNX_MODEL`), and 6 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
   `test_roundtrip`, `test_tensor_diff`, `test_schedule_diff`, `test_codegen_diff`,
   `test_exec_diff`, `test_native_exec`.
 - Suites: `tests/{golden,backend_harness,marshal,ops,grad,rand,m2_smoke,flat_codec,nn_xor,
   nn_xor_relu,nn_xor_parity,session,mem_probe,nn_conv,nn_norm,nn_module,indexing,assign,
-  mnist_e2e,state,extra_ops,ctx_ops}.rs`.
+  mnist_e2e,state,extra_ops,ctx_ops,onnx}.rs`.
 - `cargo build` is warning-free; `cargo rustdoc` is warning-free; `cargo clippy
-  --all-targets` has 0 errors and 64 mostly-style warnings (the `mutable_key_type` false
+  --all-targets` has 0 errors and 59 mostly-style warnings (the `mutable_key_type` false
   positive — `UopId` hashes by immutable `id` — is allowed at the crate root).
 - `cargo fmt` is clean after the 2026-10 formatting pass.
 
@@ -1839,8 +1840,45 @@ API shape, and missing user-facing features.
 - **Still open:** `nonzero`, `scatter*`, `masked_select`, `gather_nd/elements`,
   `diag`onal, pad reflect/replicate/circular, `max_unpool2d`, `unfold`, and
   einsum ellipsis/1-operand forms. The ONNX matrix tracks which of these T1/T2
-  needs. The ONNX loader itself is **not implemented yet**; `ONNX-Compat.md`
-  is the T1/T2 contract, and the prerequisite ops above are in place.
+  needs.
+
+**ONNX importer — T0 DONE, T1 PARTIAL (2026-10)**
+- `src/onnx/` is the port of `tinygrad/nn/onnx.py`, using only `std`:
+  `pb.rs` is a strict protobuf wire reader (varint/fixed32/fixed64/length,
+  typed and packed TensorProto fields); `mod.rs` owns the decoded graph, a
+  `Ctx` and a `Session`; `ops.rs` is the op dispatcher.
+- Public API: `OnnxModel::{load, load_with_device, from_bytes, run, run_f32}`,
+  `ctx`, `session_mut`, `inputs`, `outputs`. Inputs must come from
+  `model.ctx()`; outputs stay valid after the model is dropped (the `Ctx` is
+  reference-counted).
+- Features: static and runtime-bound symbolic dims (`Shape`/`Size` produce
+  host-visible int64 values), initializers with raw/typed fields, external
+  data (`location`/`offset`/`length`, read one tensor at a time), `Constant`,
+  and a per-run host cache for shape/index tensors keyed by interned UOp.
+- Op coverage: elementwise/logical/cast, reductions/argmax/topk/cumsum,
+  movement (`Reshape`/`Slice`/`Gather`/`GatherND`/`GatherElements`/
+  `Pad` modes/`Expand`/`Tile`/`Split`/…), `Conv`/`ConvTranspose`/`Gemm`/
+  `MatMul`, pools, `BatchNorm`/`LayerNorm`/`InstanceNorm`/`GroupNorm`/`LRN`,
+  `Softmax`/`LogSoftmax`, `Resize`/`Upsample` (linear/nearest), `Einsum`
+  (two operands), `OneHot`, `Trilu`, `EyeLike`, `Range`, `DepthToSpace`,
+  `SpaceToDepth`, `Dropout` (inference), and op-versioned softmax defaults.
+- **Pow caveat:** the CUDA/C renderers have no ALU `Pow`; the importer folds
+  scalar-base `Pow` to a host constant and small integer exponents to
+  repeated multiplication (`x**2` is common in shape subgraphs).
+- Validation: Depth-Anything V2 ViT-B fp16 (619 nodes, 253 initializers, 21 op
+  types) runs end-to-end on CUDA. Against tinygrad on the same zero image the
+  `depth` output (268,324 values) has max abs error 0.015625 (2 fp16 ulps),
+  mean abs 0.0019, max rel 0.0054. `tests/onnx.rs` has 23 self-contained
+  parser/op tests plus an `#[ignore]`d external-checkpoint smoke test.
+- **Known gaps:** `NonZero`/`Compress`/`CenterCropPad`/`Scatter*`/`MaxUnpool`
+  (need primitives), `GatherND` with `batch_dims>0`, `Einsum` with >2
+  operands/ellipsis, `Resize` cubic/antialias, zero-element tensors (the
+  storage layer cannot allocate empty storage), per-dimension
+  `Conv`/`ConvTranspose` strides/dilations/output-padding, ONNX
+  training/quantized ops, `If`, optional/sequence values, and ONNX-ML.
+  `ONNX-Compat.md` is the canonical matrix.
+- Unsupported ops return `OnnxError::Unsupported` with the op name rather than
+  panicking; malformed/missing inputs return `Parse`/`Shape`/`Runtime`.
 
 **Environment configuration — CACHED (2026-10)**
 - `helpers::env` now caches every process-env lookup once (Context overrides

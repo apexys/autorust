@@ -54,6 +54,22 @@ autorust::tensor::state::load_state_dict(&model, &state, true)?;
 `Tensor::from_read(&ctx, &mut reader, dtype, shape, device)` is the underlying
 one-tensor-at-a-time primitive.
 
+ONNX inference is available for the T0/T1 surface (std-only protobuf parser,
+external data, static/runtime-bound shapes, CNN/transformer ops):
+
+```rust,ignore
+use autorust::onnx::OnnxModel;
+use autorust::tensor::Tensor;
+
+let mut model = OnnxModel::load("model.onnx")?;
+let image = Tensor::zeros(model.ctx(), [1, 3, 518, 518]);
+let out = model.run(&[("image", image)])?;
+let depth = out["depth"].to_list::<f32>(model.session_mut());
+```
+
+See [`ONNX-Compat.md`](ONNX-Compat.md) for the supported operator matrix and
+known gaps (no `Scatter*`/`NonZero`, quantized/training ops are T2).
+
 Runnable demos: `examples/xor.rs`, `examples/mnist.rs`,
 `examples/vit_mnist.rs`, plus `examples/fa_bench.rs` and
 `examples/rayon_bench.rs` for attention/CPU benchmarks.
@@ -89,6 +105,11 @@ first tensor/realize.
   (the interpreter/RAYON paths are used instead).
 - **Training**: eager autograd covers the ops used by the demos. Fused
   `Tensor.custom_kernel`/`@function` kernels are deferred.
+- **ONNX** covers the T0/T1 inference surface. Missing: `Scatter*`,
+  `NonZero`/`Compress`/`CenterCropPad`, `MaxUnpool`, `GatherND` with
+  `batch_dims>0`, `Einsum` with more than two operands, `Resize` cubic,
+  zero-element tensors, per-dimension conv strides, and all T2 features
+  (quantization, training ops, `If`, ONNX-ML).
 - The front-end is single-threaded (`Tensor` is `Rc`-based and `!Send`);
   `RAYON` parallelism is internal to the backend.
 
@@ -98,8 +119,8 @@ first tensor/realize.
   — canonical status, design decisions, and milestone history.
 - [`INDEXING.md`](https://github.com/apexys/autorust/blob/main/INDEXING.md) — the
   `getitem` index DSL.
-- [`ONNX-Compat.md`](ONNX-Compat.md) — the ONNX T1/T2 operator/feature
-  contract. The importer itself is not in 0.1.0 yet.
+- [`ONNX-Compat.md`](ONNX-Compat.md) — the ONNX T0/T1/T2 operator and feature
+  matrix, runner API, validation results, and known gaps.
 
 ## License
 

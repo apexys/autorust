@@ -45,6 +45,7 @@ behind each milestone. Do not duplicate that document here; point at it.
 src/uop/        interned UOp graph, UPat/PatternMatcher, graph_rewrite, symbolic
 src/dtype/      DType/AddrSpace, casts, truncation, least_upper_dtype
 src/tensor/     Tensor front-end, grad, rand, nn, optim, marshal helpers
+src/onnx/       ONNX importer: std-only protobuf parser + T0/T1 op runner
 src/schedule/   rangeify/indexing/memory (Seam B)
 src/codegen/    to_program pipeline, linearize, simplify, coalesce, interp exec
 src/renderer/   Renderer trait + cstyle (OpenCL under `backend_cl`)
@@ -52,6 +53,7 @@ src/runtime/    Buffer/allocator/compiler/device traits, INTERP + CL
 src/engine/     realize, session (BufTable + ProgCache), jit (TinyJit), disk_cache, ProgramInfo
 src/bin/        oracle_* cargo bins driven by pytest (JSON graph files)
 examples/       runnable demos (xor.rs, mnist.rs) — mirror tinygrad
+tests/onnx.rs   ONNX parser/op tests; external checkpoint test is #[ignore]d
 tests/          Rust unit/differential/golden/nn tests
 py/             dev-only Python bridge + differential gates
     bridge.py       uop_to_json / json_to_uop / realize_in_tg
