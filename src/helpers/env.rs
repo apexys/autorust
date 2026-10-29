@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 thread_local! {
     static OVERRIDES: RefCell<Vec<HashMap<String, String>>> = const { RefCell::new(Vec::new()) };
@@ -33,16 +34,31 @@ pub fn with_context<T>(overrides: &[(&str, String)], f: impl FnOnce() -> T) -> T
     out
 }
 
+/// Process-environment cache. tinygrad reads `os.environ` on every `getenv`;
+/// the port reads each name once (Context overrides are still checked live).
+fn env_value(name: &str) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut c = cache.lock().expect("env cache poisoned");
+    if let Some(v) = c.get(name) {
+        return v.clone();
+    }
+    let v = std::env::var(name).ok();
+    c.insert(name.to_string(), v.clone());
+    v
+}
+
 fn lookup(name: &str) -> Option<String> {
-    OVERRIDES.with_borrow(|s| {
-        for scope in s.iter().rev() {
-            if let Some(v) = scope.get(name) {
-                return Some(v.clone());
+    OVERRIDES
+        .with_borrow(|s| {
+            for scope in s.iter().rev() {
+                if let Some(v) = scope.get(name) {
+                    return Some(v.clone());
+                }
             }
-        }
-        None
-    })
-    .or_else(|| std::env::var(name).ok())
+            None
+        })
+        .or_else(|| env_value(name))
 }
 
 /// tinygrad `getenv(env, default)` when default is an int (incl. bool).

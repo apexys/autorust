@@ -87,6 +87,16 @@ enum Mode {
     Interp,
 }
 
+fn mode() -> Mode {
+    static V: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
+    *V.get_or_init(mode_from_env)
+}
+
+fn verbose() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("RAYON_VERBOSE").is_ok())
+}
+
 fn mode_from_env() -> Mode {
     if std::env::var("RAYON_INTERP").is_ok() {
         Mode::Interp
@@ -128,11 +138,11 @@ impl RayonProgram {
         if typed.is_some() {
             TYPED_KERNELS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        if std::env::var("RAYON_VERBOSE").is_ok() {
+        if verbose() {
             let kind = if typed.is_some() { "typed" } else if f64_kernel.is_some() { "f64" } else { "fallback" };
             eprintln!("[rayon] program {} -> {kind}", elf.name);
         }
-        RayonProgram { typed, f64_kernel, inner: InterpProgram::new(elf), mode: mode_from_env() }
+        RayonProgram { typed, f64_kernel, inner: InterpProgram::new(elf), mode: mode() }
     }
 }
 

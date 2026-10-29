@@ -15,6 +15,7 @@
 use crate::helpers::bigint::BigInt;
 use crate::helpers::{DEFAULT_FLOAT, DEFAULT_INT, SUM_DTYPE, getenv_str};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::sync::LazyLock;
 
 /// Address spaces (`AddrSpace` IntEnum, auto() starting at 1).
@@ -236,10 +237,23 @@ pub fn is_weak(d: DTypeId) -> bool {
 }
 
 pub fn default_float() -> DTypeId {
-    to_dtype(&getenv_str(DEFAULT_FLOAT.env, DEFAULT_FLOAT.default)).expect("bad DEFAULT_FLOAT")
+    static V: OnceLock<DTypeId> = OnceLock::new();
+    *V.get_or_init(|| {
+        to_dtype(&getenv_str(DEFAULT_FLOAT.env, DEFAULT_FLOAT.default)).expect("bad DEFAULT_FLOAT")
+    })
 }
 pub fn default_int() -> DTypeId {
-    to_dtype(&getenv_str(DEFAULT_INT.env, DEFAULT_INT.default)).expect("bad DEFAULT_INT")
+    static V: OnceLock<DTypeId> = OnceLock::new();
+    *V.get_or_init(|| {
+        to_dtype(&getenv_str(DEFAULT_INT.env, DEFAULT_INT.default)).expect("bad DEFAULT_INT")
+    })
+}
+/// `SUM_DTYPE` (the accumulation dtype for float reductions), read once.
+pub fn sum_dtype() -> DTypeId {
+    static V: OnceLock<DTypeId> = OnceLock::new();
+    *V.get_or_init(|| {
+        to_dtype(&getenv_str(SUM_DTYPE.env, SUM_DTYPE.default)).expect("bad SUM_DTYPE")
+    })
 }
 
 /// Python value space for const args / truncation results.
@@ -581,7 +595,7 @@ pub fn sum_acc_dtype(d: DTypeId) -> DTypeId {
     } else if is_int(d) || d == BOOL {
         least_upper_dtype2(d, INT32)
     } else {
-        least_upper_dtype2(d, to_dtype(&getenv_str(SUM_DTYPE.env, SUM_DTYPE.default)).unwrap())
+        least_upper_dtype2(d, sum_dtype())
     }
 }
 
