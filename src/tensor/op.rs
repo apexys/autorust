@@ -20,6 +20,9 @@ pub fn flat_to_grouped(padding: &[i64]) -> Vec<(i64, i64)> {
 /// `resolve_pool_pads(padding, dims)` (helpers.py:56-59): normalize an int /
 /// length-`dims` / length-`2*dims` padding to the flat `2*dims` form.
 pub fn resolve_pool_pads(padding: &[i64], dims: usize) -> Vec<i64> {
+    if padding.is_empty() {
+        return vec![0; 2 * dims];
+    }
     if padding.len() == 1 {
         vec![padding[0]; 2 * dims]
     } else if padding.len() == 2 * dims {
@@ -629,4 +632,67 @@ impl Tensor {
             other => panic!("TGERR: unsupported reduction {other:?}"),
         }
     }
+}
+
+impl Tensor {
+    /// `avg_pool2d(kernel_size, stride, dilation, padding, ceil_mode,
+    /// count_include_pad)` (op.py:1290-1332). N-D; the int/tuple/tuple-2N
+    /// padding forms are resolved by `resolve_pool_pads`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn avg_pool2d(
+        &self,
+        kernel_size: &[i64],
+        stride: Option<&[i64]>,
+        dilation: i64,
+        padding: &[i64],
+        ceil_mode: bool,
+        count_include_pad: bool,
+    ) -> Tensor {
+        let k = kernel_size;
+        let s_: Vec<i64> = stride.map(|s| s.to_vec()).unwrap_or_else(|| k.to_vec());
+        let d_ = vec![dilation; k.len()];
+        let axis: Vec<usize> = {
+            let n = self.shape().as_slice().len();
+            (n..n + k.len()).collect()
+        };
+        let shape = self.shape().into_vec();
+        let reg_pads = resolve_pool_pads(padding, k.len());
+        let pads = if ceil_mode { apply_ceil_mode(&shape, &reg_pads, k, &s_, &d_) } else { reg_pads.clone() };
+
+        let pool = |x: &Tensor, padding_: &[i64]| -> Tensor {
+            let grouped = flat_to_grouped(padding_);
+            let mut p_x: Vec<(Option<i64>, Option<i64>)> =
+                vec![(Some(0), Some(0)); x.shape().as_slice().len() - k.len()];
+            p_x.extend(grouped.iter().map(|(a, b)| (Some(*a), Some(*b))));
+            x.pad_constant(&p_x, crate::dtype::ConstVal::Float(0.0))
+                .pool_vec(k, &s_, &d_)
+        };
+
+        if !count_include_pad {
+            let num = pool(self, &pads).sum(Some(&axis), false, None);
+            let den = pool(&self.const_like(crate::dtype::ConstVal::Float(1.0), None), &pads)
+                .sum(Some(&axis), false, None);
+            return num.div(&den);
+        }
+        if !ceil_mode {
+            return pool(self, &pads).mean(Some(&axis), false);
+        }
+        let num = pool(self, &pads).sum(Some(&axis), false, None);
+        let den = pool(
+            &self
+                .pad_constant(&flat_pads(self, &reg_pads, k), crate::dtype::ConstVal::Float(0.0))
+                .const_like(crate::dtype::ConstVal::Float(1.0), None),
+            &pads.iter().zip(reg_pads.iter()).map(|(cp, rp)| cp - rp).collect::<Vec<_>>(),
+        )
+        .sum(Some(&axis), false, None);
+        num.div(&den)
+    }
+}
+
+fn flat_pads(x: &Tensor, pads: &[i64], k: &[i64]) -> Vec<(Option<i64>, Option<i64>)> {
+    let grouped = flat_to_grouped(pads);
+    let mut p: Vec<(Option<i64>, Option<i64>)> =
+        vec![(Some(0), Some(0)); x.shape().as_slice().len() - k.len()];
+    p.extend(grouped.iter().map(|(a, b)| (Some(*a), Some(*b))));
+    p
 }
