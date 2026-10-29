@@ -1,10 +1,10 @@
 //! `cargo run --bin oracle_dtype` — prints Rust dtype-table answers for the
 //! differential tests. Line protocol (tab separated):
-//!   DT <attr>                       (one per dtype in the closed set)
-//!   LU <a> <b> <least-upper>        (all ordered pairs over ALL + weak dtypes)
-//!   CL <a> <b> <0|1>                (can_lossless_cast)
-//!   MINMAX <attr> <min> <max>       (Python-repr-ish: ints decimal, inf/-inf/nan)
-//!   TRUNC <attr> <value> <result>   (truncate table over a value sweep)
+//!   DT `<attr>`                       (one per dtype in the closed set)
+//!   LU `<a>` `<b>` `<least-upper>`    (all ordered pairs over ALL + weak dtypes)
+//!   CL `<a>` `<b>` `<0|1>`            (can_lossless_cast)
+//!   MINMAX `<attr>` `<min>` `<max>`   (Python-repr-ish: ints decimal, inf/-inf/nan)
+//!   TRUNC `<attr>` `<value>` `<result>` (truncate table over a value sweep)
 
 use autorust::dtype::*;
 

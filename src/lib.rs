@@ -29,6 +29,7 @@
 //!
 //! - [`tensor`] — the `Tensor` front-end, `nn` layers, optimizers, autograd.
 //! - [`models`] — reference model definitions (ViT, transformer, FlashAttention).
+//! - [`onnx`] — ONNX importer and runner (T0/T1 inference surface).
 //! - [`dtype`] / [`helpers`] — dtypes and environment/context helpers.
 //! - [`engine`] — `Session`, `Jit`, realize, disk cache.
 //! - [`runtime`] / [`renderer`] — the backend seams and built-in backends.
@@ -47,9 +48,10 @@
 //!
 //! [`Tensor`](tensor::Tensor) and [`UOpCtx`](uop::ctx::UOpCtx) are `Rc`-based
 //! and therefore `!Send`/`!Sync`; the front-end is single-threaded. The RAYON
-//! backend parallelizes internally. Most API misuse (shape/axis errors,
-//! unsupported ops) panics with a `TGERR:` message, mirroring the Python
-//! oracle; file/device/parse APIs are being converted to `Result` as they land.
+//! backend parallelizes internally. Most tensor/device API misuse (shape/axis
+//! errors, unsupported ops) panics with a `TGERR:` message, mirroring the
+//! Python oracle; fallible I/O and parse entry points (safetensors, ONNX,
+//! model loading) return `Result` instead.
 //!
 //! # License
 //!
@@ -58,6 +60,9 @@
 // `mutable_key_type`; but `Hash`/`Eq` are defined solely by the immutable node
 // `id`, so using them as `HashMap` keys is sound.
 #![allow(clippy::mutable_key_type)]
+// Public API docs are part of the release contract; keep `cargo build` honest
+// about new undocumented items (the dedicated rustdoc gate adds `-W missing_docs`).
+#![warn(missing_docs)]
 
 pub mod codegen;
 pub mod dtype;

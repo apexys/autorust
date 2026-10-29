@@ -6,7 +6,7 @@
 //! Step forms:
 //!   {"op": "from_slice", "data": [1.0, 2.0], "kind": "f32",
 //!    "dtype": "float32"|null, "device": "PYTHON"|null}
-//!   {"op": "from_bytes", "data": "<hex>", "dtype": "uint8", "device": null}
+//!   {"op": "from_bytes", "data": "`<hex>`", "dtype": "uint8", "device": null}
 //!   {"op": "arange", "start": 5, "stop": null, "step": 1, "dtype": null}
 //!   {"op": "eye", "n": 3, "m": null, "dtype": null}
 //!   {"op": "zeros" | "ones", "shape": [2, 3]}

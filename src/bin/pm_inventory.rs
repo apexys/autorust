@@ -3,8 +3,8 @@
 //! (`py/pm_inventory.py`).
 //!
 //! Format:
-//!   PM <name> <rule_count>
-//!   R <index> <signature>
+//!   PM `<name>` `<rule_count>`
+//!   R `<index>` `<signature>`
 fn main() {
     for (name, sigs) in autorust::codegen::pipeline::pm_inventory() {
         println!("PM {} {}", name, sigs.len());

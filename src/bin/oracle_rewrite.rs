@@ -1,7 +1,7 @@
 //! M2 differential oracle: reads one JSON request per line
-//!   {"pm": "<pm-name>", "graph": <FlatGraph>}
+//!   {"pm": "`<pm-name>`", "graph": `<FlatGraph>`}
 //! rewrites the graph with the named Rust PatternMatcher, and answers
-//!   {"ok": true, "graph": <FlatGraph>}
+//!   {"ok": true, "graph": `<FlatGraph>`}
 //! or {"ok": false, "error": "..."}  (panics caught, like Python exceptions).
 use std::io::{BufRead, Write};
 
