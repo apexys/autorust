@@ -355,7 +355,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **198 passed, 11 ignored, 0 failed** (2026-10, with the ONNX
+- `cargo test` → **199 passed, 11 ignored, 0 failed** (2026-10, with the ONNX
   importer). The ignored = 1 `backend_harness` (`#[ignore = "M7 gate: XOR training
   via tinygrad.nn (Gradient/Adam)"]`), 1 `nn_xor_parity::xor_parity_tinygrad_seed42`,
   1 `mnist_e2e` (downloads data + a CNN train step), 1 `vit_e2e`, 1
@@ -1862,13 +1862,15 @@ API shape, and missing user-facing features.
   `Softmax`/`LogSoftmax`, `Resize`/`Upsample` (linear/nearest), `Einsum`
   (two operands), `OneHot`, `Trilu`, `EyeLike`, `Range`, `DepthToSpace`,
   `SpaceToDepth`, `Dropout` (inference), and op-versioned softmax defaults.
-- **Pow caveat:** the CUDA/C renderers have no ALU `Pow`; the importer folds
-  scalar-base `Pow` to a host constant and small integer exponents to
-  repeated multiplication (`x**2` is common in shape subgraphs).
+- **Pow:** the CUDA/C renderers have no ALU `Pow`; the importer folds
+  scalar-base `Pow` to a host constant, small integer exponents to repeated
+  multiplication (`x**2` is common in shape subgraphs), and otherwise uses
+  tinygrad's `xpow` decomposition (`exp2(e*log2(|b|))` plus the
+  negative-base/odd-exponent/NaN/`x**0` fixups).
 - Validation: Depth-Anything V2 ViT-B fp16 (619 nodes, 253 initializers, 21 op
   types) runs end-to-end on CUDA. Against tinygrad on the same zero image the
   `depth` output (268,324 values) has max abs error 0.015625 (2 fp16 ulps),
-  mean abs 0.0019, max rel 0.0054. `tests/onnx.rs` has 24 self-contained
+  mean abs 0.0019, max rel 0.0054. `tests/onnx.rs` has 25 self-contained
   parser/op tests plus an `#[ignore]`d external-checkpoint smoke test.
 - **Known gaps:** `NonZero`/`Compress`/`CenterCropPad`/`Scatter*`/`MaxUnpool`
   (need primitives), `GatherND` with `batch_dims>0`, `Einsum` with >2

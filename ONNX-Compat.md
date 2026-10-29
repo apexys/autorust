@@ -69,7 +69,7 @@ outputs remain valid after it is dropped.
   zero image, the `depth` output (268,324 values) has **max abs error 0.015625**
   (2 fp16 ulps at ~8), mean abs error 0.0019, max relative error 0.0054. This
   is the T0 acceptance model.
-- `tests/onnx.rs`: 24 self-contained tests covering the parser, external data,
+- `tests/onnx.rs`: 25 self-contained tests covering the parser, external data,
   typed/raw tensor encodings, symbolic dims, movement/reduction/nn/resize ops,
   and error paths. The external-checkpoint test is `#[ignore]`d and driven by
   `ONNX_MODEL`/`ONNX_DEVICE`.
