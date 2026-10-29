@@ -1148,3 +1148,65 @@ fn zero_element_initializer_is_a_clear_error() {
         Ok(_) => panic!("expected a zero-element error"),
     }
 }
+
+#[test]
+fn resize_nearest_honors_nearest_mode() {
+    let sizes = b::i64_tensor("sizes", &[4], &[1, 1, 1, 4]);
+    let nodes = vec![
+        b::node(
+            "Resize",
+            &["x", "", "", "sizes"],
+            &["default"],
+            &[
+                Attr::Str("mode", "nearest"),
+                Attr::Str("coordinate_transformation_mode", "half_pixel"),
+            ],
+        ),
+        b::node(
+            "Resize",
+            &["x", "", "", "sizes"],
+            &["floor"],
+            &[
+                Attr::Str("mode", "nearest"),
+                Attr::Str("coordinate_transformation_mode", "half_pixel"),
+                Attr::Str("nearest_mode", "floor"),
+            ],
+        ),
+    ];
+    let inputs = vec![b::value_info(
+        "x",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(1), Dim::Val(2)],
+    )];
+    let outputs = vec![
+        b::value_info(
+            "default",
+            b::FLOAT,
+            &[Dim::Val(1), Dim::Val(1), Dim::Val(1), Dim::Val(4)],
+        ),
+        b::value_info(
+            "floor",
+            b::FLOAT,
+            &[Dim::Val(1), Dim::Val(1), Dim::Val(1), Dim::Val(4)],
+        ),
+    ];
+    let bytes = b::model(
+        &b::graph(&nodes, &[sizes], &inputs, &outputs, "resize_near"),
+        13,
+    );
+
+    let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
+    let x = Tensor::from_slice(m.ctx(), &[0.0f32, 10.0], Some(dtype::FLOAT32), None)
+        .reshape([1, 1, 1, 2]);
+    let out = m.run(&[("x", x)]).unwrap();
+    close(
+        &out["default"].to_list::<f32>(m.session_mut()),
+        &[0.0, 0.0, 10.0, 10.0],
+        1e-6,
+    );
+    close(
+        &out["floor"].to_list::<f32>(m.session_mut()),
+        &[0.0, 0.0, 0.0, 10.0],
+        1e-6,
+    );
+}

@@ -1623,13 +1623,23 @@ impl OnnxModel {
             }
             other => return Err(OnnxError::Unsupported(format!("Resize mode `{other}`"))),
         };
+        if node.attr_str("keep_aspect_ratio_policy", "stretch") != "stretch" {
+            return Err(OnnxError::Unsupported(
+                "Resize keep_aspect_ratio_policy != stretch".into(),
+            ));
+        }
         let coord = node.attr_str("coordinate_transformation_mode", "half_pixel");
+        if mode == "nearest" {
+            let nearest_mode = node.attr_str("nearest_mode", "round_prefer_floor");
+            return self.resize_nearest(x, &axes, &targets, &in_shape, coord, nearest_mode);
+        }
         let align_corners = match coord {
             "align_corners" => true,
-            "half_pixel" | "pytorch_half_pixel" | "asymmetric" | "half_pixel_symmetric" => false,
+            "half_pixel" => false,
+            "pytorch_half_pixel" if !targets.contains(&1) => false,
             other => {
                 return Err(OnnxError::Unsupported(format!(
-                    "Resize coordinate_transformation_mode `{other}`"
+                    "Resize linear coordinate_transformation_mode `{other}`"
                 )));
             }
         };
@@ -1655,6 +1665,79 @@ impl OnnxModel {
             }
             Ok(resized.permute(&inv))
         }
+    }
+}
+
+impl OnnxModel {
+    fn resize_nearest(
+        &mut self,
+        x: &Tensor,
+        axes: &[usize],
+        targets: &[i64],
+        in_shape: &[i64],
+        coord: &str,
+        nearest_mode: &str,
+    ) -> Result<Tensor> {
+        let rank = x.shape().as_slice().len();
+        let mut out = x.clone();
+        for (&ax, &out_sz) in axes.iter().zip(targets.iter()) {
+            let in_sz = in_shape[ax];
+            if in_sz <= 0 || out_sz <= 0 {
+                return Err(OnnxError::Shape("Resize zero-sized dimension".into()));
+            }
+            let scale = out_sz as f64 / in_sz as f64;
+            let mut idx = Vec::with_capacity(out_sz as usize);
+            for i in 0..out_sz {
+                let i = i as f64;
+                let p = match coord {
+                    "half_pixel" => (i + 0.5) / scale - 0.5,
+                    "align_corners" => {
+                        if out_sz > 1 {
+                            i * (in_sz - 1) as f64 / (out_sz - 1) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    "asymmetric" => i / scale,
+                    "pytorch_half_pixel" => {
+                        if out_sz > 1 {
+                            (i + 0.5) / scale - 0.5
+                        } else {
+                            0.0
+                        }
+                    }
+                    "half_pixel_symmetric" => {
+                        let output_dim_scaled = in_sz as f64 * scale;
+                        (in_sz as f64 / 2.0) * (1.0 - (out_sz as f64 / output_dim_scaled))
+                            + (i + 0.5) / scale
+                            - 0.5
+                    }
+                    other => {
+                        return Err(OnnxError::Unsupported(format!(
+                            "Resize coordinate_transformation_mode `{other}`"
+                        )));
+                    }
+                };
+                let p = p.clamp(0.0, (in_sz - 1) as f64);
+                let q = match nearest_mode {
+                    "round_prefer_floor" => (p - 0.5).ceil(),
+                    "round_prefer_ceil" => (p + 0.5).floor(),
+                    "floor" => p.floor(),
+                    "ceil" => p.ceil(),
+                    other => {
+                        return Err(OnnxError::Unsupported(format!(
+                            "Resize nearest_mode `{other}`"
+                        )));
+                    }
+                };
+                idx.push(q as i64);
+            }
+            let idx = Tensor::from_slice(&self.ctx, &idx, Some(dtype::INT32), self.device());
+            let mut ixs: Vec<Ix> = vec![Ix::All; rank];
+            ixs[ax] = Ix::Tensor(idx);
+            out = out.getitem(&ixs);
+        }
+        Ok(out)
     }
 }
 
