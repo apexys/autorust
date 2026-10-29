@@ -1,6 +1,7 @@
 //! Device-selection tests for the backend priority (CURRENT_STATE.md §9.8):
 //! CUDA → CL → RAYON → INTERP, and the `RAYON` device executes correctly.
 
+#[cfg(feature = "backend_rayon")]
 use autorust::tensor::{Ctx, Tensor};
 
 #[test]

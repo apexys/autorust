@@ -8,7 +8,6 @@
 
 use autorust::tensor::nn::{self, Linear};
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 fn skip() -> bool {
     if !autorust::runtime::ops_cl::available() {
@@ -24,7 +23,7 @@ fn cl_reduce_axis_mean_runs() {
     if skip() {
         return;
     }
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let data: Vec<f32> = (1..=16).map(|v| v as f32).collect();
     let x = Tensor::from_slice(&ctx, &data, None, Some("CL")).reshape([4, 4]);
     let m = x.mean(Some(&[1]), false);
@@ -47,7 +46,7 @@ fn cl_xor_backward_kernels_build_and_run() {
     if skip() {
         return;
     }
-    let mut ctx = Ctx::new();
+    let ctx = Ctx::new();
     let l1 = Linear::new(&ctx, 2, 4, true);
     let l2 = Linear::new(&ctx, 4, 1, true);
     let x = Tensor::from_slice(

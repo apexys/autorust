@@ -56,6 +56,10 @@ backend_cuda = ["dep:cudarc"]
 trace = []
 dump = []
 
+[[example]]
+name = "rayon_bench"
+required-features = ["backend_rayon"]
+
 [dependencies]
 nanoserde = "0.2.1"
 # Multithreaded CPU backend (`backend_rayon`); work-stealing parallelism.

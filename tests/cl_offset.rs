@@ -25,9 +25,7 @@ fn cl_offset_view_get_buf_panics() {
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = view.get_buf(&dev);
     }));
-    let err = res
-        .err()
-        .expect("CL offset view must panic (CLAllocator has no _offset)");
+    let err = res.expect_err("CL offset view must panic (CLAllocator has no _offset)");
     let msg = err
         .downcast_ref::<String>()
         .map(String::as_str)

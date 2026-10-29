@@ -377,6 +377,10 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
   `--no-default-features`) and `cargo +1.88.0 test --no-run` are warning-free.
 - `cargo package --allow-dirty` succeeds (149 files, 2.3 MiB; the packaged crate
   compiles in the verify step), and `cargo doc --no-deps` is warning-free.
+- `cargo test --no-run` compiles warning-free for the default,
+  `--all-features`, and `--no-default-features` sets (feature-gated tests and
+  the `rayon_bench` example carry the right `cfg`/`required-features`), and
+  `cargo clippy --all-targets` is 0/0 for the same three feature sets.
 
 ### 8.1 Core graph engine (mature)
 `src/uop/`: interned UOps, `UopId` (a strong `Rc<Node>` handle, `Clone` not `Copy`), shapes, dtypes, `Ops`, `Arg`, `SVal`/`SInt`,

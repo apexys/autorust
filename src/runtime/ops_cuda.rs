@@ -421,7 +421,7 @@ pub fn register() {
         let allocator = LruAllocator::with_backend(Box::new(CudaAllocator {
             inner: inner.clone(),
         }));
-        let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> = {
+        let ctor: crate::runtime::device::RuntimeCtor = {
             let inner = inner.clone();
             Rc::new(move |elf| Rc::new(RefCell::new(CudaProgram::new(inner.clone(), elf))))
         };
