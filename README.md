@@ -98,7 +98,8 @@ first tensor/realize.
   — canonical status, design decisions, and milestone history.
 - [`INDEXING.md`](https://github.com/apexys/autorust/blob/main/INDEXING.md) — the
   `getitem` index DSL.
-- [`ONNX-Compat.md`](ONNX-Compat.md) — ONNX operator/feature support matrix.
+- [`ONNX-Compat.md`](ONNX-Compat.md) — the ONNX T1/T2 operator/feature
+  contract. The importer itself is not in 0.1.0 yet.
 
 ## License
 

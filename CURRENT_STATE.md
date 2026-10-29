@@ -355,19 +355,20 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **152 passed, 9 ignored, 0 failed**. The ignored = 1 `backend_harness`
-  (`#[ignore = "M7 gate: XOR training via tinygrad.nn (Gradient/Adam)"]`), 1
-  `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `mnist_e2e` (downloads data + a CNN
-  train step), 4 doc-tests.
+- `cargo test` → **170 passed, 9 ignored, 0 failed** (2026-10 release pass). The
+  ignored = 1 `backend_harness` (`#[ignore = "M7 gate: XOR training via tinygrad.nn
+  (Gradient/Adam)"]`), 1 `nn_xor_parity::xor_parity_tinygrad_seed42`, 1 `mnist_e2e`
+  (downloads data + a CNN train step), 1 `vit_e2e`, and 5 doc-tests.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
   `test_roundtrip`, `test_tensor_diff`, `test_schedule_diff`, `test_codegen_diff`,
   `test_exec_diff`, `test_native_exec`.
 - Suites: `tests/{golden,backend_harness,marshal,ops,grad,rand,m2_smoke,flat_codec,nn_xor,
   nn_xor_relu,nn_xor_parity,session,mem_probe,nn_conv,nn_norm,nn_module,indexing,assign,
-  mnist_e2e}.rs`.
-- `cargo build` is warning-free; `cargo clippy --all-targets` has 0 errors (the
-  `mutable_key_type` false positive — `UopId` hashes by immutable `id` — is allowed at the
-  crate root). A few dozen minor style lints remain (see below), left as-is.
+  mnist_e2e,state,extra_ops,ctx_ops}.rs`.
+- `cargo build` is warning-free; `cargo rustdoc` is warning-free; `cargo clippy
+  --all-targets` has 0 errors and 58 mostly-style warnings (the `mutable_key_type` false
+  positive — `UopId` hashes by immutable `id` — is allowed at the crate root).
+- `cargo fmt` is clean after the 2026-10 formatting pass.
 
 ### 8.1 Core graph engine (mature)
 `src/uop/`: interned UOps, `UopId` (a strong `Rc<Node>` handle, `Clone` not `Copy`), shapes, dtypes, `Ops`, `Arg`, `SVal`/`SInt`,
@@ -1827,17 +1828,19 @@ API shape, and missing user-facing features.
   `softsign`, `mish`, `logsigmoid`), `sign`, `round`, `tan`, `log10`,
   `logaddexp`, `copysign`, `erf`; reductions `min`, `argmin`, `std`,
   `std_mean`, `normalize`, `logsumexp`, `cumprod`; sorting `sort`, `argsort`,
-  `topk`; predicates `isnan`/`isinf`/`isfinite`/`isclose`/`allclose`;
-  `numel`/`size`/`nbytes`/`zeros_like`/`ones_like`/`full_like`; `roll`,
-  `diag`, `meshgrid`, `masked_fill`, `repeat`, `avg_pool2d`, and two-operand
-  `einsum` (`ij,jk->ik`, bias sums, dots).
+  `topk`; `cummax`/`cummin`/`logcumsumexp`; inverse/hyperbolic trig
+  (`asin`/`acos`/`atan`/`asinh`/`acosh`/`atanh`/`sinh`/`cosh`); predicates
+  `isnan`/`isinf`/`isfinite`/`isclose`/`allclose`; `numel`/`size`/`nbytes`/
+  `zeros_like`/`ones_like`/`full_like`; `roll`, `diag`, `meshgrid`,
+  `masked_fill`, `repeat`, `avg_pool2d`, and two-operand `einsum`
+  (`ij,jk->ik`, bias sums, dots).
 - `from_url`/download is **descoped**: users fetch weights themselves. The
   library will not grow an opaque download API.
-- **Still open:** `cummax`/`cummin`/`logcumsumexp`, `nonzero`, `scatter*`,
-  `masked_select`, `gather_nd/elements`, `diag`onal, pad reflect/replicate/
-  circular, `max_unpool2d`, activation `asin/acos/atan`/hyperbolics, and
+- **Still open:** `nonzero`, `scatter*`, `masked_select`, `gather_nd/elements`,
+  `diag`onal, pad reflect/replicate/circular, `max_unpool2d`, `unfold`, and
   einsum ellipsis/1-operand forms. The ONNX matrix tracks which of these T1/T2
-  needs.
+  needs. The ONNX loader itself is **not implemented yet**; `ONNX-Compat.md`
+  is the T1/T2 contract, and the prerequisite ops above are in place.
 
 **Environment configuration — CACHED (2026-10)**
 - `helpers::env` now caches every process-env lookup once (Context overrides

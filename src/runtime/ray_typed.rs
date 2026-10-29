@@ -1,6 +1,6 @@
 //! Typed (dtype-native) executor for `ops_rayon` — R2 of `CURRENT_STATE.md` §9.8.
 //!
-//! `interp::exec_launch` re-expressed over [`ray_value::Bytes`] instead of `f64`
+//! `interp::exec_launch` re-expressed over `ray_value::Bytes` instead of `f64`
 //! lanes: register values are exact bytes at the node dtype, ALU is
 //! monomorphized per dtype, loads/stores are byte copies (no per-element
 //! conversion), and `uint64` is exact. Control flow (RANGE/END/IF, SPECIAL,

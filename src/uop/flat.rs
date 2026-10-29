@@ -1,7 +1,7 @@
 //! JSON interchange for UOp graphs (nanoserde), port-side of `autorust/py/bridge.py`.
 //!
 //! Schema (v1):
-//!   { "dtypes": [<attr name>...],        # name table referenced by index
+//!   { "dtypes": [&lt;attr name&gt;...],        # name table referenced by index
 //!     "nodes": [ { "op": u16, "dtype": u16, "srcs": [u32...], "arg": FlatArg,
 //!                  "tag": FlatArg } ... ], # post-order (srcs < index)
 //!     "roots": [u32...] }

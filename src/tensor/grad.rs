@@ -9,7 +9,7 @@
 //! (`call_gradient`, `_compact_params`) is intentionally omitted: eager `Tensor`
 //! graphs never build those nodes, so XOR training never reaches them.
 //!
-//! Gradients are written back into [`UOpCtx::grads`] keyed by the target `uop`.
+//! Gradients are written back into `UOpCtx::grads` keyed by the target `uop`.
 
 use std::collections::{HashMap, HashSet};
 

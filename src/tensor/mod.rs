@@ -4,7 +4,7 @@
 //! A [`Tensor`] is a cheap `Clone` handle to an interned UOp plus a shared
 //! realized-buffer cell. Graph-building methods take `&mut UOpCtx` (the
 //! interning arena); reads and realize take a
-//! [`Session`](crate::engine::session::Session) as well. The `Tensor` API
+//! [`Session`] as well. The `Tensor` API
 //! mirrors tinygrad's method names and argument order.
 //!
 //! Module map:

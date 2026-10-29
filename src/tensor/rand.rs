@@ -451,7 +451,7 @@ fn rand_host(
 }
 
 /// `Tensor.rand` (rand.py:50): the device-graph route on hardware backends,
-/// where `uint64` is exact; the host evaluator on INTERP (see [`rand_host`]).
+/// where `uint64` is exact; the host evaluator on INTERP (see `rand_host`).
 pub fn rand(
     ctx: &mut UOpCtx,
     shape: &[SVal],

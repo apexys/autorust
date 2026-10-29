@@ -1053,7 +1053,7 @@ pub fn reduce_ranges_to_acc(
 }
 
 /// `expand_horizontal_reduce` (codegen/__init__.py:216-221) — REDUCE with a
-/// single src: index over the leading arg[1] axes and chain the alu.
+/// single src: index over the leading arg\[1\] axes and chain the alu.
 pub fn expand_horizontal_reduce(ctx: &mut UOpCtx, r: UopId) -> Option<UopId> {
     let (_op, _dt, srcs, _arg, _tag) = ctx.snapshot(&r);
     if srcs.len() != 1 {
