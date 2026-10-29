@@ -83,7 +83,7 @@ fn sort_by_axis_desc(ctx: &mut UOpCtx, v: &mut Vec<UopId>) {
         .drain(..)
         .map(|u| (range_axis_id(ctx, &u).unwrap_or(i64::MIN), u))
         .collect();
-    keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    keyed.sort_by_key(|(k, _)| std::cmp::Reverse(*k));
     v.extend(keyed.into_iter().map(|(_, u)| u));
 }
 

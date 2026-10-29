@@ -266,6 +266,7 @@ impl Tensor {
         )
     }
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
     pub fn conv2d_ctx(
         &self,
         ctx: &mut UOpCtx,
@@ -390,6 +391,7 @@ impl Tensor {
         )
     }
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
     pub fn conv_transpose2d_ctx(
         &self,
         ctx: &mut UOpCtx,
@@ -503,6 +505,7 @@ impl Tensor {
         )
     }
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
     pub fn max_pool2d_ctx(
         &self,
         ctx: &mut UOpCtx,

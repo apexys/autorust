@@ -11,8 +11,6 @@ use crate::uop::ops::{Ops, group};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// A byte-backed allocation (one per BUFFER uop).
-
 /// A memoryview: (buffer, byte offset, element size in bytes, element count).
 #[derive(Clone, Debug)]
 pub struct MemView(pub Rc<RefCell<Vec<u8>>>, pub usize, pub usize, pub usize);

@@ -69,12 +69,21 @@ impl BackendAllocator for MemAllocator {
     }
 }
 
+/// Free-list keyed by `(size, buffer options)`.
+type OpaqueCache = HashMap<(usize, super::buffer::BufferSpec), Vec<Rc<dyn OpaqueT>>>;
+
+/// Constructs a backend runtime for a compiled artifact.
+pub type RuntimeCtor = Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>>;
+
+/// Programs compiled for one device, keyed by ELF hash.
+type RuntimeCache = HashMap<u64, Rc<RefCell<dyn Prog>>>;
+
 /// `LRUAllocator` (device.py:276) — the (size, options)-keyed free-list cache
 /// with OOM-triggered `free_cache()` retry. Perf-critical for real backends
 /// (every uncached alloc is a clCreateBuffer in M8).
 pub struct LruAllocator {
     inner: Box<dyn BackendAllocator>,
-    cache: RefCell<HashMap<(usize, super::buffer::BufferSpec), Vec<Rc<dyn OpaqueT>>>>,
+    cache: RefCell<OpaqueCache>,
 }
 
 impl LruAllocator {
@@ -209,9 +218,9 @@ pub struct Compiled {
     pub allocator: LruAllocator,
     pub renderer: Box<dyn UopRenderer>,
     pub compiler: Rc<dyn Comp>,
-    runtime_ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>>,
+    runtime_ctor: RuntimeCtor,
     compiles: Cell<usize>,
-    runtime_cache: RefCell<HashMap<u64, Rc<RefCell<dyn Prog>>>>,
+    runtime_cache: RefCell<RuntimeCache>,
 }
 
 impl Compiled {
@@ -221,7 +230,7 @@ impl Compiled {
         renderer: Box<dyn UopRenderer>,
         allocator: LruAllocator,
         compiler: Rc<dyn Comp>,
-        runtime_ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>>,
+        runtime_ctor: RuntimeCtor,
     ) -> Rc<Compiled> {
         Rc::new(Compiled {
             device: device.to_string(),
@@ -323,8 +332,11 @@ pub fn is_interp_engine(device: &str) -> bool {
 
 pub type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
 
+/// A registered backend and its lazily-constructed device.
+type DeviceEntry = (DeviceFactory, Option<Rc<Compiled>>);
+
 thread_local! {
-    static REGISTRY: RefCell<HashMap<String, (DeviceFactory, Option<Rc<Compiled>>)>> = RefCell::new(HashMap::new());
+    static REGISTRY: RefCell<HashMap<String, DeviceEntry>> = RefCell::new(HashMap::new());
     static BUILTINS: Cell<bool> = const { Cell::new(false) };
 }
 

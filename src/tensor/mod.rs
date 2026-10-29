@@ -1884,6 +1884,7 @@ impl Tensor {
         )
     }
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
     pub fn scaled_dot_product_attention_ctx(
         &self,
         ctx: &mut UOpCtx,
@@ -2506,14 +2507,11 @@ impl Tensor {
             "TGERR: gather: self.ndim must equal index.ndim"
         );
         let d = movement::resolve_dim(ndim, dim, false);
-        let mut target: Vec<SVal> = Vec::with_capacity(ndim);
-        for i in 0..ndim {
-            target.push(if i == d {
-                SVal::I(-1)
-            } else {
-                idx_shape[i].clone()
-            });
-        }
+        let target: Vec<SVal> = idx_shape
+            .iter()
+            .enumerate()
+            .map(|(i, s)| if i == d { SVal::I(-1) } else { s.clone() })
+            .collect();
         let x = self
             .shrink_to_ctx(ctx, &target)
             .unsqueeze_ctx(ctx, -1)

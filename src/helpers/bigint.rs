@@ -195,20 +195,11 @@ impl BigInt {
         let top = self.mag[self.mag.len() - 1];
         let shift = 64 * (self.mag.len() - 1) as i32;
         let v = top as f64;
-        if shift >= 0 {
-            let scale = 2f64.powi(shift);
-            if self.is_negative() {
-                -v * scale
-            } else {
-                v * scale
-            }
+        let scale = 2f64.powi(shift);
+        if self.is_negative() {
+            -v * scale
         } else {
-            let scale = 2f64.powi(shift);
-            if self.is_negative() {
-                -v * scale
-            } else {
-                v * scale
-            }
+            v * scale
         }
     }
 

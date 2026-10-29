@@ -68,8 +68,9 @@ INDEXING.md        the getitem index-DSL reference
 Run from this directory (`autorust/`):
 
 - `cargo build` — should be warning-free.
-- `cargo clippy --all-targets` — 0 errors (`mutable_key_type` is allowed at the
-  crate root; a few minor style lints are left as-is).
+- `cargo clippy --all-targets` — 0 errors, 0 warnings (`mutable_key_type` is
+  allowed at the crate root; oracle-mirroring functions that exceed the argument
+  limit carry targeted `allow`s).
 - `cargo test` — the Rust suite (some tests `#[ignore]`d as explicit M7 gates).
 - `cargo run --release --example xor` — runnable demo; knobs via env vars
   (`EPOCHS`, `LR`, `SEED`).

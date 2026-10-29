@@ -367,8 +367,10 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
   nn_xor_relu,nn_xor_parity,session,mem_probe,nn_conv,nn_norm,nn_module,indexing,assign,
   mnist_e2e,state,extra_ops,ctx_ops,onnx}.rs`.
 - `cargo build` is warning-free; `cargo rustdoc` is warning-free; `cargo clippy
-  --all-targets` has 0 errors and 59 mostly-style warnings (the `mutable_key_type` false
-  positive — `UopId` hashes by immutable `id` — is allowed at the crate root).
+  --all-targets` has 0 errors and 0 warnings (the `mutable_key_type` false positive —
+  `UopId` hashes by immutable `id` — is allowed at the crate root; the remaining
+  `too_many_arguments` sites are targeted allows on functions whose signatures
+  mirror tinygrad).
 - `cargo fmt` is clean after the 2026-10 formatting pass.
 
 ### 8.1 Core graph engine (mature)

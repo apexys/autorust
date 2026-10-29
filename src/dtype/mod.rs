@@ -818,15 +818,13 @@ pub fn f64_to_f16_bits(x: f64) -> u16 {
     if (1..=30).contains(&f16exp) {
         // normal: mantissa top 10 bits + RNE using the rest
         let shift = 42; // 52 - 10
-        let m = mant >> shift;
+        let mut m = mant >> shift;
         let rem = mant & ((1u64 << shift) - 1);
         let half = 1u64 << (shift - 1);
-        let mut m = m;
         if rem > half || (rem == half && (m & 1) == 1) {
             m += 1;
         }
         let mut e = f16exp as u32;
-        let mut m = m;
         if m == 0x400 {
             // mantissa overflowed into exponent
             m = 0;

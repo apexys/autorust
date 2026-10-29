@@ -16,10 +16,13 @@ fn valid_is_true(ctx: &mut UOpCtx, valid: UopId) -> bool {
     ctx.op_of(&valid) == Ops::Const && matches!(ctx.val(&valid), ConstVal::Bool(true))
 }
 
+/// One coalescing bucket: `(op, buf, root_src, valid) -> offset -> [uops]`.
+type MemoryEntry = ((Ops, UopId, Key, UopId), HashMap<i64, Vec<UopId>>);
+
 /// `memory_coalescing` (coalesce.py:117).
 pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     // collect: (op, buf, root_src, valid) -> offset -> [uops]
-    let mut memory: Vec<((Ops, UopId, Key, UopId), HashMap<i64, Vec<UopId>>)> = Vec::new();
+    let mut memory: Vec<MemoryEntry> = Vec::new();
     for u in ctx.toposort(&sink).iter() {
         let op = ctx.op_of(u);
         if op != Ops::Load && op != Ops::Store {

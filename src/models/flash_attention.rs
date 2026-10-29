@@ -94,6 +94,7 @@ pub fn flash_attention_blocks(
 }
 
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
 pub fn flash_attention_blocks_ctx(
     q: &Tensor,
     k: &Tensor,

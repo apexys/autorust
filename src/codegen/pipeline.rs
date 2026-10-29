@@ -1234,16 +1234,11 @@ fn broadcast_and_devec_wmma(ctx: &mut Ctx2, b: UopId) -> Option<UopId> {
 /// `maybe_load` (codegen/__init__.py:245).
 fn maybe_load(ctx: &mut Ctx2, u: UopId) -> UopId {
     match ctx.addrspace_derived(u.clone()) {
-        Some(a)
-            if matches!(
-                a,
-                crate::dtype::AddrSpace::Global
-                    | crate::dtype::AddrSpace::Local
-                    | crate::dtype::AddrSpace::Reg
-            ) =>
-        {
-            crate::tensor::load(ctx, u, vec![])
-        }
+        Some(
+            crate::dtype::AddrSpace::Global
+            | crate::dtype::AddrSpace::Local
+            | crate::dtype::AddrSpace::Reg,
+        ) => crate::tensor::load(ctx, u, vec![]),
         _ => u,
     }
 }

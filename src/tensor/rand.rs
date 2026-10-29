@@ -202,7 +202,6 @@ fn numel_int(shape: &[SVal]) -> i64 {
         .product()
 }
 
-/// `RandMixin.rand(*shape, dtype, device)` (rand.py:50).
 // ---------------------------------------------------------------------------
 // Device-graph RNG (`mixin/rand.py`): the faithful path, a `Ops.THREEFRY`
 // graph lowered by `codegen::decomp::threefry2x32` and folded back to uint32

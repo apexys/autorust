@@ -129,7 +129,7 @@ pub fn register() {
         let renderer: Box<dyn UopRenderer> = Box::new(InterpUopRenderer::new());
         let compiler: Rc<dyn crate::runtime::device::Comp> =
             Rc::new(crate::runtime::device::IdentityCompiler::default());
-        let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> =
+        let ctor: crate::runtime::device::RuntimeCtor =
             Rc::new(|elf| Rc::new(RefCell::new(InterpProgram::new(elf))));
         Compiled::new(
             device,
@@ -150,7 +150,7 @@ pub fn fallback(device: &str) -> Rc<Compiled> {
     let renderer: Box<dyn UopRenderer> = Box::new(InterpUopRenderer::new());
     let compiler: Rc<dyn crate::runtime::device::Comp> =
         Rc::new(crate::runtime::device::IdentityCompiler::default());
-    let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> =
+    let ctor: crate::runtime::device::RuntimeCtor =
         Rc::new(|elf| Rc::new(RefCell::new(InterpProgram::new(elf))));
     Compiled::new(
         device,

@@ -1,3 +1,4 @@
+#![allow(clippy::mutable_key_type)]
 //! M2 smoke tests: construction, shape, min/max, and the rewrite engine.
 
 use autorust::dtype::{ConstVal, DTypeId};

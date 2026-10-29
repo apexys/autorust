@@ -97,6 +97,7 @@ impl UOpCtx {
 
     /// `UOp.wmma(a, b, acc, dims, device, threads, tc_upcast_axes)` (ops.py:626).
     /// `arg=(dims, dtype_in, device, threads, tc_upcast_axes)`.
+    #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
     pub fn wmma(
         &mut self,
         a: UopId,

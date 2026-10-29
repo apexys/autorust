@@ -136,9 +136,9 @@ fn extract_string_field(s: &str, field: &str) -> Option<String> {
     let i = s.find(&key)? + key.len();
     let rest = &s[i..];
     let rest = rest.trim_start();
-    if rest.starts_with('"') {
-        let end = rest[1..].find('"')?;
-        Some(rest[1..1 + end].to_string())
+    if let Some(body) = rest.strip_prefix('"') {
+        let end = body.find('"')?;
+        Some(body[..end].to_string())
     } else {
         None
     }

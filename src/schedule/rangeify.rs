@@ -1183,7 +1183,7 @@ fn bufferize_to_store(
         Arg::Enum(e) => AddrSpace::from_u8(e.value as u8).expect("TGERR: bad addrspace"),
         _ => panic!("TGERR: STAGE without addrspace"),
     };
-    let dev: Option<DeviceSpec> = d.get("device").clone().try_into().ok().flatten();
+    let dev: Option<DeviceSpec> = d.get("device").clone().into();
 
     if addrspace == AddrSpace::Global {
         let slot = cnt.get();

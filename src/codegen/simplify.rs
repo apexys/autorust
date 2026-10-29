@@ -178,8 +178,7 @@ fn build_pm_simplify_ranges() -> PatternMatcher {
 fn mark_gated(ctx: &mut UOpCtx, idx: UopId, g: &mut HashMap<UopId, UopId>) {
     let srcs = ctx.srcs(&idx).to_vec();
     let mut guards: HashMap<UopId, UopId> = HashMap::new();
-    let x;
-    if srcs.len() > 1 && ctx.op_of(&srcs[1]) == Ops::Where {
+    let x = if srcs.len() > 1 && ctx.op_of(&srcs[1]) == Ops::Where {
         let ws = ctx.srcs(&srcs[1]).to_vec();
         let cond = ws[0].clone();
         let stmts = ctx.split_uop_vec(cond, Ops::And);
@@ -191,10 +190,10 @@ fn mark_gated(ctx: &mut UOpCtx, idx: UopId, g: &mut HashMap<UopId, UopId>) {
                 }
             }
         }
-        x = (ws[1]).clone();
+        ws[1].clone()
     } else {
-        x = idx;
-    }
+        idx
+    };
     for (r, c) in &guards {
         match g.get(r) {
             Some(cur) => {

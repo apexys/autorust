@@ -2219,9 +2219,7 @@ impl Ord for NumKey {
             (NumKey::F(a), NumKey::F(b)) => {
                 if a.is_nan() && b.is_nan() {
                     std::cmp::Ordering::Equal
-                } else if a.is_nan() {
-                    std::cmp::Ordering::Greater
-                } else if b.is_nan() {
+                } else if a.is_nan() || b.is_nan() {
                     std::cmp::Ordering::Greater
                 } else {
                     a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)

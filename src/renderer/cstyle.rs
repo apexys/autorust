@@ -374,8 +374,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         let mut stack: Vec<UopId> = lst
             .iter()
             .filter(|&u| info[u].op == Ops::Store)
-            .cloned()
-            .map(|u| (info[&u].srcs[0]).clone())
+            .map(|u| info[u].srcs[0].clone())
             .collect();
         let mut seen = std::collections::HashSet::new();
         while let Some(u) = stack.pop() {
@@ -445,8 +444,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         }
 
         // naming
-        let prefix: Option<&'static str>;
-        match i.op {
+        let prefix: Option<&'static str> = match i.op {
             Ops::Special => {
                 // r[u] = u.arg (the plain string, e.g. "lidx0")
                 let nm = match ctx.arg_of(u) {
@@ -454,7 +452,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     other => panic!("TGERR: cstyle SPECIAL arg {other:?}"),
                 };
                 r.insert(u.clone(), nm);
-                prefix = None;
+                None
             }
             Ops::Range => {
                 let letter = match AxisType::range_axis_type(ctx, u.clone()) {
@@ -475,7 +473,7 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     u.clone(),
                     format!("{letter}idx{}", range_str(ctx.arg_of(u))),
                 );
-                prefix = None;
+                None
             }
             _ => {
                 let p = match i.op {
@@ -488,9 +486,9 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                 };
                 let c0 = counters.entry(p).or_insert(0);
                 r.insert(u.clone(), format!("{p}{c0}"));
-                prefix = Some(p);
+                Some(p)
             }
-        }
+        };
 
         // render the op to a string
         let g = |m: &HashMap<UopId, String>, id: &UopId| -> String {
@@ -918,12 +916,11 @@ fn const_int(ctx: &mut UOpCtx, u: UopId) -> Option<i128> {
     }
 }
 
-/// `wmma_args` (cstyle.py:112) — the deduped `(name, dims, dtype_in, dtype_out,
-/// upcast_sizes)` per WMMA op in the linear list.
-fn wmma_args(
-    ctx: &mut UOpCtx,
-    lst: &[UopId],
-) -> Vec<(String, (i64, i64, i64), DTypeId, DTypeId, (i64, i64, i64))> {
+/// One WMMA call site: `(name, dims, dtype_in, dtype_out, upcast_sizes)`.
+type WmmaArg = (String, (i64, i64, i64), DTypeId, DTypeId, (i64, i64, i64));
+
+/// `wmma_args` (cstyle.py:112) — the deduped WMMA call sites in the linear list.
+fn wmma_args(ctx: &mut UOpCtx, lst: &[UopId]) -> Vec<WmmaArg> {
     use crate::uop::Ops;
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();

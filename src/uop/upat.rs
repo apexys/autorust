@@ -669,7 +669,12 @@ impl UPat {
     }
 }
 
+/// Memo table used by `pm_long_decomp` while splitting long index chains.
+pub type L2iMemo =
+    std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>;
+
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // patterns are built once; boxing would complicate every match
 pub enum UPatOrConst {
     Pat(UPat),
     Val(crate::dtype::ConstVal),
@@ -858,11 +863,7 @@ pub enum CtxVal {
     /// Dtype set context for `pm_dtype_decomps`.
     Decomp(std::rc::Rc<std::cell::RefCell<crate::codegen::decomp_dtype::DtypeDecompCtx>>),
     /// Memo dict for `pm_long_decomp` `split_l2i`.
-    L2i(
-        std::rc::Rc<
-            std::cell::RefCell<HashMap<(Ops, crate::dtype::DTypeId, Vec<UopId>), Vec<UopId>>>,
-        >,
-    ),
+    L2i(std::rc::Rc<L2iMemo>),
 }
 
 /// `LocalAddBufferContext` (rangeify.py:469).
@@ -1532,6 +1533,7 @@ impl<'a> RewriteCtxt<'a> {
 }
 
 /// `graph_rewrite` (ops.py:1743-1746).
+#[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
 pub fn graph_rewrite(
     ctx: &mut UOpCtx,
     sink: UopId,
