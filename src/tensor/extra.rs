@@ -681,3 +681,154 @@ fn parse_einsum(s: &str) -> (String, String, Option<String>) {
     );
     (lhs, rhs, out)
 }
+
+impl Tensor {
+    /// `asin()` (Abramowitz–Stegun 4.4.46, matching tinygrad).
+    pub fn asin(&self) -> Tensor {
+        const C: [f64; 8] = [
+            -0.0012624911,
+            0.0066700901,
+            -0.0170881256,
+            0.0308918810,
+            -0.0501743046,
+            0.0889789874,
+            -0.2145988016,
+            1.5707963050,
+        ];
+        let abs = self.abs();
+        let poly = C
+            .iter()
+            .fold(abs.const_like(ConstVal::Float(0.0), None), |acc, c| {
+                acc.mul(&abs).add(*c)
+            });
+        let x = abs
+            .const_like(ConstVal::Float(std::f64::consts::FRAC_PI_2), None)
+            .sub(
+                abs.const_like(ConstVal::Float(1.0), None)
+                    .sub(&abs)
+                    .sqrt()
+                    .mul(poly),
+            );
+        self.sign().mul(x)
+    }
+
+    /// `acos()`: `pi/2 - asin(x)`.
+    pub fn acos(&self) -> Tensor {
+        self.const_like(ConstVal::Float(std::f64::consts::FRAC_PI_2), None)
+            .sub(self.asin())
+    }
+
+    /// `atan()`: `asin(x / sqrt(1 + x^2))`.
+    pub fn atan(&self) -> Tensor {
+        self.div(self.mul(self).add(1.0).sqrt()).asin()
+    }
+
+    /// `asinh()`: `log(x + sqrt(x^2 + 1))`.
+    pub fn asinh(&self) -> Tensor {
+        self.add(self.mul(self).add(1.0).sqrt()).log()
+    }
+
+    /// `acosh()`: `log(x + sqrt(x^2 - 1))`.
+    pub fn acosh(&self) -> Tensor {
+        self.add(self.mul(self).sub(1.0).sqrt()).log()
+    }
+
+    /// `atanh()`: `log((1 + x) / (1 - x)) / 2`.
+    pub fn atanh(&self) -> Tensor {
+        self.add(1.0).div(self.neg().add(1.0)).log().div(2.0)
+    }
+
+    /// `sinh()`: `(exp(x) - exp(-x)) / 2`.
+    pub fn sinh(&self) -> Tensor {
+        self.exp().sub(self.neg().exp()).div(2.0)
+    }
+
+    /// `cosh()`: `(exp(x) + exp(-x)) / 2`.
+    pub fn cosh(&self) -> Tensor {
+        self.exp().add(self.neg().exp()).div(2.0)
+    }
+}
+
+impl Tensor {
+    fn cum_max(&self, axis: i64) -> Tensor {
+        let ax = resolve_dim(self, axis);
+        let mut ctx = self.ctx().borrow_mut();
+        let u = crate::tensor::reduce::cumalu(&mut ctx, self.uop(), ax, crate::uop::ops::Ops::Max);
+        Tensor::from_uop(&ctx, u)
+    }
+
+    /// `cummax(axis=0)` -> `(values, indices)` (movement.py/op.py:801-818).
+    pub fn cummax(&self, axis: i64) -> (Tensor, Tensor) {
+        let ndim = self.shape().as_slice().len();
+        let ax = resolve_dim(self, axis);
+        let values = self.cum_max(axis);
+        if ndim == 0 {
+            let z = self.zeros_like().cast(crate::dtype::INT32);
+            return (values, z);
+        }
+        let n = self.size(ax as i64);
+        let x = self.transpose(axis, -1);
+        let vt = values.transpose(axis, -1);
+        let mask = Tensor::full_const(
+            self.ctx(),
+            [n, n],
+            ConstVal::Bool(true),
+            Some(crate::dtype::BOOL),
+        )
+        .triu(0);
+        let mask_i = mask.cast(crate::dtype::INT32);
+        let match_i = x
+            .unsqueeze(-1)
+            .eq(vt.unsqueeze(-2))
+            .cast(crate::dtype::INT32)
+            .mul(mask_i);
+        let weights = Tensor::arange(
+            self.ctx(),
+            n as f64,
+            Some(0.0),
+            -1.0,
+            Some(crate::dtype::INT32),
+        )
+        .reshape([n, 1]);
+        let red = ndim - 1;
+        let idx = match_i
+            .mul(weights)
+            .max(Some(&[red]), false)
+            .neg()
+            .add(n)
+            .cast(crate::dtype::INT32);
+        (values, idx.transpose(-1, axis))
+    }
+
+    /// `cummin(axis=0)` -> `(values, indices)`.
+    pub fn cummin(&self, axis: i64) -> (Tensor, Tensor) {
+        let (v, i) = self.neg().cummax(axis);
+        (v.neg(), i)
+    }
+
+    /// `logcumsumexp(axis=0)` (op.py:833-864).
+    pub fn logcumsumexp(&self, axis: i64) -> Tensor {
+        let ndim = self.shape().as_slice().len();
+        if ndim == 0 {
+            return self.clone();
+        }
+        let x = self.transpose(axis, -1);
+        let n = x.size(-1);
+        let cm = x.cum_max(-1).detach();
+        let mask = Tensor::full_const(
+            self.ctx(),
+            [n, n],
+            ConstVal::Bool(true),
+            Some(crate::dtype::BOOL),
+        )
+        .tril(0);
+        let ninf = self.const_like(ConstVal::Float(f64::NEG_INFINITY), None);
+        let ret = mask
+            .where_(x.unsqueeze(-2).sub(cm.unsqueeze(-1)), ninf)
+            .exp()
+            .sum(Some(&[ndim]), false, None)
+            .log()
+            .add(&cm);
+        ret.transpose(-1, axis)
+    }
+}

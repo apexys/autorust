@@ -259,3 +259,75 @@ fn einsum_common_patterns() {
     let dot = x.einsum(&y, "i,i->");
     close(&dot.to_list::<f32>(&mut sess), &[32.0], 1e-5);
 }
+
+#[test]
+fn inverse_and_hyperbolic_trig() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let x = f32s(&ctx, &[-0.9, -0.3, 0.0, 0.3, 0.9], &[5]);
+    close(
+        &x.asin().to_list::<f32>(&mut sess),
+        &[-1.119770, -0.304693, 0.0, 0.304693, 1.119770],
+        2e-4,
+    );
+    close(
+        &x.acos().to_list::<f32>(&mut sess),
+        &[2.690726, 1.875489, 1.570796, 1.266104, 0.451027],
+        2e-4,
+    );
+    close(
+        &x.atan().to_list::<f32>(&mut sess),
+        &[-0.732815, -0.291457, 0.0, 0.291457, 0.732815],
+        2e-4,
+    );
+    let s = f32s(&ctx, &[-1.0, 0.0, 1.0], &[3]);
+    close(
+        &s.sinh().to_list::<f32>(&mut sess),
+        &[-1.175201, 0.0, 1.175201],
+        2e-5,
+    );
+    close(
+        &s.cosh().to_list::<f32>(&mut sess),
+        &[1.543081, 1.0, 1.543081],
+        2e-5,
+    );
+    close(
+        &s.asinh().to_list::<f32>(&mut sess),
+        &[-0.881374, 0.0, 0.881374],
+        2e-5,
+    );
+    let h = f32s(&ctx, &[-0.5, 0.0, 0.5], &[3]);
+    close(
+        &h.atanh().to_list::<f32>(&mut sess),
+        &[-0.549306, 0.0, 0.549306],
+        2e-5,
+    );
+}
+
+#[test]
+fn cumulative_max_min_and_logsumexp() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let x = f32s(&ctx, &[0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0], &[7]);
+    let (v, i) = x.cummax(0);
+    close(
+        &v.to_list::<f32>(&mut sess),
+        &[0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+        1e-6,
+    );
+    assert_eq!(i.to_list::<i32>(&mut sess), vec![0, 1, 1, 3, 3, 5, 5]);
+    let (v, i) = x.cummin(0);
+    close(
+        &v.to_list::<f32>(&mut sess),
+        &[0.0, 0.0, -1.0, -1.0, -2.0, -2.0, -3.0],
+        1e-6,
+    );
+    assert_eq!(i.to_list::<i32>(&mut sess), vec![0, 0, 2, 2, 4, 4, 6]);
+
+    let z = f32s(&ctx, &[0.0, 0.0, 0.0], &[3]);
+    close(
+        &z.logcumsumexp(0).to_list::<f32>(&mut sess),
+        &[0.0, 0.693147, 1.098612],
+        1e-5,
+    );
+}
