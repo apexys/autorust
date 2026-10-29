@@ -1248,3 +1248,58 @@ fn pow_handles_tensor_exponents_and_negative_bases() {
     assert!(s[0].is_nan(), "sqrt(-2) should be NaN: {}", s[0]);
     assert!(s[3].is_nan(), "sqrt(-4) should be NaN: {}", s[3]);
 }
+
+#[test]
+fn lrn_and_lp_normalization() {
+    let nodes = vec![
+        b::node(
+            "LpNormalization",
+            &["x"],
+            &["lp"],
+            &[Attr::Int("axis", 1), Attr::Int("p", 2)],
+        ),
+        b::node(
+            "LRN",
+            &["y"],
+            &["lrn"],
+            &[
+                Attr::Int("size", 2),
+                Attr::Float("alpha", 1.0),
+                Attr::Float("beta", 1.0),
+                Attr::Float("bias", 0.0),
+            ],
+        ),
+    ];
+    let inputs = vec![
+        b::value_info("x", b::FLOAT, &[Dim::Val(1), Dim::Val(2)]),
+        b::value_info(
+            "y",
+            b::FLOAT,
+            &[Dim::Val(1), Dim::Val(2), Dim::Val(1), Dim::Val(1)],
+        ),
+    ];
+    let outputs = vec![
+        b::value_info("lp", b::FLOAT, &[Dim::Val(1), Dim::Val(2)]),
+        b::value_info(
+            "lrn",
+            b::FLOAT,
+            &[Dim::Val(1), Dim::Val(2), Dim::Val(1), Dim::Val(1)],
+        ),
+    ];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "norm2"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
+    let x = Tensor::from_slice(m.ctx(), &[3.0f32, 4.0], Some(dtype::FLOAT32), None).reshape([1, 2]);
+    let y = Tensor::from_slice(m.ctx(), &[1.0f32, 2.0], Some(dtype::FLOAT32), None)
+        .reshape([1, 2, 1, 1]);
+    let out = m.run(&[("x", x), ("y", y)]).unwrap();
+    close(
+        &out["lp"].to_list::<f32>(m.session_mut()),
+        &[0.6, 0.8],
+        1e-6,
+    );
+    close(
+        &out["lrn"].to_list::<f32>(m.session_mut()),
+        &[0.4, 1.0],
+        1e-6,
+    );
+}

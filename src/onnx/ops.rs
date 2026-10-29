@@ -893,7 +893,21 @@ impl OnnxModel {
                 let x = inp(ins, 0)?;
                 let p = node.attr_f64("p", 2.0);
                 let axis = self.axis(node, "axis", -1, x.shape().as_slice().len() as i64)?;
-                one(x.normalize(p, axis as i64, 1e-12))
+                let axes = [axis];
+                let abs = x.abs();
+                let mut den = if p == 1.0 {
+                    abs.sum(Some(&axes), true, None)
+                } else if p == 2.0 {
+                    abs.square().sum(Some(&axes), true, None)
+                } else {
+                    self.pow_scalar(&abs, p).sum(Some(&axes), true, None)
+                };
+                if p == 2.0 {
+                    den = den.sqrt();
+                } else if p != 1.0 {
+                    den = self.pow_scalar(&den, 1.0 / p);
+                }
+                one(x.div(den.maximum(1e-12)))
             }
             "MeanVarianceNormalization" => {
                 let x = inp(ins, 0)?;
@@ -1024,6 +1038,16 @@ impl OnnxModel {
             t = self.reverse_axis(&t, ax)?;
         }
         Ok(t)
+    }
+
+    fn pow_scalar(&self, x: &Tensor, p: f64) -> Tensor {
+        let e = Tensor::full_const(
+            &self.ctx,
+            &[] as &[i64],
+            ConstVal::Float(p),
+            Some(x.dtype()),
+        );
+        xpow(x, &e)
     }
 
     fn reverse_axis(&mut self, x: &Tensor, ax: usize) -> Result<Tensor> {
@@ -1542,15 +1566,14 @@ impl OnnxModel {
         let hw: i64 = shape[2..].iter().product();
         let sq = x.square().reshape([b, 1, c, hw]);
         let mut pads = [(0i64, 0i64); 4];
-        pads[3] = ((size - 1) / 2, size / 2);
+        pads[2] = ((size - 1) / 2, size / 2);
         let p: Vec<(Option<i64>, Option<i64>)> =
             pads.iter().map(|(a, b)| (Some(*a), Some(*b))).collect();
         let pooled = sq
             .pad_constant(&p, ConstVal::Float(0.0))
             .avg_pool2d(&[size, 1], Some(&[1, 1]), 1, &[], false, true)
             .reshape(shape.clone());
-        let betac = x.const_like(ConstVal::Float(beta), None);
-        let denom = pooled.mul(alpha).add(bias).pow(&betac);
+        let denom = self.pow_scalar(&pooled.mul(alpha).add(bias), beta);
         Ok(x.div(&denom))
     }
 
