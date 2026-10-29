@@ -205,7 +205,7 @@ pub fn arg_from_flat_with(
             volatile,
         } => {
             let dtype = dtmap(*dtype)?;
-            let vv = if vmin_vmax[0] == Box::new(FlatArg::Bool(true)) {
+            let vv = if matches!(&*vmin_vmax[0], FlatArg::Bool(true)) {
                 Some((
                     flat_to_constval(&vmin_vmax[1])?,
                     flat_to_constval(&vmin_vmax[2])?,

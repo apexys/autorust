@@ -373,6 +373,10 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
   `too_many_arguments` sites are targeted allows on functions whose signatures
   mirror tinygrad).
 - `cargo fmt` is clean after the 2026-10 formatting pass.
+- MSRV verified: `cargo +1.88.0 check` (default, `--all-features`,
+  `--no-default-features`) and `cargo +1.88.0 test --no-run` are warning-free.
+- `cargo package --allow-dirty` succeeds (149 files, 2.3 MiB; the packaged crate
+  compiles in the verify step), and `cargo doc --no-deps` is warning-free.
 
 ### 8.1 Core graph engine (mature)
 `src/uop/`: interned UOps, `UopId` (a strong `Rc<Node>` handle, `Clone` not `Copy`), shapes, dtypes, `Ops`, `Arg`, `SVal`/`SInt`,
