@@ -34,12 +34,15 @@ pub use shapearg::ShapeArg;
 pub mod creation;
 mod dtype;
 pub mod elementwise;
+pub mod extra;
 pub mod grad;
 pub mod movement;
 pub mod nn;
 pub mod op;
 pub mod optim;
 pub mod rand;
+pub mod state;
+pub use state::State;
 pub mod reduce;
 
 use crate::dtype::ConstVal;
@@ -465,8 +468,7 @@ impl Tensor {
 
     /// `Tensor.assign` (tensor.py:436): write `value` into *this* tensor's
     /// storage in place (a fused STORE+AFTER, not a copy), leaving `self.uop()`
-    /// unchanged.
-    ///
+    /// unchanged.    ///
     /// This is what keeps a persistent parameter a stable leaf across optimizer
     /// steps: `w - lr*grad` is built as a fresh subgraph, stored back into `w`'s
     /// buffer by the scheduler, then dropped. Without it, rebinding
@@ -484,6 +486,25 @@ impl Tensor {
         // stats, optimizer moments that are read again immediately).
         let _ = sess.realize_tensor(ctx, effect.uop().clone());
         self.pin_buffer_ctx(ctx, sess);
+    }
+
+    /// Replace this tensor's graph node and realized storage with `other`
+    /// (tinygrad `Tensor.replace`, used by `load_state_dict`). Clones of this
+    /// tensor see the new storage immediately; the optimizer's references stay
+    /// valid.
+    pub fn replace(&self, other: &Tensor) {
+        self.ctx().ensure_same(other.ctx());
+        self.set_uop(other.uop());
+        *self.buffer.borrow_mut() = other.realized_buffer();
+    }
+
+    /// `Tensor.to(device)`: copy this tensor's storage to `device` (a no-op view
+    /// when it is already there). Tinygrad's `.to` is the user-facing device move.
+    pub fn to(&self, device: &str) -> Tensor {
+        let dev = creation::canonicalize_device(Some(device));
+        let mut ctx = self.ctx.borrow_mut();
+        let u = creation::copy_to_device(&mut ctx, self.uop(), &dev);
+        Tensor::from_uop(&ctx, u)
     }
 
     /// Turn a computed tensor (e.g. a random-initialized parameter) into a
@@ -994,6 +1015,34 @@ impl Tensor {
         device: Option<&str>,
     ) -> Tensor {
         ctx.with_ctx(|ctx| creation::from_bytes(ctx, data, dtype, device))
+    }
+
+    /// Read exactly `numel(shape) * dtype.itemsize()` bytes from `reader` and
+    /// build a tensor of `shape` on `device`.
+    ///
+    /// This is the weight-loading primitive: `reader` is usually a
+    /// `std::fs::File` window into a safetensors tensor (or any `Read`). Only
+    /// one tensor's bytes are held at a time, so a multi-GB checkpoint does not
+    /// need a multi-GB host buffer.
+    pub fn from_read<R: std::io::Read>(
+        ctx: impl AsCtx,
+        reader: &mut R,
+        dtype: DTypeId,
+        shape: impl ShapeArg,
+        device: Option<&str>,
+    ) -> Tensor {
+        let shape = shape.into_shape_vec();
+        let numel: i128 = shape.iter().map(|s| s.clone().as_i128_or_panic()).product();
+        assert!(numel >= 0, "TGERR: from_read shape has a negative dimension");
+        let mut bytes = vec![0u8; numel as usize * dtype.itemsize()];
+        reader
+            .read_exact(&mut bytes)
+            .expect("TGERR: from_read: reader ended before the tensor was complete");
+        ctx.with_ctx(|ctx| {
+            let t = creation::from_bytes(ctx, &bytes, dtype, device);
+            let u = movement::reshape(ctx, t.uop(), &shape);
+            Tensor::from_uop(ctx, u)
+        })
     }
 
     /// `Tensor.full(shape, fill_value, ...)`.
@@ -2539,5 +2588,77 @@ fn uop_device(ctx: &UOpCtx, u: &UopId) -> Option<String> {
         },
         Mselect | Mstack | Allreduce => ctx.srcs(u).first().and_then(|s| uop_device(ctx, s)),
         _ => ctx.srcs(u).iter().find_map(|s| uop_device(ctx, s)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// std::ops sugar
+// ---------------------------------------------------------------------------
+//
+// `Tensor` stores its `Ctx`, so arithmetic no longer needs a `&mut UOpCtx`.
+// Both operands must come from the same arena; mixing contexts is a hard error
+// (a silent cross-arena graph would intern nodes in the wrong graph).
+
+macro_rules! impl_binop {
+    ($trait:ident, $method:ident) => {
+        impl std::ops::$trait<&Tensor> for &Tensor {
+            type Output = Tensor;
+            fn $method(self, rhs: &Tensor) -> Tensor {
+                self.ctx().ensure_same(rhs.ctx());
+                self.$method(rhs)
+            }
+        }
+        impl std::ops::$trait<Tensor> for &Tensor {
+            type Output = Tensor;
+            fn $method(self, rhs: Tensor) -> Tensor {
+                self.ctx().ensure_same(rhs.ctx());
+                self.$method(&rhs)
+            }
+        }
+        impl std::ops::$trait<&Tensor> for Tensor {
+            type Output = Tensor;
+            fn $method(self, rhs: &Tensor) -> Tensor {
+                self.ctx().ensure_same(rhs.ctx());
+                Tensor::$method(&self, rhs)
+            }
+        }
+        impl std::ops::$trait<Tensor> for Tensor {
+            type Output = Tensor;
+            fn $method(self, rhs: Tensor) -> Tensor {
+                self.ctx().ensure_same(rhs.ctx());
+                Tensor::$method(&self, &rhs)
+            }
+        }
+        impl std::ops::$trait<f64> for &Tensor {
+            type Output = Tensor;
+            fn $method(self, rhs: f64) -> Tensor {
+                self.$method(rhs)
+            }
+        }
+        impl std::ops::$trait<f64> for Tensor {
+            type Output = Tensor;
+            fn $method(self, rhs: f64) -> Tensor {
+                Tensor::$method(&self, rhs)
+            }
+        }
+    };
+}
+
+impl_binop!(Add, add);
+impl_binop!(Sub, sub);
+impl_binop!(Mul, mul);
+impl_binop!(Div, div);
+
+impl std::ops::Neg for &Tensor {
+    type Output = Tensor;
+    fn neg(self) -> Tensor {
+        self.neg()
+    }
+}
+
+impl std::ops::Neg for Tensor {
+    type Output = Tensor;
+    fn neg(self) -> Tensor {
+        Tensor::neg(&self)
     }
 }

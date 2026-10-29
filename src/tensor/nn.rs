@@ -27,6 +27,18 @@ pub trait Module {
         self.named_params().map(|(_name, p)| p)
     }
 
+    /// Non-trainable buffers (`running_mean`/`running_var`/…). tinygrad's
+    /// `get_state_dict` includes these; optimizers do not. Default: none.
+    fn named_buffers(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        Box::new(std::iter::empty())
+    }
+
+    /// The full state dict: parameters followed by buffers. This is what
+    /// safetensors save/load uses (tinygrad `get_state_dict`).
+    fn named_state(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        Box::new(self.named_params().chain(self.named_buffers()))
+    }
+
     /// Materialize every parameter into a buffer-backed leaf (see
     /// [`Tensor::to_param`]), consuming and rebuilding the module. Recurse
     /// through nested modules. Do this once before training so the optimizer can
@@ -594,6 +606,20 @@ impl Module for BatchNorm {
     /// tinygrad) and are not collected by the optimizer.
     fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
         optional_weight_bias(&self.weight, &self.bias)
+    }
+
+    fn named_buffers(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        let mut v: Vec<(String, Tensor)> = Vec::new();
+        if let Some(t) = &self.running_mean {
+            v.push(("running_mean".to_string(), t.clone()));
+        }
+        if let Some(t) = &self.running_var {
+            v.push(("running_var".to_string(), t.clone()));
+        }
+        if let Some(t) = &self.num_batches_tracked {
+            v.push(("num_batches_tracked".to_string(), t.clone()));
+        }
+        Box::new(v.into_iter())
     }
 
     fn into_params(mut self) -> Self {
