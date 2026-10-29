@@ -20,9 +20,11 @@ The core engine is complete and differentially tested against tinygrad:
   `CL` (OpenCL), and `CUDA` (driver API + NVRTC, bf16/WMMA).
 - `TinyJit`-style capture/replay, BEAM search, and a content-keyed program cache.
 
-The public API is **0.1.0 and unstable**. Weight/state loading (safetensors and
-`load_state_dict`) is the main missing framework piece; see
-[`CURRENT_STATE.md`](CURRENT_STATE.md) for the full status and known gaps.
+The public API is **0.1.0 and unstable**. A `Tensor` owns a shared `Ctx`
+handle, so graph operations do not take a context argument; safetensors and
+`load_state_dict` are implemented (including non-trainable buffers). See
+[`CURRENT_STATE.md`](https://github.com/apexys/autorust/blob/main/CURRENT_STATE.md)
+for the full status and known gaps.
 
 ## Quick start
 
@@ -32,16 +34,25 @@ cargo run --release --example xor
 
 ```rust
 use autorust::engine::session::Session;
-use autorust::tensor::Tensor;
-use autorust::uop::ctx::UOpCtx;
+use autorust::tensor::{Ctx, Tensor};
 
-let mut ctx = UOpCtx::new();
+let ctx = Ctx::new();
 let mut sess = Session::new();
-let a = Tensor::from_slice(&mut ctx, &[1.0f32, 2.0, 3.0], None, None);
-let b = Tensor::from_slice(&mut ctx, &[10.0f32, 20.0, 30.0], None, None);
-let c = a.add(&mut ctx, &b);
-assert_eq!(c.to_list::<f32>(&mut ctx, &mut sess), vec![11.0, 22.0, 33.0]);
+let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);
+let b = Tensor::from_slice(&ctx, &[10.0f32, 20.0, 30.0], None, None);
+let c = &a + &b; // or a.add(&b)
+assert_eq!(c.to_list::<f32>(&mut sess), vec![11.0, 22.0, 33.0]);
 ```
+
+Weights can be streamed from safetensors without loading the whole checkpoint:
+
+```rust,ignore
+let state = autorust::tensor::state::safe_load("model.safetensors")?;
+autorust::tensor::state::load_state_dict(&model, &state, true)?;
+```
+
+`Tensor::from_read(&ctx, &mut reader, dtype, shape, device)` is the underlying
+one-tensor-at-a-time primitive.
 
 Runnable demos: `examples/xor.rs`, `examples/mnist.rs`,
 `examples/vit_mnist.rs`, plus `examples/fa_bench.rs` and
@@ -64,7 +75,8 @@ are the only sanctioned non-core dependencies.
 Device selection is `CUDA → CL → RAYON → INTERP` for the first available
 backend; set `DEFAULT_DEVICE` to override. Runtime knobs (device, dtype,
 `BEAM`, `JIT`, `FA`, …) are environment variables read once and cached; build-
-time diagnostics/backends are Cargo features.
+time diagnostics/backends are Cargo features. Set runtime env vars before the
+first tensor/realize.
 
 ## Scope and known limitations
 

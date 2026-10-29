@@ -70,7 +70,7 @@ Sizes are LOC of the v0.14.0 tree. Decision key: **PORT** (must exist in Rust),
 | rng / autograd | `mixin/rand.py`, `mixin/gradient.py` | 462 | PORT (P6) | after native execution works |
 | nn core | `nn/__init__.py` (420), `nn/state.py` (352), `nn/optim.py` (179) | ~950 | **PORT (M7e)** | the M7 integrator: exercises custom_kernel (Embedding), rand, gradient, conv ops together |
 | llm / viz / nn extras | `llm/`, `viz/`, `nn/onnx.py`, `nn/torch.py`, disk cache, process replay | huge | SKIP | ONNX import stays out |
-| `fetch` / `Tensor.from_url` | thin std-only shim: `TcpStream` HTTP/1.1 GET (Content-Length + chunked, <=3 redirects, tinygrad cache layout) + minimal DEFLATE inflate (~200 LOC) | ~350 | **PORT (M7e)** | plain HTTP only; no TLS, no ranges |
+| `fetch` / `Tensor.from_url` | **DESCOPED** (2026-10): weight/data download is left to the user; `examples/mnist.rs` shells out to `curl` once | — | **DESCOPED** | no opaque download API in the library |
 
 MVP port budget ≈ **10–11k lines of Python** (of ~19k core), plus tests.
 
@@ -224,10 +224,10 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
 - **nn core** (`nn/__init__.py` + `nn/state.py` + `nn/optim.py`): BatchNorm, Conv1d/2d,
   ConvTranspose1d/2d, Linear, GroupNorm, InstanceNorm, LayerNorm(+2d), RMSNorm, Embedding,
   LSTMCell; `State`; Optimizer + SGD/Adam(+W)/LARS/LAMB. **Proof: MNIST e2e** (MLP train
-  step + Conv inference, weights via `State`, optimizer numerics diffed). Dataset via the
-  std-only `fetch`/`from_url` shim. **MNIST example + ignored e2e gate DONE (§8.16)**;
-  all `nn/__init__.py` layers are now ported (§8.25), each gated by
-  `tests/nn_layers.rs` vs tinygrad goldens. Remaining: `State`/safetensors (§9.6). 🚧
+  step + Conv inference, weights via `State`, optimizer numerics diffed). **MNIST
+  example + ignored e2e gate DONE (§8.16)**; all `nn/__init__.py` layers are now ported
+  (§8.25), each gated by `tests/nn_layers.rs` vs tinygrad goldens. `State`/safetensors
+  landed in §9.9; dataset download is descoped (examples use `curl`). ✅
 
 ### M8 — first additional backend: OpenCL — DONE
 - `runtime/` + `renderer/` backend seams: `OpaqueT`/`BackendAllocator`/`Comp`/`Prog`/
@@ -448,8 +448,8 @@ those nodes).
   Optimizer state is `Tensor::zeros_param` (a pure BUFFER leaf; see §9.5). Gate:
   `tests/nn_optim.rs` (3/3) diffs one- and multi-step SGD/LARS/Adam/AdamW against tinygrad
   goldens (`py/dump_optim_golden.py`).
-- No `nn/state.py` equivalent (`state_dict`/`load_state_dict`/safetensors); `fetch`/`from_url`
-  is ported (std-only HTTP/inflate).
+- `nn/state.py` equivalent: `tensor::state` (`State`, safetensors, `get_state_dict` /
+  `load_state_dict` incl. buffers) landed in §9.9. `fetch`/`from_url` is **descoped**.
 - Tensor helpers added for nn: `dot`, `linear`, `batchnorm`, `layernorm`, `pool`, `uniform`,
   `rand`, `tanh`, `div`, `square`, `sqrt`, `abs`, `eq`, `where_`, `chunk`/`split`,
   `unflatten`, `shrink_to`, `conv_transpose2d`.
@@ -1268,15 +1268,14 @@ data path. The original plan follows.
 2. **Norm layers, faithful**: BatchNorm / LayerNorm / GroupNorm running-stat updates as
    in-graph **assign** in train mode, buffered stats in inference, affine `weight`/`bias`;
    add `InstanceNorm`, `RMSNorm`, `LayerNorm2d`.
-3. **`nn/state.py` equivalent**: `state_dict`/`load_state_dict` over `Module::named_params`,
-   plus a minimal safetensors reader/writer (std-only) and `init_weight`/`fetch`.
-4. **Optimizers** (`nn/optim.py`): momentum, weight decay, then `Adam`, `AdamW`, `LARS`,
-   `LAMB`. Needs `Tensor` assign/mutation semantics that survive the buffer work (§9.1) —
-   today `step` returns new handles rather than mutating in place.
-5. **Remaining ops needed by nn**: `max`/`min` with axis, `argmax`, `pad2d`, `flatten`,
-   `interpolate`; `Embedding` via `custom_kernel`; `LSTMCell`.
-6. **Data path (only if going for MNIST e2e)**: std-only `fetch`/`from_url` (HTTP/1.1 GET +
-   inflate) loading into the tinygrad cache layout.
+3. **`nn/state.py` equivalent** — **DONE (§9.9)**: `State`, safetensors reader/writer,
+   `get_state_dict`/`load_state_dict` (buffers included).
+4. **Optimizers** (`nn/optim.py`) — **DONE (§9.5)**: LARS/LAMB/Adam/AdamW + in-place
+   `Tensor::assign`.
+5. **Remaining ops needed by nn** — **DONE**: `max`/`min`, `argmax`, `flatten`,
+   `interpolate`, `Embedding`, `LSTMCell` (§8.25).
+6. **Data path**: descoped; `examples/mnist.rs` shells out to `curl` once and reads
+   the IDX files directly.
 
 ### 9.4 Testing nn
 1. **Golden harness**: add `py/dump_golden.py` cases and `tests/nn_{linear,conv2d,batchnorm,
@@ -1792,7 +1791,7 @@ API shape, and missing user-facing features.
 - Edition 2024 is current; `rust-version = "1.88"` is the first release with
   the edition-2024 let-chains used in the code. CI is deferred by request.
 
-**API decision: `Ctx` lives inside `Tensor`**
+**API decision: `Ctx` lives inside `Tensor` — DONE (2026-10)**
 - `Tensor` gains a `Ctx` handle (a shared `Rc<RefCell<UOpCtx>>`), so graph
   construction no longer needs an explicit `&mut UOpCtx` argument on every
   call. Constructors take `&Ctx`; methods use `self.ctx`.
@@ -1807,37 +1806,48 @@ API shape, and missing user-facing features.
   operator syntax possible, and it removes two mutable contexts from every
   call site. `Tensor` remains `!Send`/`!Sync`.
 
-**State API (next, before the networks)**
+**State API — CORE DONE (2026-10)**
 - `Tensor::from_read(ctx, reader, dtype, shape, device)` — streaming upload
-  from any `std::io::Read`, one tensor at a time.
-- `tensor::state`: `State` map, safetensors read/write (header parser +
-  per-tensor streaming), `get_state_dict`/`load_state_dict` including
-  **buffers** (BatchNorm running stats), `replace`/`assign_many`.
-- Engine memory plumbing: free `Node.initial_data` after a device upload,
-  avoid the `to_param` host round-trip and the `pending_copyin` clone; this is
-  required for the 6.76 GB DA3 checkpoint.
-- nn constructors that accept loaded tensors (`from_parts`/state-driven), so
-  large models do not initialize random weights first.
-- `Tensor::to(device)` and `numel`/`size`/`zeros_like`-class conveniences.
+  from any `std::io::Read`, one tensor at a time. `tests/state.rs`.
+- `tensor::state`: `State` map, safetensors read/write (a small strict JSON
+  header parser + per-tensor streaming), `get_state_dict`/`load_state_dict`
+  including **buffers** (BatchNorm running stats via `Module::named_buffers`).
+  Cross-`Ctx` loads copy through bytes; same-arena loads use `Tensor::replace`.
+- `Tensor::to(device)`, `Tensor::replace`, `numel`/`size`/`nbytes` and
+  `zeros_like`/`ones_like`/`full_like`.
+- **Still open:** free `Node.initial_data` after a device upload, avoid the
+  `to_param` host round-trip and the `pending_copyin` clone (needed for the
+  6.76 GB DA3 checkpoint), nn `from_parts` constructors, and a state-loading
+  test on a real checkpoint.
 
-**Tensor long tail (next)**
-- The review found ~157 names in the raw Python/Rust method diff (~90 genuine
-  user-facing ops). Implement the missing reductions/sorting, activations,
-  movement/indexing, pooling/linalg, and creation helpers. Network-critical
-  ones: `silu`, `min`, `argmin`, `sort`/`argsort`, `tan`, `erf`, `normalize`,
-  `quick_gelu`, `logsumexp`, `einsum`.
+**Tensor long tail — BATCH 1 DONE (2026-10)**
+- Added in `tensor/extra.rs`/`op.rs` (gated by `tests/extra_ops.rs`):
+  activations (`silu`, `swish`, `quick_gelu`, `leaky_relu`, `relu6`,
+  `hardswish`, `hardsigmoid`, `hardtanh`, `elu`, `celu`, `selu`, `softplus`,
+  `softsign`, `mish`, `logsigmoid`), `sign`, `round`, `tan`, `log10`,
+  `logaddexp`, `copysign`, `erf`; reductions `min`, `argmin`, `std`,
+  `std_mean`, `normalize`, `logsumexp`, `cumprod`; sorting `sort`, `argsort`,
+  `topk`; predicates `isnan`/`isinf`/`isfinite`/`isclose`/`allclose`;
+  `numel`/`size`/`nbytes`/`zeros_like`/`ones_like`/`full_like`; `roll`,
+  `diag`, `meshgrid`, `masked_fill`, `repeat`, `avg_pool2d`, and two-operand
+  `einsum` (`ij,jk->ik`, bias sums, dots).
 - `from_url`/download is **descoped**: users fetch weights themselves. The
   library will not grow an opaque download API.
+- **Still open:** `cummax`/`cummin`/`logcumsumexp`, `nonzero`, `scatter*`,
+  `masked_select`, `gather_nd/elements`, `diag`onal, pad reflect/replicate/
+  circular, `max_unpool2d`, activation `asin/acos/atan`/hyperbolics, and
+  einsum ellipsis/1-operand forms. The ONNX matrix tracks which of these T1/T2
+  needs.
 
-**Environment configuration**
+**Environment configuration — CACHED (2026-10)**
+- `helpers::env` now caches every process-env lookup once (Context overrides
+  are still checked live). `dtype::{default_float,default_int,sum_dtype}` cache
+  their parsed `DTypeId` in `OnceLock`; `ops_rayon` caches its mode and
+  `RAYON_VERBOSE`.
 - Runtime knobs (device, dtype, `BEAM`, `JIT`, `FA`, `RAYON_*`, cache dirs)
-  stay environment variables for now, but must be read **once and cached**
-  (a `config` module + `OnceLock`), not re-read on every call. Build-time
-  diagnostics/backends remain Cargo features (`trace`, `dump`, `backend_*`).
-  This is a hybrid by design: features select code, env selects runtime
-  behavior.
-- The hot `DEFAULT_FLOAT`/`DEFAULT_INT`/`SUM_DTYPE` reads in `dtype` are the
-  first caching targets.
+  remain environment variables (set before the first tensor/realize), while
+  build-time diagnostics/backends are Cargo features (`trace`, `dump`,
+  `backend_*`). This hybrid is documented in the README.
 
 **Codegen**
 - The missing `get_late_rewrite_patterns`/`get_transcendental_patterns` and
