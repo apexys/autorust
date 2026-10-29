@@ -162,17 +162,40 @@ pub fn max(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) ->
     reduce(ctx, x, Ops::Max, axis, keepdim)
 }
 
-/// `ReduceMixin.any` (reduce.py:96-116): `cast(bool).sum()`.
-pub fn any(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) -> UopId {
-    let b = ctx.cast(x, dtype::BOOL);
-    sum(ctx, b, axis, keepdim, None)
+/// Number of elements being reduced (static shapes; symbolic axes panic).
+fn reduced_numel(ctx: &mut UOpCtx, x: &UopId, axis: Option<&[usize]>) -> i128 {
+    let shape = ctx.shape(x).unwrap().unwrap_or_default();
+    match axis {
+        None => shape.iter().map(|s| s.clone().as_i128_or_panic()).product(),
+        Some(ax) => ax
+            .iter()
+            .map(|&a| shape[a].clone().as_i128_or_panic())
+            .product(),
+    }
 }
 
-/// `ReduceMixin.all` (reduce.py:118-137): `(logical_not(x)).min()`.logical_not().
+/// `ReduceMixin.any` (reduce.py:96-116): `cast(bool).sum() != 0`.
+pub fn any(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) -> UopId {
+    let b = ctx.cast(x, dtype::BOOL);
+    let i = ctx.cast(b, dtype::INT32);
+    let s = sum(ctx, i, axis, keepdim, None);
+    let zero = ctx.const_py(ConstVal::Int(0), Some(dtype::INT32));
+    super::elementwise::ne(ctx, s, zero)
+}
+
+/// `ReduceMixin.all` (reduce.py:118-137): every element is true.
+///
+/// tinygrad writes this as `(logical_not(x)).min().logical_not()`, but `min`
+/// routes through `max` and bool `max` is not defined; summing the cast and
+/// comparing with the reduced element count is equivalent and works on every
+/// backend.
 pub fn all(ctx: &mut UOpCtx, x: UopId, axis: Option<&[usize]>, keepdim: bool) -> UopId {
-    let nb = super::elementwise::logical_not(ctx, x);
-    let m = max(ctx, nb, axis, keepdim);
-    super::elementwise::logical_not(ctx, m)
+    let n = reduced_numel(ctx, &x, axis);
+    let b = ctx.cast(x, dtype::BOOL);
+    let i = ctx.cast(b, dtype::INT32);
+    let s = sum(ctx, i, axis, keepdim, None);
+    let nc = ctx.const_py(ConstVal::Int(n as i128), Some(dtype::INT32));
+    super::elementwise::eq(ctx, s, nc)
 }
 
 /// `OpMixin.mean` (op.py:499-524).
