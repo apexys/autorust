@@ -1954,8 +1954,15 @@ fn build_split_kernels() -> PatternMatcher {
 /// `get_kernel_graph` (rangeify.py:584) — run the full rangeify pipeline and return the kernel SINK.
 pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     // (single-device: multi_pm skipped; OPENPILOT_HACKS off)
+    let prof = crate::engine::prof::enabled();
+    let lap = |name: &'static str, t: Option<std::time::Instant>| {
+        if let Some(t) = t {
+            crate::engine::prof::add(name, t.elapsed().as_secs_f64());
+        }
+    };
 
     // 0. earliest rewrites (python: pm_mops+earliest_rewrites, bottom_up)
+    let t = prof.then(std::time::Instant::now);
     let pm_earliest = earliest_rewrites().add(&pm_mops());
     let tsink = graph_rewrite(
         ctx,
@@ -1968,8 +1975,10 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         CtxVal::None,
     )
     .unwrap_or_else(|e| panic!("TGERR: earliest rewrites: {e}"));
+    lap("rng.earliest", t);
 
     // convert copies to stores
+    let t = prof.then(std::time::Instant::now);
     let tsink = graph_rewrite(
         ctx,
         tsink,
@@ -1981,18 +1990,28 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         CtxVal::Cnt(std::rc::Rc::new(std::cell::Cell::new(0))),
     )
     .unwrap_or_else(|e| panic!("TGERR: convert copy to store: {e}"));
+    lap("rng.copy_to_store", t);
 
     // convert movement ops to ranges
+    let t = prof.then(std::time::Instant::now);
     let tsink =
         super::indexing::run_rangeify(ctx, tsink, std::env::var("TG_DEBUG_RANGEIFY").is_ok());
+    lap("rng.run_rangeify", t);
 
     // cleanups for speed and runability
+    let t = prof.then(std::time::Instant::now);
+    if prof {
+        for _ in ctx.toposort(&tsink) {
+            crate::engine::prof::count("rng.graph_nodes");
+        }
+    }
     let pm = symbolic()
         .add(&crate::codegen::simplify::pm_reduce_simplify())
         .add(&pm_const_buffer_folding())
         .add(&pm_remove_bufferize());
     let tsink = graph_rewrite(ctx, tsink, &pm, false, None, false, false, CtxVal::None)
         .unwrap_or_else(|e| panic!("TGERR: symbolic+reduce_collapse+debuf: {e}"));
+    lap("rng.cleanup", t);
 
     // limit buffers (NV: MAX_KERNEL_BUFFERS=0 and DEVICE_MAX_BUFS has no NV entry — no-op)
 

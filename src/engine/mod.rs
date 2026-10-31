@@ -5,11 +5,13 @@
 //!   program cache + symbolic values; reuse it across training steps.
 //! - [`jit`] — opt-in TinyJit-style capture/replay of planned LINEARs.
 //! - [`disk_cache`] — the BEAM/PTX disk cache.
+//! - [`prof`] — opt-in phase timings (`AUTORUST_PROF=1`).
 //!
 //! A `Tensor` owns its realized buffer; the `Session` keeps views/bases alive
 //! for the duration of a realize and prunes unreferenced bases at the start of
 //! the next one.
 pub mod disk_cache;
 pub mod jit;
+pub mod prof;
 pub mod realize;
 pub mod session;

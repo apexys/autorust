@@ -1,5 +1,5 @@
 //! Port of the pattern matcher (ops.py:1317-1479): `UPat` matching semantics,
-//! `PatternMatcher` (interpret path — the Python bytecode compiler is a pure
+//! `PatternMatcher` (interpret path â€” the Python bytecode compiler is a pure
 //! optimization), and the rewrite driver context values.
 //!
 //! Semantics faithfully mirrored:
@@ -69,7 +69,7 @@ pub type Store = HashMap<&'static str, UopId>;
 // `impl Into<UPatOrConst>`, which a std operator could not cover.
 #[allow(clippy::should_implement_trait)]
 impl UPat {
-    /// `UPat(...)` — build a pattern, deriving length and early-reject fields from `src`.
+    /// `UPat(...)` â€” build a pattern, deriving length and early-reject fields from `src`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         op: Option<Vec<Ops>>,
@@ -150,12 +150,12 @@ impl UPat {
         UPat::cvar(None, dtype, Some(super::arg::Arg::Const(v)))
     }
 
-    /// `UPat.any(*src)` — try each alternative against the same node.
+    /// `UPat.any(*src)` â€” try each alternative against the same node.
     pub fn any(srcs: Vec<UPat>) -> UPat {
         UPat::new(None, None, SrcPat::Any(srcs), None, None, false, None)
     }
 
-    /// `UPat.named(name)` — copy with a store binding name.
+    /// `UPat.named(name)` â€” copy with a store binding name.
     pub fn named(&self, name: &'static str) -> UPat {
         let mut p = self.clone();
         p.name = Some(name);
@@ -183,7 +183,7 @@ impl UPat {
         p
     }
 
-    /// `p.f(op, ...)` — child pattern.
+    /// `p.f(op, ...)` â€” child pattern.
     pub fn f(&self, op: Ops) -> UPat {
         UPat::ops1(op).with_src_tup(vec![self.clone()])
     }
@@ -276,7 +276,7 @@ impl UPat {
         }
     }
 
-    /// `UPat.alu(op, *src)` — ALU pattern, permuted for commutative ops.
+    /// `UPat.alu(op, *src)` â€” ALU pattern, permuted for commutative ops.
     pub fn alu(self, op: Ops, src: Vec<UPat>) -> UPat {
         let mut asrc = vec![self];
         asrc.extend(src);
@@ -562,7 +562,7 @@ impl UPat {
         p
     }
 
-    /// `UPat(Ops.STACK, self.match_dtype, src=self, ...)` — repeat src.
+    /// `UPat(Ops.STACK, self.match_dtype, src=self, ...)` â€” repeat src.
     pub fn broadcast(self, allow_any_len: bool) -> UPat {
         let dt = self.dtype.clone();
         let src = SrcPat::Repeat(Box::new(self));
@@ -617,7 +617,7 @@ impl UPat {
 
     // ---------- matching ----------
 
-    /// `UPat.match` — append every binding store that matches `uop` to `out`.
+    /// `UPat.match` â€” append every binding store that matches `uop` to `out`.
     pub fn match_uop(&self, ctx: &UOpCtx, uop: UopId, store: Store, out: &mut Vec<Store>) {
         if let SrcPat::Any(alts) = &self.src {
             for alt in alts {
@@ -648,7 +648,7 @@ impl UPat {
         {
             return;
         }
-        // arg (Python `!=` — bools compare as ints)
+        // arg (Python `!=` â€” bools compare as ints)
         if let Some(pa) = &self.arg
             && !arg_matches(pa, ctx.arg_of(&uop))
         {
@@ -865,7 +865,7 @@ pub type RuleFn = Arc<dyn Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + Se
 ///
 /// `PatternMatcher` is `Send + Sync` (patterns are owned data and rules are
 /// `Arc<dyn Fn + Send + Sync>` that capture no arena state), so a `OnceLock`
-/// hands out a process-wide `&'static` with thread-safe initialization — no
+/// hands out a process-wide `&'static` with thread-safe initialization â€” no
 /// leak, no `unsafe`, and no per-thread copies. Rules that need arena-specific
 /// data receive it through [`CtxVal`] rather than capturing it.
 pub struct PmSlot(std::sync::OnceLock<PatternMatcher>);
@@ -1168,7 +1168,7 @@ impl PatternMatcher {
         &self.0.rules
     }
 
-    /// `pm1 + pm2` — concatenate rule sets. Rules are shared (`Arc<Rule>`), so
+    /// `pm1 + pm2` â€” concatenate rule sets. Rules are shared (`Arc<Rule>`), so
     /// this copies pointers, not the `UPat` trees. When both operands have a
     /// stable identity the result is memoized, so the same composition is built
     /// only once (tinygrad's `functools.cache` on `__add__`, ops.py:1470).
@@ -1201,7 +1201,7 @@ impl PatternMatcher {
         pm
     }
 
-    /// `pm.rewrite(uop, ctx)` — first rule match wins.
+    /// `pm.rewrite(uop, ctx)` â€” first rule match wins.
     pub fn rewrite(&self, ctx: &mut UOpCtx, uop: UopId, ctxval: &CtxVal) -> Option<UopId> {
         let idxs = self.0.pdict.get(&ctx.op_of(&uop))?;
         let ler: HashSet<Ops> = ctx.srcs(&uop).iter().map(|s| ctx.op_of(s)).collect();
@@ -1258,7 +1258,7 @@ pub fn sget(store: &Store, name: &str) -> UopId {
         .clone()
 }
 
-/// `st.get(name)` — the binding when present.
+/// `st.get(name)` â€” the binding when present.
 pub fn sget_opt(store: &Store, name: &str) -> Option<UopId> {
     store.get(name).cloned()
 }
@@ -1396,9 +1396,14 @@ impl<'a> RewriteCtxt<'a> {
         x: UopId,
     ) -> Result<Option<UopId>, BottomUpGate> {
         if let Some(ret) = self.bpm_cache.get(&x) {
+            crate::engine::prof::count("rw.match_cached");
             return Ok(ret.clone());
         }
+        crate::engine::prof::count("rw.match_calls");
         let ret = self.bpm.unwrap().rewrite(ctx, x.clone(), self.ctxval);
+        if ret.is_some() {
+            crate::engine::prof::count("rw.match_hits");
+        }
         self.bpm_cache.insert(x, ret.clone());
         Ok(ret)
     }
@@ -1482,6 +1487,7 @@ impl<'a> RewriteCtxt<'a> {
         let mut iters = 0usize;
         while let Some((n, stage, new_n)) = stack.pop() {
             iters += 1;
+            crate::engine::prof::count("rw.steps");
             if iters > 400_000 {
                 return Err("rewrite step limit".into());
             }
@@ -1492,7 +1498,7 @@ impl<'a> RewriteCtxt<'a> {
                 // NOTE: python can't hit this for freshly rebuilt nodes (identity
                 // objects); structural interning can, so fire the waiters.
                 if let Some(w) = waitlist.remove(&n) {
-                    stack.extend(w);
+                    crate::engine::prof::count("rw.waitlist_fire");                    stack.extend(w);
                 }
                 continue;
             }
@@ -1523,7 +1529,7 @@ impl<'a> RewriteCtxt<'a> {
                             // gate: done with this node, don't continue down the srcs
                             self.replace.insert(n.clone(), tn);
                             if let Some(w) = waitlist.remove(&n) {
-                                stack.extend(w);
+                                crate::engine::prof::count("rw.waitlist_fire");                                stack.extend(w);
                             }
                             continue;
                         }
@@ -1549,6 +1555,7 @@ impl<'a> RewriteCtxt<'a> {
                         match self.replace.get(x) {
                             Some(rx) => tmp.push(rx.clone()),
                             None => {
+                                crate::engine::prof::count("rw.waitlist_push");
                                 waitlist.entry(x.clone()).or_default().push((
                                     n.clone(),
                                     Stage::S1,
@@ -1574,7 +1581,7 @@ impl<'a> RewriteCtxt<'a> {
                             None => {
                                 self.replace.insert(n.clone(), new_n);
                                 if let Some(w) = waitlist.remove(&n) {
-                                    stack.extend(w);
+                                    crate::engine::prof::count("rw.waitlist_fire");                                    stack.extend(w);
                                 }
                                 continue;
                             }
@@ -1601,7 +1608,7 @@ impl<'a> RewriteCtxt<'a> {
                     Some(rn) => {
                         self.replace.insert(n.clone(), rn.clone());
                         if let Some(w) = waitlist.remove(&n) {
-                            stack.extend(w);
+                            crate::engine::prof::count("rw.waitlist_fire");                            stack.extend(w);
                         }
                     }
                 },
@@ -1642,7 +1649,7 @@ pub fn graph_rewrite(
     }
 }
 
-/// `UOp.substitute` (ops.py:529-534) — bottom-up rewrite with `_substitute`.
+/// `UOp.substitute` (ops.py:529-534) â€” bottom-up rewrite with `_substitute`.
 /// `substitute` with an extra PM composed before `_substitute`
 /// (python `substitute(..., extra_pm=...)`).
 pub fn substitute_extra(
@@ -1671,7 +1678,7 @@ pub fn substitute_extra(
     .unwrap_or_else(|e| panic!("TGERR: substitute_extra failed: {e}"))
 }
 
-/// `UOp.substitute` — bottom-up rewrite replacing `dvars`.
+/// `UOp.substitute` â€” bottom-up rewrite replacing `dvars`.
 pub fn substitute(
     ctx: &mut UOpCtx,
     root: UopId,

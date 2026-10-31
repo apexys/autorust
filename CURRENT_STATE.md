@@ -1241,6 +1241,49 @@ FA 87 ms. End-to-end per step (graph scheduling included) FA is ~18x/42x slower.
 The op-level FA is **not faster** — it is not a fused kernel; the fused `tk`
 kernel (`Tensor.custom_kernel`/CALL) is the deferred M7 stretch.
 
+### 8.34 Opt-in phase profiling (`AUTORUST_PROF=1`) and the DA3 schedule cost
+
+`src/engine/prof.rs`: thread-local named accumulators (`add` for timed phases,
+`count` for counters), printed by `report()`. Zero cost when disabled (a
+`OnceLock` read at each call site). Hooked into `realize_many`
+(`materialize`/`callify`/`schedule`/`run`), `exec_linear` (`exec.kernel`),
+`create_linear_with_vars` (`rangeify`/`resolve`/`copies`/`memory`),
+`get_kernel_graph` (`earliest`/`copy_to_store`/`run_rangeify`/`cleanup`) and
+`unified_rewrite` (steps, match attempts/hits, waitlist pushes/fires).
+
+Why it exists: the DA3 port (sibling project `da3-autorust`) ran at ~75 ms of
+GPU time but seconds of wall time per frame. Measured on an RTX 4500 Ada,
+12-block ViT-B (721 tokens, 768 dim):
+
+| | tinygrad 0.14.0 | autorust |
+|---|---|---|
+| kernels | 168 | 265 (incl. exact-erf GELU) |
+| schedule | 38.9 ms | 2034 ms |
+| realize (warm) | 50.5 ms | ~2700 ms |
+
+Breakdown of the 2034 ms: `get_kernel_graph` (rangeify) 1039 ms,
+`create_schedule` 0.65 ms, memory plan 1 ms, then `compile_linear` on
+cache hits ~660 ms, GPU execution 60 ms.
+
+Inside rangeify, all of it is the rewrites: `earliest` 4 ms,
+`copy_to_store` 2 ms, `run_rangeify` 34 ms, `cleanup` 587 ms, and the
+bufferize/store tail ~450 ms. Notably the *cleanup* rewrite costs ~250 ms per
+full-graph pass even for a 4-rule PM, i.e. the cost is the traversal, not the
+rules.
+
+Counters for one 3153-node graph (`--backbone-only`): **1.56M rewrite steps,
+441k pattern-match attempts, 10k hits, 328k waitlist pushes / 248k fires** —
+~250 steps and ~50 re-queues per node against ~2-4 for a well-behaved DAG walk,
+and every pass sits just under the 400k `rewrite step limit`. The unified
+rewrite loop is a faithful port of `ops.py:unified_rewrite` (including
+`on_stack`'s "on the stack or in replace" semantics), so the port has the same
+*shape*; what differs is that Python's UOps/`sint` are interleaved with
+`functools.cache`d property computations (vmin/vmax/resolve) and its `replace`
+/`waitlist` dictionaries are identity-keyed on interned objects. Closing the gap
+is an open task: either make the traversal do O(1) work per node (find why nodes
+are re-queued ~50x) or use `Jit` capture/replay for repeated shapes, which is
+what TinyJit does and which skips scheduling entirely.
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same

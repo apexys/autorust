@@ -600,7 +600,11 @@ pub fn exec_linear(
                     .get(&call.id())
                     .expect("TGERR: exec_linear missing CompiledProg")
                     .clone();
+                let timer = crate::engine::prof::enabled().then(std::time::Instant::now);
                 exec_kernel(ctx, t, call.clone(), &cp, var_vals);
+                if let Some(tr) = timer {
+                    crate::engine::prof::add("exec.kernel", tr.elapsed().as_secs_f64());
+                }
             }
             other => panic!("TGERR: exec_linear call ast op {other:?}"),
         }
@@ -661,6 +665,8 @@ pub fn realize_many(
 ) -> (Vec<crate::runtime::buffer::Buffer>, Vec<UopId>) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
+    let prof = crate::engine::prof::enabled();
+    let t0 = prof.then(std::time::Instant::now);
     let targets: Vec<UopId> = tensor_uops
         .iter()
         .map(|u| materialize_target(ctx, u.clone()))
@@ -669,14 +675,25 @@ pub fn realize_many(
         let (b, u) = realize_tensor(ctx, targets.into_iter().next().unwrap(), t, cache, capture);
         return (vec![b], vec![u]);
     }
+    let t1 = prof.then(std::time::Instant::now);
     let sink = crate::tensor::sink(ctx, targets.clone());
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
+    let t2 = prof.then(std::time::Instant::now);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
     let _ = linear;
+    let t3 = prof.then(std::time::Instant::now);
     if let Some(c) = capture.as_mut() {
         c.push(planned.clone());
     }
     run_linear(ctx, planned, t, &HashMap::new(), cache);
+    if let (Some(a), Some(b), Some(c), Some(d)) = (t0, t1, t2, t3) {
+        use crate::engine::prof::add;
+        add("realize.materialize", b.duration_since(a).as_secs_f64());
+        add("realize.callify", c.duration_since(b).as_secs_f64());
+        add("realize.schedule", d.duration_since(c).as_secs_f64());
+        add("realize.run", d.elapsed().as_secs_f64());
+        add("realize.total", d.elapsed().as_secs_f64() + c.duration_since(b).as_secs_f64() + b.duration_since(a).as_secs_f64());
+    }
     // python `_apply_map_to_tensors`: each tensor's uop becomes its final storage
     // form after the schedule — a leaf aliasing that allocation.
     let mut bufs = Vec::with_capacity(targets.len());

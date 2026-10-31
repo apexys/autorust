@@ -336,7 +336,9 @@ pub fn pm_resolve_linear_call() -> PatternMatcher {
 /// `create_linear_with_vars` (schedule/__init__.py:181) — returns the resolved
 /// LINEAR (pre-memory-plan) plus the final memory-planned LINEAR.
 pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, UopId, Vec<UopId>) {
+    let prof = crate::engine::prof::enabled();
     // schedule to linear: pm_schedule lowers the top SINK
+    let t0 = prof.then(std::time::Instant::now);
     let linear_call = {
         let pm_sched = pm_schedule();
         graph_rewrite(
@@ -351,6 +353,7 @@ pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Uop
         )
         .unwrap_or_else(|e| panic!("TGERR: schedule to linear: {e}"))
     };
+    let t1 = prof.then(std::time::Instant::now);
 
     // held bufs (schedule/__init__.py:208): the top CALL's direct BUFFER args
     let held_bufs: Vec<UopId> = ctx.srcs(&linear_call)[1..]
@@ -361,8 +364,9 @@ pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Uop
 
     // resolve the linear_call (allocates buffers)
     let linear = resolve_linear_call(ctx, linear_call);
+    let t2 = prof.then(std::time::Instant::now);
 
-    // create copies (SDMA) — needed for cross-device (PYTHON->NV) copies
+    // create copies (SDMA) - needed for cross-device (PYTHON->NV) copies
     let linear = graph_rewrite(
         ctx,
         linear,
@@ -374,9 +378,17 @@ pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Uop
         CtxVal::None,
     )
     .unwrap_or_else(|e| panic!("TGERR: create copies: {e}"));
+    let t3 = prof.then(std::time::Instant::now);
 
-    // vars: corpus is concrete — no var_vals
+    // vars: corpus is concrete - no var_vals
     let planned = crate::schedule::memory::memory_plan_rewrite(ctx, linear.clone(), &held_bufs);
+    if let (Some(a), Some(b), Some(c), Some(d)) = (t0, t1, t2, t3) {
+        use crate::engine::prof::add;
+        add("sched.rangeify", b.duration_since(a).as_secs_f64());
+        add("sched.resolve", c.duration_since(b).as_secs_f64());
+        add("sched.copies", d.duration_since(c).as_secs_f64());
+        add("sched.memory", d.elapsed().as_secs_f64());
+    }
     (linear, planned, held_bufs)
 }
 
@@ -392,8 +404,20 @@ pub fn pm_schedule() -> PatternMatcher {
             {
                 return None;
             }
-            let sched_sink = super::rangeify::get_kernel_graph(ctx, function);
-            Some(create_schedule(ctx, sched_sink))
+            let sched_sink = {
+                let t = crate::engine::prof::enabled().then(std::time::Instant::now);
+                let s = super::rangeify::get_kernel_graph(ctx, function);
+                if let Some(t) = t {
+                    crate::engine::prof::add("sched.kernel_graph", t.elapsed().as_secs_f64());
+                }
+                s
+            };
+            let t = crate::engine::prof::enabled().then(std::time::Instant::now);
+            let sched = create_schedule(ctx, sched_sink);
+            if let Some(t) = t {
+                crate::engine::prof::add("sched.create_schedule", t.elapsed().as_secs_f64());
+            }
+            Some(sched)
         }),
     )])
 }
