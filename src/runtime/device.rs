@@ -210,6 +210,15 @@ pub struct TinyElf {
     pub signature: Vec<(i64, crate::dtype::DTypeId)>,
 }
 
+/// Content key for a compiled artifact (FNV-1a over `lib`). Computed once at
+/// compile time and stored on `CompiledProg`; hashing the artifact on every
+/// launch was 97% of the per-kernel launch cost on the DA3 replay path.
+pub fn elf_key(elf: &TinyElf) -> u64 {
+    elf.lib.iter().fold(0xcbf29ce484222325u64, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x100000001b3)
+    })
+}
+
 /// `Program.__call__(*bufs, global_size, local_size, vals, wait)` — the
 /// runtime launch seam. Returns elapsed seconds when `wait`.
 pub trait Prog {
@@ -265,14 +274,19 @@ impl Compiled {
     /// `Device[device].runtime(elf)` — construct (or fetch cached) the runtime
     /// for a compiled artifact. Cache key = lib hash (python: (ast.key, device)).
     pub fn runtime(self: &Rc<Self>, elf: TinyElf) -> Rc<RefCell<dyn Prog>> {
-        let key = elf.lib.iter().fold(0xcbf29ce484222325u64, |h, &b| {
-            (h ^ b as u64).wrapping_mul(0x100000001b3)
-        });
+        let key = elf_key(&elf);
+        self.runtime_keyed(key, &elf)
+    }
+
+    /// [`Device::runtime`] with a caller-supplied content key (computed once at
+    /// compile time and stored on [`CompiledProg`](crate::engine::realize::CompiledProg)),
+    /// so a launch does not re-hash the compiled artifact.
+    pub fn runtime_keyed(&self, key: u64, elf: &TinyElf) -> Rc<RefCell<dyn Prog>> {
         if let Some(rt) = self.runtime_cache.borrow().get(&key) {
             return rt.clone();
         }
         self.compiles.set(self.compiles.get() + 1);
-        let rt = (self.runtime_ctor)(&elf);
+        let rt = (self.runtime_ctor)(elf);
         self.runtime_cache.borrow_mut().insert(key, rt.clone());
         rt
     }

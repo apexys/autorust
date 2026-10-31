@@ -188,6 +188,11 @@ impl BackendAllocator for CudaAllocator {
     fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
         assert_eq!(dest.size(), src.size(), "TGERR: copy size mismatch");
         self.inner.ctx.bind_to_thread().ok();
+        // No `cuStreamSynchronize`: the copy is enqueued on the same stream as
+        // the surrounding kernels, so program order already serializes it
+        // (tinygrad's `CUDAAllocator._copy` likewise just posts the async D2D).
+        // Syncing here cost ~1.2 ms per copy, and a DA3 forward emits ~290 of
+        // them, i.e. the entire steady-state frame time.
         unsafe {
             result::memcpy_dtod_async(
                 cuda_of(dest).ptr(),
@@ -197,7 +202,6 @@ impl BackendAllocator for CudaAllocator {
             )
         }
         .unwrap_or_else(|e| panic!("TGERR: cuMemcpyDtoDAsync_v2: {e}"));
-        self.inner.synchronize();
     }
     fn _offset(&self, buf: &dyn OpaqueT, size: usize, offset: usize) -> Rc<dyn OpaqueT> {
         // `CUDAAllocator._offset`: CUdeviceptr_v2(buf.value + offset)

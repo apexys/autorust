@@ -60,6 +60,12 @@ pub fn count(name: &'static str) {
     });
 }
 
+/// Clear all accumulators (e.g. after a JIT capture, so the reported table
+/// describes steady-state replay only).
+pub fn reset() {
+    ENTRIES.with(|e| e.borrow_mut().clear());
+}
+
 /// Print the accumulated table (no-op when disabled or empty).
 pub fn report() {
     if !enabled() {

@@ -1297,6 +1297,31 @@ Also added `exec.linear` (whole dispatch loop) and `exec.copy.secs` to the
 profiler: `exec.kernel` alone is only ~0.17 ms per launch, so the remaining
 per-frame cost is dispatch in `exec_linear`, not the kernels.
 
+### 8.36 Per-launch hashing, per-copy syncs, and re-uploaded weights
+
+Three costs that made a DA3 frame look like "the GPU is idle":
+
+1. `Device::runtime` hashed the whole compiled artifact (`elf.lib`, the PTX) on
+   **every launch** to key its program cache — 0.22 ms per kernel, 97% of
+   `exec_kernel`. The key is now computed once at compile time
+   (`runtime::device::elf_key`, stored as `CompiledProg::elf_key`) and looked up
+   via `runtime_keyed`; per-launch cost is 3.5 µs.
+2. `_copy_into` (CUDA) called `cuStreamSynchronize` after every async D2D copy,
+   serializing the pipeline (~1.2 ms/copy). Removed — the copy is enqueued on
+   the same stream, so program order already serializes it, matching tinygrad's
+   `CUDAAllocator._copy`.
+3. **Weights were re-uploaded on every realize.** `safe_load` stages a tensor as
+   `COPY(device, BUFFER(PYTHON))`, so an unrealized weight is copied host→device
+   by every realize that reads it: measured **~290 host→device copies per DA3
+   forward**, i.e. the whole checkpoint, ~1.2 s/frame. `safe_load`'s docs now
+   say to materialize; the DA3 loader realizes each tensor once
+   (`Session::realize_tensor` + `set_uop`/`set_realized_buffer`) so weights
+   become device BUFFER leaves.
+
+Effect on DA3 (140×252, RTX 4500 Ada): non-JIT steady state 4.6 s → 3.0 s per
+frame; JIT replay (TinyJit capture/replay) **0.32 s → 0.008 s per frame**
+(120 FPS), which is 1.1 ms of kernels + one input upload.
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same

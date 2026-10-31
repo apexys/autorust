@@ -234,6 +234,10 @@ pub struct CompiledProg {
     pub pi: ProgramInfo,
     /// The compiled artifact.
     pub elf: Rc<TinyElf>,
+    /// Content hash of [`CompiledProg::elf`]'s `lib`, computed once at compile
+    /// time. `Device::runtime` keys its program cache on this; recomputing it
+    /// per launch cost 0.22 ms (97% of a kernel launch) on the DA3 replay path.
+    pub elf_key: u64,
 }
 
 /// `to_program_cache` — the JIT cache. Keyed by a **content hash of the AST
@@ -350,6 +354,7 @@ pub fn to_program(
             uop: prg,
             pi: p.pi.clone(),
             elf: p.elf.clone(),
+            elf_key: p.elf_key,
         });
     }
     // 1. full_rewrite_to_sink
@@ -437,7 +442,13 @@ pub fn to_program(
         name: to_function_name_pub(&pi.name),
         signature,
     });
-    let cp = Rc::new(CompiledProg { uop: prg, pi, elf });
+    let elf_key = crate::runtime::device::elf_key(&elf);
+    let cp = Rc::new(CompiledProg {
+        uop: prg,
+        pi,
+        elf,
+        elf_key,
+    });
     cache.insert(key, cp.clone());
     cp
 }
@@ -510,13 +521,11 @@ fn exec_copy(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId) {
     let d = dest.get_buf(&dest_dev);
     let s = src.get_buf(&src_dev);
     if dest.device() == src.device() {
-        // tinygrad `exec_copy`: same device is an `_copy` (D2D memcpy), not a
-        // host bounce. This matters: a bufferize pass can emit hundreds of
-        // same-device copies and each bounce costs a stream sync + two PCIe
-        // transfers (measured ~1.2 ms vs ~0.05 ms on CUDA).
+        crate::engine::prof::count("copy.d2d");
         dest_dev.allocator._copy_into(&*d, &*s);
         return;
     }
+    crate::engine::prof::count("copy.bounce");
     let mut tmp = vec![0u8; s.size()];
     src_dev.allocator._copyout(&mut tmp, &*s);
     dest_dev.allocator._copyin(&*d, &tmp);
@@ -530,6 +539,8 @@ fn exec_kernel(
     cp: &Rc<CompiledProg>,
     var_vals: &HashMap<String, i64>,
 ) {
+    let prof = crate::engine::prof::enabled();
+    let t0 = prof.then(std::time::Instant::now);
     let resolved = resolve_params(ctx, call);
     // device from the first global arg (python: to_tuple(call.src[1].device))
     let g0 = *cp.pi.globals.first().unwrap_or(&0) as usize;
@@ -537,6 +548,7 @@ fn exec_kernel(
         .device()
         .to_string();
     let dev = device(&dev_name);
+    let t1 = prof.then(std::time::Instant::now);
     // `bufs` is indexed by **buffer slot**, not position (tinygrad's `bufs[slot]`
     // contract): a kernel need not use every buffer in the graph, so the used
     // slots can have gaps (`globals = [0..9, 11]`). Build a slot-indexed vec;
@@ -559,14 +571,19 @@ fn exec_kernel(
                 .expect("TGERR: kernel has no buffers")
         })
         .collect();
-    let rt = dev.runtime(TinyElf {
-        lib: cp.elf.lib.clone(),
-        name: cp.elf.name.clone(),
-        signature: cp.elf.signature.clone(),
-    });
+    let t2 = prof.then(std::time::Instant::now);
+    let rt = dev.runtime_keyed(cp.elf_key, &cp.elf);
+    let t3 = prof.then(std::time::Instant::now);
     let (gs, ls) = cp.pi.launch_dims(var_vals);
     rt.borrow_mut()
         .call(&bufs, gs, ls, &cp.pi.vals(var_vals), false);
+    if let (Some(a), Some(b), Some(c), Some(d)) = (t0, t1, t2, t3) {
+        use crate::engine::prof::add;
+        add("kx.resolve_dev", b.duration_since(a).as_secs_f64());
+        add("kx.buffers", c.duration_since(b).as_secs_f64());
+        add("kx.runtime", d.duration_since(c).as_secs_f64());
+        add("kx.launch", d.elapsed().as_secs_f64());
+    }
 }
 
 /// A lowered+compiled LINEAR (tinygrad `jit_lower`): every SINK-ast CALL swapped
