@@ -1096,10 +1096,8 @@ impl<'a> Scheduler<'a> {
                 }
                 let sep = colored("_", "BLACK");
                 let mut name = k_type.to_string();
-                for (i, p) in parts.iter().enumerate() {
-                    if i > 0 || true {
-                        name.push_str(&sep);
-                    }
+                for p in &parts {
+                    name.push_str(&sep);
                     name.push_str(p);
                 }
                 name
