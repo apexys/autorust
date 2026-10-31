@@ -72,6 +72,18 @@ fn unary_pow_log() {
 }
 
 #[test]
+fn tanh_saturates_instead_of_nan() {
+    // `(exp2(2x/ln2) - 1) / (exp2(2x/ln2) + 1)` overflows to inf/inf past
+    // |x| ~ 44; the port caps the exponent so it saturates like f32 tanh.
+    let ctx = Ctx::new();
+    let x = f32s(&ctx, &[50.0, 100.0, 1000.0, -50.0, -1000.0]);
+    almost(
+        &x.tanh().to_list_fresh::<f32>(),
+        &[1.0, 1.0, 1.0, -1.0, -1.0],
+    );
+}
+
+#[test]
 fn unary_misc() {
     let ctx = Ctx::new();
     let s = f32s(&ctx, &[0.0, 1.0, -1.0]);

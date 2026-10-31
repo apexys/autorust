@@ -169,6 +169,11 @@ pub fn sin(ctx: &mut UOpCtx, x: UopId) -> UopId {
 }
 
 /// `tanh()`: `(exp(2x) - 1) / (exp(2x) + 1)`.
+///
+/// The `exp2` argument is capped at 120 so the value saturates to ±1 instead of
+/// overflowing to `inf/inf = NaN` for `|x| ≳ 44` (where f32 `tanh` is exactly
+/// ±1 anyway). Found while porting DA3: its tanh-approximate GELU feeds
+/// arguments around 55.
 pub fn tanh(ctx: &mut UOpCtx, x: UopId) -> UopId {
     // exp(2x) == exp2(2x/ln2)
     let two = binop_c(ctx, Ops::Mul, x, ConstVal::Float(2.0));
@@ -178,6 +183,8 @@ pub fn tanh(ctx: &mut UOpCtx, x: UopId) -> UopId {
         two,
         ConstVal::Float(1.0 / std::f64::consts::LN_2),
     );
+    let cap = ctx.const_py(ConstVal::Float(120.0), None);
+    let scaled = minimum(ctx, scaled, cap);
     let exp_2x = ctx.alu1(Ops::Exp2, scaled);
     let one = ConstVal::Float(1.0);
     let one_const = ctx.const_py(one, None);
