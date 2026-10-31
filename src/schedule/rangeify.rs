@@ -1119,8 +1119,7 @@ fn remove_bufferize(ctx: &mut UOpCtx, src: UopId, buf: UopId, idx: UopId) -> Opt
     if let Some(t) = t {
         crate::engine::prof::add("rb.substitute", t.elapsed().as_secs_f64());
     }
-    Some(out)
-}
+    Some(out)}
 
 // ---------- 4. put in buffers for bufferize (rangeify.py:392-463) ----------
 

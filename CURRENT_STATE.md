@@ -1377,11 +1377,22 @@ One 504×280 DA3 backbone schedule (4840 nodes, 571 kernels):
 
 Output is unchanged (differential gate still 1.5e-5) and replay stays 9 ms/frame.
 
-Remaining hotspot: `pm_remove_bufferize` (372 ms of the 604 ms cleanup is 314
-`substitute` calls over large subtrees; `rb.walk` is only 2 ms). It fires ~1100
-times, i.e. ~1100 `STAGE(INDEX(...))` sites survive to this pass — tinygrad
-eliminates most of them earlier, so the next question is why our rangeify leaves
-so many bufferize sites behind.
+Remaining hotspot: `pm_remove_bufferize` (369 ms of the 600 ms cleanup is 314
+`substitute` calls at 1.2 ms each; `rb.walk` is 2 ms, `rb.reduce_walk` 51 ms).
+Investigated and found to be **inherent per-site work**, not another cache bug:
+
+- all 314 `(src, replacements)` pairs are distinct (memoising would not help);
+- every replacement key is live in `src` (skipping is not valid);
+- each `src` subtree is ~1770 nodes (measured with a temporary toposort), and
+  all 314 are distinct, so it is 556k node visits of genuine substitution.
+
+The only way to cut it is to make `remove_bufferize` fire ~1100 times less, i.e.
+leave fewer `STAGE(INDEX)` sites for `run_rangeify` to clean up. That is a
+bufferization-policy question (`maybe_realize_axes` / the fusion decision), and
+it needs a controlled comparison: build the *same* 12-block ViT graph in both
+runtimes and compare node/kernel/STAGE counts (tinygrad: 168 kernels,
+`py/tg_bench.py`). Tracking that as the next scheduler task; it is not on the
+critical path for the streaming pipeline any more (capture 3.1 s at 504×280).
 
 ## 9. Next steps
 
