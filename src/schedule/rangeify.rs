@@ -1057,7 +1057,11 @@ fn remove_bufferize(ctx: &mut UOpCtx, src: UopId, buf: UopId, idx: UopId) -> Opt
             }
             true
         };
+        let t = crate::engine::prof::enabled().then(std::time::Instant::now);
         ctx.toposort_gated(src.clone(), Some(&gate2), true);
+        if let Some(t) = t {
+            crate::engine::prof::add("rb.walk", t.elapsed().as_secs_f64());
+        }
     }
     let (mut accessed_buffers, mut indexes, mut reduces) = accessed.into_inner();
     // AFTER markers were raw src nodes; map through buf_uop now
@@ -1084,7 +1088,11 @@ fn remove_bufferize(ctx: &mut UOpCtx, src: UopId, buf: UopId, idx: UopId) -> Opt
             true
         };
         // visit and set flag: any PARAM/STAGE/AFTER inside => buffer_in_reduce
+        let t = crate::engine::prof::enabled().then(std::time::Instant::now);
         let ts = ctx.toposort_gated(sink, Some(&buf_gate), true);
+        if let Some(t) = t {
+            crate::engine::prof::add("rb.reduce_walk", t.elapsed().as_secs_f64());
+        }
         for x in ts {
             if matches!(ctx.op_of(&x), Ops::Param | Ops::Stage | Ops::After) {
                 buffer_in_reduce = true;
@@ -1106,9 +1114,12 @@ fn remove_bufferize(ctx: &mut UOpCtx, src: UopId, buf: UopId, idx: UopId) -> Opt
         }
         replaced.insert(k.clone(), v.clone());
     }
-    Some(crate::uop::upat::substitute(
-        ctx, src, replaced, false, false,
-    ))
+    let t = crate::engine::prof::enabled().then(std::time::Instant::now);
+    let out = crate::uop::upat::substitute(ctx, src, replaced, false, false);
+    if let Some(t) = t {
+        crate::engine::prof::add("rb.substitute", t.elapsed().as_secs_f64());
+    }
+    Some(out)
 }
 
 // ---------- 4. put in buffers for bufferize (rangeify.py:392-463) ----------
@@ -1733,7 +1744,16 @@ fn find_bufs(ctx: &mut UOpCtx, x: UopId) {
 }
 
 /// `to_define_global` (rangeify.py:507).
+///
+/// Singleton: `split_store` rebuilds this per match, so constructing the
+/// matcher each time (275× per DA3 schedule) both costs time and defeats the
+/// identity-keyed `PatternMatcher::add` memo.
 pub fn to_define_global() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_to_define_global).clone()
+}
+
+fn build_to_define_global() -> PatternMatcher {
     let rules: Vec<(UPat, RuleFn)> = vec![
         (
             UPat::ops1(Ops::Store).named("x"),
@@ -1866,6 +1886,11 @@ pub fn to_define_global() -> PatternMatcher {
 
 /// `rangeify_codegen` (rangeify.py:535).
 pub fn rangeify_codegen() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(build_rangeify_codegen).clone()
+}
+
+fn build_rangeify_codegen() -> PatternMatcher {
     PatternMatcher::new(vec![
         (
             UPat::ops1(Ops::Contiguous).named("x"),
@@ -1894,11 +1919,16 @@ pub fn rangeify_codegen() -> PatternMatcher {
 
 /// `split_store` (rangeify.py:547).
 fn split_store(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
+    let prof = crate::engine::prof::enabled();
+    let t0 = prof.then(std::time::Instant::now);
     // if we have any open ranges here, we don't split. open DEVICE ranges are fine
     for r in ctx.ranges(&x.clone()).iter() {
         if AxisType::range_axis_type(ctx, r.clone()) != AxisType::Device {
             return None;
         }
+    }
+    if let Some(t) = t0 {
+        crate::engine::prof::add("split.ranges", t.elapsed().as_secs_f64());
     }
     // the store of a bound Variable is an input value, not a kernel
     let st = if ctx.op_of(&x) == Ops::End {
@@ -1913,9 +1943,7 @@ fn split_store(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
     let lctx = std::rc::Rc::new(std::cell::RefCell::new(
         crate::uop::upat::LocalAddBufferContext::default(),
     ));
-    if crate::engine::prof::enabled() {
-        crate::engine::prof::add("split.input_nodes", ctx.toposort(&x).len() as f64);
-    }
+    let t1 = prof.then(std::time::Instant::now);
     let pm = to_define_global()
         .add(&crate::codegen::simplify::pm_flatten_range())
         .add(&rangeify_codegen());
@@ -1932,11 +1960,19 @@ fn split_store(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
     .unwrap_or_else(|e| panic!("TGERR: kernel split: {e}"));
 
     // create the Kernel
+    let t2 = prof.then(std::time::Instant::now);
+    if let Some(t) = t1 {
+        crate::engine::prof::add("split.rewrite", t.elapsed().as_secs_f64());
+    }
     let ki = kernel_info("test", None);
     let sink = ctx.sink_arg(vec![ret], Arg::Data(ki));
     let lc = lctx.borrow();
     let args: Vec<UopId> = lc.map_vals.clone();
-    Some(ctx.call(sink, args, None))
+    let out = Some(ctx.call(sink, args, None));
+    if let Some(t) = t2 {
+        crate::engine::prof::add("split.tail", t.elapsed().as_secs_f64());
+    }
+    out
 }
 
 /// `split_kernels` (rangeify.py:561).

@@ -276,6 +276,13 @@ impl UOpCtx {
 
     /// `_ranges`+`ranges` recursive property (ops.py:489/504), memoized on the
     /// node (`Node.range_c`). Insertion-ordered like the Python dict.
+    ///
+    /// tinygrad computes this as a `@recursive_property`: a node's ranges are
+    /// the union of its children's (already cached) ranges, so it is O(1)
+    /// amortized per node. The port used to `toposort` the *whole* subtree on
+    /// every cache miss, which made `split_store` quadratic in the number of
+    /// kernels: 275 calls × ~3200-node subtrees = 880k node visits, 632 ms of
+    /// a 659 ms `split_kernels`. Walk post-order but **stop at cached nodes**.
     pub fn ranges(&mut self, id: &UopId) -> Rc<Vec<UopId>> {
         if let Some(Some(cached)) = id.range_c.borrow().clone() {
             return cached;
@@ -283,41 +290,42 @@ impl UOpCtx {
         thread_local! {
             static IN_PROGRESS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        IN_PROGRESS.with(|ip| {
-            let mut ip = ip.borrow_mut();
-            if ip.contains(&id.id()) {
-                panic!(
-                    "TGERR: range cycle detected: node {} (op {:?})",
-                    id.id(),
-                    id.op
-                );
+        // Iterative post-order so deep index chains can't blow the stack.
+        let mut stack: Vec<(UopId, bool)> = vec![(id.clone(), false)];
+        while let Some((n, expanded)) = stack.pop() {
+            if n.range_c.borrow().is_some() {
+                continue;
             }
-            ip.push(id.id());
-        });
-        let out = self.ranges_inner(id);
-        IN_PROGRESS.with(|ip| {
-            let mut ip = ip.borrow_mut();
-            ip.retain(|&x| x != id.id());
-        });
-        out
-    }
-
-    fn ranges_inner(&mut self, id: &UopId) -> Rc<Vec<UopId>> {
-        // compute over the toposort bottom-up, then cache each node
-        let ts = self.toposort(id);
-        for n in ts.iter().rev() {
-            if n.range_c.borrow().is_none() {
-                let r = Rc::new(self.ranges_uncached(n));
+            if expanded {
+                let r = Rc::new(self.ranges_uncached(&n));
                 *n.range_c.borrow_mut() = Some(Some(r));
+                IN_PROGRESS.with(|ip| {
+                    let mut ip = ip.borrow_mut();
+                    ip.retain(|&x| x != n.id());
+                });
+                continue;
+            }
+            IN_PROGRESS.with(|ip| {
+                let mut ip = ip.borrow_mut();
+                if ip.contains(&n.id()) {
+                    panic!(
+                        "TGERR: range cycle detected: node {} (op {:?})",
+                        n.id(),
+                        n.op
+                    );
+                }
+                ip.push(n.id());
+            });
+            stack.push((n.clone(), true));
+            for s in n.srcs.iter().rev() {
+                if s.range_c.borrow().is_none() {
+                    stack.push((s.clone(), false));
+                }
             }
         }
         match id.range_c.borrow().clone() {
             Some(Some(r)) => r,
-            _ => {
-                let r = Rc::new(self.ranges_uncached(id));
-                *id.range_c.borrow_mut() = Some(Some(r.clone()));
-                r
-            }
+            _ => unreachable!("TGERR: ranges({}) did not complete", id.id()),
         }
     }
 

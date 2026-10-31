@@ -1350,6 +1350,39 @@ Effect on DA3 (140×252, RTX 4500 Ada): non-JIT steady state 4.6 s → 3.0 s per
 frame; JIT replay (TinyJit capture/replay) **0.32 s → 0.008 s per frame**
 (120 FPS), which is 1.1 ms of kernels + one input upload.
 
+### 8.37 `ranges` was quadratic — the real scheduler bug
+
+`ctx.ranges()` is tinygrad's `@recursive_property _ranges`: a node's ranges are
+the union of its children's (already memoized) ranges, i.e. O(1) amortized per
+node. The port instead ran **`toposort` over the whole subtree on every cache
+miss**. `split_store` calls `ranges` once per matched STORE/END, so with 275
+matches on ~3200-node subtrees the pass walked 880k nodes: `split.ranges` was
+**632 ms of a 659 ms `split_kernels`**, and the same property is used all over
+indexing/codegen.
+
+Fix: walk post-order iteratively but **stop at cached nodes**, so only genuinely
+new nodes are computed (`src/uop/range.rs`). Also made `to_define_global` and
+`rangeify_codegen` singletons (they rebuilt a `PatternMatcher` on every
+`split_store` call, which also defeated the identity-keyed `add` memo).
+
+One 504×280 DA3 backbone schedule (4840 nodes, 571 kernels):
+
+| | before | after |
+|---|---|---|
+| `rng.split_kernels` | 659 ms | **17 ms** |
+| `rng.cleanup` | 975 ms | 604 ms |
+| rangeify total | 1815 ms | **769 ms** |
+| model realize | 2382 ms | **1218 ms** |
+| JIT capture @140×252 | 5.8 s | **2.6 s** |
+
+Output is unchanged (differential gate still 1.5e-5) and replay stays 9 ms/frame.
+
+Remaining hotspot: `pm_remove_bufferize` (372 ms of the 604 ms cleanup is 314
+`substitute` calls over large subtrees; `rb.walk` is only 2 ms). It fires ~1100
+times, i.e. ~1100 `STAGE(INDEX(...))` sites survive to this pass — tinygrad
+eliminates most of them earlier, so the next question is why our rangeify leaves
+so many bufferize sites behind.
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same
