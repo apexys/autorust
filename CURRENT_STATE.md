@@ -1297,25 +1297,20 @@ which is what localized the cost:
    12-block shape (`py/tg_bench.py`; it lacks qk-norm/RoPE/exact-erf GELU).
    Every kernel pays `split_store`'s nested 3-PM rewrite (~1.5 ms) plus codegen
    (~1 ms), so the count dominates the total.
-2. **`split_store` is quadratic in kernel count (confirmed).** `split_kernels`
-   is a 1-rule bottom-up pass whose rule calls `split_store`, and `split_store`
-   re-runs a nested 3-PM rewrite on the matched node's whole subtree. Measured
-   on the 504×280 backbone: 275 `split_store` calls over **880k nodes total —
-   ~3,200 nodes per call on a 4,840-node graph**. Each kernel should cost its
-   own small subtree (~35 nodes, which is what `to_program` sees afterwards:
-   `codegen.ast_nodes` averages 35), so the nested walks are reaching into
-   already-split kernels. That is O(kernels × graph) ≈ 1 s, and it is the
-   remaining scheduler bug.
+2. **`split_store`'s nested rewrite is the second half (partly localized).**
+   `split_kernels` is a 1-rule bottom-up pass; each match runs `split_store`,
+   which re-runs a nested 3-PM rewrite (`to_define_global` + `pm_flatten_range`
+   + `rangeify_codegen`) over the matched node's subtree. `TG_RW_TRACE` shows
+   this pass at **52.8k steps but 889 ms → 17 µs/step** (28× the engine's
+   ~0.6 µs), i.e. 275 matches × ~3 ms of nested work. (`split.input_nodes`
+   reports ~3200 nodes per match, but that is `toposort`, which — unlike the
+   rewrite — does not stop at opaque call bodies, so treat it as an upper
+   bound.) Next step: split that timer across the three nested PMs; the prime
+   suspect is `rangeify_codegen`/`pm_flatten_range` over shared index
+   expressions.
 
-   Likely cause: an `Ops::End`/`Ops::Store` chain — each kernel's END wraps the
-   previous ones, so the subtree rooted at an outer END grows with the number of
-   kernels; tinygrad's `graph_rewrite(..., enter_calls=False)` stops at
-   `_OPAQUE_CALL_BODIES`, while the port's `is_opaque_body_call` may not cover
-   the split-kernel CALL bodies. Next step: count what one outer END reaches,
-   and align `is_opaque_body_call` with `UOp._OPAQUE_CALL_BODIES`.
-
-   The AST-size hypothesis is **disproved**: kernel ASTs average 35 nodes,
-   comparable to tinygrad's ~46 steps/kernel.
+   The AST-size hypothesis is **disproved**: kernel ASTs average 35 nodes
+   (`codegen.ast_nodes`), comparable to tinygrad's ~46 steps/kernel.
 
 ### 8.35 Same-device `exec_copy` is a D2D memcpy, not a host bounce
 
