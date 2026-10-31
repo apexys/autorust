@@ -1284,6 +1284,19 @@ is an open task: either make the traversal do O(1) work per node (find why nodes
 are re-queued ~50x) or use `Jit` capture/replay for repeated shapes, which is
 what TinyJit does and which skips scheduling entirely.
 
+### 8.35 Same-device `exec_copy` is a D2D memcpy, not a host bounce
+
+`exec_copy` always went `_copyout` (which `cuStreamSynchronize`s) then `_copyin`,
+even when both sides were the same device. For CUDA that is a full stream sync
+plus two PCIe transfers per copy. It now takes the `_copy_into` path (the
+backend's `cuMemcpyDtoDAsync`) when `dest.device() == src.device()`, mirroring
+tinygrad's `exec_copy`. Measured per copy on an RTX 4500: ~1.4 ms → ~0.05 ms
+(the DA3 forward emits ~290 copies, mostly bufferize/copy-from-store).
+
+Also added `exec.linear` (whole dispatch loop) and `exec.copy.secs` to the
+profiler: `exec.kernel` alone is only ~0.17 ms per launch, so the remaining
+per-frame cost is dispatch in `exec_linear`, not the kernels.
+
 ## 9. Next steps
 
 Ordered by leverage on the training path. Items 1 and 2 are the two halves of the same
