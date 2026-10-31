@@ -1913,6 +1913,9 @@ fn split_store(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
     let lctx = std::rc::Rc::new(std::cell::RefCell::new(
         crate::uop::upat::LocalAddBufferContext::default(),
     ));
+    if crate::engine::prof::enabled() {
+        crate::engine::prof::add("split.input_nodes", ctx.toposort(&x).len() as f64);
+    }
     let pm = to_define_global()
         .add(&crate::codegen::simplify::pm_flatten_range())
         .add(&rangeify_codegen());

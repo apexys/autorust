@@ -338,6 +338,10 @@ pub fn to_program(
     cache: &mut ProgCache,
 ) -> Rc<CompiledProg> {
     let key = ctx.g.content_key(&ast);
+    if crate::engine::prof::enabled() {
+        // Kernel AST size, for comparing against tinygrad (see CURRENT_STATE 8.34).
+        crate::engine::prof::add("codegen.ast_nodes", ctx.toposort(&ast).len() as f64);
+    }
     if let Some(p) = cache.get(key) {
         // The cached program may have been compiled in a different arena (the key
         // is content-based by design), so its `uop` id is not valid here. The
