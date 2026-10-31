@@ -2027,6 +2027,7 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         }
     }
     let paramarg_start = max_slot + 1;
+    let t = prof.then(std::time::Instant::now);
     let pm = pm_add_buffers().add(&pm_add_param_range_tags());
     let tsink = graph_rewrite(
         ctx,
@@ -2039,8 +2040,10 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         CtxVal::Cnt(std::rc::Rc::new(std::cell::Cell::new(paramarg_start))),
     )
     .unwrap_or_else(|e| panic!("TGERR: stage to store: {e}"));
+    lap("rng.bufferize", t);
 
     // split into kernels
+    let t = prof.then(std::time::Instant::now);
     let tsink = graph_rewrite(
         ctx,
         tsink,
@@ -2052,9 +2055,11 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         CtxVal::None,
     )
     .unwrap_or_else(|e| panic!("TGERR: split kernels: {e}"));
+    lap("rng.split_kernels", t);
 
     // remove indexing from call args
-    graph_rewrite(
+    let t = prof.then(std::time::Instant::now);
+    let out = graph_rewrite(
         ctx,
         tsink,
         &pm_no_indexing_calls(),
@@ -2064,5 +2069,7 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         false,
         CtxVal::None,
     )
-    .unwrap_or_else(|e| panic!("TGERR: remove indexing from call args: {e}"))
+    .unwrap_or_else(|e| panic!("TGERR: remove indexing from call args: {e}"));
+    lap("rng.no_indexing", t);
+    out
 }

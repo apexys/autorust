@@ -1,5 +1,5 @@
 //! Port of the pattern matcher (ops.py:1317-1479): `UPat` matching semantics,
-//! `PatternMatcher` (interpret path â€” the Python bytecode compiler is a pure
+//! `PatternMatcher` (interpret path Ã¢â‚¬â€ the Python bytecode compiler is a pure
 //! optimization), and the rewrite driver context values.
 //!
 //! Semantics faithfully mirrored:
@@ -69,7 +69,7 @@ pub type Store = HashMap<&'static str, UopId>;
 // `impl Into<UPatOrConst>`, which a std operator could not cover.
 #[allow(clippy::should_implement_trait)]
 impl UPat {
-    /// `UPat(...)` â€” build a pattern, deriving length and early-reject fields from `src`.
+    /// `UPat(...)` Ã¢â‚¬â€ build a pattern, deriving length and early-reject fields from `src`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         op: Option<Vec<Ops>>,
@@ -150,12 +150,12 @@ impl UPat {
         UPat::cvar(None, dtype, Some(super::arg::Arg::Const(v)))
     }
 
-    /// `UPat.any(*src)` â€” try each alternative against the same node.
+    /// `UPat.any(*src)` Ã¢â‚¬â€ try each alternative against the same node.
     pub fn any(srcs: Vec<UPat>) -> UPat {
         UPat::new(None, None, SrcPat::Any(srcs), None, None, false, None)
     }
 
-    /// `UPat.named(name)` â€” copy with a store binding name.
+    /// `UPat.named(name)` Ã¢â‚¬â€ copy with a store binding name.
     pub fn named(&self, name: &'static str) -> UPat {
         let mut p = self.clone();
         p.name = Some(name);
@@ -183,7 +183,7 @@ impl UPat {
         p
     }
 
-    /// `p.f(op, ...)` â€” child pattern.
+    /// `p.f(op, ...)` Ã¢â‚¬â€ child pattern.
     pub fn f(&self, op: Ops) -> UPat {
         UPat::ops1(op).with_src_tup(vec![self.clone()])
     }
@@ -276,7 +276,7 @@ impl UPat {
         }
     }
 
-    /// `UPat.alu(op, *src)` â€” ALU pattern, permuted for commutative ops.
+    /// `UPat.alu(op, *src)` Ã¢â‚¬â€ ALU pattern, permuted for commutative ops.
     pub fn alu(self, op: Ops, src: Vec<UPat>) -> UPat {
         let mut asrc = vec![self];
         asrc.extend(src);
@@ -562,7 +562,7 @@ impl UPat {
         p
     }
 
-    /// `UPat(Ops.STACK, self.match_dtype, src=self, ...)` â€” repeat src.
+    /// `UPat(Ops.STACK, self.match_dtype, src=self, ...)` Ã¢â‚¬â€ repeat src.
     pub fn broadcast(self, allow_any_len: bool) -> UPat {
         let dt = self.dtype.clone();
         let src = SrcPat::Repeat(Box::new(self));
@@ -617,7 +617,7 @@ impl UPat {
 
     // ---------- matching ----------
 
-    /// `UPat.match` â€” append every binding store that matches `uop` to `out`.
+    /// `UPat.match` Ã¢â‚¬â€ append every binding store that matches `uop` to `out`.
     pub fn match_uop(&self, ctx: &UOpCtx, uop: UopId, store: Store, out: &mut Vec<Store>) {
         if let SrcPat::Any(alts) = &self.src {
             for alt in alts {
@@ -648,7 +648,7 @@ impl UPat {
         {
             return;
         }
-        // arg (Python `!=` â€” bools compare as ints)
+        // arg (Python `!=` Ã¢â‚¬â€ bools compare as ints)
         if let Some(pa) = &self.arg
             && !arg_matches(pa, ctx.arg_of(&uop))
         {
@@ -865,7 +865,7 @@ pub type RuleFn = Arc<dyn Fn(&mut UOpCtx, &Store, &CtxVal) -> Option<UopId> + Se
 ///
 /// `PatternMatcher` is `Send + Sync` (patterns are owned data and rules are
 /// `Arc<dyn Fn + Send + Sync>` that capture no arena state), so a `OnceLock`
-/// hands out a process-wide `&'static` with thread-safe initialization â€” no
+/// hands out a process-wide `&'static` with thread-safe initialization Ã¢â‚¬â€ no
 /// leak, no `unsafe`, and no per-thread copies. Rules that need arena-specific
 /// data receive it through [`CtxVal`] rather than capturing it.
 pub struct PmSlot(std::sync::OnceLock<PatternMatcher>);
@@ -1118,6 +1118,17 @@ struct PmInner {
 #[derive(Clone)]
 pub struct PatternMatcher(Arc<PmInner>);
 
+impl PatternMatcher {
+    /// Number of rules (diagnostics only).
+    pub fn len(&self) -> usize {
+        self.0.rules.len()
+    }
+    /// Whether this matcher has no rules.
+    pub fn is_empty(&self) -> bool {
+        self.0.rules.is_empty()
+    }
+}
+
 impl Default for PatternMatcher {
     fn default() -> Self {
         PatternMatcher(Arc::new(PmInner::default()))
@@ -1168,7 +1179,7 @@ impl PatternMatcher {
         &self.0.rules
     }
 
-    /// `pm1 + pm2` â€” concatenate rule sets. Rules are shared (`Arc<Rule>`), so
+    /// `pm1 + pm2` Ã¢â‚¬â€ concatenate rule sets. Rules are shared (`Arc<Rule>`), so
     /// this copies pointers, not the `UPat` trees. When both operands have a
     /// stable identity the result is memoized, so the same composition is built
     /// only once (tinygrad's `functools.cache` on `__add__`, ops.py:1470).
@@ -1201,7 +1212,7 @@ impl PatternMatcher {
         pm
     }
 
-    /// `pm.rewrite(uop, ctx)` â€” first rule match wins.
+    /// `pm.rewrite(uop, ctx)` Ã¢â‚¬â€ first rule match wins.
     pub fn rewrite(&self, ctx: &mut UOpCtx, uop: UopId, ctxval: &CtxVal) -> Option<UopId> {
         let idxs = self.0.pdict.get(&ctx.op_of(&uop))?;
         let ler: HashSet<Ops> = ctx.srcs(&uop).iter().map(|s| ctx.op_of(s)).collect();
@@ -1258,7 +1269,7 @@ pub fn sget(store: &Store, name: &str) -> UopId {
         .clone()
 }
 
-/// `st.get(name)` â€” the binding when present.
+/// `st.get(name)` Ã¢â‚¬â€ the binding when present.
 pub fn sget_opt(store: &Store, name: &str) -> Option<UopId> {
     store.get(name).cloned()
 }
@@ -1400,7 +1411,11 @@ impl<'a> RewriteCtxt<'a> {
             return Ok(ret.clone());
         }
         crate::engine::prof::count("rw.match_calls");
+        let timer = crate::engine::prof::enabled().then(std::time::Instant::now);
         let ret = self.bpm.unwrap().rewrite(ctx, x.clone(), self.ctxval);
+        if let Some(t) = timer {
+            crate::engine::prof::add("rw.match_secs", t.elapsed().as_secs_f64());
+        }
         if ret.is_some() {
             crate::engine::prof::count("rw.match_hits");
         }
@@ -1485,8 +1500,17 @@ impl<'a> RewriteCtxt<'a> {
         let mut on_stack: HashSet<UopId> = HashSet::from([root.clone()]);
         let mut waitlist: HashMap<UopId, Vec<(UopId, Stage, UopId)>> = HashMap::new();
         let mut iters = 0usize;
+        // Diagnostic (`TG_RW_VISITS=1`): per-node visit histogram + total.
+        // A well-behaved DAG walk visits each node a handful of times; if some
+        // node shows hundreds of visits the waitlist retry loop is thrashing.
+        let mut visits: Option<HashMap<UopId, u32>> = std::env::var("TG_RW_VISITS")
+            .ok()
+            .map(|_| HashMap::new());
         while let Some((n, stage, new_n)) = stack.pop() {
             iters += 1;
+            if let Some(v) = visits.as_mut() {
+                *v.entry(n.clone()).or_default() += 1;
+            }
             crate::engine::prof::count("rw.steps");
             if iters > 400_000 {
                 return Err("rewrite step limit".into());
@@ -1573,7 +1597,14 @@ impl<'a> RewriteCtxt<'a> {
                     if new_src == srcs {
                         // top-down rewrite of the node as-is
                         let rewritten = if self.pm.is_some() {
-                            self.pm_rewrite(ctx, new_n.clone())
+                            let timer =
+                                crate::engine::prof::enabled().then(std::time::Instant::now);
+                            crate::engine::prof::count("rw.pm_calls");
+                            let r = self.pm_rewrite(ctx, new_n.clone());
+                            if let Some(t) = timer {
+                                crate::engine::prof::add("rw.pm_secs", t.elapsed().as_secs_f64());
+                            }
+                            r
                         } else {
                             None
                         };
@@ -1614,6 +1645,24 @@ impl<'a> RewriteCtxt<'a> {
                 },
             }
         }
+        if let Some(v) = visits
+            && iters > 5000
+        {
+            let mut top: Vec<(UopId, u32)> = v.into_iter().collect();
+            top.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+            let total: u32 = top.iter().map(|(_, c)| *c).sum();
+            println!(
+                "[rw] steps={iters} distinct={} (sum {total}); top re-visits:",
+                top.len()
+            );
+            for (id, c) in top.iter().take(10) {
+                println!(
+                    "  {:?} srcs={} visits={c}",
+                    ctx.op_of(id),
+                    ctx.srcs(id).len()
+                );
+            }
+        }
         match self.replace.get(&root) {
             Some(r) => Ok(r.clone()),
             None => Err(format!("rewrite did not complete root {:?}", root.id())),
@@ -1642,14 +1691,35 @@ pub fn graph_rewrite(
         enter_calls,
     };
     let _ = &mut rc;
-    if walk {
+    let trace = std::env::var("TG_RW_TRACE").is_ok();
+    let t = trace.then(std::time::Instant::now);
+    let steps0 = if trace {
+        crate::engine::prof::get("rw.steps")
+    } else {
+        0
+    };
+    let out = if walk {
         rc.walk_rewrite(ctx, sink)
     } else {
         rc.unified_rewrite(ctx, sink)
+    };
+    if let Some(t) = t {
+        let steps = crate::engine::prof::get("rw.steps").saturating_sub(steps0);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        println!(
+            "[gr] rules={} bottom_up={} walk={} steps={} {:.2}ms ({:.1}us/step)",
+            pm.len(),
+            bottom_up,
+            walk,
+            steps,
+            ms,
+            if steps > 0 { ms * 1e3 / steps as f64 } else { 0.0 }
+        );
     }
+    out
 }
 
-/// `UOp.substitute` (ops.py:529-534) â€” bottom-up rewrite with `_substitute`.
+/// `UOp.substitute` (ops.py:529-534) Ã¢â‚¬â€ bottom-up rewrite with `_substitute`.
 /// `substitute` with an extra PM composed before `_substitute`
 /// (python `substitute(..., extra_pm=...)`).
 pub fn substitute_extra(
@@ -1678,7 +1748,7 @@ pub fn substitute_extra(
     .unwrap_or_else(|e| panic!("TGERR: substitute_extra failed: {e}"))
 }
 
-/// `UOp.substitute` â€” bottom-up rewrite replacing `dvars`.
+/// `UOp.substitute` Ã¢â‚¬â€ bottom-up rewrite replacing `dvars`.
 pub fn substitute(
     ctx: &mut UOpCtx,
     root: UopId,

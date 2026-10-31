@@ -1271,18 +1271,39 @@ bufferize/store tail ~450 ms. Notably the *cleanup* rewrite costs ~250 ms per
 full-graph pass even for a 4-rule PM, i.e. the cost is the traversal, not the
 rules.
 
-Counters for one 3153-node graph (`--backbone-only`): **1.56M rewrite steps,
-441k pattern-match attempts, 10k hits, 328k waitlist pushes / 248k fires** —
-~250 steps and ~50 re-queues per node against ~2-4 for a well-behaved DAG walk,
-and every pass sits just under the 400k `rewrite step limit`. The unified
-rewrite loop is a faithful port of `ops.py:unified_rewrite` (including
-`on_stack`'s "on the stack or in replace" semantics), so the port has the same
-*shape*; what differs is that Python's UOps/`sint` are interleaved with
-`functools.cache`d property computations (vmin/vmax/resolve) and its `replace`
-/`waitlist` dictionaries are identity-keyed on interned objects. Closing the gap
-is an open task: either make the traversal do O(1) work per node (find why nodes
-are re-queued ~50x) or use `Jit` capture/replay for repeated shapes, which is
-what TinyJit does and which skips scheduling entirely.
+Counters for one 504×280 backbone schedule (4840-node graph, 571 kernels,
+1.72 s of rangeify):
+
+| stage | time |
+|---|---|
+| `rng.cleanup` (symbolic + reduce_simplify + const_buffer_folding + remove_bufferize, 134 rules) | 0.96 s |
+| `rng.split_kernels` (1 rule, bottom-up) | 0.83 s |
+| `rng.run_rangeify` | 0.07 s |
+| bufferize / earliest / copy_to_store / no_indexing | < 0.07 s total |
+| codegen (`to_program` per kernel) | ~0.6 s |
+
+Two hypotheses were **ruled out** by measurement:
+
+- Not traversal thrash: `TG_RW_VISITS=1` (per-node visit histogram in
+  `unified_rewrite`) shows **2–6 visits per node** in every pass, and the engine
+  costs ~0.6 µs per step. The earlier "~250 steps/node" figure divided all
+  rewrite steps by one graph's node count while the steps span ~180 rewrites.
+- Not the waitlist retry loop: pushes are bounded by edges.
+
+`TG_RW_TRACE=1` prints one line per `graph_rewrite` (rules, steps, ms, µs/step),
+which is what localized the cost:
+
+1. **Kernel count.** 571 kernels for the backbone vs tinygrad's 168 for the same
+   12-block shape (`py/tg_bench.py`; it lacks qk-norm/RoPE/exact-erf GELU).
+   Every kernel pays `split_store`'s nested 3-PM rewrite (~1.5 ms) plus codegen
+   (~1 ms), so the count dominates the total.
+2. **Per-kernel AST size (leading suspect for the remaining ~10×/kernel).**
+   tinygrad's per-kernel rewriting averages ~46 steps (39 ms / 168 kernels at
+   Python speeds); the nested rewrites inside `split_store` here run over
+   2000–4000-node graphs. Next step: dump one kernel's node count and compare
+   with tinygrad's for the same op — if ours are 20-50× bigger, rangeify's
+   movement→index expansion is inlining far more of the graph than tinygrad
+   does, and that (not the rewrite engine) is the bug.
 
 ### 8.35 Same-device `exec_copy` is a D2D memcpy, not a host bounce
 

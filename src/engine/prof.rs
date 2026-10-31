@@ -66,6 +66,11 @@ pub fn reset() {
     ENTRIES.with(|e| e.borrow_mut().clear());
 }
 
+/// Current count for `name` (0 when profiling is off).
+pub fn get(name: &'static str) -> u64 {
+    ENTRIES.with(|e| e.borrow().get(name).map(|x| x.count).unwrap_or(0))
+}
+
 /// Print the accumulated table (no-op when disabled or empty).
 pub fn report() {
     if !enabled() {
