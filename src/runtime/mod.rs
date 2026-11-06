@@ -6,6 +6,8 @@
 pub mod buffer;
 #[cfg(feature = "backend_cl")]
 pub(crate) mod cl_sys;
+#[cfg(feature = "backend_cuda")]
+pub mod cublas;
 pub mod device;
 pub mod interp;
 #[cfg(feature = "backend_cl")]

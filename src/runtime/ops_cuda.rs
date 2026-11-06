@@ -76,6 +76,10 @@ struct CudaInner {
     #[allow(dead_code)]
     device_name: String,
     compile_cache: RefCell<CompileCache>,
+    /// Lazily created cuBLAS handle bound to `stream` (host GEMM dispatch).
+    cublas: RefCell<Option<crate::runtime::cublas::Handle>>,
+    /// Cached bias-epilogue kernels keyed by dtype id.
+    bias_kernels: RefCell<HashMap<u16, (Arc<CudaModule>, CudaFunction)>>,
 }
 
 impl CudaInner {
@@ -99,6 +103,219 @@ impl CudaInner {
             arch,
             device_name,
             compile_cache: RefCell::new(CompileCache::new()),
+            cublas: RefCell::new(None),
+            bias_kernels: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Compile (and cache) a one-off epilogue kernel.
+    fn epilogue(&self, dtype: DTypeId) -> (Arc<CudaModule>, CudaFunction) {
+        if let Some(k) = self.bias_kernels.borrow().get(&dtype.0) {
+            return (k.0.clone(), k.1.clone());
+        }
+        let (src, name) = match dtype {
+            crate::dtype::FLOAT32 => (
+                r#"
+extern "C" __global__ void autorust_bias_f32(float* c, const float* b, long long total, long long n, long long m, long long stride_c, long long c_off, long long b_off) {
+  long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  long long col = i % n;
+  long long row = (i / n) % m;
+  long long bat = i / (n * m);
+  c[c_off + bat * stride_c + row * n + col] += b[b_off + col];
+}
+"#,
+                "autorust_bias_f32",
+            ),
+            crate::dtype::FLOAT16 => (
+                r#"
+#include <cuda_fp16.h>
+extern "C" __global__ void autorust_bias_f16(__half* c, const __half* b, long long total, long long n, long long m, long long stride_c, long long c_off, long long b_off) {
+  long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  long long col = i % n;
+  long long row = (i / n) % m;
+  long long bat = i / (n * m);
+  long long ci = c_off + bat * stride_c + row * n + col;
+  c[ci] = __float2half(__half2float(c[ci]) + __half2float(b[b_off + col]));
+}
+"#,
+                "autorust_bias_f16",
+            ),
+            crate::dtype::BFLOAT16 => (
+                r#"
+#include <cuda_bf16.h>
+extern "C" __global__ void autorust_bias_bf16(__nv_bfloat16* c, const __nv_bfloat16* b, long long total, long long n, long long m, long long stride_c, long long c_off, long long b_off) {
+  long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  long long col = i % n;
+  long long row = (i / n) % m;
+  long long bat = i / (n * m);
+  long long ci = c_off + bat * stride_c + row * n + col;
+  c[ci] = __float2bfloat16(__bfloat162float(c[ci]) + __bfloat162float(b[b_off + col]));
+}
+"#,
+                "autorust_bias_bf16",
+            ),
+            other => panic!("TGERR: unsupported bias epilogue dtype {other:?}"),
+        };
+        let mut options = vec![format!("--gpu-architecture={}", self.arch)];
+        match std::env::var("CUDA_PATH") {
+            Ok(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
+            _ => {
+                options.push("-I/usr/local/cuda/include".to_string());
+                options.push("-I/usr/include".to_string());
+                options.push("-I/opt/cuda/include".to_string());
+            }
+        }
+        let ptx = compile_ptx_with_opts(
+            src,
+            CompileOptions {
+                options,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("TGERR: NVRTC epilogue compile: {e}"));
+        let module = self
+            .ctx
+            .load_module(Ptx::from_src(
+                String::from_utf8_lossy(ptx.to_src().as_bytes()).to_string(),
+            ))
+            .unwrap_or_else(|e| panic!("TGERR: cuModuleLoadData epilogue: {e}"));
+        let func = module
+            .load_function(name)
+            .unwrap_or_else(|e| panic!("TGERR: epilogue function {name}: {e}"));
+        self.bias_kernels
+            .borrow_mut()
+            .insert(dtype.0, (module.clone(), func.clone()));
+        (module, func)
+    }
+
+    /// Add a `[n]` bias vector to every row of `C[m,n]` (optionally batched).
+    #[allow(clippy::too_many_arguments)]
+    fn bias_add(
+        &self,
+        dtype: DTypeId,
+        c: u64,
+        bias: u64,
+        batch: i64,
+        m: i64,
+        n: i64,
+        stride_c: i64,
+        c_off: i64,
+        bias_off: i64,
+    ) {
+        let total = batch.saturating_mul(m).saturating_mul(n);
+        if total <= 0 {
+            return;
+        }
+        let (_module, func) = self.epilogue(dtype);
+        let (c, bias) = (c, bias);
+        let (total, n, m, stride_c, c_off, bias_off) = (total, n, m, stride_c, c_off, bias_off);
+        let cfg = LaunchConfig {
+            grid_dim: (((total + 255) / 256) as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut args = self.stream.launch_builder(&func);
+        args.arg(&c)
+            .arg(&bias)
+            .arg(&total)
+            .arg(&n)
+            .arg(&m)
+            .arg(&stride_c)
+            .arg(&c_off)
+            .arg(&bias_off);
+        unsafe { args.launch(cfg) }.unwrap_or_else(|e| panic!("TGERR: bias epilogue launch: {e}"));
+    }
+
+    /// Run a host GEMM on this device's stream. The descriptor is the
+    /// `HostGemm` dataclass attached by the scheduler.
+    fn host_gemm(
+        &self,
+        bufs: &[crate::runtime::buffer::OpaqueView],
+        desc: &crate::uop::arg::DataArg,
+    ) {
+        use crate::schedule::host_gemm::HostGemm;
+        let g = HostGemm::from_arg(&crate::uop::arg::Arg::Data(desc.clone()))
+            .unwrap_or_else(|| panic!("TGERR: bad HostGemm descriptor"));
+        let elem = match g.dtype {
+            crate::dtype::FLOAT32 => crate::runtime::cublas::Elem::F32,
+            crate::dtype::FLOAT16 => crate::runtime::cublas::Elem::F16,
+            crate::dtype::BFLOAT16 => crate::runtime::cublas::Elem::Bf16,
+            other => panic!("TGERR: cublas unsupported dtype {other:?}"),
+        };
+        let isz = match elem {
+            crate::runtime::cublas::Elem::F32 => 4i64,
+            _ => 2,
+        };
+        let ptr = |slot: i64, off: i64| -> u64 {
+            let o = cuda_of(&*bufs[slot as usize]);
+            o.ptr() + (off * isz) as u64
+        };
+        let (a, b, c) = (
+            ptr(g.a_slot, g.a_off),
+            ptr(g.b_slot, g.b_off),
+            ptr(g.c_slot, g.c_off),
+        );
+        // cuBLAS is column-major: compute C^T(n,m) = B^T (n,k) @ A^T (k,m), so
+        // the cublas "A" operand is our B and the "B" operand is our A.
+        let trans_a = g.b_k == 1;
+        let trans_b = g.a_m == 1;
+        let gemm = crate::runtime::cublas::GemmDesc {
+            elem,
+            trans_a,
+            trans_b,
+            m: g.n,
+            n: g.m,
+            k: g.k,
+            lda: if trans_a { g.b_n } else { g.b_k },
+            ldb: if trans_b { g.a_k } else { g.a_m },
+            ldc: g.c_m,
+            alpha: g.alpha,
+        };
+        self.ctx.bind_to_thread().ok();
+        let mut handle = self.cublas.borrow_mut();
+        if handle.is_none() {
+            *handle = unsafe {
+                crate::runtime::cublas::Handle::new(self.stream.cu_stream() as *mut std::ffi::c_void)
+            };
+        }
+        let handle = handle
+            .as_ref()
+            .unwrap_or_else(|| panic!("TGERR: cuBLAS handle creation failed"));
+        let rc = unsafe {
+            crate::runtime::cublas::gemm(
+                handle,
+                &gemm,
+                b as *const std::ffi::c_void,
+                a as *const std::ffi::c_void,
+                c as *mut std::ffi::c_void,
+                g.batch,
+                g.b_b,
+                g.a_b,
+                g.c_b,
+            )
+        };
+        if let Err(e) = rc {
+            panic!(
+                "TGERR: {e} (m={} n={} k={} batch={})",
+                g.m, g.n, g.k, g.batch
+            );
+        }
+        if g.bias_slot >= 0 {
+            let bias = ptr(g.bias_slot, g.bias_off);
+            self.bias_add(
+                g.dtype,
+                c,
+                bias,
+                g.batch,
+                g.m,
+                g.n,
+                if g.batch > 1 { g.c_b } else { 0 },
+                g.c_off,
+                g.bias_off,
+            );
         }
     }
 
@@ -451,7 +668,16 @@ pub fn register() {
             let inner = inner.clone();
             Rc::new(move |elf| Rc::new(RefCell::new(CudaProgram::new(inner.clone(), elf))))
         };
-        Compiled::new("CUDA", renderer, allocator, compiler, ctor)
+        let dev = Compiled::new("CUDA", renderer, allocator, compiler, ctor);
+        // Install the dispatcher whenever the library loads: whether a host
+        // GEMM is *emitted* is the scheduler's decision (`AUTORUST_CUBLAS`),
+        // and an already-open device must still be able to run one.
+        if crate::runtime::cublas::library_present() {
+            let inner2 = inner.clone();
+            *dev.host_exec.borrow_mut() =
+                Some(Box::new(move |bufs, desc| inner2.host_gemm(bufs, desc)));
+        }
+        dev
     });
     register_device("CUDA", factory);
 }

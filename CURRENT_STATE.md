@@ -2100,6 +2100,43 @@ so it is opt-in and default-off.
 `FA=1` remains an algorithm reference: CUDA ViT is unchanged (~62 ms) and CPU
 training is ~2x slower than SDPA.
 
+### 9.10b Dynamically loaded cuBLAS (2026-11) — DONE
+
+The CUDA backend now has an optional library GEMM. It is **dynamically loaded**
+(`libloading`; `libcublas.so.12/13`), so `backend_cuda` still needs no CUDA
+toolkit at build time and simply disables the path when the library is absent.
+
+Detection happens in `schedule/host_gemm.rs`, called from `split_store` after
+the store is lowered to affine `INDEX` expressions (not from the tensor graph):
+a store of `REDUCE(ADD, MUL(load, load))` with affine strides becomes a
+`HostGemm` descriptor `{slots, offsets, m/n/k, lda/ldb/ldc, batch strides,
+dtype, alpha, optional bias}`. It is stored in the kernel's `KernelInfo`;
+`engine/realize.rs` then skips render/compile and runs `runtime/ops_cuda.rs`'s
+host dispatcher.
+
+Supported: f32 (`cublasSgemm_v2` / strided-batched), f16/bf16 (`cublasGemmEx`
+with f32 accumulate), arbitrary leading dimensions (transposed/strided views as
+ViT produces), fused `+ bias` via a tiny NVRTC epilogue kernel, and strided
+batches. Unsupported patterns (masked/fused softmax operands, flattened outputs,
+multiple reductions) fall back to the generated kernel. The dispatcher is
+installed whenever the library loads, independently of the `AUTORUST_CUBLAS`
+toggle, so a device opened before the toggle still works.
+
+Default policy: use the library only when `m`, `n` or `k` is not divisible by 4
+(197 is the motivating case); our 8x8 register tile wins on clean square shapes.
+`AUTORUST_CUBLAS=0` disables, `=all` forces, `=1` (default) is the heuristic.
+`AUTORUST_CUBLAS_TF32=1` enables TF32, `AUTORUST_CUBLAS_LIB` overrides the path.
+A correctness bug found by the FlashAttention tests (double-counting the slice
+start in `base_of`) is fixed and covered by `tests/cublas.rs` (plain, transposed
+weight + bias, strided-batched attention, bf16).
+
+Results (RTX 3060, f32, `JIT=1`): ViT-B/16 forward **28-29 ms -> 21-22 ms**
+(~25%); training step 372 -> 360 ms; 96 of the 120 contractions dispatch (72
+linears + 24 batched `QK^T`; the `AV` product is fused with the softmax and
+falls back). SDPA forward is unchanged/slightly faster; FlashAttention matches.
+cuDNN is intentionally not wired up: the demos' only conv (patch embed) is
+negligible, and `HostGemm` is the seam a library conv/attention op would use.
+
 Benchmarks (RTX 3060 / Ryzen 3900X, 24 threads):
 - GEMM 512³ f32: CPU `RUST` ~0.84 ms (319 GFLOP/s), CUDA ~0.41-0.50 ms
   (540-656 GFLOP/s); CUDA 2048³ ~7.8 ms (2.2 TFLOP/s).
@@ -2220,7 +2257,8 @@ CPU (24 threads, captured steady state, `JIT=1`):
   CUDA ~62 ms vs ~30 ms; not a speedup.
 
 CUDA (RTX 3060, same physical GPU; shared ~30% utilization):
-- ViT-B/16 forward (`JIT=1`, f32): **~29-30 ms/iter** (was 166 ms).
+- ViT-B/16 forward (`JIT=1`, f32): **~21-22 ms/iter** with the cuBLAS path
+  (~28-29 ms with generated kernels; was 166 ms before tiling).
 - ViT-B/16 train step (fwd+bwd+Adam, f32, `vit_train_bench`): ~387 ms.
 - 512³ f32 GEMM: 0.3-0.5 ms pure kernel (0.8-0.9 ms with the per-iteration
   sync); 2048³ 2.2 TFLOP/s. bf16 tensor-core GEMM: ~1 TFLOP/s (512³),

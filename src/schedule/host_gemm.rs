@@ -1,0 +1,688 @@
+//! Recognize a pure `A[m,k] * B[k,n] -> REDUCE(ADD)` kernel and describe it as
+//! a library GEMM.
+//!
+//! The scheduler lowers each contraction to its own kernel with an affine
+//! `INDEX` per operand. Rather than pattern-matching the high-level tensor
+//! graph, we read the already-rangeified store (the same place
+//! `try_matmul_tiling` looks) and recover the layout from the index maps:
+//!
+//! ```text
+//! STORE(INDEX(C, m*N + n),
+//!       REDUCE(ADD, MUL(INDEX(A, m*K + k), INDEX(B, k*N + n)), k))
+//! ```
+//!
+//! Any load/store pattern that is not a plain strided matrix (masked stores,
+//! non-affine offsets, mixed dtypes, multiple reductions) is rejected and the
+//! normal generated kernel is used. The descriptor is attached to the kernel's
+//! `KernelInfo`; `engine/realize.rs` executes it through cuBLAS when available.
+
+use crate::dtype::DTypeId;
+use crate::uop::UopId;
+use crate::uop::arg::{Arg, DataArg, DeviceSpec};
+use crate::uop::ctx::UOpCtx;
+use crate::uop::ops::Ops;
+use crate::uop::sint::SVal;
+
+/// A GEMM expressed in the backend's row-major view of the tensors.
+///
+/// `C[m,n] = alpha * A[m,k] @ B[k,n]`, with optional strided batching along a
+/// third axis. `*_off` and `*_b` are in elements.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostGemm {
+    /// Buffer slot of `A`.
+    pub a_slot: i64,
+    /// Buffer slot of `B`.
+    pub b_slot: i64,
+    /// Buffer slot of `C`.
+    pub c_slot: i64,
+    /// Constant element offset of `A`.
+    pub a_off: i64,
+    /// Constant element offset of `B`.
+    pub b_off: i64,
+    /// Constant element offset of `C`.
+    pub c_off: i64,
+    /// Rows of `C`.
+    pub m: i64,
+    /// Columns of `C`.
+    pub n: i64,
+    /// Contraction length.
+    pub k: i64,
+    /// Stride of the `m` axis in `A` (elements).
+    pub a_m: i64,
+    /// Stride of the `k` axis in `A`.
+    pub a_k: i64,
+    /// Stride of the `k` axis in `B`.
+    pub b_k: i64,
+    /// Stride of the `n` axis in `B`.
+    pub b_n: i64,
+    /// Stride of the `m` axis in `C`.
+    pub c_m: i64,
+    /// Stride of the `n` axis in `C`.
+    pub c_n: i64,
+    /// Number of strided batches (>= 1).
+    pub batch: i64,
+    /// Batch stride in `A` (0 when shared).
+    pub a_b: i64,
+    /// Batch stride in `B` (0 when shared).
+    pub b_b: i64,
+    /// Batch stride in `C`.
+    pub c_b: i64,
+    /// Storage dtype of all three operands.
+    pub dtype: DTypeId,
+    /// Scalar multiplier.
+    pub alpha: f32,
+    /// Optional bias vector slot (-1 when absent), added to every row.
+    pub bias_slot: i64,
+    /// Element offset of the bias vector.
+    pub bias_off: i64,
+}
+
+impl HostGemm {
+    /// Serialize into the kernel's `KernelInfo` arg.
+    pub fn to_data(&self) -> DataArg {
+        let int = |v: i64| Arg::Int(v);
+        DataArg {
+            tag: "HostGemm".into(),
+            fields: vec![
+                ("a_slot".into(), int(self.a_slot)),
+                ("b_slot".into(), int(self.b_slot)),
+                ("c_slot".into(), int(self.c_slot)),
+                ("a_off".into(), int(self.a_off)),
+                ("b_off".into(), int(self.b_off)),
+                ("c_off".into(), int(self.c_off)),
+                ("m".into(), int(self.m)),
+                ("n".into(), int(self.n)),
+                ("k".into(), int(self.k)),
+                ("a_m".into(), int(self.a_m)),
+                ("a_k".into(), int(self.a_k)),
+                ("b_k".into(), int(self.b_k)),
+                ("b_n".into(), int(self.b_n)),
+                ("c_m".into(), int(self.c_m)),
+                ("c_n".into(), int(self.c_n)),
+                ("batch".into(), int(self.batch)),
+                ("a_b".into(), int(self.a_b)),
+                ("b_b".into(), int(self.b_b)),
+                ("c_b".into(), int(self.c_b)),
+                ("dtype".into(), int(self.dtype.0 as i64)),
+                ("alpha".into(), Arg::Float(self.alpha as f64)),
+                ("bias_slot".into(), int(self.bias_slot)),
+                ("bias_off".into(), int(self.bias_off)),
+            ],
+        }
+    }
+
+    /// Parse the `host_gemm` field of a kernel's `KernelInfo`.
+    pub fn from_arg(arg: &Arg) -> Option<HostGemm> {
+        let Arg::Data(d) = arg else { return None };
+        if d.tag != "HostGemm" {
+            return None;
+        }
+        let i = |name: &str| match d.get(name) {
+            Arg::Int(v) => *v,
+            _ => 0,
+        };
+        let alpha = match d.get("alpha") {
+            Arg::Float(v) => *v as f32,
+            _ => 1.0,
+        };
+        Some(HostGemm {
+            a_slot: i("a_slot"),
+            b_slot: i("b_slot"),
+            c_slot: i("c_slot"),
+            a_off: i("a_off"),
+            b_off: i("b_off"),
+            c_off: i("c_off"),
+            m: i("m"),
+            n: i("n"),
+            k: i("k"),
+            a_m: i("a_m"),
+            a_k: i("a_k"),
+            b_k: i("b_k"),
+            b_n: i("b_n"),
+            c_m: i("c_m"),
+            c_n: i("c_n"),
+            batch: i("batch").max(1),
+            a_b: i("a_b"),
+            b_b: i("b_b"),
+            c_b: i("c_b"),
+            dtype: DTypeId(i("dtype") as u16),
+            alpha,
+            bias_slot: {
+                let v = i("bias_slot");
+                if v == 0 && d.fields.iter().all(|(n, _)| n != "bias_slot") {
+                    -1
+                } else {
+                    v
+                }
+            },
+            bias_off: i("bias_off"),
+        })
+    }
+}
+
+/// Look up the `host_gemm` field on a kernel SINK (or any `KernelInfo` arg).
+pub fn host_gemm_of(ctx: &UOpCtx, sink: &UopId) -> Option<HostGemm> {
+    match ctx.arg_of(sink) {
+        Arg::Data(d) if d.tag == "KernelInfo" => {
+            let field = d.fields.iter().find(|(n, _)| n == "host_gemm")?;
+            HostGemm::from_arg(&field.1)
+        }
+        _ => None,
+    }
+}
+
+/// A range keyed by its (axis id, axis type) rather than its arena id.
+type RKey = (i64, u16);
+
+fn range_key(ctx: &UOpCtx, u: &UopId) -> Option<RKey> {
+    if ctx.op_of(u) != Ops::Range {
+        return None;
+    }
+    match ctx.arg_of(u) {
+        Arg::Seq { tuple: true, items } => {
+            let id = match items.first()? {
+                Arg::Int(i) => *i,
+                _ => return None,
+            };
+            let ty = match items.last()? {
+                Arg::Enum(e) => e.value,
+                _ => return None,
+            };
+            Some((id, ty))
+        }
+        _ => None,
+    }
+}
+
+fn const_int(ctx: &UOpCtx, u: &UopId) -> Option<i64> {
+    match ctx.arg_of(u) {
+        Arg::Const(crate::dtype::ConstVal::Int(v)) => i64::try_from(*v).ok(),
+        Arg::Int(v) => Some(*v),
+        Arg::Const(crate::dtype::ConstVal::Bool(b)) => Some(*b as i64),
+        Arg::Const(crate::dtype::ConstVal::Float(f)) if f.fract() == 0.0 => Some(*f as i64),
+        Arg::Float(f) if f.fract() == 0.0 => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// Split an index expression into `const + sum(coeff * range)`.
+fn affine(ctx: &UOpCtx, u: &UopId) -> Option<(i64, Vec<(RKey, i64)>)> {
+    if let Some(c) = const_int(ctx, u) {
+        return Some((c, vec![]));
+    }
+    if let Some(k) = range_key(ctx, u) {
+        return Some((0, vec![(k, 1)]));
+    }
+    let op = ctx.op_of(u);
+    let srcs = ctx.srcs(u);
+    if srcs.len() != 2 {
+        return None;
+    }
+    match op {
+        Ops::Add | Ops::Sub => {
+            let (c0, m0) = affine(ctx, &srcs[0])?;
+            let (c1, m1) = affine(ctx, &srcs[1])?;
+            let sign = if op == Ops::Sub { -1 } else { 1 };
+            let mut m = m0;
+            for (k, v) in m1 {
+                add_coeff(&mut m, k, sign * v);
+            }
+            Some((c0 + sign * c1, m))
+        }
+        Ops::Mul => {
+            let (c0, m0) = affine(ctx, &srcs[0])?;
+            let (c1, m1) = affine(ctx, &srcs[1])?;
+            match (m0.is_empty(), m1.is_empty()) {
+                (true, _) => {
+                    let mut m = m1;
+                    for v in m.iter_mut() {
+                        v.1 *= c0;
+                    }
+                    Some((c0 * c1, m))
+                }
+                (_, true) => {
+                    let mut m = m0;
+                    for v in m.iter_mut() {
+                        v.1 *= c1;
+                    }
+                    Some((c0 * c1, m))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn add_coeff(m: &mut Vec<(RKey, i64)>, k: RKey, v: i64) {
+    if let Some(e) = m.iter_mut().find(|(kk, _)| *kk == k) {
+        e.1 += v;
+        if e.1 == 0 {
+            m.retain(|(kk, _)| *kk != k);
+        }
+    } else if v != 0 {
+        m.push((k, v));
+    }
+}
+
+fn coeff(m: &[(RKey, i64)], k: RKey) -> i64 {
+    m.iter()
+        .find(|(kk, _)| *kk == k)
+        .map(|(_, v)| *v)
+        .unwrap_or(0)
+}
+
+fn param_slot(ctx: &UOpCtx, u: &UopId) -> Option<(i64, DTypeId)> {
+    match ctx.arg_of(u) {
+        Arg::Param(p) if p.addrspace == Some(crate::dtype::AddrSpace::Global) => {
+            Some((p.slot, p.dtype))
+        }
+        _ => None,
+    }
+}
+
+/// Walk a pointer expression down to its backing `PARAM` (through `AFTER`,
+/// casts and reshapes). The index offset is returned separately by `affine`;
+/// adding it here too would double-count slice starts.
+fn base_of(ctx: &UOpCtx, u: &UopId) -> Option<(i64, DTypeId, i64)> {
+    let mut cur = u.clone();
+    let off = 0i64;
+    for _ in 0..32 {
+        match ctx.op_of(&cur) {
+            Ops::Index => {
+                cur = ctx.srcs(&cur)[0].clone();
+            }
+            Ops::After | Ops::Cast | Ops::Bitcast | Ops::Contiguous | Ops::Reshape => {
+                cur = ctx.srcs(&cur)[0].clone();
+            }
+            _ => break,
+        }
+    }
+    let (slot, dt) = param_slot(ctx, &cur)?;
+    Some((slot, dt, off))
+}
+
+/// The affine offset expression of a pointer (`INDEX(buf, off)` → `off`).
+fn index_offset(ctx: &UOpCtx, u: &UopId) -> UopId {
+    let mut cur = u.clone();
+    for _ in 0..8 {
+        match ctx.op_of(&cur) {
+            Ops::Index => return ctx.srcs(&cur)[1].clone(),
+            Ops::After | Ops::Cast | Ops::Bitcast | Ops::Contiguous | Ops::Reshape => {
+                cur = ctx.srcs(&cur)[0].clone()
+            }
+            _ => return cur,
+        }
+    }
+    cur
+}
+
+fn unwrap(ctx: &UOpCtx, mut u: UopId) -> UopId {
+    loop {
+        match ctx.op_of(&u) {
+            Ops::Cast | Ops::Bitcast | Ops::Contiguous | Ops::Reshape => {
+                u = ctx.srcs(&u)[0].clone();
+            }
+            _ => return u,
+        }
+    }
+}
+
+fn is_cuda(ctx: &UOpCtx, u: &UopId) -> bool {
+    let mut cur = u.clone();
+    for _ in 0..8 {
+        if let Arg::Param(p) = ctx.arg_of(&cur) {
+            return matches!(p.device, Some(DeviceSpec::Single(ref s)) if s.starts_with("CUDA"));
+        }
+        if ctx.srcs(&cur).is_empty() {
+            return false;
+        }
+        cur = ctx.srcs(&cur)[0].clone();
+    }
+    false
+}
+
+/// Whether a dynamically loaded GEMM library is usable in this process.
+pub fn library_available() -> bool {
+    #[cfg(feature = "backend_cuda")]
+    {
+        crate::runtime::cublas::available()
+    }
+    #[cfg(not(feature = "backend_cuda"))]
+    {
+        false
+    }
+}
+
+/// Try to interpret a lowered kernel store as a library GEMM.
+///
+/// Returns `None` for anything that is not a plain strided matrix product, or
+/// when the kernel is not on `CUDA` (the only backend with a library path).
+pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
+    // Cheap reject for elementwise kernels: only the store value matters, and
+    // we must not descend into AFTER (which embeds whole earlier kernels).
+    fn has_reduce(ctx: &UOpCtx, u: &UopId) -> bool {
+        match ctx.op_of(u) {
+            Ops::After => false,
+            Ops::Reduce => true,
+            _ => ctx.srcs(u).iter().any(|s| has_reduce(ctx, s)),
+        }
+    }
+    let st0 = if ctx.op_of(&store) == Ops::End {
+        ctx.srcs(&store)[0].clone()
+    } else {
+        store.clone()
+    };
+    if ctx.op_of(&st0) != Ops::Store || !has_reduce(ctx, &ctx.srcs(&st0)[1].clone()) {
+        return None;
+    }
+    if !is_cuda(ctx, &store) {
+        return None;
+    }
+
+    let st = if ctx.op_of(&store) == Ops::End {
+        ctx.srcs(&store)[0].clone()
+    } else {
+        store.clone()
+    };
+    if ctx.op_of(&st) != Ops::Store {
+        return None;
+    }
+    let dst_ptr = ctx.srcs(&st)[0].clone();
+    let (c_off0, c_map) = affine(ctx, &index_offset(ctx, &dst_ptr))?;
+    if c_map.len() < 2 {
+        return None;
+    }
+    let (c_slot, c_dt, c_base) = base_of(ctx, &dst_ptr)?;
+    let c_off = c_off0 + c_base;
+
+    // Peel a scalar multiplier, then either a single ADD reduction or
+    // `ADD(reduce, bias)` (the fused linear bias).
+    let mut alpha = 1.0f32;
+    let mut value = ctx.srcs(&st)[1].clone();
+    for _ in 0..8 {
+        match ctx.op_of(&value) {
+            Ops::Cast | Ops::Bitcast => value = ctx.srcs(&value)[0].clone(),
+            Ops::Mul => {
+                let srcs = ctx.srcs(&value).to_vec();
+                if ctx.srcs(&srcs[1]).is_empty() {
+                    alpha *= const_float(ctx, &srcs[1])? as f32;
+                    value = srcs[0].clone();
+                } else if ctx.srcs(&srcs[0]).is_empty() {
+                    alpha *= const_float(ctx, &srcs[0])? as f32;
+                    value = srcs[1].clone();
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    let mut bias_expr: Option<UopId> = None;
+    if ctx.op_of(&value) == Ops::Add {
+        let asrcs = ctx.srcs(&value).to_vec();
+        if ctx.op_of(&unwrap(ctx, asrcs[1].clone())) == Ops::Reduce {
+            bias_expr = Some(asrcs[0].clone());
+            value = asrcs[1].clone();
+        } else if ctx.op_of(&unwrap(ctx, asrcs[0].clone())) == Ops::Reduce {
+            bias_expr = Some(asrcs[1].clone());
+            value = asrcs[0].clone();
+        }
+    }
+    value = unwrap(ctx, value);
+    if ctx.op_of(&value) != Ops::Reduce {
+        return None;
+    }
+    let reduce = value;
+    let red_dt = ctx.dt_of(&reduce);
+    let rsrcs = ctx.srcs(&reduce).to_vec();
+    if rsrcs.len() != 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
+        return None;
+    }
+    let red_k = range_key(ctx, &rsrcs[1])?;
+
+    let mul = unwrap(ctx, rsrcs[0].clone());
+    if ctx.op_of(&mul) != Ops::Mul {
+        return None;
+    }
+    let msrcs = ctx.srcs(&mul).to_vec();
+    if msrcs.len() != 2 {
+        return None;
+    }
+    if ctx.dt_of(&mul) != red_dt || ctx.dt_of(&mul) != c_dt {
+        return None;
+    }
+    if !matches!(
+        ctx.dt_of(&mul),
+        crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
+    ) {
+        return None;
+    }
+
+    // Operands are either `LOAD(INDEX(...))` or the bare `INDEX(...)` the
+    // lowerer emits (an INDEX used as a value is a load in this IR).
+    let operand = |ctx: &UOpCtx, u: UopId| -> Option<UopId> {
+        let u = unwrap(ctx, u);
+        match ctx.op_of(&u) {
+            Ops::Load => Some(ctx.srcs(&u)[0].clone()),
+            Ops::Index => Some(u),
+            _ => None,
+        }
+    };
+    let a_idx = operand(ctx, msrcs[0].clone())?;
+    let b_idx = operand(ctx, msrcs[1].clone())?;
+    let (a_off0, a_map) = affine(ctx, &index_offset(ctx, &a_idx))?;
+    let (b_off0, b_map) = affine(ctx, &index_offset(ctx, &b_idx))?;
+    let (a_slot, _, a_base) = base_of(ctx, &a_idx)?;
+    let a_off = a_off0 + a_base;
+    let (b_slot, _, b_base) = base_of(ctx, &b_idx)?;
+    let b_off = b_off0 + b_base;
+
+    // n is the only range B iterates that A does not, and C stores it
+    // contiguously (stride 1). m is the A-only range whose C stride equals the
+    // n extent (row-major output). Shared ranges are batch axes.
+    let a_keys: Vec<RKey> = a_map.iter().map(|(k, _)| *k).collect();
+    let b_keys: Vec<RKey> = b_map.iter().map(|(k, _)| *k).collect();
+    let mut n_candidates: Vec<RKey> = b_keys
+        .iter()
+        .copied()
+        .filter(|k| *k != red_k && !a_keys.contains(k) && coeff(&c_map, *k) == 1)
+        .collect();
+    n_candidates.dedup();
+    if n_candidates.len() != 1 {
+        return None;
+    }
+    let n_key = n_candidates[0];
+    let n = range_extent(ctx, &st, n_key)?;
+    if n <= 1 {
+        return None;
+    }
+    let mut m_candidates: Vec<(RKey, i64)> = a_keys
+        .iter()
+        .copied()
+        .filter(|k| *k != red_k && !b_keys.contains(k))
+        .map(|k| (k, coeff(&c_map, k)))
+        .filter(|(_, c)| *c >= n)
+        .collect();
+    m_candidates.dedup();
+    // The m axis is the innermost remaining output axis (smallest C stride).
+    m_candidates.sort_by_key(|(_, c)| *c);
+    if m_candidates.is_empty() || (m_candidates.len() > 1 && m_candidates[0].1 == m_candidates[1].1)
+    {
+        return None;
+    }
+    let m_key = m_candidates[0].0;
+    let m = range_extent(ctx, &st, m_key)?;
+    let k = range_extent(ctx, &st, red_k)?;
+    if m <= 0 || k <= 0 {
+        return None;
+    }
+
+    let a_m = coeff(&a_map, m_key);
+    let a_k = coeff(&a_map, red_k);
+    let b_k = coeff(&b_map, red_k);
+    let b_n = coeff(&b_map, n_key);
+    let c_m = coeff(&c_map, m_key);
+    let c_n = coeff(&c_map, n_key);
+    if c_n != 1 || c_m < n {
+        return None;
+    }
+    // A row-major (k contiguous) or column-major (m contiguous). The leading
+    // dimension may be larger than the tight size: ViT's attention operands are
+    // transposed views interleaving the head axis into the row stride.
+    let a_row = a_k == 1 && a_m >= k;
+    let a_col = a_m == 1 && a_k >= m;
+    let b_row = b_n == 1 && b_k >= n;
+    let b_col = b_k == 1 && b_n >= k;
+    if !(a_row || a_col) || !(b_row || b_col) {
+        return None;
+    }
+
+    // Optional fused bias: an index that depends only on n.
+    let (bias_slot, bias_off) = match bias_expr {
+        Some(expr) => {
+            let expr = unwrap(ctx, expr);
+            let idx = operand(ctx, expr)?;
+            let (off0, map) = affine(ctx, &index_offset(ctx, &idx))?;
+            if map.len() != 1 || coeff(&map, n_key) != 1 {
+                return None;
+            }
+            let (slot, dt, base) = base_of(ctx, &idx)?;
+            if dt != c_dt {
+                return None;
+            }
+            (slot, off0 + base)
+        }
+        None => (-1, 0),
+    };
+
+    // Batch axes: every range in C that is neither m nor n. Fold a contiguous
+    // set into one strided batch axis.
+    let mut batch: Vec<(RKey, i64, i64, i64, i64)> = Vec::new(); // key, ext, a, b, c
+    for (key, _) in c_map.iter() {
+        if *key == m_key || *key == n_key {
+            continue;
+        }
+        let ext = range_extent(ctx, &st, *key)?;
+        // An extent-1 axis contributes a constant zero; drop it.
+        if ext == 1 {
+            continue;
+        }
+        batch.push((
+            *key,
+            ext,
+            coeff(&a_map, *key),
+            coeff(&b_map, *key),
+            coeff(&c_map, *key),
+        ));
+    }
+    // A and B must not iterate any other range we ignored.
+    for (key, _) in a_map.iter().chain(b_map.iter()) {
+        if *key != m_key && *key != n_key && *key != red_k && !batch.iter().any(|(k, ..)| k == key)
+        {
+            return None;
+        }
+    }
+    let (batch_count, a_b, b_b, c_b) = fold_batches(&mut batch)?;
+
+    // Our own kernels register-tile the output, which only pays off when the
+    // axes divide by the upcast width. For prime/thin shapes (ViT's 197-token
+    // sequence is the motivating case) the library wins; for shapes that tile
+    // cleanly the generated kernel is faster (and avoids a library call).
+    // `AUTORUST_CUBLAS=all` forces the library for every eligible contraction.
+    let force = matches!(
+        std::env::var("AUTORUST_CUBLAS").as_deref(),
+        Ok("all") | Ok("force")
+    );
+    if !force && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
+        return None;
+    }
+
+    if std::env::var("AUTORUST_CUBLAS_DEBUG").is_ok() {
+        eprintln!(
+            "CUBLAS m={m} n={n} k={k} batch={batch_count} \
+             a=[{a_m},{a_k}] b=[{b_k},{b_n}] c=[{c_m},{c_n}] alpha={alpha} bias={bias_slot} \
+             off=[{a_off},{b_off},{c_off}] slots=[{a_slot},{b_slot},{c_slot}]"
+        );
+    }
+    Some(HostGemm {
+        a_slot,
+        b_slot,
+        c_slot,
+        a_off,
+        b_off,
+        c_off,
+        m,
+        n,
+        k,
+        a_m,
+        a_k,
+        b_k,
+        b_n,
+        c_m,
+        c_n,
+        batch: batch_count,
+        a_b,
+        b_b,
+        c_b,
+        dtype: ctx.dt_of(&mul),
+        alpha,
+        bias_slot,
+        bias_off,
+    })
+}
+
+fn reduce_op(ctx: &UOpCtx, reduce: &UopId) -> Option<Ops> {
+    match ctx.arg_of(reduce) {
+        Arg::Seq { tuple: true, items } => match items.first()? {
+            Arg::Enum(e) => Ops::from_u16(e.value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn const_float(ctx: &UOpCtx, u: &UopId) -> Option<f64> {
+    match ctx.arg_of(u) {
+        Arg::Float(f) => Some(*f),
+        Arg::Int(i) => Some(*i as f64),
+        Arg::Const(crate::dtype::ConstVal::Float(f)) => Some(*f),
+        Arg::Const(crate::dtype::ConstVal::Int(i)) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+/// Find a range's extent by scanning the (small) store AST for its extent node.
+fn range_extent(ctx: &mut UOpCtx, root: &UopId, key: RKey) -> Option<i64> {
+    for u in ctx.toposort(root) {
+        if range_key(ctx, &u) == Some(key) {
+            let ext = ctx.srcs(&u)[0].clone();
+            if let Ok(SVal::I(v)) = ctx.ssimplify(ext) {
+                return i64::try_from(v).ok();
+            }
+        }
+    }
+    None
+}
+
+/// Collapse a set of batch ranges into `(count, a_stride, b_stride, c_stride)`.
+fn fold_batches(batch: &mut [(RKey, i64, i64, i64, i64)]) -> Option<(i64, i64, i64, i64)> {
+    if batch.is_empty() {
+        return Some((1, 0, 0, 0));
+    }
+    // Innermost (smallest C stride) first.
+    batch.sort_by_key(|(_, _, _, _, c)| *c);
+    let mut count = 1i64;
+    for w in batch.windows(2) {
+        let (_, e0, a0, b0, c0) = w[0];
+        let (_, _, a1, b1, c1) = w[1];
+        if c1 != c0.saturating_mul(e0) || a1 != a0.saturating_mul(e0) || b1 != b0.saturating_mul(e0)
+        {
+            return None;
+        }
+        count = count.checked_mul(e0)?;
+    }
+    count = count.checked_mul(batch.last()?.1)?;
+    let (_, _, a, b, c) = batch[0];
+    Some((count, a, b, c))
+}

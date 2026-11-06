@@ -90,19 +90,32 @@ grid dimension is placed on `blockIdx.x` so CUDA runs all M blocks for one N
 weight tile before moving on (L2 reuse). Tuning overrides:
 `AUTORUST_MM_{M,N,K,LM,LN}`.
 
+On CUDA, a pure contraction can also run through **dynamically loaded cuBLAS**.
+The scheduler describes it as a `HostGemm` (shapes, strides, optional fused
+bias) and the executor calls `cublasSgemm_v2` / `cublasGemmEx` — including
+strided-batched attention and a small bias epilogue. This is what makes the
+prime 197-token ViT sequence fast: the register tile cannot vectorize 197, while
+the library can. The library is used only for shapes that do not tile cleanly
+(any of `m,n,k` not divisible by 4), because our own kernels still win on
+square matrices; `AUTORUST_CUBLAS=all` forces it, `=0` disables it.
+`AUTORUST_CUBLAS_TF32=1` allows TF32 for f32 GEMMs, and
+`AUTORUST_CUBLAS_LIB=/path/libcublas.so` overrides the library. No CUDA toolkit
+is needed at build time; a missing library just disables the path.
+
 Representative numbers on a 24-thread Ryzen 3900X / RTX 3060 (captured,
 `JIT=1`):
 
 | workload | before | now |
 |---|---|---|
 | ViT-B/16 forward, `RUST` CPU | 4.1 s | **0.66 s** |
-| ViT-B/16 forward, CUDA | 166 ms | **29-30 ms** |
+| ViT-B/16 forward, CUDA | 166 ms | **21-22 ms** (cuBLAS) |
 | 512³ f32 GEMM, `RUST` | 27.6 GFLOP/s | **~320 GFLOP/s** |
 | 512³ f32 GEMM, CUDA | 144 GFLOP/s | **~650-830 GFLOP/s** |
 | 2048³ bf16 GEMM, CUDA (TC) | — | **~2-3.5 TFLOP/s** |
 
 Use `AUTORUST_KPROF=1` for a per-kernel CUDA time table (works without GPU
-performance-counter permissions). `AUTORUST_PROF=1` reports scheduler phases.
+performance-counter permissions). `examples/cublas_check.rs` compares the
+library path against the generated kernels on the same ViT weights. `AUTORUST_PROF=1` reports scheduler phases.
 `SDPA_TILE=32` enables tensor-level attention padding (correct, but slower with
 the current schedules, so off by default).
 
@@ -174,9 +187,11 @@ first tensor/realize.
   (quantization, training ops, `If`, ONNX-ML).
 - The front-end is single-threaded (`Tensor` is `Rc`-based and `!Send`);
   `RAYON` parallelism is internal to the backend.
-- CUDA f32 uses generated register-tiled FFMA kernels, not cuBLAS/cuDNN.
-  Optional library dispatch and a shared-memory/TMA matmul are future work;
-  the current prime-197 bf16 path also cannot use tensor cores without padding.
+- CUDA matmuls are register-tiled by default and dispatch to dynamically
+  loaded cuBLAS when the shape does not tile cleanly (see Performance). cuDNN
+  is not wired up: the only convolution in the demos (the ViT patch embed) is a
+  negligible fraction of the forward, and the `HostGemm` seam is where a
+  library conv/attention op would slot in.
 - Codegen `PADTO` on a vector-store axis is unsafe (the mask is not lane-wise);
   padding is done at the tensor level (e.g. `SDPA_TILE`) instead.
 

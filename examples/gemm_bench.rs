@@ -169,6 +169,9 @@ fn main() {
                     for p in 0..k {
                         acc += ad[i * k + p] as f64 * bd[p * n + j] as f64;
                     }
+                    if bias_on {
+                        acc += bsd[j] as f64;
+                    }
                     head.push((i, j, acc as f32, got[i * n + j]));
                 }
             }
@@ -180,6 +183,9 @@ fn main() {
                 let mut acc = 0.0f64;
                 for p in 0..k {
                     acc += ad[i * k + p] as f64 * bd[p * n + j] as f64;
+                }
+                if bias_on {
+                    acc += bsd[j] as f64;
                 }
                 let d = (acc as f32 - got[i * n + j]).abs() as f64;
                 maxd = maxd.max(d);

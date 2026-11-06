@@ -241,6 +241,9 @@ pub struct CompiledProg {
     /// time. `Device::runtime` keys its program cache on this; recomputing it
     /// per launch cost 0.22 ms (97% of a kernel launch) on the DA3 replay path.
     pub elf_key: u64,
+    /// Optional host-side operation (cuBLAS GEMM). When present the backend's
+    /// `host_exec` dispatcher runs it instead of `elf`.
+    pub host: Option<DataArg>,
 }
 
 /// `to_program_cache` — the JIT cache. Keyed by a **content hash of the AST
@@ -363,7 +366,28 @@ pub fn to_program(
             elf: p.elf.clone(),
             source: p.source.clone(),
             elf_key: p.elf_key,
+            host: p.host.clone(),
         });
+    }
+    // Host-dispatch kernel (library GEMM): no rendering/compilation. The AST is
+    // still walked for its buffer slots so the executor can resolve `bufs`.
+    if let Some(gemm) = crate::schedule::host_gemm::host_gemm_of(ctx, &ast) {
+        let pi = program_info_from_sink(ctx, ast.clone());
+        let prg = ctx.uop(Ops::Program, Some(crate::dtype::VOID), vec![], pi.to_arg());
+        let cp = Rc::new(CompiledProg {
+            uop: prg,
+            pi,
+            elf: Rc::new(TinyElf {
+                lib: Vec::new(),
+                name: "host_gemm".into(),
+                signature: Vec::new(),
+            }),
+            source: String::new(),
+            elf_key: 0,
+            host: Some(gemm.to_data()),
+        });
+        cache.insert(key, cp.clone());
+        return cp;
     }
     // 1. full_rewrite_to_sink
     let optimize = matches!(ctx.tag_of(&ast), Arg::None);
@@ -468,6 +492,7 @@ pub fn to_program(
         elf,
         source: src_text,
         elf_key,
+        host: None,
     });
     cache.insert(key, cp.clone());
     cp
@@ -592,6 +617,21 @@ fn exec_kernel(
         })
         .collect();
     let t2 = prof.then(std::time::Instant::now);
+    if let Some(host) = &cp.host {
+        let exec = dev.host_exec.borrow();
+        let f = exec.as_ref().unwrap_or_else(|| {
+            panic!(
+                "TGERR: device {} has no host-op dispatcher for {}",
+                dev_name, host.tag
+            )
+        });
+        f(&bufs, host);
+        if let Some(a) = t0 {
+            use crate::engine::prof::add;
+            add("kx.host", a.elapsed().as_secs_f64());
+        }
+        return;
+    }
     let rt = dev.runtime_keyed(cp.elf_key, &cp.elf);
     let t3 = prof.then(std::time::Instant::now);
     let (gs, ls) = cp.pi.launch_dims(var_vals);

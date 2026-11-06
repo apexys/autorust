@@ -52,7 +52,7 @@ backend_rayon = ["dep:rayon", "dep:bytemuck"]
 backend_cl = ["dep:libloading"]
 # CUDA backend (operations/codegen on the CUDA driver API via `cudarc`),
 # dynamically loaded; no CUDA libraries are required at build time.
-backend_cuda = ["dep:cudarc"]
+backend_cuda = ["dep:cudarc", "dep:libloading"]
 # Native CPU backend: render Rust kernels, compile them with `rustc` to a
 # cdylib, and load them with `libloading`. Parallel launches use `rayon`.
 backend_rust = ["dep:libloading", "dep:rayon"]
@@ -75,6 +75,10 @@ required-features = ["backend_rayon"]
 [[example]]
 name = "vit_freeze"
 required-features = ["freeze"]
+
+[[example]]
+name = "cublas_check"
+required-features = ["backend_cuda"]
 
 [dependencies]
 nanoserde = "0.2.1"

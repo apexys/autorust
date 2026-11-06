@@ -1964,7 +1964,19 @@ fn split_store(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
     if let Some(t) = t1 {
         crate::engine::prof::add("split.rewrite", t.elapsed().as_secs_f64());
     }
-    let ki = kernel_info("test", None);
+    // Optional library GEMM (cuBLAS). The store has just been lowered to
+    // affine `INDEX` expressions, so a pure contraction can be described
+    // without pattern-matching the high-level tensor graph. Anything that does
+    // not match keeps the normal generated kernel.
+    let host = if crate::schedule::host_gemm::library_available() {
+        crate::schedule::host_gemm::extract(ctx, ret.clone())
+    } else {
+        None
+    };
+    let mut ki = kernel_info("test", None);
+    if let Some(h) = &host {
+        ki.fields.push(("host_gemm".into(), Arg::Data(h.to_data())));
+    }
     let sink = ctx.sink_arg(vec![ret], Arg::Data(ki));
     let lc = lctx.borrow();
     let args: Vec<UopId> = lc.map_vals.clone();

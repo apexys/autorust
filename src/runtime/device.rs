@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::renderer::UopRenderer;
+use crate::uop::arg::DataArg;
 
-use super::buffer::OpaqueT;
+use super::buffer::{OpaqueT, OpaqueView};
 // ---------------- Allocator ----------------
 
 /// The runtime-implemented allocator methods (python `Allocator._alloc` etc).
@@ -235,6 +236,11 @@ pub trait Prog {
 
 // ---------------- Compiled device ----------------
 
+/// A host-side operation executed instead of a generated kernel (currently the
+/// optional cuBLAS GEMM). The descriptor is the `HostGemm` dataclass carried by
+/// the kernel's `KernelInfo`; `bufs` is indexed by buffer slot.
+pub type HostExec = dyn Fn(&[OpaqueView], &DataArg);
+
 /// `Compiled` (device.py:343) — renderer + allocator + compiler + runtime
 /// factory, the four public seams every backend plugs into.
 pub struct Compiled {
@@ -246,6 +252,8 @@ pub struct Compiled {
     pub renderer: Box<dyn UopRenderer>,
     /// Compiler turning rendered source into library bytes.
     pub compiler: Rc<dyn Comp>,
+    /// Optional host-op dispatcher (library GEMM).
+    pub host_exec: RefCell<Option<Box<HostExec>>>,
     runtime_ctor: RuntimeCtor,
     compiles: Cell<usize>,
     runtime_cache: RefCell<RuntimeCache>,
@@ -265,6 +273,7 @@ impl Compiled {
             allocator,
             renderer,
             compiler,
+            host_exec: RefCell::new(None),
             runtime_ctor,
             compiles: Cell::new(0),
             runtime_cache: RefCell::new(HashMap::new()),
