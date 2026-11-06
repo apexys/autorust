@@ -328,9 +328,10 @@ pub fn fused_attention(
         out.realized_buffer()?,
     ];
     let call = crate::runtime::cuda_flash::host_call(bufs, b, h, n);
-    if !sess.capture_host(call.clone()) {
-        call.exec();
-    }
+    // Record the launch for replay *and* run it now: the capture pass executes
+    // the graph, so the consumers that follow need the value.
+    sess.capture_host(call.clone());
+    call.exec();
     Some(out)
 }
 

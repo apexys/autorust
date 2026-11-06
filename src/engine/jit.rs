@@ -212,13 +212,15 @@ impl Default for Jit {
 fn collect_buffers(ctx: &mut UOpCtx, sess: &mut Session, steps: &[JitStep]) -> Vec<Buffer> {
     let mut out: Vec<Buffer> = Vec::new();
     let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut held_host: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for st in steps {
         let c = match st {
             JitStep::Linear(c) => c,
             JitStep::Host(h) => {
+                // Dedup by base pointer in a separate set: `seen` holds uop ids,
+                // and a truncated pointer must not collide with one of those.
                 for b in &h.bufs {
-                    let key = std::rc::Rc::as_ptr(&b.base) as usize as u32;
-                    if seen.insert(key) {
+                    if held_host.insert(std::rc::Rc::as_ptr(&b.base) as usize) {
                         out.push(b.clone());
                     }
                 }
