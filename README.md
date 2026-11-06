@@ -110,8 +110,8 @@ its own fastest implementation:
 
 Attention's `P·V` reaches the same path when the caller uses
 `Tensor::scaled_dot_product_attention_sess`: the score matrix is materialized so
-the contraction has a buffer to describe. That is a CPU win (0.31 s -> 3 ms for
-the 12 AV products of a ViT-S/16) but a GPU loss, because `P` is
+the contraction has a buffer to describe. That is a CPU win (~150 ms -> ~7 ms per
+image for the 12 AV products of a ViT-S/16) but a GPU loss, because `P` is
 `batch*heads*t*t` and writing/re-reading it costs more bandwidth than fusing
 softmax into the AV kernel saves. The choice belongs to the caller, which knows
 the device.
