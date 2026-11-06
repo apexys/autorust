@@ -388,6 +388,17 @@ pub fn to_program(
     // 4. do_render: SOURCE through the device's renderer seam
     let src_text = dev.renderer.render(ctx, &lst);
     #[cfg(feature = "dump")]
+    if std::env::var("TG_DUMP_SRC").is_ok() {
+        let pname = crate::codegen::postrange::kernel_name(ctx, &lst);
+        eprintln!(
+            "SRC### BEGIN name={} dev={}",
+            pname,
+            dev.renderer.facts().device
+        );
+        eprintln!("{src_text}");
+        eprintln!("SRC### END name={}", pname);
+    }
+    #[cfg(feature = "dump")]
     if std::env::var("TG_DUMP_LST").is_ok() {
         let pname = crate::codegen::postrange::kernel_name(ctx, &lst);
         eprintln!("LST### BEGIN name={}", pname);

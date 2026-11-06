@@ -133,6 +133,12 @@ impl TransformerBlock {
     }
     #[doc(hidden)]
     pub fn attn_ctx(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        self.attn_mask_ctx(x, None, ctx)
+    }
+    /// Attention with an optional additive mask (`-inf` masks a key).
+    /// `None` is the normal path.
+    #[doc(hidden)]
+    pub fn attn_mask_ctx(&self, x: &Tensor, mask: Option<&Tensor>, ctx: &mut UOpCtx) -> Tensor {
         let bs = x.shape_ctx(ctx).into_vec()[0].clone();
         let nh = SVal::I(self.num_heads as i128);
         let hs = SVal::I(self.head_size as i128);
@@ -147,9 +153,9 @@ impl TransformerBlock {
         // `FA=1` swaps the (default) SDPA for the tiled FlashAttention port;
         // both are the same softmax attention, so training is equivalent.
         let attention = if flash_enabled() {
-            crate::models::flash_attention::flash_attention_ctx(&q, &k, &v, None, false, ctx)
+            crate::models::flash_attention::flash_attention_ctx(&q, &k, &v, mask, false, ctx)
         } else {
-            q.scaled_dot_product_attention_ctx(ctx, &k, &v, None, 0.0, false, false)
+            q.scaled_dot_product_attention_ctx(ctx, &k, &v, mask, 0.0, false, false)
         };
         let attention = attention.transpose_ctx(ctx, 1, 2);
         let merged = attention.reshape_ctx(
@@ -169,11 +175,16 @@ impl TransformerBlock {
     }
     #[doc(hidden)]
     pub fn forward_ctx(&self, x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
+        self.forward_mask_ctx(x, None, ctx)
+    }
+    /// [`Self::forward_ctx`] with an optional additive attention mask.
+    #[doc(hidden)]
+    pub fn forward_mask_ctx(&self, x: &Tensor, mask: Option<&Tensor>, ctx: &mut UOpCtx) -> Tensor {
         if self.prenorm {
             let n1 = x
                 .layernorm_ctx(ctx, -1, 1e-5)
                 .linear_ctx(ctx, &self.ln1.0, Some(&self.ln1.1));
-            let a = self.attn_ctx(&n1, ctx);
+            let a = self.attn_mask_ctx(&n1, mask, ctx);
             let a = a.dropout_ctx(ctx, self.dropout);
             let x = x.add_ctx(ctx, &a);
             let n2 = x
@@ -185,7 +196,7 @@ impl TransformerBlock {
             let h = h.dropout_ctx(ctx, self.dropout);
             x.add_ctx(ctx, &h)
         } else {
-            let a = self.attn_ctx(x, ctx);
+            let a = self.attn_mask_ctx(x, mask, ctx);
             let a = a.dropout_ctx(ctx, self.dropout);
             let x = x.add_ctx(ctx, &a);
             let x = x

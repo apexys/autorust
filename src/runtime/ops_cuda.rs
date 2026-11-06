@@ -281,7 +281,16 @@ pub struct CudaProgram {
     #[allow(dead_code)]
     module: Arc<CudaModule>,
     func: CudaFunction,
+    name: String,
     signature: Vec<(i64, DTypeId)>,
+}
+
+/// `AUTORUST_KPROF=1` synchronizes after each kernel and prints its name/time.
+/// This serializes launches (so it is a profiling aid, not a benchmark mode),
+/// but it works without GPU performance-counter permissions.
+fn kprof_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AUTORUST_KPROF").is_ok())
 }
 
 impl CudaProgram {
@@ -299,6 +308,7 @@ impl CudaProgram {
             inner,
             module,
             func,
+            name: obj.name.clone(),
             signature: obj.signature.clone(),
         }
     }
@@ -378,6 +388,12 @@ impl Prog for CudaProgram {
         };
         let start = std::time::Instant::now();
         unsafe { args.launch(cfg) }.unwrap_or_else(|e| panic!("TGERR: cuLaunchKernel: {e}"));
+        if kprof_enabled() && !wait {
+            self.inner.synchronize();
+            let secs = start.elapsed().as_secs_f64();
+            eprintln!("KPROF\t{}\t{secs:.6}", self.name);
+            return Some(secs);
+        }
         if wait {
             self.inner.synchronize();
             return Some(start.elapsed().as_secs_f64());

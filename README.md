@@ -76,8 +76,35 @@ See [`ONNX-Compat.md`](ONNX-Compat.md) for the supported operator matrix and
 known gaps (no `Scatter*`/`NonZero`, quantized/training ops are T2).
 
 Runnable demos: `examples/xor.rs`, `examples/mnist.rs`,
-`examples/vit_mnist.rs`, plus `examples/fa_bench.rs` and
-`examples/rayon_bench.rs` for attention/CPU benchmarks.
+`examples/vit_mnist.rs`, plus `examples/fa_bench.rs`,
+`examples/rayon_bench.rs`, `examples/gemm_bench.rs`, `examples/vit_bench.rs`,
+and `examples/vit_train_bench.rs` for attention/CPU/GPU/GEMM/training
+benchmarks.
+
+## Performance
+
+Matmul-shaped contractions (`MUL -> REDUCE(ADD)`) are register-blocked by the
+scheduler: `RUST`/`CC` use an 8x8 output tile with a 4-wide K unroll; CUDA/CL
+use `LOCAL`/`UPCAST` tiles (4x4 or 8x8, chosen by output size). The largest
+grid dimension is placed on `blockIdx.x` so CUDA runs all M blocks for one N
+weight tile before moving on (L2 reuse). Tuning overrides:
+`AUTORUST_MM_{M,N,K,LM,LN}`.
+
+Representative numbers on a 24-thread Ryzen 3900X / RTX 3060 (captured,
+`JIT=1`):
+
+| workload | before | now |
+|---|---|---|
+| ViT-B/16 forward, `RUST` CPU | 4.1 s | **0.66 s** |
+| ViT-B/16 forward, CUDA | 166 ms | **29-30 ms** |
+| 512³ f32 GEMM, `RUST` | 27.6 GFLOP/s | **~320 GFLOP/s** |
+| 512³ f32 GEMM, CUDA | 144 GFLOP/s | **~650-830 GFLOP/s** |
+| 2048³ bf16 GEMM, CUDA (TC) | — | **~2-3.5 TFLOP/s** |
+
+Use `AUTORUST_KPROF=1` for a per-kernel CUDA time table (works without GPU
+performance-counter permissions). `AUTORUST_PROF=1` reports scheduler phases.
+`SDPA_TILE=32` enables tensor-level attention padding (correct, but slower with
+the current schedules, so off by default).
 
 ## Frozen CPU plans
 
@@ -147,6 +174,11 @@ first tensor/realize.
   (quantization, training ops, `If`, ONNX-ML).
 - The front-end is single-threaded (`Tensor` is `Rc`-based and `!Send`);
   `RAYON` parallelism is internal to the backend.
+- CUDA f32 uses generated register-tiled FFMA kernels, not cuBLAS/cuDNN.
+  Optional library dispatch and a shared-memory/TMA matmul are future work;
+  the current prime-197 bf16 path also cannot use tensor cores without padding.
+- Codegen `PADTO` on a vector-store axis is unsafe (the mask is not lane-wise);
+  padding is done at the tensor level (e.g. `SDPA_TILE`) instead.
 
 ## Documentation
 

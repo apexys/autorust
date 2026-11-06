@@ -54,6 +54,42 @@ fn bf16_matches_interp_on_all_backends() {
     }
 }
 
+/// A bf16 matmul with an f32 accumulator must match the hardware semantics:
+/// inputs are rounded to bf16 once, then multiplied/accumulated in f32 (not
+/// each product rounded back to bf16). This is the `try_matmul_tiling` promote
+/// path and also exercises the vectorized bf16 load coalescing.
+#[test]
+fn bf16_matmul_accumulates_in_f32() {
+    fn bf16_round(x: f32) -> f32 {
+        let bits = x.to_bits();
+        let round = 0x7fff + ((bits >> 16) & 1);
+        f32::from_bits((bits.wrapping_add(round)) & 0xffff_0000)
+    }
+    let (m, n, k) = (64usize, 64usize, 64usize);
+    let ad: Vec<f32> = (0..m * k).map(|i| ((i % 19) as f32) * 0.05 - 0.4).collect();
+    let bd: Vec<f32> = (0..k * n).map(|i| ((i % 17) as f32) * 0.04 - 0.3).collect();
+    let want: Vec<f32> = (0..m * n)
+        .map(|idx| {
+            let (i, j) = (idx / n, idx % n);
+            (0..k)
+                .map(|p| bf16_round(ad[i * k + p]) * bf16_round(bd[p * n + j]))
+                .sum()
+        })
+        .collect();
+    for dev in registered_devices() {
+        let ctx = Ctx::new();
+        let a = Tensor::from_slice(&ctx, &ad, Some(dtype::BFLOAT16), Some(&dev)).reshape([64, 64]);
+        let b = Tensor::from_slice(&ctx, &bd, Some(dtype::BFLOAT16), Some(&dev)).reshape([64, 64]);
+        let got = a.dot_dtype(&b, Some(dtype::FLOAT32)).to_list_fresh::<f32>();
+        let maxd = want
+            .iter()
+            .zip(&got)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(maxd < 2e-4, "bf16 matmul mismatch on {dev}: max {maxd:e}");
+    }
+}
+
 /// Adam with a bf16 parameter must stay finite. Regression for the LAMB
 /// bias-correction scalars (`b1_t`/`b2_t`): tinygrad pins them to f32 regardless
 /// of the param dtype (optim.py:157) because in bf16 `0.999` rounds to `1.0`, so

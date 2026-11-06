@@ -203,9 +203,11 @@ impl Renderer {
                 .cloned()
                 .filter(|&d| !in_fp8s(d) && d != crate::dtype::FLOAT16)
                 .collect(),
-            // bf16 is stored as u16 and its ALU/casts go through f32.
+            // bf16 is stored as u16 and its ALU/casts go through f32. Widening
+            // is rendered natively (`rust_cast_scalar`) so vector loads survive;
+            // only the rounding narrow cast is expanded.
             extra_matcher: extra::create_non_native_float_pats(&[crate::dtype::BFLOAT16], true)
-                .add(&extra::pm_manual_bf16_cast()),
+                .add(&extra::pm_manual_bf16_narrow()),
         }
     }
 

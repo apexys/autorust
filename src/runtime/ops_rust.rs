@@ -138,6 +138,16 @@ fn target_cpu() -> String {
     std::env::var("AUTORUST_RUST_CPU").unwrap_or_else(|_| "native".to_string())
 }
 
+/// Shared-library magic check (ELF / Mach-O / PE). Guards both the compile
+/// cache and the runtime loader against truncated or mis-cached artifacts.
+fn dylib_magic_ok(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x7fELF")
+        || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe])
+        || bytes.starts_with(b"MZ")
+}
+
 /// FNV-1a, matching the rest of the port's cheap content hashes.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -242,6 +252,13 @@ impl RustcCompiler {
             panic!("TGERR: rustc rejected a kernel:\n{err}\n--- source ---\n{text}");
         }
         let lib = std::fs::read(&so).expect("TGERR: read rust kernel cdylib");
+        if !dylib_magic_ok(&lib) {
+            panic!(
+                "TGERR: rustc produced a non-dylib artifact ({} bytes, magic {:02x?})",
+                lib.len(),
+                &lib[..lib.len().min(8)]
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
         lib
     }
@@ -269,8 +286,12 @@ impl Comp for RustcCompiler {
         if crate::engine::disk_cache::cache_enabled()
             && let Ok(lib) = std::fs::read(&path)
         {
-            self.cache.borrow_mut().insert(src.to_string(), lib.clone());
-            return lib;
+            if dylib_magic_ok(&lib) {
+                self.cache.borrow_mut().insert(src.to_string(), lib.clone());
+                return lib;
+            }
+            // Corrupt cache entry (interrupted write / full disk): recompile.
+            let _ = std::fs::remove_file(&path);
         }
         let lib = self.compile_raw(src);
         if crate::engine::disk_cache::cache_enabled() {
@@ -308,13 +329,10 @@ impl RustProgram {
         let dir = std::env::temp_dir().join("autorust-rust-libs");
         std::fs::create_dir_all(&dir).expect("TGERR: create rust kernel lib dir");
         let path = dir.join(format!("{key:016x}.{}", dylib_ext()));
-        let same = std::fs::metadata(&path)
-            .map(|m| m.len() == elf.lib.len() as u64)
-            .unwrap_or(false);
-        if !same {
-            // Publish atomically: several test threads may load the same
-            // content-addressed kernel concurrently, and a reader must never
-            // see a half-written file.
+        // Publish atomically: several test threads may load the same
+        // content-addressed kernel concurrently, and a reader must never see a
+        // half-written file.
+        let publish = || {
             let tmp = dir.join(format!(
                 "{key:016x}.tmp{}-{}",
                 std::process::id(),
@@ -324,9 +342,37 @@ impl RustProgram {
             if std::fs::rename(&tmp, &path).is_err() {
                 let _ = std::fs::remove_file(&tmp);
             }
+        };
+        if !dylib_magic_ok(&elf.lib) {
+            panic!(
+                "TGERR: expected a Rust cdylib for a frozen plan, got {} bytes (magic {:02x?}). \
+                 Frozen plans must be captured with DEFAULT_DEVICE=RUST.",
+                elf.lib.len(),
+                &elf.lib[..elf.lib.len().min(8)]
+            );
         }
-        let lib = unsafe { libloading::Library::new(&path) }
-            .unwrap_or_else(|e| panic!("TGERR: load rust kernel {}: {e}", path.display()));
+        let same = std::fs::metadata(&path)
+            .map(|m| m.len() == elf.lib.len() as u64)
+            .unwrap_or(false);
+        if !same {
+            publish();
+        }
+        // A cache entry can be truncated/corrupted by an interrupted writer or
+        // a full disk while still matching the length check. If `dlopen`
+        // rejects it, re-publish the in-memory bytes and retry once.
+        let lib = match unsafe { libloading::Library::new(&path) } {
+            Ok(lib) => lib,
+            Err(first) => {
+                let _ = std::fs::remove_file(&path);
+                publish();
+                unsafe { libloading::Library::new(&path) }.unwrap_or_else(|e| {
+                    panic!(
+                        "TGERR: load rust kernel {} (first error: {first}): {e}",
+                        path.display()
+                    )
+                })
+            }
+        };
         let f = unsafe {
             *lib.get::<KernelFn>(elf.name.as_bytes())
                 .unwrap_or_else(|e| panic!("TGERR: rust kernel symbol {}: {e}", elf.name))

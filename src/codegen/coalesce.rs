@@ -94,11 +94,14 @@ pub fn memory_coalescing(ctx: &mut UOpCtx, sink: UopId) -> UopId {
     // build replacements
     let mut replacements: Vec<(UopId, UopId)> = Vec::new();
     for ((op, buf, base, valid), offsets) in memory.iter() {
-        // allowed lengths (coalesce.py:132-146). bf16/int8/etc. are NOT in the
-        // allowed dtype set, so they never coalesce (only `length=1`).
+        // allowed lengths (coalesce.py:132-146). bf16 is storage-only but a
+        // coalesced load is just a wider 16-bit load; excluding it made every
+        // bf16 GEMM input scalar (the vectorized CPU kernel then spent all its
+        // time in per-element loads/conversions).
         let buf_dt = ctx.dt_of(buf);
         let allowed = buf_dt == dtype::FLOAT32
             || buf_dt == dtype::FLOAT16
+            || buf_dt == dtype::BFLOAT16
             || buf_dt == dtype::INT32
             || buf_dt == dtype::UINT32
             || dtype::in_set(dtype::FP8S, buf_dt);

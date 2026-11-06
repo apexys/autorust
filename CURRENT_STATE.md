@@ -2062,18 +2062,53 @@ API shape, and missing user-facing features.
   `TC_OPT=2` typedefs are documented in the README as known limitations; no
   codegen work in this pass.
 
-### 9.10 Perf backlog — tiled/blocked kernels (2026-11)
+### 9.10 Register-blocked GEMM + grid ordering (2026-11) — DONE
 
-Tiling/register blocking is a likely big win across the CPU backends, not just
-matmul. The current generated GEMM computes a small output tile per work item
-and relies on LLVM to vectorize the reduction; the ViT-B/16 forward is ~4.1 s
-captured (vs ~0.3–0.45 s for PyTorch CPU oneDNN/MKL, ~14 s for tinygrad
-TinyJit). A register-blocked GEMM (`m`×`n` micro-tile, multiple accumulators,
-`mul_add`/FMA, K-blocking for cache reuse) is the obvious next step, and the
-same idea applies to conv, reductions and elementwise chains. FlashAttention is
-the attention-specific instance of this pattern (tile Q/K/V, stream the softmax
-normalizer). Track this after the freeze/AOT and C+clang backends; benchmark it
-on ViT-B/16, not just 512².
+The matmul-shaped `MUL -> REDUCE(ADD)` pattern now gets a backend-specific
+register tile in `codegen/postrange.rs::try_matmul_tiling` (before the generic
+heuristic, after the tensor-core attempt):
+
+- **CPU (`RUST`/`CC`)**: upcast both output axes 8x8 and unroll K by 4. The
+  inner loop does 64 FMAs from eight vector loads. A 512³ f32 GEMM went from
+  27.6 to ~320 GFLOP/s; ViT-B/16 forward from 4.1 s to **0.66 s** (24 threads).
+- **GPU (`CUDA`/`CL`)**: `LOCAL` + `UPCAST` + `UNROLL`. Small/medium shapes use
+  4x4 registers with 2x64 threads (block 8x256), large (`M*N >= 1M`) use 8x8
+  with 4x16 threads (block 32x128). `AUTORUST_MM_{M,N,K,LM,LN}` override the
+  defaults for tuning.
+- **Grid order** (`codegen/gpudims.rs`): global axes are sorted by extent
+  ascending so the largest dimension becomes `blockIdx.x` (fastest-varying).
+  For `M=197` linears this runs all M blocks for one N tile before moving on,
+  keeping the weight N-tile hot in L2 instead of streaming it per row. This
+  alone took CUDA ViT from 61 ms to 30 ms.
+
+bf16/f16: the tiling is dtype-agnostic. Two fixes were required:
+1. `codegen/coalesce.rs` now includes `BFLOAT16` in the vector-coalescing set;
+   previously every bf16 load stayed scalar.
+2. The matmul multiply is promoted to the f32 accumulator before scheduling
+   (`Cast(f32, A) * Cast(f32, B)`), matching tensor-core accumulate semantics.
+   Without this, every bf16 product was rounded back to bf16 and re-widened
+   (a 512³ bf16 GEMM was ~15x slower than f32; now it matches f32 on CPU).
+
+`PADTO` on an output axis is deliberately **not** used by the matmul path: the
+store mask is not lane-wise for vector stores, so padding a prime axis (197)
+wrote past the tensor and corrupted the heap. Tensor-level SDPA padding
+(`SDPA_TILE=32`, pad Q/K/V to 224, mask padded keys, slice back) is **correct**
+after materializing the padded tensors with `contiguous`, but it is **slower**
+(CUDA attention 6.8 -> 11.0 ms, CPU 14.8 -> 17.4 ms) with the current schedules,
+so it is opt-in and default-off.
+
+`FA=1` remains an algorithm reference: CUDA ViT is unchanged (~62 ms) and CPU
+training is ~2x slower than SDPA.
+
+Benchmarks (RTX 3060 / Ryzen 3900X, 24 threads):
+- GEMM 512³ f32: CPU `RUST` ~0.84 ms (319 GFLOP/s), CUDA ~0.41-0.50 ms
+  (540-656 GFLOP/s); CUDA 2048³ ~7.8 ms (2.2 TFLOP/s).
+- bf16 GEMM 512³ CUDA (TC): ~0.26 ms (~1.0 TFLOP/s); 2048³ ~5-8 ms
+  (~2-3.5 TFLOP/s).
+- ViT-B/16 forward (`JIT=1`): `RUST` ~0.66 s, `CC` ~0.7 s, CUDA **~29-30 ms**
+  (was 166 ms), frozen `RUST` plan ~0.87 s.
+- ViT-B/16 training step (`vit_train_bench`, forward+backward+Adam, 404
+  linears): CUDA ~381 ms/step.
 
 ### 9.11 Frozen CPU plans — `autorust::freeze` (2026-11) — DONE
 
@@ -2174,20 +2209,25 @@ CUDA → CL → RUST → CC → RAYON → INTERP.
 
 ### 9.14 Comparative benchmarks (2026-11, RTX 3060 / Ryzen 3900X)
 
-CPU (24 threads, captured steady state):
-- ViT-B/16 forward: `RUST` 4.1 s, `CC` 4.2 s, tinygrad `TinyJit` ~14 s,
-  PyTorch CPU ~0.3–0.45 s.
-- Per-kernel profile (`FROZEN_PROF=1`): the MLP/QKV matmuls are ~82% of the
-  frozen run (`r_3072_197_192_4` alone 2.1 s); attention is ~13%.
-- `FA=1` routes attention through the op-level FlashAttention port: 795 steps
-  / 36 kernels and **5.37 s**, vs 399/15 and 4.25 s for SDPA. It is an
-  algorithm/correctness reference, not a current speedup; a fused kernel is
-  required.
+Numbers below are **after** the 9.10 tiling/grid-order work.
+
+CPU (24 threads, captured steady state, `JIT=1`):
+- ViT-B/16 forward: `RUST` **0.65 s**, `CC` **0.63 s**, frozen `RUST` plan
+  0.86 s; tinygrad `TinyJit` ~14 s, PyTorch CPU ~0.3–0.45 s.
+- 512³ f32 GEMM: `RUST` ~0.72 ms (~370 GFLOP/s); bf16 ~1.3 ms (207 GFLOP/s).
+- `FA=1` routes attention through the op-level FlashAttention port and remains
+  an algorithm/correctness reference: CPU ViT ~2.5 s vs ~0.65 s for SDPA and
+  CUDA ~62 ms vs ~30 ms; not a speedup.
 
 CUDA (RTX 3060, same physical GPU; shared ~30% utilization):
-- ViT-B/16 captured (`JIT=1`, f32): `CUDA` 166 ms/iter.
-- PyTorch 2.14.1+cu126 f32: ~8.5–9.1 ms/iter steady state (first call 229 ms
-  includes cuBLAS/cuDNN warmup). The ~19x gap is expected: PyTorch uses
-  cuBLAS/cuDNN, while the port's f32 kernels are untiled scalar CUDA (no
-  tensor cores for f32). CUDA tiling/TC is a separate track from the CPU
-  register-blocking work.
+- ViT-B/16 forward (`JIT=1`, f32): **~29-30 ms/iter** (was 166 ms).
+- ViT-B/16 train step (fwd+bwd+Adam, f32, `vit_train_bench`): ~387 ms.
+- 512³ f32 GEMM: 0.3-0.5 ms pure kernel (0.8-0.9 ms with the per-iteration
+  sync); 2048³ 2.2 TFLOP/s. bf16 tensor-core GEMM: ~1 TFLOP/s (512³),
+  ~2-3.5 TFLOP/s (2048³).
+- PyTorch 2.14.1+cu126 f32: ~8.5–9.1 ms/iter steady state. The remaining ~3.4x
+  gap is cuBLAS/cuDNN + tensor cores; our f32 path is register-tiled FFMA and
+  the bf16 TC path cannot tile the prime 197 dimensions without padding.
+- Per-kernel profiler: `AUTORUST_KPROF=1` (syncs per launch; no GPU-counter
+  permission needed). Nsight Compute needs
+  `NVreg_RestrictProfilingToAdminUsers=0` (or root).

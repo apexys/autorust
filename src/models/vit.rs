@@ -127,12 +127,14 @@ impl ViT {
         for tb in &self.tbs {
             x = tb.forward_ctx(&x, ctx);
         }
-        let x = x.layernorm_ctx(ctx, -1, 1e-5).linear_ctx(
+        // LayerNorm and the head are per-token, so slice the cls token first
+        // instead of normalizing/projecting every patch token.
+        let cls_tok = x.getitem_ctx(ctx, &[Ix::All, Ix::Index(0)]);
+        let cls_tok = cls_tok.layernorm_ctx(ctx, -1, 1e-5).linear_ctx(
             ctx,
             &self.encoder_norm.0,
             Some(&self.encoder_norm.1),
         );
-        let cls_tok = x.getitem_ctx(ctx, &[Ix::All, Ix::Index(0)]);
         cls_tok.linear_ctx(ctx, &self.head.0, Some(&self.head.1))
     }
 }

@@ -1904,6 +1904,30 @@ impl Tensor {
         is_causal: bool,
         enable_gqa: bool,
     ) -> Tensor {
+        self.sdpa_impl(
+            ctx, key, value, attn_mask, dropout_p, is_causal, enable_gqa, true,
+        )
+    }
+
+    /// Tile-aligned attention (opt-in via `SDPA_TILE`, default off): the
+    /// 197-token ViT sequence is prime, so the `QKᵀ` / `AV` matmuls cannot be
+    /// register-tiled. Padding Q/K/V to a multiple of the tile (e.g. 32 -> 224)
+    /// makes every GEMM dimension tileable; padded keys get `-inf`, padded query
+    /// rows are sliced away. This is the safe tensor-level equivalent of codegen
+    /// PADTO (no masked vector stores). It is currently slower than the untiled
+    /// path on the measured shapes, so it is kept as an experiment.
+    #[allow(clippy::too_many_arguments)]
+    fn sdpa_impl(
+        &self,
+        ctx: &mut UOpCtx,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+        enable_gqa: bool,
+        allow_pad: bool,
+    ) -> Tensor {
         let ndim = self.shape_ctx(ctx).len();
         let (key, value) = if enable_gqa {
             let qh = self.shape_ctx(ctx).into_vec()[ndim - 3]
@@ -1925,6 +1949,92 @@ impl Tensor {
         } else {
             (key.clone(), value.clone())
         };
+
+        let q_ndim = self.shape_ctx(ctx).len();
+        let n = self.shape_ctx(ctx).into_vec()[q_ndim - 2]
+            .clone()
+            .as_i64()
+            .unwrap_or(0);
+        let k_ndim = key.shape_ctx(ctx).len();
+        let nk = key.shape_ctx(ctx).into_vec()[k_ndim - 2]
+            .clone()
+            .as_i64()
+            .unwrap_or(0);
+        let tile = std::env::var("SDPA_TILE")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        if allow_pad
+            && tile > 1
+            && attn_mask.is_none()
+            && dropout_p == 0.0
+            && n >= tile
+            && nk >= tile
+            && (n % tile != 0 || nk % tile != 0)
+        {
+            let np = (n + tile - 1) / tile * tile;
+            let nkp = (nk + tile - 1) / tile * tile;
+            let q_pad = {
+                let shp = self.shape_ctx(ctx).into_vec();
+                let mut p = vec![(0i64, 0i64); shp.len()];
+                p[shp.len() - 2] = (0, np - n);
+                p
+            };
+            let k_pad = {
+                let shp = key.shape_ctx(ctx).into_vec();
+                let mut p = vec![(0i64, 0i64); shp.len()];
+                p[shp.len() - 2] = (0, nkp - nk);
+                p
+            };
+            let v_pad = {
+                let shp = value.shape_ctx(ctx).into_vec();
+                let mut p = vec![(0i64, 0i64); shp.len()];
+                p[shp.len() - 2] = (0, nkp - nk);
+                p
+            };
+            // Materialize the padded views. Leaving them as PAD index maps lets
+            // the matmul kernel vectorize across the pad boundary, which
+            // currently mis-indexes the last valid columns.
+            let qp = self.pad_ctx(ctx, &q_pad).contiguous_ctx(ctx);
+            let kp = key.pad_ctx(ctx, &k_pad).contiguous_ctx(ctx);
+            let vp = value.pad_ctx(ctx, &v_pad).contiguous_ctx(ctx);
+            // Non-causal needs an explicit -inf mask for padded key columns;
+            // causal already masks every j > i (and padded j >= nk > i).
+            let mask = if is_causal {
+                None
+            } else {
+                let cols = Tensor::arange(
+                    &mut *ctx,
+                    0.0,
+                    Some(nkp as f64),
+                    1.0,
+                    Some(crate::dtype::FLOAT32),
+                )
+                .reshape_ctx(ctx, [1, nkp]);
+                let zero = Tensor::full_const(
+                    &mut *ctx,
+                    &[] as &[i64],
+                    ConstVal::Float(0.0),
+                    Some(crate::dtype::FLOAT32),
+                );
+                let ninf = Tensor::full_const(
+                    &mut *ctx,
+                    &[] as &[i64],
+                    ConstVal::Float(f64::NEG_INFINITY),
+                    Some(crate::dtype::FLOAT32),
+                );
+                Some(
+                    cols.lt_ctx(ctx, TensorAddArg::C(ConstVal::Float(nk as f64)))
+                        .where__ctx(ctx, &zero, &ninf),
+                )
+            };
+            let out = qp.sdpa_impl(ctx, &kp, &vp, mask.as_ref(), 0.0, is_causal, false, false);
+            return out.getitem_ctx(
+                ctx,
+                &[Ix::Ellipsis, Ix::slice(Some(0), Some(n), 1), Ix::All],
+            );
+        }
+
         let q = self.clone();
         let q_last = q.shape_ctx(ctx).into_vec()[ndim - 1]
             .clone()

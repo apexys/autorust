@@ -182,6 +182,23 @@ pub fn pm_manual_bf16_cast() -> PatternMatcher {
     ])
 }
 
+/// Narrowing half of [`pm_manual_bf16_cast`]. Backends whose renderer can
+/// widen a bf16 load to f32 natively keep the widening `CAST` as a single op,
+/// so an upcast (vector) load stays vectorized; the old rule expanded it into
+/// per-lane bit ops and scalarized every GEMM input load. Rounding f32→bf16
+/// still needs the manual sequence.
+pub fn pm_manual_bf16_narrow() -> PatternMatcher {
+    PatternMatcher::new(vec![(
+        UPat::ops1(Ops::Cast)
+            .with_dtype(Some(vec![dtype::BFLOAT16]))
+            .with_src_tup(vec![UPat::var(Some("x"), Some(vec![dtype::FLOAT32]))]),
+        r(|ctx, st, _| {
+            let x = sget(st, "x");
+            Some(cast_float_to_bf16(ctx, x))
+        }),
+    )])
+}
+
 /// `CUDARenderer.extra_matcher` (cstyle.py:427-429) — fp8 compute-through-f32
 /// (no casting fixups) plus the fp8→fp8 cast widening.
 pub fn cuda_extra_matcher() -> PatternMatcher {

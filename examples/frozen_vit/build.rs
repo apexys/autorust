@@ -9,6 +9,9 @@ use autorust::engine::jit::Jit;
 use autorust::engine::session::Session;
 
 fn main() {
+    // The emitted plan is RUST code; capture it on RUST even on machines where
+    // CL/CUDA are available.
+    unsafe { std::env::set_var("DEFAULT_DEVICE", "RUST") };
     for key in [
         "VIT_LAYERS",
         "VIT_EMBED",

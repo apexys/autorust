@@ -411,6 +411,10 @@ fn rust_zero(dt: DTypeId) -> String {
 
 /// A scalar Rust cast expression.
 fn rust_cast_scalar(src: &str, src_dt: DTypeId, dst_dt: DTypeId) -> String {
+    if src_dt == dtype::BFLOAT16 && dst_dt == dtype::FLOAT32 {
+        // bf16 is `u16` storage: widen by placing the 16 bits in the high half.
+        return format!("f32::from_bits((({src}) as u32) << 16)");
+    }
     if dst_dt == dtype::BOOL {
         if src_dt == dtype::BOOL {
             src.to_string()

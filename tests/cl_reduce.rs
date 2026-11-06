@@ -47,8 +47,21 @@ fn cl_xor_backward_kernels_build_and_run() {
         return;
     }
     let ctx = Ctx::new();
-    let l1 = Linear::new(&ctx, 2, 4, true);
-    let l2 = Linear::new(&ctx, 4, 1, true);
+    // Build the weights explicitly on CL: `Linear::new` would use the selected
+    // default device (CUDA when that backend is compiled in).
+    let w = |n: usize, seed: usize| -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i + seed) % 7) as f32 * 0.1 - 0.3)
+            .collect()
+    };
+    let l1 = Linear {
+        weight: Tensor::from_slice(&ctx, &w(8, 0), None, Some("CL")).reshape([4, 2]),
+        bias: Some(Tensor::from_slice(&ctx, &w(4, 1), None, Some("CL"))),
+    };
+    let l2 = Linear {
+        weight: Tensor::from_slice(&ctx, &w(4, 2), None, Some("CL")).reshape([1, 4]),
+        bias: Some(Tensor::from_slice(&ctx, &w(1, 3), None, Some("CL"))),
+    };
     let x = Tensor::from_slice(
         &ctx,
         &[0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],

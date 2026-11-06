@@ -574,7 +574,8 @@ impl<'a> Scheduler<'a> {
                     matches!(
                         AxisType::range_axis_type(ctx, rng.clone()),
                         AxisType::Global | AxisType::Local | AxisType::Weak
-                    ),
+                    ) || (self.ren.globalize_loops
+                        && AxisType::range_axis_type(ctx, rng.clone()) == AxisType::Loop),
                     "TGERR: upcast is for GLOBAL/LOCAL/LOOP"
                 );
             }
@@ -612,7 +613,7 @@ impl<'a> Scheduler<'a> {
 
     /// `OptOps.PADTO` (postrange.py:185) — round a const range up to a multiple,
     /// masking out-of-range lanes with `Invalid`.
-    fn apply_padto(&mut self, ctx: &mut UOpCtx, axis: usize, arg: i64) -> Result<(), String> {
+    fn apply_padto(&mut self, ctx: &mut UOpCtx, axis: usize, arg: i64) -> Result<UopId, String> {
         let rng = self.rngs(ctx)[axis].clone();
         // python: these are `KernelOptError`s (caught by `_apply_tc_opt`), not fatal.
         if ctx.op_of(&ctx.srcs(&rng)[0].clone()) != Ops::Const {
@@ -672,7 +673,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), replaces, false, false);
-        Ok(())
+        Ok(replaced_rng)
     }
 
     /// `apply_opt(Opt(OptOps.TC, axis, (tc_select, tc_opt, use_tensor_cores)))`
@@ -1343,6 +1344,229 @@ pub enum OptOp {
     Tc,
 }
 
+/// Detect a piled `mul` + single `add` reduction (a matmul / implicit-GEMM
+/// contraction) and return the multiply node, its two independent output
+/// ranges, and the reduce dtype. Unlike the tensor-core path this works for
+/// plain f32 (no TF32) and for reductions that are not a clean 2-D product.
+fn matmul_ranges(
+    ctx: &mut UOpCtx,
+    k: &Scheduler,
+) -> Option<(UopId, UopId, UopId, crate::dtype::DTypeId)> {
+    let ros = k.reduceops(ctx);
+    if ros.len() != 1 || reduce_alu_op(ctx, &ros[0]) != Ops::Add {
+        return None;
+    }
+    let red_dt = ctx.dt_of(&ros[0]);
+    let rsrc0 = ctx.srcs(&ros[0])[0].clone();
+    let mul = if ctx.op_of(&rsrc0) == Ops::Cast {
+        ctx.srcs(&rsrc0)[0].clone()
+    } else {
+        rsrc0
+    };
+    if ctx.op_of(&mul) != Ops::Mul {
+        return None;
+    }
+    let mul_srcs = ctx.srcs(&mul).to_vec();
+    if mul_srcs.len() != 2 {
+        return None;
+    }
+    let in0r: Vec<UopId> = ctx.ranges(&mul_srcs[0]).iter().cloned().collect();
+    let in1r: Vec<UopId> = ctx.ranges(&mul_srcs[1]).iter().cloned().collect();
+    // The two operands must each own a distinct output axis. This is what
+    // distinguishes `A[m,k] * B[k,n]` from `x*x` (layernorm variance), where
+    // both operands iterate the same ranges.
+    let ir0: Vec<UopId> = in0r.iter().filter(|u| !in1r.contains(u)).cloned().collect();
+    let ir1: Vec<UopId> = in1r.iter().filter(|u| !in0r.contains(u)).cloned().collect();
+    if ir0.is_empty() || ir1.is_empty() {
+        return None;
+    }
+    Some((mul, ir0[0].clone(), ir1[0].clone(), red_dt))
+}
+
+/// Register-block a matmul-style contraction. CPU uses an 8x8 output tile and
+/// a 4-wide reduce unroll; GPUs use LOCAL/UPCAST (4x4 for small/medium shapes,
+/// 8x8 for large) and a 4-wide unroll. This is the tiling tinygrad's BEAM
+/// search would pick, without per-shape search. Low-precision inputs are
+/// promoted to f32 before the multiply so products are not rounded per FMA.
+fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
+    let Some((mul, m_rng, n_rng, red_dt)) = matmul_ranges(ctx, k) else {
+        return false;
+    };
+    // bf16/f16 GEMM should accumulate like the hardware does: promote the
+    // multiply itself to the f32 accumulator instead of rounding every product
+    // back to the low-precision dtype and then widening it again. Without this
+    // the generated kernel spends most of its time on bf16 round-trips (a
+    // 512^3 bf16 GEMM was ~15x slower than f32 on CPU).
+    let mul_dt = ctx.dt_of(&mul);
+    if red_dt == crate::dtype::FLOAT32
+        && mul_dt != crate::dtype::FLOAT32
+        && crate::dtype::in_set(
+            &[
+                crate::dtype::FLOAT16,
+                crate::dtype::BFLOAT16,
+                crate::dtype::FP8E4M3,
+                crate::dtype::FP8E5M2,
+            ],
+            mul_dt,
+        )
+    {
+        let msrcs = ctx.srcs(&mul).to_vec();
+        if msrcs.len() == 2 {
+            let a = ctx.cast(msrcs[0].clone(), crate::dtype::FLOAT32);
+            let b = ctx.cast(msrcs[1].clone(), crate::dtype::FLOAT32);
+            let promoted = ctx.binop(Ops::Mul, a, b);
+            let mut m = HashMap::new();
+            m.insert(mul.clone(), promoted);
+            k.ast = crate::uop::upat::substitute(ctx, k.ast.clone(), m, false, false);
+        }
+    }
+    let idx_of = |k: &Scheduler, ctx: &mut UOpCtx, rng: &UopId| -> Option<usize> {
+        k.rngs(ctx).iter().position(|r| r == rng)
+    };
+    let dbg = std::env::var("AUTORUST_MM_DEBUG").is_ok();
+    if dbg {
+        eprintln!(
+            "MM dev={} m={:?} n={:?} red={red_dt:?} mul_dt={:?}",
+            k.ren.device,
+            idx_of(k, ctx, &m_rng).map(|i| k.full_shape(ctx)[i]),
+            idx_of(k, ctx, &n_rng).map(|i| k.full_shape(ctx)[i]),
+            mul_dt
+        );
+    }
+
+    // Register-tile defaults. CPU: 8x8 (64 accumulators) is ~2x faster than
+    // 4x4 at every size measured and keeps the B stream in L2/L3. GPU: 4x4 with
+    // 2x64 threads wins for small/medium matrices, while 8x8 with 4x16 threads
+    // is better once the output no longer fits comfortably in L2 (>=1024^2).
+    let m_ext0 = idx_of(k, ctx, &m_rng)
+        .map(|i| k.full_shape(ctx)[i])
+        .unwrap_or(1);
+    let n_ext0 = idx_of(k, ctx, &n_rng)
+        .map(|i| k.full_shape(ctx)[i])
+        .unwrap_or(1);
+    let large = m_ext0.saturating_mul(n_ext0) >= 1_000_000;
+    let (def_m, def_n, def_lm, def_ln) = if k.ren.has_local && !large {
+        (4, 4, 2, 64)
+    } else if k.ren.has_local {
+        (8, 8, 4, 16)
+    } else {
+        (8, 8, 2, 64)
+    };
+    let want_m = env_int("AUTORUST_MM_M", def_m).clamp(1, 16);
+    let want_n = env_int("AUTORUST_MM_N", def_n).clamp(1, 16);
+    let want_k = env_int("AUTORUST_MM_K", 4).clamp(1, 16);
+
+    // NOTE: padded tiling (PADTO on an output axis) is deliberately disabled:
+    // PADTO gates the store through the index, but an upcast store is a *vector*
+    // store whose mask is not lane-wise in the current renderers. Padding a
+    // prime axis (197) wrote past the tensor and corrupted the heap. Only tile
+    // axes whose extent divides exactly until masked vector stores exist.
+    if k.ren.globalize_loops && !k.ren.has_local {
+        // CPU: vectorize both output axes (MxN register tile).
+        let mut picks: Vec<(UopId, i64)> = Vec::new();
+        for (rng, want) in [(m_rng.clone(), want_m), (n_rng.clone(), want_n)] {
+            let Some(i) = idx_of(k, ctx, &rng) else {
+                return false;
+            };
+            let ext = k.full_shape(ctx)[i];
+            let up = [want, 4, 2]
+                .into_iter()
+                .find(|s| *s >= 1 && *s <= 16 && ext % s == 0)
+                .unwrap_or(1);
+            picks.push((rng, up));
+        }
+        if picks.iter().all(|(_, sz)| *sz == 1) {
+            return false;
+        }
+        for (rng, sz) in picks {
+            if sz == 1 {
+                continue;
+            }
+            let Some(i) = idx_of(k, ctx, &rng) else {
+                return false;
+            };
+            if dbg {
+                eprintln!("  cpu UPCAST axis={i} sz={sz}");
+            }
+            k.apply_opt(ctx, OptOp::Upcast, Some(i), Some(sz));
+        }
+    } else if k.ren.has_local {
+        // GPU: thread-block tiling + per-thread register tile.
+        // LOCAL is the *block tile*; UPCAST then splits it into
+        // (threads x registers-per-thread). tinygrad's best 512^3 config is
+        // 8x16 threads with a 4x4 register tile, i.e. a 32x64 block tile.
+        let want_lm = env_int("AUTORUST_MM_LM", def_lm).clamp(1, 64);
+        let want_ln = env_int("AUTORUST_MM_LN", def_ln).clamp(1, 64);
+        let mut local_picks: Vec<(UopId, i64, i64)> = Vec::new();
+        for (rng, want_threads, want_up) in [
+            (m_rng.clone(), want_lm, want_m),
+            (n_rng.clone(), want_ln, want_n),
+        ] {
+            let Some(i) = idx_of(k, ctx, &rng) else {
+                return false;
+            };
+            let ext = k.full_shape(ctx)[i];
+            let up = [want_up, 4, 2]
+                .into_iter()
+                .find(|s| *s >= 1 && ext % s == 0)
+                .unwrap_or(1);
+            let mut local = 1i64;
+            for threads in [want_threads, 8, 4, 2] {
+                let cand = threads * up;
+                if cand <= ext && ext % cand == 0 {
+                    local = cand;
+                    break;
+                }
+            }
+            local_picks.push((rng, local, up));
+        }
+        if local_picks.iter().all(|(_, sz, _)| *sz == 1) {
+            return false;
+        }
+        for (rng, local, up) in local_picks {
+            // A prime/ineligible extent leaves `local == 1`; applying a no-op
+            // LOCAL still splits the range and can fail the graph substitution.
+            if local == 1 {
+                continue;
+            }
+            let Some(i) = idx_of(k, ctx, &rng) else {
+                return false;
+            };
+            if dbg {
+                eprintln!("  gpu LOCAL axis={i} sz={local} up={up}");
+            }
+            let ret = k.apply_opt(ctx, OptOp::Local, Some(i), Some(local));
+            if up > 1 {
+                let inner = ret[1].clone();
+                let Some(ii) = idx_of(k, ctx, &inner) else {
+                    return false;
+                };
+                if dbg {
+                    eprintln!("  gpu UPCAST axis={ii} sz={up}");
+                }
+                k.apply_opt(ctx, OptOp::Upcast, Some(ii), Some(up));
+            }
+        }
+    } else {
+        return false;
+    }
+
+    // Reduce unroll (vector loads along K).
+    let ud = k.unrollable_dims(ctx);
+    if let Some(&ax) = ud.last() {
+        let ext = k.full_shape(ctx)[ax];
+        let amt = [want_k, 4, 2]
+            .into_iter()
+            .find(|s| *s >= 1 && ext % s == 0)
+            .unwrap_or(1);
+        if amt > 1 {
+            let last = k.unrollable_dims(ctx).len() - 1;
+            k.apply_opt(ctx, OptOp::Unroll, Some(last), Some(amt));
+        }
+    }
+    true
+}
+
 /// `hand_coded_optimizations` (heuristic.py) — corpus subset.
 pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
     // first try the tensor cores
@@ -1400,6 +1624,12 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
             *k = tk;
             return;
         }
+    }
+
+    // A matmul-style contraction gets register tiling regardless of backend;
+    // the TC path above only fires for half/bf16 (or f32 with ALLOW_TF32).
+    if try_matmul_tiling(k, ctx) {
+        return;
     }
 
     // are we grouping? (requires local shape support)

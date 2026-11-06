@@ -179,16 +179,21 @@ pub fn add_gpudims(ctx: &mut UOpCtx, s: UopId) -> Option<UopId> {
             all_ranges.insert(range_head(ctx, x.clone()), x.clone());
         }
     }
-    let mut global_dims: Vec<Vec<i64>> = all_ranges
-        .iter()
-        .filter(|(_, r)| {
-            matches!(
-                AxisType::range_axis_type(ctx, (**r).clone()),
-                AxisType::Global | AxisType::Thread
-            )
-        })
-        .map(|(k, _)| k.clone())
-        .collect();
+    let extent = |ctx: &mut UOpCtx, r: UopId| -> i64 {
+        match ctx.ssimplify(ctx.srcs(&r)[0].clone()) {
+            Ok(SVal::I(v)) => v as i64,
+            _ => panic!("TGERR: symbolic gpudims extent"),
+        }
+    };
+    let mut global_pairs: Vec<(Vec<i64>, i64)> = Vec::new();
+    for (k, r) in all_ranges.iter() {
+        if matches!(
+            AxisType::range_axis_type(ctx, r.clone()),
+            AxisType::Global | AxisType::Thread
+        ) {
+            global_pairs.push((k.clone(), extent(ctx, r.clone())));
+        }
+    }
     let mut local_dims: Vec<Vec<i64>> = all_ranges
         .iter()
         .filter(|(_, r)| {
@@ -199,22 +204,20 @@ pub fn add_gpudims(ctx: &mut UOpCtx, s: UopId) -> Option<UopId> {
         })
         .map(|(k, _)| k.clone())
         .collect();
-    global_dims.sort();
+    // Put the *largest* grid dimension on `gidx0` (blockIdx.x). CUDA dispatches
+    // x fastest, so for a matmul this runs all M blocks for one N tile before
+    // moving on: the weight tile stays hot in L2. With `M=197` untiled in ViT's
+    // FFN this is the difference between streaming the weight matrix per row
+    // and reusing it across rows. It also keeps the >65535-capable dimension on
+    // x rather than y/z.
+    global_pairs.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let global_dims: Vec<Vec<i64>> = global_pairs.iter().map(|(k, _)| k.clone()).collect();
+    let global_shape: Vec<i64> = global_pairs.iter().map(|(_, e)| *e).collect();
     local_dims.sort();
     if global_dims.is_empty() && local_dims.is_empty() {
         return None;
     }
 
-    let extent = |ctx: &mut UOpCtx, r: UopId| -> i64 {
-        match ctx.ssimplify(ctx.srcs(&r)[0].clone()) {
-            Ok(SVal::I(v)) => v as i64,
-            _ => panic!("TGERR: symbolic gpudims extent"),
-        }
-    };
-    let mut global_shape: Vec<i64> = Vec::with_capacity(global_dims.len());
-    for k in global_dims.iter() {
-        global_shape.push(extent(ctx, all_ranges[k].clone()));
-    }
     let mut local_shape: Vec<i64> = Vec::with_capacity(local_dims.len());
     for k in local_dims.iter() {
         local_shape.push(extent(ctx, all_ranges[k].clone()));

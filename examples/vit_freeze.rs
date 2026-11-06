@@ -27,6 +27,9 @@ fn env_i64(key: &str, default: i64) -> i64 {
 }
 
 fn main() {
+    // A frozen plan is CPU code emitted for the RUST backend; capture on RUST
+    // even if CL/CUDA are present (otherwise the plan holds CL/PTX artifacts).
+    unsafe { std::env::set_var("DEFAULT_DEVICE", "RUST") };
     let layers = env_i64("LAYERS", 1);
     let embed = env_i64("EMBED", 192);
     let heads = env_i64("HEADS", 3);
