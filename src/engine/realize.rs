@@ -732,7 +732,7 @@ pub fn realize_many(
         add("realize.callify", c.duration_since(b).as_secs_f64());
         add("realize.schedule", d.duration_since(c).as_secs_f64());
         add("realize.run", d.elapsed().as_secs_f64());
-        add("realize.total", d.elapsed().as_secs_f64() + c.duration_since(b).as_secs_f64() + b.duration_since(a).as_secs_f64());
+        add("realize.total", a.elapsed().as_secs_f64());
     }
     // python `_apply_map_to_tensors`: each tensor's uop becomes its final storage
     // form after the schedule — a leaf aliasing that allocation.

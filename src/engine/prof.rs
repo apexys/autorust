@@ -26,13 +26,18 @@ thread_local! {
     static ENTRIES: RefCell<BTreeMap<&'static str, Entry>> = const { RefCell::new(BTreeMap::new()) };
 }
 
-/// Whether profiling is on (`AUTORUST_PROF` set and not `0`).
+/// Whether profiling is on.
+///
+/// `AUTORUST_PROF` turns it on (any value except `0`/empty). The rewrite
+/// diagnostics `TG_RW_TRACE` and `TG_RW_VISITS` also turn it on, because their
+/// output is derived from the `rw.*` counters maintained here.
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("AUTORUST_PROF")
+        let prof = std::env::var("AUTORUST_PROF")
             .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        prof || std::env::var("TG_RW_TRACE").is_ok() || std::env::var("TG_RW_VISITS").is_ok()
     })
 }
 
@@ -82,7 +87,10 @@ pub fn report() {
             return;
         }
         println!("--- autorust profile ---");
-        println!("{:<24} {:>7} {:>12} {:>12}", "phase", "calls", "total (s)", "per call");
+        println!(
+            "{:<24} {:>7} {:>12} {:>12}",
+            "phase", "calls", "total (s)", "per call"
+        );
         for (name, ent) in m.iter() {
             println!(
                 "{:<24} {:>7} {:>12.4} {:>12}",
