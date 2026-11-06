@@ -113,51 +113,79 @@ impl CudaInner {
         if let Some(k) = self.bias_kernels.borrow().get(&dtype.0) {
             return (k.0.clone(), k.1.clone());
         }
+        // `C = (C + bias[col]) * scale[col] + residual[row, col]`, in place.
+        // Any subset of the three can be disabled; the corresponding pointer is
+        // then unused (we still pass `c` so the argument is never null).
         let (src, name) = match dtype {
             crate::dtype::FLOAT32 => (
                 r#"
-extern "C" __global__ void autorust_bias_f32(float* c, const float* b, long long total, long long n, long long m, long long stride_c, long long c_off, long long b_off) {
+extern "C" __global__ void autorust_epi_f32(float* c, const float* b, const float* s, const float* r,
+    long long total, long long n, long long m, long long stride_c,
+    long long c_off, long long b_off, long long s_off, long long r_off,
+    int has_bias, int has_scale, int has_res) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   long long col = i % n;
   long long row = (i / n) % m;
   long long bat = i / (n * m);
-  c[c_off + bat * stride_c + row * n + col] += b[b_off + col];
+  long long rel = bat * stride_c + row * n + col;
+  long long ci = c_off + rel;
+  float v = c[ci];
+  if (has_bias) v += b[b_off + col];
+  if (has_scale) v *= s[s_off + col];
+  if (has_res) v += r[r_off + rel];
+  c[ci] = v;
 }
 "#,
-                "autorust_bias_f32",
+                "autorust_epi_f32",
             ),
             crate::dtype::FLOAT16 => (
                 r#"
 #include <cuda_fp16.h>
-extern "C" __global__ void autorust_bias_f16(__half* c, const __half* b, long long total, long long n, long long m, long long stride_c, long long c_off, long long b_off) {
+extern "C" __global__ void autorust_epi_f16(__half* c, const __half* b, const __half* s, const __half* r,
+    long long total, long long n, long long m, long long stride_c,
+    long long c_off, long long b_off, long long s_off, long long r_off,
+    int has_bias, int has_scale, int has_res) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   long long col = i % n;
   long long row = (i / n) % m;
   long long bat = i / (n * m);
-  long long ci = c_off + bat * stride_c + row * n + col;
-  c[ci] = __float2half(__half2float(c[ci]) + __half2float(b[b_off + col]));
+  long long rel = bat * stride_c + row * n + col;
+  long long ci = c_off + rel;
+  float v = __half2float(c[ci]);
+  if (has_bias) v += __half2float(b[b_off + col]);
+  if (has_scale) v *= __half2float(s[s_off + col]);
+  if (has_res) v += __half2float(r[r_off + rel]);
+  c[ci] = __float2half(v);
 }
 "#,
-                "autorust_bias_f16",
+                "autorust_epi_f16",
             ),
             crate::dtype::BFLOAT16 => (
                 r#"
 #include <cuda_bf16.h>
-extern "C" __global__ void autorust_bias_bf16(__nv_bfloat16* c, const __nv_bfloat16* b, long long total, long long n, long long m, long long stride_c, long long c_off, long long b_off) {
+extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat16* b, const __nv_bfloat16* s, const __nv_bfloat16* r,
+    long long total, long long n, long long m, long long stride_c,
+    long long c_off, long long b_off, long long s_off, long long r_off,
+    int has_bias, int has_scale, int has_res) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   long long col = i % n;
   long long row = (i / n) % m;
   long long bat = i / (n * m);
-  long long ci = c_off + bat * stride_c + row * n + col;
-  c[ci] = __float2bfloat16(__bfloat162float(c[ci]) + __bfloat162float(b[b_off + col]));
+  long long rel = bat * stride_c + row * n + col;
+  long long ci = c_off + rel;
+  float v = __bfloat162float(c[ci]);
+  if (has_bias) v += __bfloat162float(b[b_off + col]);
+  if (has_scale) v *= __bfloat162float(s[s_off + col]);
+  if (has_res) v += __bfloat162float(r[r_off + rel]);
+  c[ci] = __float2bfloat16(v);
 }
 "#,
-                "autorust_bias_bf16",
+                "autorust_epi_bf16",
             ),
-            other => panic!("TGERR: unsupported bias epilogue dtype {other:?}"),
+            other => panic!("TGERR: unsupported epilogue dtype {other:?}"),
         };
         let mut options = vec![format!("--gpu-architecture={}", self.arch)];
         match std::env::var("CUDA_PATH") {
@@ -191,27 +219,42 @@ extern "C" __global__ void autorust_bias_bf16(__nv_bfloat16* c, const __nv_bfloa
         (module, func)
     }
 
-    /// Add a `[n]` bias vector to every row of `C[m,n]` (optionally batched).
+    /// Apply the fused epilogue in place over `C[batch, m, n]`.
     #[allow(clippy::too_many_arguments)]
-    fn bias_add(
+    fn epilogue_apply(
         &self,
         dtype: DTypeId,
         c: u64,
-        bias: u64,
+        bias: Option<(u64, i64)>,
+        scale: Option<(u64, i64)>,
+        residual: Option<(u64, i64)>,
         batch: i64,
         m: i64,
         n: i64,
         stride_c: i64,
         c_off: i64,
-        bias_off: i64,
     ) {
+        if bias.is_none() && scale.is_none() && residual.is_none() {
+            return;
+        }
         let total = batch.saturating_mul(m).saturating_mul(n);
         if total <= 0 {
             return;
         }
         let (_module, func) = self.epilogue(dtype);
-        let (c, bias) = (c, bias);
-        let (total, n, m, stride_c, c_off, bias_off) = (total, n, m, stride_c, c_off, bias_off);
+        let b_ptr = bias.map(|x| x.0).unwrap_or(c);
+        let s_ptr = scale.map(|x| x.0).unwrap_or(c);
+        let r_ptr = residual.map(|x| x.0).unwrap_or(c);
+        let (b_off, s_off, r_off) = (
+            bias.map(|x| x.1).unwrap_or(0),
+            scale.map(|x| x.1).unwrap_or(0),
+            residual.map(|x| x.1).unwrap_or(0),
+        );
+        let (has_bias, has_scale, has_res) = (
+            bias.is_some() as i32,
+            scale.is_some() as i32,
+            residual.is_some() as i32,
+        );
         let cfg = LaunchConfig {
             grid_dim: (((total + 255) / 256) as u32, 1, 1),
             block_dim: (256, 1, 1),
@@ -219,14 +262,21 @@ extern "C" __global__ void autorust_bias_bf16(__nv_bfloat16* c, const __nv_bfloa
         };
         let mut args = self.stream.launch_builder(&func);
         args.arg(&c)
-            .arg(&bias)
+            .arg(&b_ptr)
+            .arg(&s_ptr)
+            .arg(&r_ptr)
             .arg(&total)
             .arg(&n)
             .arg(&m)
             .arg(&stride_c)
             .arg(&c_off)
-            .arg(&bias_off);
-        unsafe { args.launch(cfg) }.unwrap_or_else(|e| panic!("TGERR: bias epilogue launch: {e}"));
+            .arg(&b_off)
+            .arg(&s_off)
+            .arg(&r_off)
+            .arg(&has_bias)
+            .arg(&has_scale)
+            .arg(&has_res);
+        unsafe { args.launch(cfg) }.unwrap_or_else(|e| panic!("TGERR: epilogue launch: {e}"));
     }
 
     /// Run a host GEMM on this device's stream. The descriptor is the
@@ -303,20 +353,25 @@ extern "C" __global__ void autorust_bias_bf16(__nv_bfloat16* c, const __nv_bfloa
                 g.m, g.n, g.k, g.batch
             );
         }
-        if g.bias_slot >= 0 {
-            let bias = ptr(g.bias_slot, g.bias_off);
-            self.bias_add(
-                g.dtype,
-                c,
-                bias,
-                g.batch,
-                g.m,
-                g.n,
-                if g.batch > 1 { g.c_b } else { 0 },
-                g.c_off,
-                g.bias_off,
-            );
-        }
+        let opt = |slot: i64, off: i64| -> Option<(u64, i64)> {
+            if slot >= 0 {
+                Some((ptr(slot, off), off))
+            } else {
+                None
+            }
+        };
+        self.epilogue_apply(
+            g.dtype,
+            c,
+            opt(g.bias_slot, g.bias_off),
+            opt(g.scale_slot, g.scale_off),
+            opt(g.res_slot, g.res_off),
+            g.batch,
+            g.m,
+            g.n,
+            if g.batch > 1 { g.c_b } else { 0 },
+            g.c_off,
+        );
     }
 
     fn synchronize(&self) {

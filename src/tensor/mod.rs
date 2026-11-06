@@ -491,6 +491,33 @@ impl Tensor {
         self.pin_buffer_ctx(ctx, sess);
     }
 
+    /// Copy host bytes into this tensor's realized storage without scheduling.
+    ///
+    /// This is the cheap way to feed a new input into a JIT-captured graph:
+    /// the tensor keeps its buffer, so replay still sees the same allocation,
+    /// and no scheduler pass (or `prune`, which would reallocate it) runs.
+    /// The byte length must match the storage size.
+    pub fn write_bytes(&self, bytes: &[u8]) {
+        use crate::runtime::device::device;
+        let b = self
+            .realized_buffer()
+            .unwrap_or_else(|| panic!("TGERR: write_bytes on an unrealized tensor"));
+        let dev = device(b.device());
+        b.ensure_allocated(&dev);
+        assert_eq!(
+            bytes.len(),
+            self.shape()
+                .into_vec()
+                .iter()
+                .map(|d| d.clone().as_i64().unwrap_or(0) as usize)
+                .product::<usize>()
+                * self.dtype().itemsize(),
+            "TGERR: write_bytes length does not match the tensor storage"
+        );
+        let o = b.get_buf(&dev);
+        dev.allocator._copyin(&*o, bytes);
+    }
+
     /// Replace this tensor's graph node and realized storage with `other`
     /// (tinygrad `Tensor.replace`, used by `load_state_dict`). Clones of this
     /// tensor see the new storage immediately; the optimizer's references stay
@@ -565,6 +592,23 @@ impl Tensor {
     #[doc(hidden)]
     pub fn realize_ctx(&self, ctx: &mut UOpCtx, sess: &mut Session) -> &Tensor {
         let _ = self.to_bytes_ctx(ctx, sess);
+        self
+    }
+
+    /// [`Tensor::realize`] without the host round-trip: run the schedule and
+    /// keep the result as a device buffer (a fusion boundary for later graphs).
+    ///
+    /// This is the cheap form of `tinygrad`'s `Tensor.realize()` used to force
+    /// a materialization point (e.g. so a contraction's store stays a plain
+    /// GEMM instead of absorbing its consumers' epilogue).
+    pub fn realize_device_ctx(&self, ctx: &mut UOpCtx, sess: &mut Session) -> &Tensor {
+        if self.realized_buffer().is_some() {
+            return self;
+        }
+        let (b, leaf) = sess.realize_tensor(ctx, self.uop());
+        let _ = crate::engine::realize::buffer_bytes(&b);
+        self.set_uop(leaf);
+        self.set_realized_buffer(b);
         self
     }
 

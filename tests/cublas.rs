@@ -155,3 +155,35 @@ fn cublas_matches_bf16() {
     let d = maxdiff(&run_case(false), &run_case(true));
     assert!(d < 5e-3, "bf16: cuBLAS diff {d:e}");
 }
+
+#[test]
+fn cublas_matches_scale_and_residual_epilogue() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    // `x + (linear(h) + bias) * layer_scale`, the transformer block epilogue the
+    // store-level GEMM detection has to peel to keep the contraction dispatchable.
+    let (m, k, n) = (197usize, 384usize, 384usize);
+    let hd = values(2, m * k);
+    let wd = values(4, n * k);
+    let bd = values(6, n);
+    let sd = values(8, n);
+    let xd = values(11, m * n);
+    let run_case = |lib: bool| {
+        set_lib(lib);
+        run(|ctx| {
+            let h = Tensor::from_slice(ctx, &hd, None, Some("CUDA")).reshape([m as i64, k as i64]);
+            let x = Tensor::from_slice(ctx, &xd, None, Some("CUDA")).reshape([m as i64, n as i64]);
+            let lin = Linear {
+                weight: Tensor::from_slice(ctx, &wd, None, Some("CUDA"))
+                    .reshape([n as i64, k as i64]),
+                bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CUDA"))),
+            };
+            let scale = Tensor::from_slice(ctx, &sd, None, Some("CUDA"));
+            vec![x.add(&lin.forward(&h).mul(&scale))]
+        })
+    };
+    let d = maxdiff(&run_case(false), &run_case(true));
+    assert!(d < 1e-3, "scale+residual: cuBLAS diff {d:e}");
+}

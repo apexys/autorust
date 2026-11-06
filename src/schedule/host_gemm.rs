@@ -75,6 +75,14 @@ pub struct HostGemm {
     pub bias_slot: i64,
     /// Element offset of the bias vector.
     pub bias_off: i64,
+    /// Optional per-column scale slot (-1 when absent).
+    pub scale_slot: i64,
+    /// Element offset of the scale vector.
+    pub scale_off: i64,
+    /// Optional residual tensor slot (-1 when absent), added elementwise.
+    pub res_slot: i64,
+    /// Element offset of the residual tensor.
+    pub res_off: i64,
 }
 
 impl HostGemm {
@@ -107,6 +115,10 @@ impl HostGemm {
                 ("alpha".into(), Arg::Float(self.alpha as f64)),
                 ("bias_slot".into(), int(self.bias_slot)),
                 ("bias_off".into(), int(self.bias_off)),
+                ("scale_slot".into(), int(self.scale_slot)),
+                ("scale_off".into(), int(self.scale_off)),
+                ("res_slot".into(), int(self.res_slot)),
+                ("res_off".into(), int(self.res_off)),
             ],
         }
     }
@@ -156,6 +168,18 @@ impl HostGemm {
                 }
             },
             bias_off: i("bias_off"),
+            scale_slot: if d.fields.iter().any(|(n, _)| n == "scale_slot") {
+                i("scale_slot")
+            } else {
+                -1
+            },
+            scale_off: i("scale_off"),
+            res_slot: if d.fields.iter().any(|(n, _)| n == "res_slot") {
+                i("res_slot")
+            } else {
+                -1
+            },
+            res_off: i("res_off"),
         })
     }
 }
@@ -317,6 +341,15 @@ fn index_offset(ctx: &UOpCtx, u: &UopId) -> UopId {
     cur
 }
 
+/// Whether `u` contains a reduction without crossing a materialization point.
+fn contains_reduce(ctx: &UOpCtx, u: &UopId) -> bool {
+    match ctx.op_of(u) {
+        Ops::Reduce => true,
+        Ops::After | Ops::Buffer | Ops::Param => false,
+        _ => ctx.srcs(u).iter().any(|s| contains_reduce(ctx, s)),
+    }
+}
+
 fn unwrap(ctx: &UOpCtx, mut u: UopId) -> UopId {
     loop {
         match ctx.op_of(&u) {
@@ -396,37 +429,79 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let (c_slot, c_dt, c_base) = base_of(ctx, &dst_ptr)?;
     let c_off = c_off0 + c_base;
 
-    // Peel a scalar multiplier, then either a single ADD reduction or
-    // `ADD(reduce, bias)` (the fused linear bias).
+    // Operands are either `LOAD(INDEX(...))` or the bare `INDEX(...)` the
+    // lowerer emits (an INDEX used as a value is a load in this IR).
+    let operand = |ctx: &UOpCtx, u: UopId| -> Option<UopId> {
+        let u = unwrap(ctx, u);
+        match ctx.op_of(&u) {
+            Ops::Load => Some(ctx.srcs(&u)[0].clone()),
+            Ops::Index => Some(u),
+            _ => None,
+        }
+    };
+
+    // Peel the fused epilogue, outermost first. A transformer store looks like
+    //   `ADD(residual, MUL(ADD(REDUCE(...), bias), scale))`
+    // (`x + linear(x)*layer_scale`), a plain linear like
+    //   `ADD(REDUCE(...), bias)`.
+    // Scalar factors become `alpha`; every other non-reduce operand is kept and
+    // classified afterwards by its affine index map (a MUL operand is the
+    // per-column scale, an ADD operand is the residual or the bias).
+    struct Extra {
+        from_mul: bool,
+        expr: UopId,
+    }
     let mut alpha = 1.0f32;
+    let mut extras: Vec<Extra> = Vec::new();
     let mut value = ctx.srcs(&st)[1].clone();
-    for _ in 0..8 {
+    for _ in 0..12 {
         match ctx.op_of(&value) {
             Ops::Cast | Ops::Bitcast => value = ctx.srcs(&value)[0].clone(),
             Ops::Mul => {
                 let srcs = ctx.srcs(&value).to_vec();
-                if ctx.srcs(&srcs[1]).is_empty() {
-                    alpha *= const_float(ctx, &srcs[1])? as f32;
-                    value = srcs[0].clone();
-                } else if ctx.srcs(&srcs[0]).is_empty() {
-                    alpha *= const_float(ctx, &srcs[0])? as f32;
-                    value = srcs[1].clone();
+                let (sa, sb) = (srcs[0].clone(), srcs[1].clone());
+                if ctx.srcs(&sb).is_empty() {
+                    alpha *= const_float(ctx, &sb)? as f32;
+                    value = sa;
+                } else if ctx.srcs(&sa).is_empty() {
+                    alpha *= const_float(ctx, &sa)? as f32;
+                    value = sb;
+                } else if contains_reduce(ctx, &sa) && !contains_reduce(ctx, &sb) {
+                    extras.push(Extra {
+                        from_mul: true,
+                        expr: sb,
+                    });
+                    value = sa;
+                } else if contains_reduce(ctx, &sb) && !contains_reduce(ctx, &sa) {
+                    extras.push(Extra {
+                        from_mul: true,
+                        expr: sa,
+                    });
+                    value = sb;
+                } else {
+                    break;
+                }
+            }
+            Ops::Add => {
+                let srcs = ctx.srcs(&value).to_vec();
+                let (sa, sb) = (srcs[0].clone(), srcs[1].clone());
+                if contains_reduce(ctx, &sa) && !contains_reduce(ctx, &sb) {
+                    extras.push(Extra {
+                        from_mul: false,
+                        expr: sb,
+                    });
+                    value = sa;
+                } else if contains_reduce(ctx, &sb) && !contains_reduce(ctx, &sa) {
+                    extras.push(Extra {
+                        from_mul: false,
+                        expr: sa,
+                    });
+                    value = sb;
                 } else {
                     break;
                 }
             }
             _ => break,
-        }
-    }
-    let mut bias_expr: Option<UopId> = None;
-    if ctx.op_of(&value) == Ops::Add {
-        let asrcs = ctx.srcs(&value).to_vec();
-        if ctx.op_of(&unwrap(ctx, asrcs[1].clone())) == Ops::Reduce {
-            bias_expr = Some(asrcs[0].clone());
-            value = asrcs[1].clone();
-        } else if ctx.op_of(&unwrap(ctx, asrcs[0].clone())) == Ops::Reduce {
-            bias_expr = Some(asrcs[1].clone());
-            value = asrcs[0].clone();
         }
     }
     value = unwrap(ctx, value);
@@ -459,16 +534,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
 
-    // Operands are either `LOAD(INDEX(...))` or the bare `INDEX(...)` the
-    // lowerer emits (an INDEX used as a value is a load in this IR).
-    let operand = |ctx: &UOpCtx, u: UopId| -> Option<UopId> {
-        let u = unwrap(ctx, u);
-        match ctx.op_of(&u) {
-            Ops::Load => Some(ctx.srcs(&u)[0].clone()),
-            Ops::Index => Some(u),
-            _ => None,
-        }
-    };
     let a_idx = operand(ctx, msrcs[0].clone())?;
     let b_idx = operand(ctx, msrcs[1].clone())?;
     let (a_off0, a_map) = affine(ctx, &index_offset(ctx, &a_idx))?;
@@ -538,23 +603,48 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
 
-    // Optional fused bias: an index that depends only on n.
-    let (bias_slot, bias_off) = match bias_expr {
-        Some(expr) => {
-            let expr = unwrap(ctx, expr);
-            let idx = operand(ctx, expr)?;
-            let (off0, map) = affine(ctx, &index_offset(ctx, &idx))?;
-            if map.len() != 1 || coeff(&map, n_key) != 1 {
-                return None;
-            }
-            let (slot, dt, base) = base_of(ctx, &idx)?;
-            if dt != c_dt {
-                return None;
-            }
-            (slot, off0 + base)
+    // Classify the peeled epilogue operands. A MUL operand is the per-column
+    // scale; an ADD operand is the residual (same affine layout as C) or the
+    // bias (depends only on the output columns).
+    let mut bias: (i64, i64) = (-1, 0);
+    let mut scale: (i64, i64) = (-1, 0);
+    let mut residual: (i64, i64) = (-1, 0);
+    for e in &extras {
+        let idx = operand(ctx, e.expr.clone())?;
+        let (off0, map) = affine(ctx, &index_offset(ctx, &idx))?;
+        let (slot, dt, base) = base_of(ctx, &idx)?;
+        if dt != c_dt {
+            return None;
         }
-        None => (-1, 0),
-    };
+        let off = off0 + base;
+        if map.len() == 1 && coeff(&map, n_key) == 1 {
+            // A MUL operand is the per-column scale; an ADD operand is additive.
+            // Two additive n-only terms (e.g. `bias_ih + bias_hh`) cannot be
+            // expressed by this epilogue, so leave the kernel generated.
+            if e.from_mul {
+                if scale.0 >= 0 {
+                    return None;
+                }
+                scale = (slot, off);
+            } else {
+                if bias.0 >= 0 {
+                    return None;
+                }
+                bias = (slot, off);
+            }
+            continue;
+        }
+        // The residual must be elementwise-aligned with the output store.
+        let same_layout =
+            map.len() == c_map.len() && c_map.iter().all(|(k, v)| coeff(&map, *k) == *v);
+        if !same_layout || e.from_mul || residual.0 >= 0 {
+            return None;
+        }
+        residual = (slot, off);
+    }
+    let (bias_slot, bias_off) = bias;
+    let (scale_slot, scale_off) = scale;
+    let (res_slot, res_off) = residual;
 
     // Batch axes: every range in C that is neither m nor n. Fold a contiguous
     // set into one strided batch axis.
@@ -601,7 +691,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if std::env::var("AUTORUST_CUBLAS_DEBUG").is_ok() {
         eprintln!(
             "CUBLAS m={m} n={n} k={k} batch={batch_count} \
-             a=[{a_m},{a_k}] b=[{b_k},{b_n}] c=[{c_m},{c_n}] alpha={alpha} bias={bias_slot} \
+             a=[{a_m},{a_k}] b=[{b_k},{b_n}] c=[{c_m},{c_n}] alpha={alpha} bias={bias_slot} scale={scale_slot} res={res_slot} \
              off=[{a_off},{b_off},{c_off}] slots=[{a_slot},{b_slot},{c_slot}]"
         );
     }
@@ -629,6 +719,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         alpha,
         bias_slot,
         bias_off,
+        scale_slot,
+        scale_off,
+        res_slot,
+        res_off,
     })
 }
 
