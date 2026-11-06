@@ -292,13 +292,13 @@ pub fn fused_attention(
     }
     let i = |x: &SVal| x.clone().as_i64().unwrap_or(0);
     let (b, h, n, d) = (i(&dims[0]), i(&dims[1]), i(&dims[2]), i(&dims[3]));
-    if !crate::runtime::cuda_flash::supports(n, d) {
-        return None;
-    }
-    if q.device().as_deref() != Some("CUDA") {
-        return None;
-    }
     if q.dtype() != dtype::FLOAT32 {
+        return None;
+    }
+    let dev = q.device().unwrap_or_default();
+    let cuda = dev.starts_with("CUDA") && crate::runtime::cuda_flash::supports(n, d);
+    let cl = dev.starts_with("CL") && crate::runtime::cl_flash::supports(n, d);
+    if !cuda && !cl {
         return None;
     }
 
@@ -313,7 +313,7 @@ pub fn fused_attention(
         &ctx,
         &vec![0.0f32; (b * h * n * d) as usize],
         None,
-        Some("CUDA"),
+        Some(&dev),
     )
     .reshape([b, h, n, d])
     .to_param();
@@ -327,7 +327,25 @@ pub fn fused_attention(
         v.realized_buffer()?,
         out.realized_buffer()?,
     ];
-    let call = crate::runtime::cuda_flash::host_call(bufs, b, h, n);
+    let call = if cuda {
+        #[cfg(feature = "backend_cuda")]
+        {
+            crate::runtime::cuda_flash::host_call(bufs, b, h, n)
+        }
+        #[cfg(not(feature = "backend_cuda"))]
+        {
+            return None;
+        }
+    } else {
+        #[cfg(feature = "backend_cl")]
+        {
+            crate::runtime::cl_flash::host_call(bufs, b, h, n)
+        }
+        #[cfg(not(feature = "backend_cl"))]
+        {
+            return None;
+        }
+    };
     // Record the launch for replay *and* run it now: the capture pass executes
     // the graph, so the consumers that follow need the value.
     sess.capture_host(call.clone());
