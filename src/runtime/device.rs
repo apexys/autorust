@@ -287,6 +287,39 @@ impl Compiled {
         self.runtime_keyed(key, &elf)
     }
 
+    /// Compile and launch a **hand-written kernel** for this backend.
+    ///
+    /// `src` is the backend's kernel language (CUDA C for `CUDA`, OpenCL C for
+    /// `CL`, the generated-Rust ABI for `RUST`). This is the seam for fused
+    /// kernels that cannot be expressed as generated uops — flash attention is
+    /// the motivating case: online softmax needs running per-thread state, which
+    /// the uop IR cannot carry.
+    ///
+    /// `signature` is `(slot, dtype)` in argument order. A `slot` below
+    /// `bufs.len()` is a buffer pointer; beyond it the value comes from `vals`
+    /// at `slot - bufs.len()`, exactly like a generated kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_host_kernel(
+        self: &Rc<Self>,
+        src: &str,
+        name: &str,
+        signature: &[(i64, crate::dtype::DTypeId)],
+        bufs: &[OpaqueView],
+        global: [usize; 3],
+        local: Option<[usize; 3]>,
+        vals: &[i64],
+        wait: bool,
+    ) -> Option<f64> {
+        let lib = self.compiler.compile_cached(src);
+        let elf = TinyElf {
+            lib,
+            name: name.to_string(),
+            signature: signature.to_vec(),
+        };
+        let rt = self.runtime(elf);
+        rt.borrow_mut().call(bufs, global, local, vals, wait)
+    }
+
     /// [`Compiled::runtime`] with a caller-supplied content key (computed once
     /// at compile time and stored on
     /// [`CompiledProg`](crate::engine::realize::CompiledProg)), so a launch does

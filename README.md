@@ -108,6 +108,23 @@ its own fastest implementation:
   CPU kernel tiles one output row and re-streams `B` for every row: 789x384x384
   went from 16.7 ms to 1.2 ms (14 → 200 GFLOP/s) on a 3900X.
 
+### Hand-written kernels
+
+`Compiled::run_host_kernel` is the escape hatch for kernels the uop IR cannot
+express — a fused kernel needs running per-thread state (flash attention's
+online softmax), which the IR has no way to carry. It takes source in the
+backend's own language, compiles it through the device's existing compiler
+(NVRTC on CUDA, `clBuildProgram` on OpenCL, rustc on `RUST`) and launches it
+through the device's existing runtime, so buffers bind by slot and scalar args
+follow the generated-kernel ABI. `tests/host_kernel.rs` covers the CUDA path
+end to end.
+
+This is the prerequisite for a real fused attention: the graph-level port in
+`models::flash_attention` is 16x *slower* than the current fused softmax·V on
+CUDA (105.7 s vs 6.4 s per 128 frames at 448px) because every tile boundary
+becomes a materialized kernel, which is exactly why tinygrad's FA is a
+`@custom_kernel` over its warp DSL rather than a graph.
+
 Attention's `P·V` reaches the same path when the caller uses
 `Tensor::scaled_dot_product_attention_sess`: the score matrix is materialized so
 the contraction has a buffer to describe. That is a CPU win (~150 ms -> ~7 ms per
