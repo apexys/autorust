@@ -82,6 +82,8 @@ struct ClInner {
     driver_version: String,
     exts: String,
     compile_cache: RefCell<CompileCache>,
+    /// Cached f32 epilogue kernel `(kernel, program)` for library GEMMs.
+    epilogue: RefCell<Option<(Kernel, Program)>>,
 }
 
 impl ClInner {
@@ -109,11 +111,192 @@ impl ClInner {
             driver_version,
             exts,
             compile_cache: RefCell::new(CompileCache::new()),
+            epilogue: RefCell::new(None),
         }
     }
 
     fn synchronize(&self) {
         check(self.queue.finish(), "clFinish");
+    }
+
+    /// `C = (C + bias[col]) * scale[col] + residual[row, col]`, in place.
+    fn epilogue_kernel(&self) -> std::cell::RefMut<'_, Option<(Kernel, Program)>> {
+        let mut slot = self.epilogue.borrow_mut();
+        if slot.is_none() {
+            let src = r#"
+__kernel void autorust_epi_f32(__global float* c, __global const float* b,
+    __global const float* s, __global const float* r,
+    long total, long n, long m, long stride_c,
+    long c_off, long b_off, long s_off, long r_off,
+    int has_bias, int has_scale, int has_res) {
+  long i = (long)get_global_id(0);
+  if (i >= total) return;
+  long col = i % n;
+  long row = (i / n) % m;
+  long bat = i / (n * m);
+  long rel = bat * stride_c + row * n + col;
+  long ci = c_off + rel;
+  float v = c[ci];
+  if (has_bias) v += b[b_off + col];
+  if (has_scale) v *= s[s_off + col];
+  if (has_res) v += r[r_off + rel];
+  c[ci] = v;
+}
+"#;
+            let program = check(
+                Program::create_from_source(&self.context, src),
+                "clCreateProgramWithSource(epilogue)",
+            );
+            let devices = [self.dev.id()];
+            if let Err(e) = program.build(&devices, "") {
+                let log = program.get_build_log(devices[0]).unwrap_or_default();
+                panic!("TGERR: OpenCL epilogue build error: {e}\n{log}");
+            }
+            let kernel = check(
+                Kernel::create(&program, "autorust_epi_f32"),
+                "clCreateKernel(epilogue)",
+            );
+            *slot = Some((kernel, program));
+        }
+        slot
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn epilogue_apply(
+        &self,
+        c: crate::runtime::cl_sys::cl_mem,
+        bias: Option<(crate::runtime::cl_sys::cl_mem, i64)>,
+        scale: Option<(crate::runtime::cl_sys::cl_mem, i64)>,
+        residual: Option<(crate::runtime::cl_sys::cl_mem, i64)>,
+        batch: i64,
+        m: i64,
+        n: i64,
+        stride_c: i64,
+        c_off: i64,
+    ) {
+        if bias.is_none() && scale.is_none() && residual.is_none() {
+            return;
+        }
+        let total = batch.saturating_mul(m).saturating_mul(n);
+        if total <= 0 {
+            return;
+        }
+        let guard = self.epilogue_kernel();
+        let (kernel, _program) = guard.as_ref().expect("epilogue kernel");
+        let b_ptr = bias.map(|x| x.0).unwrap_or(c);
+        let s_ptr = scale.map(|x| x.0).unwrap_or(c);
+        let r_ptr = residual.map(|x| x.0).unwrap_or(c);
+        let b_off = bias.map(|x| x.1).unwrap_or(0);
+        let s_off = scale.map(|x| x.1).unwrap_or(0);
+        let r_off = residual.map(|x| x.1).unwrap_or(0);
+        let (has_bias, has_scale, has_res) = (
+            bias.is_some() as i32,
+            scale.is_some() as i32,
+            residual.is_some() as i32,
+        );
+        check(kernel.set_arg(0, &c), "epilogue arg c");
+        check(kernel.set_arg(1, &b_ptr), "epilogue arg b");
+        check(kernel.set_arg(2, &s_ptr), "epilogue arg s");
+        check(kernel.set_arg(3, &r_ptr), "epilogue arg r");
+        check(kernel.set_arg(4, &total), "epilogue arg total");
+        check(kernel.set_arg(5, &n), "epilogue arg n");
+        check(kernel.set_arg(6, &m), "epilogue arg m");
+        check(kernel.set_arg(7, &stride_c), "epilogue arg stride_c");
+        check(kernel.set_arg(8, &c_off), "epilogue arg c_off");
+        check(kernel.set_arg(9, &b_off), "epilogue arg b_off");
+        check(kernel.set_arg(10, &s_off), "epilogue arg s_off");
+        check(kernel.set_arg(11, &r_off), "epilogue arg r_off");
+        check(kernel.set_arg(12, &has_bias), "epilogue arg has_bias");
+        check(kernel.set_arg(13, &has_scale), "epilogue arg has_scale");
+        check(kernel.set_arg(14, &has_res), "epilogue arg has_res");
+        let gs = [total as usize, 1, 1];
+        check(
+            self.queue.enqueue_nd_range_kernel(kernel.get(), &gs, None),
+            "clEnqueueNDRangeKernel(epilogue)",
+        );
+    }
+
+    /// Run a host GEMM (CLBlast) described by the scheduler's `HostGemm`.
+    fn host_gemm(
+        &self,
+        bufs: &[crate::runtime::buffer::OpaqueView],
+        desc: &crate::uop::arg::DataArg,
+    ) {
+        use crate::runtime::clblast;
+        use crate::schedule::host_gemm::HostGemm;
+        let g = HostGemm::from_arg(&crate::uop::arg::Arg::Data(desc.clone()))
+            .unwrap_or_else(|| panic!("TGERR: bad HostGemm descriptor"));
+        assert_eq!(
+            g.dtype,
+            crate::dtype::FLOAT32,
+            "CLBlast path only supports f32"
+        );
+        let mem = |slot: i64| -> crate::runtime::cl_sys::cl_mem {
+            cl_of(&*bufs[slot as usize]).mem.get()
+        };
+        // CLBlast takes an explicit layout, so pass row-major and use the
+        // transpose flags only when an operand is stored the other way round.
+        let (trans_a, a_ld) = if g.a_k == 1 {
+            (clblast::TRANSPOSE_NO, g.a_m)
+        } else {
+            (clblast::TRANSPOSE_YES, g.a_k)
+        };
+        let (trans_b, b_ld) = if g.b_n == 1 {
+            (clblast::TRANSPOSE_NO, g.b_k)
+        } else {
+            (clblast::TRANSPOSE_YES, g.b_n)
+        };
+        let c_ld = g.c_m;
+        let (a, b, c) = (mem(g.a_slot), mem(g.b_slot), mem(g.c_slot));
+        if let Err(e) = unsafe {
+            clblast::gemm(
+                self.queue.raw(),
+                trans_a,
+                trans_b,
+                g.m as usize,
+                g.n as usize,
+                g.k as usize,
+                g.alpha,
+                a,
+                g.a_off as usize,
+                a_ld as usize,
+                b,
+                g.b_off as usize,
+                b_ld as usize,
+                c,
+                g.c_off as usize,
+                c_ld as usize,
+                g.batch as usize,
+                g.a_b.max(0) as usize,
+                g.b_b.max(0) as usize,
+                g.c_b.max(0) as usize,
+            )
+        } {
+            panic!(
+                "TGERR: {e} (m={} n={} k={} batch={})",
+                g.m, g.n, g.k, g.batch
+            );
+        }
+        if g.bias_slot >= 0 || g.scale_slot >= 0 || g.res_slot >= 0 {
+            let opt = |slot: i64, off: i64| -> Option<(crate::runtime::cl_sys::cl_mem, i64)> {
+                if slot >= 0 {
+                    Some((mem(slot), off))
+                } else {
+                    None
+                }
+            };
+            self.epilogue_apply(
+                c,
+                opt(g.bias_slot, g.bias_off),
+                opt(g.scale_slot, g.scale_off),
+                opt(g.res_slot, g.res_off),
+                g.batch,
+                g.m,
+                g.n,
+                if g.batch > 1 { g.c_b } else { 0 },
+                g.c_off,
+            );
+        }
     }
 }
 
@@ -417,7 +600,13 @@ pub fn register() {
                 )))
             })
         };
-        Compiled::new("CL", renderer, allocator, compiler, ctor)
+        let dev = Compiled::new("CL", renderer, allocator, compiler, ctor);
+        if crate::runtime::clblast::library_present() {
+            let inner2 = inner.clone();
+            *dev.host_exec.borrow_mut() =
+                Some(Box::new(move |bufs, desc| inner2.host_gemm(bufs, desc)));
+        }
+        dev
     });
     register_device("CL", factory);
 }

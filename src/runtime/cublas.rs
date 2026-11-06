@@ -226,7 +226,12 @@ pub fn library_present() -> bool {
 /// `AUTORUST_CUBLAS=0` disables it; any other value keeps the default (on when
 /// the library is present).
 pub fn available() -> bool {
-    if std::env::var("AUTORUST_CUBLAS").as_deref() == Ok("0") {
+    if matches!(
+        std::env::var("AUTORUST_GEMM")
+            .or_else(|_| std::env::var("AUTORUST_CUBLAS"))
+            .as_deref(),
+        Ok("0")
+    ) {
         return false;
     }
     lib().is_some()

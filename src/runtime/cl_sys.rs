@@ -464,6 +464,11 @@ impl CommandQueue {
         })
     }
 
+    /// Raw `cl_command_queue` (for library calls such as CLBlast).
+    pub fn raw(&self) -> cl_command_queue {
+        self.raw
+    }
+
     /// `clFinish`.
     pub fn finish(&self) -> ClResult<()> {
         let cl = ClLib::get().ok_or(ClError(-1))?;

@@ -361,30 +361,77 @@ fn unwrap(ctx: &UOpCtx, mut u: UopId) -> UopId {
     }
 }
 
-fn is_cuda(ctx: &UOpCtx, u: &UopId) -> bool {
-    let mut cur = u.clone();
-    for _ in 0..8 {
-        if let Arg::Param(p) = ctx.arg_of(&cur) {
-            return matches!(p.device, Some(DeviceSpec::Single(ref s)) if s.starts_with("CUDA"));
+fn library_ready(kind: GemmDevice) -> bool {
+    match kind {
+        GemmDevice::Cuda => {
+            #[cfg(feature = "backend_cuda")]
+            {
+                crate::runtime::cublas::available()
+            }
+            #[cfg(not(feature = "backend_cuda"))]
+            {
+                false
+            }
         }
-        if ctx.srcs(&cur).is_empty() {
-            return false;
+        GemmDevice::Cl => {
+            #[cfg(feature = "backend_cl")]
+            {
+                crate::runtime::clblast::available()
+            }
+            #[cfg(not(feature = "backend_cl"))]
+            {
+                false
+            }
         }
-        cur = ctx.srcs(&cur)[0].clone();
+    }
+}
+
+/// Whether any dynamically loaded GEMM library is usable in this process.
+///
+/// The per-device check happens in [`extract`]: a CUDA store needs cuBLAS and an
+/// OpenCL store needs CLBlast.
+pub fn library_available() -> bool {
+    #[cfg(feature = "backend_cuda")]
+    if crate::runtime::cublas::available() {
+        return true;
+    }
+    #[cfg(feature = "backend_cl")]
+    if crate::runtime::clblast::available() {
+        return true;
     }
     false
 }
 
-/// Whether a dynamically loaded GEMM library is usable in this process.
-pub fn library_available() -> bool {
-    #[cfg(feature = "backend_cuda")]
-    {
-        crate::runtime::cublas::available()
+/// Which library-backed device a kernel belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GemmDevice {
+    Cuda,
+    Cl,
+}
+
+fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
+    let mut cur = u.clone();
+    for _ in 0..8 {
+        if let Arg::Param(p) = ctx.arg_of(&cur) {
+            let s = match &p.device {
+                Some(DeviceSpec::Single(s)) => s.as_str(),
+                Some(DeviceSpec::Multi(v)) => v.first().map(|s| s.as_str())?,
+                None => return None,
+            };
+            if s.starts_with("CUDA") {
+                return Some(GemmDevice::Cuda);
+            }
+            if s.starts_with("CL") {
+                return Some(GemmDevice::Cl);
+            }
+            return None;
+        }
+        if ctx.srcs(&cur).is_empty() {
+            return None;
+        }
+        cur = ctx.srcs(&cur)[0].clone();
     }
-    #[cfg(not(feature = "backend_cuda"))]
-    {
-        false
-    }
+    None
 }
 
 /// Try to interpret a lowered kernel store as a library GEMM.
@@ -409,7 +456,8 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if ctx.op_of(&st0) != Ops::Store || !has_reduce(ctx, &ctx.srcs(&st0)[1].clone()) {
         return None;
     }
-    if !is_cuda(ctx, &store) {
+    let kind = gemm_device(ctx, &store)?;
+    if !library_ready(kind) {
         return None;
     }
 
@@ -531,6 +579,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         ctx.dt_of(&mul),
         crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
     ) {
+        return None;
+    }
+    // CLBlast's `Sgemm` is the only entry point wired up on OpenCL.
+    if kind == GemmDevice::Cl && ctx.dt_of(&mul) != crate::dtype::FLOAT32 {
         return None;
     }
 
@@ -681,7 +733,9 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // cleanly the generated kernel is faster (and avoids a library call).
     // `AUTORUST_CUBLAS=all` forces the library for every eligible contraction.
     let force = matches!(
-        std::env::var("AUTORUST_CUBLAS").as_deref(),
+        std::env::var("AUTORUST_GEMM")
+            .or_else(|_| std::env::var("AUTORUST_CUBLAS"))
+            .as_deref(),
         Ok("all") | Ok("force")
     );
     if !force && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {

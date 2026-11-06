@@ -90,17 +90,34 @@ grid dimension is placed on `blockIdx.x` so CUDA runs all M blocks for one N
 weight tile before moving on (L2 reuse). Tuning overrides:
 `AUTORUST_MM_{M,N,K,LM,LN}`.
 
-On CUDA, a pure contraction can also run through **dynamically loaded cuBLAS**.
-The scheduler describes it as a `HostGemm` (shapes, strides, optional fused
-bias) and the executor calls `cublasSgemm_v2` / `cublasGemmEx` — including
-strided-batched attention and a small bias epilogue. This is what makes the
-prime 197-token ViT sequence fast: the register tile cannot vectorize 197, while
-the library can. The library is used only for shapes that do not tile cleanly
-(any of `m,n,k` not divisible by 4), because our own kernels still win on
-square matrices; `AUTORUST_CUBLAS=all` forces it, `=0` disables it.
-`AUTORUST_CUBLAS_TF32=1` allows TF32 for f32 GEMMs, and
-`AUTORUST_CUBLAS_LIB=/path/libcublas.so` overrides the library. No CUDA toolkit
-is needed at build time; a missing library just disables the path.
+A pure contraction can also run through a **dynamically loaded library GEMM**.
+The scheduler describes it as a `HostGemm` (shapes, strides, dtype, alpha and a
+fused `bias + per-column scale + residual` epilogue) and the executor calls the
+backend's library:
+
+- **CUDA → cuBLAS** (`cublasSgemm_v2` / `cublasGemmEx`, f32/f16/bf16,
+  strided-batched, in-place epilogue kernel).
+- **CL → CLBlast** (`CLBlastSgemm` / `CLBlastSgemmStridedBatched`, f32,
+  row-major). Install `libclblast1` (`apt install libclblast1`); without it the
+  OpenCL backend simply keeps using generated kernels.
+
+This is what makes the prime 197-token ViT sequence fast: the register tile
+cannot vectorize 197, while the library can. The library is used only for shapes
+that do not tile cleanly (any of `m,n,k` not divisible by 4), because our own
+kernels still win on square matrices.
+
+| switch | effect |
+|---|---|
+| `AUTORUST_GEMM=all` | force the library for every eligible contraction |
+| `AUTORUST_GEMM=0` | disable the library on every backend |
+| `AUTORUST_CUBLAS=all\|0` | CUDA-only alias (kept for compatibility) |
+| `AUTORUST_CUBLAS_TF32=1` | allow TF32 for f32 CUDA GEMMs |
+| `AUTORUST_CUBLAS_LIB`, `AUTORUST_CLBLAST_LIB` | override the library path |
+
+Neither library is needed at build time; a missing one just disables its path.
+On a 448px DINOv3 ViT-S/16, CLBlast takes the OpenCL backend from 27.0 s to
+9.5 s per 128 frames (generated kernels → library GEMM), with CUDA/cuBLAS at
+6.9 s.
 
 Representative numbers on a 24-thread Ryzen 3900X / RTX 3060 (captured,
 `JIT=1`):
