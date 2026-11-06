@@ -90,9 +90,39 @@ impl Jit {
     where
         F: FnOnce(&Ctx, &mut Session) -> Tensor,
     {
-        self.call_many(ctx, sess, |ctx, sess| vec![f(ctx, sess)])
-            .pop()
-            .expect("TGERR: JIT call captured no result")
+        if !sess.jit_enabled() {
+            // `if not JIT:` (jit.py:244) — run the step directly, no capture.
+            return f(ctx, sess);
+        }
+        if self.rets.is_empty() {
+            // Single-root capture keeps the original `realize_ctx` path (the
+            // CL device-RNG/JIT tests depend on its exact capture semantics).
+            sess.begin_capture();
+            let ret = f(ctx, sess);
+            let mut c = ctx.borrow_mut();
+            ret.realize_ctx(&mut c, sess);
+            let planned = sess.end_capture();
+            assert!(
+                !planned.is_empty(),
+                "TGERR: JIT captured no linears (did the step realize anything?)"
+            );
+            self.linears = planned
+                .into_iter()
+                .map(|l| compile_linear_cached(&mut c, l, &mut sess.cache))
+                .collect();
+            self.held = collect_buffers(&mut c, sess, &self.linears);
+            self.rets = vec![ret.clone()];
+            ret
+        } else {
+            let mut c = ctx.borrow_mut();
+            for cl in &self.linears {
+                exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new());
+            }
+            self.rets
+                .first()
+                .cloned()
+                .expect("TGERR: JIT replay missing captured result")
+        }
     }
 
     /// Multi-root variant of [`Jit::call`]: all returned tensors are realized

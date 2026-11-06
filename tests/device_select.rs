@@ -47,6 +47,14 @@ fn cuda_availability_probe_does_not_panic() {
     let _ = autorust::runtime::ops_cuda::available();
 }
 
+/// Same requirement for OpenCL: the loader is dynamic, and `AUTORUST_CL_LIB`
+/// can point at a missing path to exercise the fallback.
+#[cfg(feature = "backend_cl")]
+#[test]
+fn cl_availability_probe_does_not_panic() {
+    let _ = autorust::runtime::ops_cl::available();
+}
+
 /// `RUST` is only selected when `rustc` is present; the probe must not panic.
 #[cfg(feature = "backend_rust")]
 #[test]

@@ -5,7 +5,6 @@
 use autorust::engine::jit::Jit;
 use autorust::engine::session::Session;
 use autorust::tensor::{Ctx, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 /// On replay the JIT executes the stored compiled LINEARS: it must not re-lower
 /// or re-look-up any program (`jit_lower` runs once, jit.py:263).
@@ -181,18 +180,19 @@ fn jit_rng_continues_from_host_counter() {
     }
     let ctx = Ctx::new();
     let mut sess = Session::new();
-    let draw = |ctx: &mut UOpCtx, sess: &mut Session| {
-        Tensor::randint(ctx, &[6], 0, 50, None, None).to_list::<i32>(sess)
+    let draw = |ctx: &Ctx, sess: &mut Session| {
+        let t = Tensor::randint(&mut ctx.borrow_mut(), &[6], 0, 50, None, None);
+        t.to_list::<i32>(sess)
     };
 
     // A: one "init" draw, then three non-JIT draws.
     Tensor::manual_seed(7);
-    let init_a = draw(&mut ctx.raw(), &mut sess);
-    let a: Vec<Vec<i32>> = (0..3).map(|_| draw(&mut ctx.raw(), &mut sess)).collect();
+    let init_a = draw(&ctx, &mut sess);
+    let a: Vec<Vec<i32>> = (0..3).map(|_| draw(&ctx, &mut sess)).collect();
 
     // B: the same init draw, then JIT for the rest.
     Tensor::manual_seed(7);
-    let init_b = draw(&mut ctx.raw(), &mut sess);
+    let init_b = draw(&ctx, &mut sess);
     assert_eq!(init_a, init_b);
     sess.enable_jit();
     let mut jit = Jit::new();

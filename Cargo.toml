@@ -39,15 +39,19 @@ required-features = ["backend_cuda"]
 
 [features]
 # `ops_interp` is always compiled (the faithful reference interpreter). The
-# default set adds the multithreaded CPU backend `ops_rayon`; `backend_cl` and
-# `backend_cuda` are opt-in and, when compiled, take selection priority.
-default = ["capi", "backend_rayon"]
+# default set adds the multithreaded CPU backend (`RAYON`), the dynamically
+# loaded native CPU backends (`RUST`/`CC`), and OpenCL (`CL`). CUDA stays opt-in
+# (build weight/test environment; it is dynamically loaded and needs no CUDA
+# libraries at build time).
+default = ["capi", "backend_rayon", "backend_rust", "backend_cl", "backend_clang"]
 # C ABI loaded by the Python ctypes bridge (py/bridge.py).
 capi = []
 # Multithreaded CPU backend (device "RAYON"), parallelized with `rayon`.
 backend_rayon = ["dep:rayon", "dep:bytemuck"]
-backend_cl = ["dep:opencl3"]
-# CUDA backend (operations/codegen on the CUDA driver API via `cudarc`).
+# OpenCL backend (device "CL"), loaded dynamically at run time.
+backend_cl = ["dep:libloading"]
+# CUDA backend (operations/codegen on the CUDA driver API via `cudarc`),
+# dynamically loaded; no CUDA libraries are required at build time.
 backend_cuda = ["dep:cudarc"]
 # Native CPU backend: render Rust kernels, compile them with `rustc` to a
 # cdylib, and load them with `libloading`. Parallel launches use `rayon`.
@@ -78,8 +82,8 @@ nanoserde = "0.2.1"
 rayon = { version = "1.12", optional = true }
 # dtype-native byte reinterpretation for the `ops_rayon` typed evaluator.
 bytemuck = { version = "1", optional = true }
-opencl3 = { version = "0.9", optional = true }
-# Runtime loading of the `rustc`-built kernel cdylibs (`backend_rust`).
+# Runtime loading of the `rustc`-built kernel cdylibs (`backend_rust`),
+# portable C shared libraries (`backend_clang`), and `libOpenCL` (`backend_cl`).
 libloading = { version = "0.8", optional = true }
 # CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
 # needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.

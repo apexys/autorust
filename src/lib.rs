@@ -40,9 +40,11 @@
 //!
 //! # Features
 //!
-//! Default: `capi` + `backend_rayon`. `backend_cl` and `backend_cuda` are
-//! opt-in. `--no-default-features` is std-only (plus `nanoserde`). See
-//! `Cargo.toml` and the README for the full table.
+//! Default: `capi` + `backend_rayon` + `backend_rust` + `backend_clang` +
+//! `backend_cl` (all dynamically loaded at run time). CUDA (`backend_cuda`)
+//! and the frozen-plan API (`freeze`) are opt-in. `--no-default-features` is
+//! std-only (plus `nanoserde`). See `Cargo.toml` and the README for the full
+//! table.
 //!
 //! # Threading and panics
 //!

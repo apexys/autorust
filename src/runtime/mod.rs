@@ -4,6 +4,8 @@
 //! by implementing `OpaqueT`, `BackendAllocator`, `Comp`, `Prog` and
 //! `UopRenderer` and calling `register_device` — nothing else.
 pub mod buffer;
+#[cfg(feature = "backend_cl")]
+pub(crate) mod cl_sys;
 pub mod device;
 pub mod interp;
 #[cfg(feature = "backend_cl")]

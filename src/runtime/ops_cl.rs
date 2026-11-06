@@ -1,5 +1,5 @@
-//! `runtime/ops_cl.py` port — the OpenCL backend (`opencl3` behind the
-//! `backend_cl` feature).
+//! `runtime/ops_cl.py` port — the OpenCL backend (dynamically loaded `cl_sys`
+//! behind the `backend_cl` feature).
 //!
 //! `CLDevice` = CLCompiler (source → CL binary) + CLAllocator (clCreateBuffer
 //! under the LRU) + CLProgram (binary → clCreateKernel, NDRange launches) over
@@ -8,23 +8,22 @@
 //! `register_device`) as the interp backend. Corpus constraints mirrored from
 //! python: no images, no `_offset` (python's CLAllocator has none), blocking
 //! copyin (python retains pending_copyin instead).
+//!
+//! The OpenCL library is loaded at run time (`cl_sys`), so a binary built with
+//! `backend_cl` starts and falls back cleanly on machines without an ICD
+//! loader.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use opencl3::command_queue::{CL_QUEUE_PROFILING_ENABLE, CommandQueue};
-use opencl3::context::Context;
-use opencl3::device::{
-    CL_DEVICE_TYPE_DEFAULT, CL_DEVICE_TYPE_GPU, Device, cl_device_id, get_all_devices,
-};
-use opencl3::kernel::Kernel;
-use opencl3::memory::{Buffer, CL_MEM_READ_WRITE, ClMem, cl_mem};
-use opencl3::program::Program;
-
 use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
 use crate::runtime::buffer::OpaqueT;
+use crate::runtime::cl_sys::{
+    CL_DEVICE_TYPE_DEFAULT, CL_DEVICE_TYPE_GPU, CL_MEM_READ_WRITE, CL_QUEUE_PROFILING_ENABLE,
+    CommandQueue, Context, Device, Kernel, Mem, Program, cl_device_id, cl_mem, get_all_devices,
+};
 use crate::runtime::device::{
     BackendAllocator, Comp, Compiled, LruAllocator, Prog, TinyElf, register_device,
 };
@@ -74,9 +73,11 @@ impl CompileCache {
 /// programs (python: CLDevice fields).
 #[allow(dead_code)]
 struct ClInner {
-    dev: Device,
-    context: Context,
+    // Drop order: the queue must be released before the context, and both
+    // before the device handle is dropped (the device is not refcounted).
     queue: CommandQueue,
+    context: Context,
+    dev: Device,
     device_name: String,
     driver_version: String,
     exts: String,
@@ -97,16 +98,13 @@ impl ClInner {
         eprintln!("CLDevice: opening {device_name} with version {driver_version}");
         let context = check(Context::from_device(&dev), "clCreateContext");
         let queue = check(
-            #[allow(deprecated)]
-            unsafe {
-                CommandQueue::create(&context, dev.id(), CL_QUEUE_PROFILING_ENABLE)
-            },
+            CommandQueue::create(&context, dev.id(), CL_QUEUE_PROFILING_ENABLE),
             "clCreateCommandQueue",
         );
         ClInner {
-            dev,
-            context,
             queue,
+            context,
+            dev,
             device_name,
             driver_version,
             exts,
@@ -127,7 +125,7 @@ fn check<T, E: std::fmt::Display>(r: Result<T, E>, what: &str) -> T {
 
 /// `cl_mem` handle wrapped as the backend opaque (python `cl.cl_mem`).
 struct ClOpaque {
-    buf: Buffer<u8>,
+    mem: Mem,
     size: usize,
 }
 
@@ -136,7 +134,7 @@ impl OpaqueT for ClOpaque {
         self.size
     }
     fn storage_id(&self) -> usize {
-        self.buf.get() as usize
+        self.mem.get() as usize
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -149,14 +147,6 @@ fn cl_of(o: &dyn OpaqueT) -> &ClOpaque {
         .expect("TGERR: expected CL opaque")
 }
 
-/// A temporary `Buffer` view over an existing cl_mem for the enqueue calls
-/// (opencl3's enqueue API wants `&mut Buffer`; the temporary is leaked out of
-/// Drop so the owning `ClOpaque` stays the single release point).
-#[allow(dead_code)]
-fn temp_buf(mem: cl_mem) -> Buffer<u8> {
-    Buffer::new(mem)
-}
-
 // ---------------- allocator ----------------
 
 struct ClAllocator {
@@ -165,63 +155,50 @@ struct ClAllocator {
 
 impl BackendAllocator for ClAllocator {
     fn _alloc(&self, size: usize) -> Rc<dyn OpaqueT> {
-        let buf = unsafe {
-            Buffer::<u8>::create(
+        let mem = check(
+            Mem::create(
                 &self.inner.context,
                 CL_MEM_READ_WRITE,
                 size,
                 std::ptr::null_mut(),
-            )
-        };
-        Rc::new(ClOpaque {
-            buf: check(buf, "clCreateBuffer"),
-            size,
-        })
+            ),
+            "clCreateBuffer",
+        );
+        Rc::new(ClOpaque { mem, size })
     }
     fn _free(&self, o: Rc<dyn OpaqueT>) {
-        drop(o); // Buffer drop => clReleaseMemObject
+        drop(o); // ClOpaque drop => Mem drop => clReleaseMemObject
     }
     fn _copyin(&self, dest: &dyn OpaqueT, src: &[u8]) {
-        // the enqueue API wants &mut Buffer; wrap the mem in a temporary that we
-        // leak so the owning ClOpaque stays the single release point
-        let mut tmp = Buffer::new(cl_of(dest).buf.get());
-        // blocking write (python posts a non-blocking write and retains the
-        // source until the queue executes it)
         check(
-            unsafe {
-                self.inner
-                    .queue
-                    .enqueue_write_buffer(&mut tmp, 1, 0, src, &[])
-            },
+            self.inner
+                .queue
+                .enqueue_write_buffer(cl_of(dest).mem.get(), true, 0, src),
             "clEnqueueWriteBuffer",
         );
-        std::mem::forget(tmp);
     }
     fn _copyout(&self, dest: &mut [u8], src: &dyn OpaqueT) {
-        let s = &cl_of(src).buf;
         check(
-            unsafe { self.inner.queue.enqueue_read_buffer(s, 1, 0, dest, &[]) },
+            self.inner
+                .queue
+                .enqueue_read_buffer(cl_of(src).mem.get(), true, 0, dest),
             "clEnqueueReadBuffer",
         );
         self.inner.synchronize();
     }
     fn _copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
         // Direct device-to-device copy (`clEnqueueCopyBuffer`); no host transfer.
-        // The enqueue API wants `&mut Buffer`; wrap both cl_mems in temporaries we
-        // leak so the owning ClOpaque stays the single release point.
         assert_eq!(dest.size(), src.size(), "TGERR: copy size mismatch");
-        let mut dst_tmp: Buffer<u8> = Buffer::new(cl_of(dest).buf.get());
-        let src_tmp: Buffer<u8> = Buffer::new(cl_of(src).buf.get());
         check(
-            unsafe {
-                self.inner
-                    .queue
-                    .enqueue_copy_buffer(&src_tmp, &mut dst_tmp, 0, 0, src.size(), &[])
-            },
+            self.inner.queue.enqueue_copy_buffer(
+                cl_of(src).mem.get(),
+                cl_of(dest).mem.get(),
+                0,
+                0,
+                src.size(),
+            ),
             "clEnqueueCopyBuffer",
         );
-        std::mem::forget(dst_tmp);
-        std::mem::forget(src_tmp);
         // `_copyout` is blocking; keep the same visibility guarantee.
         self.inner.synchronize();
     }
@@ -239,7 +216,7 @@ struct ClCompiler {
 impl Comp for ClCompiler {
     /// `CLCompiler.compile` — build from source, fetch the device binary.
     fn compile(&self, src: &str) -> Vec<u8> {
-        let mut program = check(
+        let program = check(
             Program::create_from_source(&self.inner.context, src),
             "clCreateProgramWithSource",
         );
@@ -271,12 +248,10 @@ impl Comp for ClCompiler {
 /// `CLProgram` — create the kernel from the compiled binary and launch it.
 #[allow(dead_code)]
 pub struct ClProgram {
-    inner: Rc<ClInner>,
+    /// Released before `program`; field order is drop order.
     kernel: Kernel,
-    /// tinygrad `CLProgram.program` — kept alive until the kernel is dropped
-    /// (`__del__` releases the kernel then the program). Field order matters:
-    /// Rust drops fields in declaration order, so `kernel` goes first.
     program: Program,
+    inner: Rc<ClInner>,
     signature: Vec<(i64, DTypeId)>,
 }
 
@@ -289,8 +264,10 @@ impl ClProgram {
         let compiled = cl_compiler.compile_cached(src);
         let devices = [inner.dev.id()];
         let binaries: Vec<&[u8]> = vec![&compiled];
-        let program = unsafe { Program::create_from_binary(&inner.context, &devices, &binaries) };
-        let mut program = check(program, "clCreateProgramWithBinary");
+        let program = check(
+            Program::create_from_binary(&inner.context, &devices, &binaries),
+            "clCreateProgramWithBinary",
+        );
         check(program.build(&devices, ""), "clBuildProgram");
         let kernel = check(Kernel::create(&program, &obj.name), "clCreateKernel");
         ClProgram {
@@ -314,12 +291,8 @@ impl Prog for ClProgram {
         // python: set each signature slot from bufs[slot] or vals[slot-len(bufs)]
         for (i, (slot, dt)) in self.signature.iter().enumerate() {
             if (*slot as usize) < bufs.len() {
-                let mem: cl_mem = cl_of(&*bufs[*slot as usize]).buf.get();
-                unsafe {
-                    self.kernel
-                        .set_arg(i as u32, &mem)
-                        .expect("TGERR: clSetKernelArg")
-                };
+                let mem: cl_mem = cl_of(&*bufs[*slot as usize]).mem.get();
+                check(self.kernel.set_arg(i as u32, &mem), "clSetKernelArg");
             } else {
                 let v = vals[(*slot as usize) - bufs.len()];
                 match dt.bitsize() {
@@ -334,33 +307,20 @@ impl Prog for ClProgram {
         // python: local_size scales global_size
         let (gs, ls) = match local_size {
             Some(l) => (
-                global_size
-                    .iter()
-                    .zip(l.iter())
-                    .map(|(g, l)| g * l)
-                    .collect::<Vec<_>>(),
+                [
+                    global_size[0] * l[0],
+                    global_size[1] * l[1],
+                    global_size[2] * l[2],
+                ],
                 Some(l),
             ),
-            None => (global_size.to_vec(), None),
-        };
-        // NB: keep the local sizes alive in a binding — a `map_or(.., |l| l.as_ptr())`
-        // would drop the temporary array and leave a dangling pointer.
-        let ls_ptr: *const usize = match &ls {
-            Some(l) => l.as_ptr(),
-            None => std::ptr::null(),
+            None => (global_size, None),
         };
         let st = std::time::Instant::now();
         let ev = check(
-            unsafe {
-                self.inner.queue.enqueue_nd_range_kernel(
-                    self.kernel.get(),
-                    3,
-                    std::ptr::null(),
-                    gs.as_ptr(),
-                    ls_ptr,
-                    &[],
-                )
-            },
+            self.inner
+                .queue
+                .enqueue_nd_range_kernel(self.kernel.get(), &gs, ls.as_ref()),
             "clEnqueueNDRangeKernel",
         );
         if wait {
@@ -378,16 +338,16 @@ impl Prog for ClProgram {
 }
 
 fn set_arg_u8(k: &Kernel, i: u32, v: u8) {
-    unsafe { k.set_arg(i, &v).expect("TGERR: clSetKernelArg") };
+    check(k.set_arg(i, &v), "clSetKernelArg");
 }
 fn set_arg_u16(k: &Kernel, i: u32, v: u16) {
-    unsafe { k.set_arg(i, &v).expect("TGERR: clSetKernelArg") };
+    check(k.set_arg(i, &v), "clSetKernelArg");
 }
 fn set_arg_i32(k: &Kernel, i: u32, v: i32) {
-    unsafe { k.set_arg(i, &v).expect("TGERR: clSetKernelArg") };
+    check(k.set_arg(i, &v), "clSetKernelArg");
 }
 fn set_arg_i64(k: &Kernel, i: u32, v: i64) {
-    unsafe { k.set_arg(i, &v).expect("TGERR: clSetKernelArg") };
+    check(k.set_arg(i, &v), "clSetKernelArg");
 }
 
 // ---------------- renderer ----------------
@@ -409,9 +369,12 @@ impl UopRenderer for OclUopRenderer {
 // ---------------- device + registration ----------------
 
 /// Whether an OpenCL device is present, without opening a context/queue and
-/// without panicking (the default-device probe). Matches `ClInner::open`'s
-/// GPU-else-DEFAULT selection.
+/// without panicking (the default-device probe). The ICD loader is loaded
+/// dynamically; a missing library simply returns `false`.
 pub fn available() -> bool {
+    if crate::runtime::cl_sys::ClLib::get().is_none() {
+        return false;
+    }
     match get_all_devices(CL_DEVICE_TYPE_GPU) {
         Ok(ids) if !ids.is_empty() => true,
         _ => get_all_devices(CL_DEVICE_TYPE_DEFAULT)
@@ -422,6 +385,11 @@ pub fn available() -> bool {
 
 /// The `CLDevice` composition + `Device._DeviceMap["CL"]` assignment.
 pub fn register() {
+    // A binary built with `backend_cl` must start on machines without OpenCL;
+    // only register the device when the loader and a device are actually there.
+    if !available() {
+        return;
+    }
     let factory: crate::runtime::device::DeviceFactory = Rc::new(|| {
         let inner = Rc::new(ClInner::open());
         let facts = {

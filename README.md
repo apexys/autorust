@@ -108,11 +108,11 @@ compiles the emitted crate and diffs it against eager).
 |---|---|---|
 | `capi` | yes | Small C ABI used by the development-only Python bridge. |
 | `backend_rayon` | yes | Multithreaded CPU backend (`RAYON`), via `rayon`/`bytemuck`. |
-| `backend_rust` | no | Native CPU backend (`RUST`): Rust kernel source → `rustc` cdylib → `libloading`. |
-| `backend_clang` | no | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |
+| `backend_rust` | yes | Native CPU backend (`RUST`): Rust kernel source → `rustc` cdylib → `libloading`. |
+| `backend_clang` | yes | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |
+| `backend_cl` | yes | OpenCL backend (`CL`), dynamically loaded at run time. |
+| `backend_cuda` | no | CUDA backend (`CUDA`), via `cudarc`; dynamically loaded, no build-time CUDA libs. |
 | `freeze` | no | Capture/emit frozen CPU plans (`autorust::freeze`); enables `backend_rust`. |
-| `backend_cl` | no | OpenCL backend (`CL`), via `opencl3`. |
-| `backend_cuda` | no | CUDA driver + NVRTC backend (`CUDA`), via `cudarc`. |
 | `trace` | no | Rule-firing trace (`TG_TRACE`). |
 | `dump` | no | Debug dumps and pipeline truncation (`TG_*` knobs). |
 
@@ -135,11 +135,9 @@ first tensor/realize.
 - **Backends**: CUDA tensor cores target `sm_86`; OpenCL has no offset views and
   no native bf16; there is no AMD/Metal/WebGPU backend. The `RUST` CPU backend
   is x86-64-first (other architectures fall back to libm for math).
-- **OpenCL linking**: `backend_cl` (through `opencl3`/`cl3`/`opencl-sys`)
-  hard-links `libOpenCL`; a binary built with it needs the ICD loader at
-  startup, so it cannot be shipped to a machine without OpenCL. Default/CPU/
-  CUDA builds do not link it. Dynamic loading is a follow-up (thin `libloading`
-  FFI for the used `cl_*` subset, or a separately loaded backend plugin).
+- **OpenCL loading**: `backend_cl` loads `libOpenCL` dynamically (`cl_sys`);
+  a binary built with it starts on machines without OpenCL and `CL` is simply
+  unavailable. `AUTORUST_CL_LIB` overrides the library path for testing.
 - **Training**: eager autograd covers the ops used by the demos. Fused
   `Tensor.custom_kernel`/`@function` kernels are deferred.
 - **ONNX** covers the T0/T1 inference surface. Missing: `Scatter*`,

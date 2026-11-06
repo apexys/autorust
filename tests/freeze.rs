@@ -15,7 +15,7 @@ fn decode(b: &[u8]) -> Vec<f32> {
 }
 
 #[test]
-fn engine_selects_frozen_without_gpu() {
+fn engine_selects_eager_or_frozen() {
     struct MulModel {
         w: Tensor,
     }
@@ -48,10 +48,26 @@ fn engine_selects_frozen_without_gpu() {
     let eager = MulModel { w: w.clone() };
     assert_eq!(eager.forward(x.clone()).to_list::<f32>(&mut sess), want);
 
-    let frozen =
+    let mut frozen =
         autorust::freeze::Frozen::<MulModel>::new_jit(built.plan, built.progs, vec![w.clone()]);
+    // The frozen path must be correct regardless of which engine is selected.
+    assert_eq!(frozen.forward(x.clone()).to_list::<f32>(&mut sess), want);
+
+    let mut gpu = false;
+    #[cfg(feature = "backend_cuda")]
+    {
+        gpu |= autorust::runtime::ops_cuda::available();
+    }
+    #[cfg(feature = "backend_cl")]
+    {
+        gpu |= autorust::runtime::ops_cl::available();
+    }
     let mut engine = autorust::freeze::Engine::new(eager, frozen);
-    assert!(!engine.is_eager(), "no GPU feature should select Frozen");
+    assert_eq!(
+        engine.is_eager(),
+        gpu,
+        "Engine selection must follow the compiled/available GPU backends"
+    );
     assert_eq!(engine.forward(x.clone()).to_list::<f32>(&mut sess), want);
 }
 

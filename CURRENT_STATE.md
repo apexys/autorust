@@ -2143,25 +2143,34 @@ schedule and upcast policy as `RUST`, so it is a direct codegen oracle.
 re-export, and `examples/frozen_vit/` is a flat build-script package (no model
 subcrate) that runs the packaged `ViT` through capture → emit → `Engine`.
 
-### 9.13 OpenCL linking caveat (2026-11)
+### 9.13 OpenCL dynamic loading (DONE 2026-11)
 
-`backend_cl` is **not** dynamically loaded. `opencl3 0.9.5` -> `cl3` ->
-`opencl-sys` all annotate their FFI blocks with `#[link(name = "OpenCL")]`, so
-`ldd target/debug/ocl_smoke` / `readelf -d` show a hard `DT_NEEDED` on
-`libOpenCL.so.1`. On a machine without the ICD loader the dynamic linker aborts
-before `main`, so `ops_cl::available()` cannot fall back gracefully. Default,
-`RAYON`, `RUST`, `CC` and CUDA builds do not link OpenCL.
+`backend_cl` no longer uses `opencl3` (which hard-linked `libOpenCL`).
+`runtime/cl_sys.rs` loads `libOpenCL.so.1`/`libOpenCL.so` (macOS framework,
+Windows DLL) with `libloading` and resolves the ~30 `cl_*` entry points used by
+`ops_cl`; the backend sees safe RAII wrappers. On a machine without the ICD
+loader `ClLib::get()` returns `None`, `available()` is `false`, and the process
+starts normally. `ldd target/debug/ocl_smoke` / `readelf -d` show no OpenCL
+`NEEDED` entry. `AUTORUST_CL_LIB` overrides the library path for the
+missing-library test (`AUTORUST_CL_LIB=/nonexistent` → probe returns false).
 
-Upstream has no dynamic-loading feature (nor does the `ocl` crate). Follow-ups,
-in order of preference:
-1. A thin `libloading` FFI layer for the ~30 `cl_*` entry points used by
-   `ops_cl.rs` (same pattern as `cudarc`'s `dynamic-loading`), so `available()`
-   can probe and return false.
-2. Move `ops_cl` into a separately loaded plugin `cdylib`; the main binary stays
-   portable and `dlopen`s the backend only when present.
+Leak discipline: every context/queue/program/kernel/mem/event releases on Drop;
+`ClInner` drops the queue before the context, and `ClProgram` drops the kernel
+before the program. Constructors defensively release a non-null handle if the
+driver also returned an error, enqueue errors release any event, and empty
+reads/writes/logs/binaries are short-circuited. The static `libloading::Library`
+is intentionally kept for the process lifetime because resolved function
+pointers must remain valid; the OS reclaims it at exit.
 
-Until then, ship a binary without `backend_cl` if it may run on OpenCL-less
-machines.
+Gates: `cargo test --features backend_cl` 212 passed; the CL harness 12 passed;
+`cl_reduce`/`cl_offset` pass; `ocl_smoke` works on the NVIDIA ICD.
+
+Default features are now `capi, backend_rayon, backend_rust, backend_clang,
+backend_cl`. CUDA stays opt-in for build weight/test environment, not because of
+a build-time library requirement: `cudarc`'s `dynamic-loading` +
+`fallback-latest` builds without CUDA libraries (it warns and uses the latest
+CUDA API if `nvcc` is absent). `freeze` also stays opt-in. Selection remains
+CUDA → CL → RUST → CC → RAYON → INTERP.
 
 ### 9.14 Comparative benchmarks (2026-11, RTX 3060 / Ryzen 3900X)
 
