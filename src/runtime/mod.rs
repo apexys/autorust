@@ -5,6 +5,8 @@
 //! `UopRenderer` and calling `register_device` — nothing else.
 pub mod buffer;
 #[cfg(feature = "backend_cl")]
+pub mod cl_flash;
+#[cfg(feature = "backend_cl")]
 pub(crate) mod cl_sys;
 #[cfg(feature = "backend_cl")]
 pub mod clblast;

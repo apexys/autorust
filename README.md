@@ -127,6 +127,11 @@ against 1.15 ms/image for the generated softmax·V *plus* 0.33 ms for softmax
 and a separate cuBLAS QK^T. It matches `scaled_dot_product_attention` to
 1.2e-8.
 
+`runtime::cl_flash` is the same schedule in OpenCL C (sequence length baked into
+the source so the launch is four buffers on every backend). It matches CL SDPA
+to 1.2e-8 and runs 1.32 ms at batch 1 / 8.33 ms at batch 8 (1.04 ms/image/layer,
+vs 0.73 on CUDA) — so the OpenCL backend gets the same win once it is wired in.
+
 This is the prerequisite for a real fused attention: the graph-level port in
 `models::flash_attention` is 16x *slower* than the current fused softmax·V on
 CUDA (105.7 s vs 6.4 s per 128 frames at 448px) because every tile boundary
