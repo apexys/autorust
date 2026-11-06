@@ -606,7 +606,9 @@ impl Tensor {
             return self;
         }
         let (b, leaf) = sess.realize_tensor(ctx, self.uop());
-        let _ = crate::engine::realize::buffer_bytes(&b);
+        // The BufTable alias is weak; the tensor may be moved into a consumer
+        // and dropped before the next realize, so pin the storage explicitly.
+        sess.pin(b.clone());
         self.set_uop(leaf);
         self.set_realized_buffer(b);
         self

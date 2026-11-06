@@ -57,12 +57,27 @@ pub struct Session {
     /// [`Session::training`], which also mirrors the value into the global flag
     /// that `Tensor.dropout` reads at graph-build time.
     pub training: bool,
+    /// Explicitly materialized storages whose uop outlives the `Tensor` value
+    /// (see [`Tensor::realize_device_ctx`](crate::tensor::Tensor::realize_device_ctx)).
+    /// The BufTable alias is weak, so without this the buffer is freed when the
+    /// tensor is moved into a consumer and the next `prune` reallocates it.
+    pinned: Vec<Buffer>,
 }
 
 impl Session {
     /// Create a session with the default (JIT off, eval mode) settings.
     pub fn new() -> Self {
         Session::default()
+    }
+
+    /// Keep a realized storage alive for the session's lifetime.
+    pub fn pin(&mut self, b: Buffer) {
+        self.pinned.push(b);
+    }
+
+    /// Drop every pinned storage (e.g. at the end of a forward).
+    pub fn unpin_all(&mut self) {
+        self.pinned.clear();
     }
 
     /// `sess.jit(true)` / `sess.jit(false)`: enable/disable JIT capture+replay.
