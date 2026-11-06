@@ -1938,6 +1938,35 @@ impl Tensor {
             enable_gqa,
         )
     }
+    /// Session-aware [`Tensor::scaled_dot_product_attention`].
+    ///
+    /// Same math, but the score matrix (`softmax(q·kᵀ/√d)`) is materialized so
+    /// the `P·V` contraction is a separate kernel. That is what lets the
+    /// projection reach the backends' `HostGemm` library path: a fused store
+    /// has no buffer to describe, so it stays a generated kernel.
+    #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
+    pub fn scaled_dot_product_attention_sess(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        sess: &mut Session,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+        enable_gqa: bool,
+    ) -> Tensor {
+        self.sdpa_impl(
+            &mut self.ctx.borrow_mut(),
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            enable_gqa,
+            true,
+            Some(sess),
+        )
+    }
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
     pub fn scaled_dot_product_attention_ctx(
@@ -1951,7 +1980,7 @@ impl Tensor {
         enable_gqa: bool,
     ) -> Tensor {
         self.sdpa_impl(
-            ctx, key, value, attn_mask, dropout_p, is_causal, enable_gqa, true,
+            ctx, key, value, attn_mask, dropout_p, is_causal, enable_gqa, true, None,
         )
     }
 
@@ -1973,6 +2002,7 @@ impl Tensor {
         is_causal: bool,
         enable_gqa: bool,
         allow_pad: bool,
+        sess: Option<&mut Session>,
     ) -> Tensor {
         let ndim = self.shape_ctx(ctx).len();
         let (key, value) = if enable_gqa {
@@ -2074,7 +2104,17 @@ impl Tensor {
                         .where__ctx(ctx, &zero, &ninf),
                 )
             };
-            let out = qp.sdpa_impl(ctx, &kp, &vp, mask.as_ref(), 0.0, is_causal, false, false);
+            let out = qp.sdpa_impl(
+                ctx,
+                &kp,
+                &vp,
+                mask.as_ref(),
+                0.0,
+                is_causal,
+                false,
+                false,
+                sess,
+            );
             return out.getitem_ctx(
                 ctx,
                 &[Ix::Ellipsis, Ix::slice(Some(0), Some(n), 1), Ix::All],
@@ -2131,6 +2171,12 @@ impl Tensor {
             Some(ndim - 1),
         );
         let sm = sm.dropout_ctx(ctx, dropout_p);
+        // Materialize P so the `P·V` store is a plain contraction. Without a
+        // session the graph stays lazy and the scheduler fuses softmax into the
+        // AV kernel (no buffer, no library GEMM).
+        if let Some(s) = sess {
+            sm.realize_device_ctx(ctx, s);
+        }
         sm.matmul_ctx(ctx, &value)
     }
 

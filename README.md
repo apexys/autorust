@@ -108,6 +108,14 @@ its own fastest implementation:
   CPU kernel tiles one output row and re-streams `B` for every row: 789x384x384
   went from 16.7 ms to 1.2 ms (14 → 200 GFLOP/s) on a 3900X.
 
+Attention's `P·V` reaches the same path when the caller uses
+`Tensor::scaled_dot_product_attention_sess`: the score matrix is materialized so
+the contraction has a buffer to describe. That is a CPU win (0.31 s -> 3 ms for
+the 12 AV products of a ViT-S/16) but a GPU loss, because `P` is
+`batch*heads*t*t` and writing/re-reading it costs more bandwidth than fusing
+softmax into the AV kernel saves. The choice belongs to the caller, which knows
+the device.
+
 This is what makes the prime 197-token ViT sequence fast: the register tile
 cannot vectorize 197, while the library can. On CUDA/OpenCL the library is used
 only for shapes that do not tile cleanly (any of `m,n,k` not divisible by 4),

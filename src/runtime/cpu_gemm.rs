@@ -29,6 +29,9 @@ const MR: usize = 6;
 /// Microkernel columns (two 8-wide vectors).
 const NR: usize = 16;
 
+/// Number of host GEMMs dispatched (observability / tests).
+pub static DISPATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 thread_local! {
     /// Per-thread pack buffer: `MC*KC` floats of `A`, then `KC*NC` of `B`.
     static SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
@@ -75,8 +78,20 @@ pub fn install(dev: &std::rc::Rc<crate::runtime::device::Compiled>) {
             // descriptor's offsets/strides stay inside it.
             ptrs.push(unsafe { mem.as_ptr().add(h.offset) as *mut u8 });
         }
+        DISPATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dbg = std::env::var("AUTORUST_CPU_GEMM_DEBUG").is_ok();
+        let t0 = dbg.then(std::time::Instant::now);
         if let Err(e) = unsafe { run_raw(&g, &ptrs) } {
             panic!("TGERR: cpu gemm: {e}");
+        }
+        if let Some(t) = t0 {
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            if ms > 2.0 {
+                eprintln!(
+                    "CPUGemm m={} n={} k={} batch={} a=[{},{}] b=[{},{}] c=[{},{}] {ms:.2} ms",
+                    g.m, g.n, g.k, g.batch, g.a_m, g.a_k, g.b_k, g.b_n, g.c_m, g.c_n
+                );
+            }
         }
     }));
 }
