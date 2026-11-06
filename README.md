@@ -135,6 +135,11 @@ first tensor/realize.
 - **Backends**: CUDA tensor cores target `sm_86`; OpenCL has no offset views and
   no native bf16; there is no AMD/Metal/WebGPU backend. The `RUST` CPU backend
   is x86-64-first (other architectures fall back to libm for math).
+- **OpenCL linking**: `backend_cl` (through `opencl3`/`cl3`/`opencl-sys`)
+  hard-links `libOpenCL`; a binary built with it needs the ICD loader at
+  startup, so it cannot be shipped to a machine without OpenCL. Default/CPU/
+  CUDA builds do not link it. Dynamic loading is a follow-up (thin `libloading`
+  FFI for the used `cl_*` subset, or a separately loaded backend plugin).
 - **Training**: eager autograd covers the ops used by the demos. Fused
   `Tensor.custom_kernel`/`@function` kernels are deferred.
 - **ONNX** covers the T0/T1 inference surface. Missing: `Scatter*`,

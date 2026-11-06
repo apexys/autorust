@@ -2142,3 +2142,23 @@ schedule and upcast policy as `RUST`, so it is a direct codegen oracle.
 `TransformerBlock`, `Transformer` and `ViT`. `freeze::ModuleForward` is a
 re-export, and `examples/frozen_vit/` is a flat build-script package (no model
 subcrate) that runs the packaged `ViT` through capture → emit → `Engine`.
+
+### 9.13 OpenCL linking caveat (2026-11)
+
+`backend_cl` is **not** dynamically loaded. `opencl3 0.9.5` -> `cl3` ->
+`opencl-sys` all annotate their FFI blocks with `#[link(name = "OpenCL")]`, so
+`ldd target/debug/ocl_smoke` / `readelf -d` show a hard `DT_NEEDED` on
+`libOpenCL.so.1`. On a machine without the ICD loader the dynamic linker aborts
+before `main`, so `ops_cl::available()` cannot fall back gracefully. Default,
+`RAYON`, `RUST`, `CC` and CUDA builds do not link OpenCL.
+
+Upstream has no dynamic-loading feature (nor does the `ocl` crate). Follow-ups,
+in order of preference:
+1. A thin `libloading` FFI layer for the ~30 `cl_*` entry points used by
+   `ops_cl.rs` (same pattern as `cudarc`'s `dynamic-loading`), so `available()`
+   can probe and return false.
+2. Move `ops_cl` into a separately loaded plugin `cdylib`; the main binary stays
+   portable and `dlopen`s the backend only when present.
+
+Until then, ship a binary without `backend_cl` if it may run on OpenCL-less
+machines.

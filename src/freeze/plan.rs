@@ -79,6 +79,8 @@ pub struct FrozenPlan {
     pub outputs: Vec<usize>,
     /// Concrete output shapes, in the same order as `outputs`.
     pub output_shapes: Vec<Vec<i64>>,
+    /// Kernel names (for diagnostics/profiling), in kernel-table order.
+    pub kernel_names: Vec<String>,
 }
 
 impl FrozenPlan {
@@ -313,8 +315,10 @@ pub fn build(
         .iter()
         .map(|cp| RustProgram::new(cp.elf.as_ref()))
         .collect();
+    let mut plan = b.plan;
+    plan.kernel_names = b.kernels.iter().map(|cp| cp.elf.name.clone()).collect();
     BuiltPlan {
-        plan: b.plan,
+        plan,
         progs,
         kernels: b.kernels,
     }

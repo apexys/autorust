@@ -5,6 +5,8 @@
 //! Internal storages are allocated once and reused across runs; external
 //! storages are bound to the live input/weight tensors.
 
+use std::time::Instant;
+
 use rayon::prelude::*;
 
 use crate::runtime::buffer::{OpaqueView, host_of};
@@ -22,6 +24,9 @@ pub struct FrozenRunner {
     fns: Vec<KernelFn>,
     /// Internal storage allocations, reused across runs (empty for external).
     internal: Vec<Vec<u8>>,
+    /// Per-kernel `(calls, seconds)` when `FROZEN_PROF` is set.
+    prof: Vec<(u64, f64)>,
+    prof_on: bool,
 }
 
 impl FrozenRunner {
@@ -63,6 +68,8 @@ impl FrozenRunner {
         FrozenRunner {
             plan,
             _progs: Vec::new(),
+            prof: vec![(0u64, 0.0f64); fns.len()],
+            prof_on: std::env::var("FROZEN_PROF").is_ok(),
             fns,
             internal,
         }
@@ -142,7 +149,13 @@ impl FrozenRunner {
                     global,
                 } => {
                     let ptrs: Vec<usize> = bufs.iter().map(|&v| ptr_of(v, &base_ptrs)).collect();
+                    let timer = self.prof_on.then(Instant::now);
                     run_kernel(self.fns[*kernel], &ptrs, vals, *global);
+                    if let Some(t) = timer {
+                        let e = &mut self.prof[*kernel];
+                        e.0 += 1;
+                        e.1 += t.elapsed().as_secs_f64();
+                    }
                 }
                 Step::Copy { dst, src } => {
                     let d = ptr_of(*dst, &base_ptrs);
@@ -168,6 +181,38 @@ impl FrozenRunner {
                 unsafe { std::slice::from_raw_parts(ptr as *const u8, view.nbytes).to_vec() }
             })
             .collect()
+    }
+
+    /// Print the per-kernel profile collected under `FROZEN_PROF`.
+    pub fn report_profile(&self) {
+        let mut rows: Vec<(usize, u64, f64)> = self
+            .prof
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.0 > 0)
+            .map(|(i, e)| (i, e.0, e.1))
+            .collect();
+        rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        println!("--- frozen kernel profile ---");
+        println!(
+            "{:<28} {:>6} {:>10} {:>12}",
+            "kernel", "calls", "total (s)", "per call"
+        );
+        for (i, calls, total) in rows {
+            let name = self
+                .plan
+                .kernel_names
+                .get(i)
+                .map(String::as_str)
+                .unwrap_or("?");
+            println!(
+                "{:<28} {:>6} {:>10.4} {:>10.3} ms",
+                name,
+                calls,
+                total,
+                total / calls as f64 * 1e3
+            );
+        }
     }
 }
 

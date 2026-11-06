@@ -164,6 +164,11 @@ fn plan_source(plan: &FrozenPlan) -> String {
         writeln!(s, "            vec![{}],", shape.join(", ")).unwrap();
     }
     s.push_str("        ],\n");
+    s.push_str("        kernel_names: vec![\n");
+    for name in &plan.kernel_names {
+        writeln!(s, "            {:?}.to_string(),", name).unwrap();
+    }
+    s.push_str("        ],\n");
     s.push_str("    }\n}\n");
     s
 }

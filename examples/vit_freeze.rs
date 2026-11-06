@@ -68,6 +68,9 @@ fn main() {
     let t = Instant::now();
     let got = runner.run(std::slice::from_ref(&x), &weights);
     println!("frozen run: {:.3}s", t.elapsed().as_secs_f64());
+    if std::env::var("FROZEN_PROF").is_ok() {
+        runner.report_profile();
+    }
 
     let want = {
         let b = outs[0].realized_buffer().expect("eager output realized");
