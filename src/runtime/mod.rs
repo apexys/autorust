@@ -12,6 +12,8 @@ pub mod clblast;
 pub mod cpu_gemm;
 #[cfg(feature = "backend_cuda")]
 pub mod cublas;
+#[cfg(feature = "backend_cuda")]
+pub mod cuda_flash;
 pub mod device;
 pub mod interp;
 #[cfg(feature = "backend_cl")]

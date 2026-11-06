@@ -119,6 +119,14 @@ through the device's existing runtime, so buffers bind by slot and scalar args
 follow the generated-kernel ABI. `tests/host_kernel.rs` covers the CUDA path
 end to end.
 
+`runtime::cuda_flash` is the first user: an FA2 kernel (64-query tiles, 32-key
+streaming steps, online softmax, D=64) that keeps the score matrix in
+registers/shared. For DINOv3's attention (6 heads, 789 tokens) it runs one
+layer in 1.22 ms at batch 1 and 5.85 ms at batch 8 (0.73 ms/image/layer),
+against 1.15 ms/image for the generated softmax·V *plus* 0.33 ms for softmax
+and a separate cuBLAS QK^T. It matches `scaled_dot_product_attention` to
+1.2e-8.
+
 This is the prerequisite for a real fused attention: the graph-level port in
 `models::flash_attention` is 16x *slower* than the current fused softmax·V on
 CUDA (105.7 s vs 6.4 s per 128 frames at 448px) because every tile boundary
