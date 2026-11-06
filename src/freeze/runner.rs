@@ -26,6 +26,8 @@ pub struct FrozenRunner {
     internal: Vec<Vec<u8>>,
     /// Per-kernel `(calls, seconds)` when `FROZEN_PROF` is set.
     prof: Vec<(u64, f64)>,
+    /// Host GEMM `(calls, seconds)` when `FROZEN_PROF` is set.
+    gemm_prof: (u64, f64),
     prof_on: bool,
 }
 
@@ -45,7 +47,7 @@ impl FrozenRunner {
             .iter()
             .filter_map(|s| match s {
                 Step::Kernel { kernel, .. } => Some(*kernel),
-                Step::Copy { .. } => None,
+                Step::Copy { .. } | Step::Gemm { .. } => None,
             })
             .max()
         {
@@ -69,6 +71,7 @@ impl FrozenRunner {
             plan,
             _progs: Vec::new(),
             prof: vec![(0u64, 0.0f64); fns.len()],
+            gemm_prof: (0, 0.0),
             prof_on: std::env::var("FROZEN_PROF").is_ok(),
             fns,
             internal,
@@ -157,6 +160,26 @@ impl FrozenRunner {
                         e.1 += t.elapsed().as_secs_f64();
                     }
                 }
+                Step::Gemm { gemm, bufs } => {
+                    let timer = self.prof_on.then(Instant::now);
+                    let ptrs: Vec<*mut u8> = bufs
+                        .iter()
+                        .map(|&v| {
+                            (base_ptrs[self.plan.views[v].storage] + self.plan.views[v].offset)
+                                as *mut u8
+                        })
+                        .collect();
+                    // SAFETY: every view is bound and large enough for the
+                    // descriptor's offsets/strides (checked when the plan was
+                    // built from the live tensors).
+                    if let Err(e) = unsafe { crate::runtime::cpu_gemm::run_raw(gemm, &ptrs) } {
+                        panic!("TGERR: frozen cpu gemm: {e}");
+                    }
+                    if let Some(t) = timer {
+                        self.gemm_prof.0 += 1;
+                        self.gemm_prof.1 += t.elapsed().as_secs_f64();
+                    }
+                }
                 Step::Copy { dst, src } => {
                     let d = ptr_of(*dst, &base_ptrs);
                     let s = ptr_of(*src, &base_ptrs);
@@ -194,6 +217,15 @@ impl FrozenRunner {
             .collect();
         rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         println!("--- frozen kernel profile ---");
+        if self.gemm_prof.0 > 0 {
+            println!(
+                "{:<28} {:>6} {:>10} {:>12}",
+                "host_gemm",
+                self.gemm_prof.0,
+                format!("{:.4}", self.gemm_prof.1),
+                format!("{:.3} ms", self.gemm_prof.1 * 1e3 / self.gemm_prof.0 as f64)
+            );
+        }
         println!(
             "{:<28} {:>6} {:>10} {:>12}",
             "kernel", "calls", "total (s)", "per call"

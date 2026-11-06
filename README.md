@@ -90,21 +90,29 @@ grid dimension is placed on `blockIdx.x` so CUDA runs all M blocks for one N
 weight tile before moving on (L2 reuse). Tuning overrides:
 `AUTORUST_MM_{M,N,K,LM,LN}`.
 
-A pure contraction can also run through a **dynamically loaded library GEMM**.
-The scheduler describes it as a `HostGemm` (shapes, strides, dtype, alpha and a
-fused `bias + per-column scale + residual` epilogue) and the executor calls the
-backend's library:
+A pure contraction can also run through the **`HostGemm` host path**. The
+scheduler describes it once (shapes, strides, dtype, alpha and a fused
+`bias + per-column scale + residual` epilogue) and each backend executes it with
+its own fastest implementation:
 
 - **CUDA → cuBLAS** (`cublasSgemm_v2` / `cublasGemmEx`, f32/f16/bf16,
   strided-batched, in-place epilogue kernel).
 - **CL → CLBlast** (`CLBlastSgemm` / `CLBlastSgemmStridedBatched`, f32,
   row-major). Install `libclblast1` (`apt install libclblast1`); without it the
   OpenCL backend simply keeps using generated kernels.
+- **CPU → packed blocked kernel** (`RUST`/`CC`, f32). Rayon over disjoint
+  `(m,n)` tiles, both operands packed into microkernel panels, a 6x16 AVX2/FMA
+  microkernel (12 YMM accumulators) and a scalar fringe so prime extents need no
+  padding or masks. This is our own kernel, not a library, but it goes through
+  the same descriptor and epilogue. It is on by default because the generated
+  CPU kernel tiles one output row and re-streams `B` for every row: 789x384x384
+  went from 16.7 ms to 1.2 ms (14 → 200 GFLOP/s) on a 3900X.
 
 This is what makes the prime 197-token ViT sequence fast: the register tile
-cannot vectorize 197, while the library can. The library is used only for shapes
-that do not tile cleanly (any of `m,n,k` not divisible by 4), because our own
-kernels still win on square matrices.
+cannot vectorize 197, while the library can. On CUDA/OpenCL the library is used
+only for shapes that do not tile cleanly (any of `m,n,k` not divisible by 4),
+because our generated kernels still win on square matrices; on CPU the host path
+always wins above `m*n*k >= 1e6`.
 
 | switch | effect |
 |---|---|
@@ -113,11 +121,15 @@ kernels still win on square matrices.
 | `AUTORUST_CUBLAS=all\|0` | CUDA-only alias (kept for compatibility) |
 | `AUTORUST_CUBLAS_TF32=1` | allow TF32 for f32 CUDA GEMMs |
 | `AUTORUST_CUBLAS_LIB`, `AUTORUST_CLBLAST_LIB` | override the library path |
+| `AUTORUST_CPU_GEMM_MC`, `AUTORUST_CPU_GEMM_NC`, `AUTORUST_CPU_GEMM_KC` | CPU tile sizes (48 / 96 / 256) |
 
 Neither library is needed at build time; a missing one just disables its path.
 On a 448px DINOv3 ViT-S/16, CLBlast takes the OpenCL backend from 27.0 s to
 9.5 s per 128 frames (generated kernels → library GEMM), with CUDA/cuBLAS at
-6.9 s.
+6.9 s. The CPU host GEMM takes the frozen CPU plan (`clusterfun --device cpu`)
+from 21.7 s to 13.9 s per 16 frames, and emits 48 host-GEMM steps in the frozen
+plan instead of generated kernels (freeze serializes the descriptor, so AOT and
+eager agree).
 
 Representative numbers on a 24-thread Ryzen 3900X / RTX 3060 (captured,
 `JIT=1`):

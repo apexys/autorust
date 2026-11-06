@@ -86,6 +86,48 @@ pub struct HostGemm {
 }
 
 impl HostGemm {
+    /// A Rust expression that reconstructs this descriptor.
+    ///
+    /// Used by the AOT emitter: a frozen plan may contain host GEMM steps, so
+    /// the descriptor has to survive as source.
+    pub fn to_rust_literal(&self) -> String {
+        format!(
+            "autorust::schedule::host_gemm::HostGemm {{ a_slot: {}, b_slot: {}, \
+             c_slot: {}, a_off: {}, b_off: {}, c_off: {}, m: {}, n: {}, k: {}, \
+             a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
+             a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
+             alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
+             scale_off: {}, res_slot: {}, res_off: {} }}",
+            self.a_slot,
+            self.b_slot,
+            self.c_slot,
+            self.a_off,
+            self.b_off,
+            self.c_off,
+            self.m,
+            self.n,
+            self.k,
+            self.a_m,
+            self.a_k,
+            self.b_k,
+            self.b_n,
+            self.c_m,
+            self.c_n,
+            self.batch,
+            self.a_b,
+            self.b_b,
+            self.c_b,
+            self.dtype.0,
+            self.alpha,
+            self.bias_slot,
+            self.bias_off,
+            self.scale_slot,
+            self.scale_off,
+            self.res_slot,
+            self.res_off
+        )
+    }
+
     /// Serialize into the kernel's `KernelInfo` arg.
     pub fn to_data(&self) -> DataArg {
         let int = |v: i64| Arg::Int(v);
@@ -363,6 +405,16 @@ fn unwrap(ctx: &UOpCtx, mut u: UopId) -> UopId {
 
 fn library_ready(kind: GemmDevice) -> bool {
     match kind {
+        GemmDevice::Cpu => {
+            #[cfg(feature = "backend_rust")]
+            {
+                crate::runtime::cpu_gemm::available()
+            }
+            #[cfg(not(feature = "backend_rust"))]
+            {
+                false
+            }
+        }
         GemmDevice::Cuda => {
             #[cfg(feature = "backend_cuda")]
             {
@@ -391,6 +443,10 @@ fn library_ready(kind: GemmDevice) -> bool {
 /// The per-device check happens in [`extract`]: a CUDA store needs cuBLAS and an
 /// OpenCL store needs CLBlast.
 pub fn library_available() -> bool {
+    #[cfg(feature = "backend_rust")]
+    if crate::runtime::cpu_gemm::available() {
+        return true;
+    }
     #[cfg(feature = "backend_cuda")]
     if crate::runtime::cublas::available() {
         return true;
@@ -405,6 +461,7 @@ pub fn library_available() -> bool {
 /// Which library-backed device a kernel belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GemmDevice {
+    Cpu,
     Cuda,
     Cl,
 }
@@ -423,6 +480,12 @@ fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
             }
             if s.starts_with("CL") {
                 return Some(GemmDevice::Cl);
+            }
+            // `CC`/`CLANG` only exist as compiled backends with the feature;
+            // without it the name falls back to the interpreter, which has no
+            // host-op dispatcher.
+            if s == "RUST" || (cfg!(feature = "backend_clang") && matches!(s, "CC" | "CLANG")) {
+                return Some(GemmDevice::Cpu);
             }
             return None;
         }
@@ -585,6 +648,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if kind == GemmDevice::Cl && ctx.dt_of(&mul) != crate::dtype::FLOAT32 {
         return None;
     }
+    // The CPU host GEMM packs f32 panels; other dtypes stay generated.
+    if kind == GemmDevice::Cpu && ctx.dt_of(&mul) != crate::dtype::FLOAT32 {
+        return None;
+    }
 
     let a_idx = operand(ctx, msrcs[0].clone())?;
     let b_idx = operand(ctx, msrcs[1].clone())?;
@@ -641,6 +708,11 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let b_n = coeff(&b_map, n_key);
     let c_m = coeff(&c_map, m_key);
     let c_n = coeff(&c_map, n_key);
+    // The CPU blocked kernel stores rows contiguously; anything else keeps the
+    // generated kernel.
+    if kind == GemmDevice::Cpu && c_n != 1 {
+        return None;
+    }
     if c_n != 1 || c_m < n {
         return None;
     }
@@ -738,7 +810,15 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             .as_deref(),
         Ok("all") | Ok("force")
     );
-    if !force && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
+    // The CPU host GEMM is a *different* implementation, not just a library
+    // swap: it blocks and parallelizes, so it wins on every shape where the
+    // generated kernel's 1-row tile loses its `B` reuse. Do not apply the
+    // divisibility heuristic there; require a minimum amount of work instead.
+    if kind == GemmDevice::Cpu {
+        if !force && !crate::runtime::cpu_gemm::worth_dispatching(m, n, k) {
+            return None;
+        }
+    } else if !force && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
         return None;
     }
 

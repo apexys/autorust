@@ -498,7 +498,9 @@ pub fn register() {
         let compiler: Rc<dyn Comp> = Rc::new(RustcCompiler::default());
         let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> =
             Rc::new(|elf| Rc::new(RefCell::new(RustProgram::new(elf))));
-        Compiled::new("RUST", renderer, LruAllocator::new(), compiler, ctor)
+        let dev = Compiled::new("RUST", renderer, LruAllocator::new(), compiler, ctor);
+        crate::runtime::cpu_gemm::install(&dev);
+        dev
     }
     register_device("RUST", Rc::new(make));
 }

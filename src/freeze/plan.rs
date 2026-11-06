@@ -16,6 +16,7 @@ use crate::runtime::buffer::{Buffer, buffer_of};
 use crate::runtime::ops_rust::RustProgram;
 use crate::tensor::Tensor;
 use crate::uop::Ops;
+use crate::uop::arg::Arg;
 
 /// A storage allocation (a `BufferBase`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +53,13 @@ pub enum Step {
         vals: Vec<i64>,
         /// Global launch dimensions.
         global: [usize; 3],
+    },
+    /// Host GEMM (`HostGemm`) over `bufs`, in buffer-slot order.
+    Gemm {
+        /// The descriptor (see [`crate::schedule::host_gemm::HostGemm`]).
+        gemm: Box<crate::schedule::host_gemm::HostGemm>,
+        /// View ids in buffer-slot order.
+        bufs: Vec<usize>,
     },
     /// Byte copy between two views (same device).
     Copy {
@@ -278,12 +286,33 @@ pub fn build(
                         by_slot.insert(g, vid);
                     }
                     let fallback = by_slot.values().next().copied();
+                    let max_slot = by_slot.keys().copied().max().unwrap_or(-1);
                     let mut bufs = Vec::with_capacity(cp.elf.signature.len());
                     for (slot, _) in &cp.elf.signature {
                         let vid = by_slot.get(slot).copied().or(fallback).unwrap_or_else(|| {
                             panic!("TGERR: freeze kernel has no buffers for slot {slot}")
                         });
                         bufs.push(vid);
+                    }
+                    if let Some(host) = &cp.host {
+                        // Host-dispatch kernel (library GEMM): no compiled code.
+                        // `bufs` is slot-indexed, like the eager executor.
+                        let gemm = crate::schedule::host_gemm::HostGemm::from_arg(&Arg::Data(
+                            host.clone(),
+                        ))
+                        .unwrap_or_else(|| panic!("TGERR: freeze bad {} descriptor", host.tag));
+                        let slots: Vec<usize> = (0..=max_slot)
+                            .map(|slot| {
+                                by_slot.get(&slot).copied().unwrap_or_else(|| {
+                                    panic!("TGERR: freeze gemm has no buffer for slot {slot}")
+                                })
+                            })
+                            .collect();
+                        b.plan.steps.push(Step::Gemm {
+                            gemm: Box::new(gemm),
+                            bufs: slots,
+                        });
+                        continue;
                     }
                     let kernel = b.kernel(&cp);
                     let vals = cp.pi.vals(&HashMap::new());

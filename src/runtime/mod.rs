@@ -8,6 +8,8 @@ pub mod buffer;
 pub(crate) mod cl_sys;
 #[cfg(feature = "backend_cl")]
 pub mod clblast;
+#[cfg(feature = "backend_rust")]
+pub mod cpu_gemm;
 #[cfg(feature = "backend_cuda")]
 pub mod cublas;
 pub mod device;

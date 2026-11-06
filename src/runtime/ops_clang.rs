@@ -379,7 +379,9 @@ pub fn register() {
         let compiler: Rc<dyn Comp> = Rc::new(ClangCompiler::default());
         let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> =
             Rc::new(|elf| Rc::new(RefCell::new(ClangProgram::new(elf))));
-        Compiled::new("CC", renderer, LruAllocator::new(), compiler, ctor)
+        let dev = Compiled::new("CC", renderer, LruAllocator::new(), compiler, ctor);
+        crate::runtime::cpu_gemm::install(&dev);
+        dev
     }
     register_device("CC", Rc::new(make));
     register_device("CLANG", Rc::new(make));

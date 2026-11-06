@@ -120,6 +120,16 @@ fn plan_source(plan: &FrozenPlan) -> String {
     s.push_str("        ],\n        steps: vec![\n");
     for step in &plan.steps {
         match step {
+            Step::Gemm { gemm, bufs } => {
+                let bufs: Vec<String> = bufs.iter().map(usize::to_string).collect();
+                writeln!(
+                    s,
+                    "            autorust::freeze::Step::Gemm {{ gemm: Box::new({}), bufs: vec![{}] }},",
+                    gemm.to_rust_literal(),
+                    bufs.join(", ")
+                )
+                .unwrap();
+            }
             Step::Copy { dst, src } => {
                 writeln!(
                     s,

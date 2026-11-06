@@ -66,9 +66,18 @@ fn main() {
     let a = Tensor::from_slice(&ctx, &ad, Some(dt), Some(&dev))
         .reshape([m, k])
         .to_param();
-    let b = Tensor::from_slice(&ctx, &bd, Some(dt), Some(&dev))
-        .reshape([k, n])
-        .to_param();
+    // `BT=1` stores B as `[n, k]` and transposes the view, i.e. exactly what a
+    // `Linear` weight looks like (k-contiguous columns, `b_k == 1`).
+    let b = if env_flag("BT") {
+        Tensor::from_slice(&ctx, &bd, Some(dt), Some(&dev))
+            .reshape([n, k])
+            .to_param()
+            .transpose(0, 1)
+    } else {
+        Tensor::from_slice(&ctx, &bd, Some(dt), Some(&dev))
+            .reshape([k, n])
+            .to_param()
+    };
     let bias = Tensor::from_slice(&ctx, &bsd, Some(acc), Some(&dev))
         .reshape([n])
         .to_param();
