@@ -394,8 +394,12 @@ fn ensure_builtins() {
             super::ops_rayon::register();
             #[cfg(feature = "backend_cl")]
             super::ops_cl::register();
+            #[cfg(feature = "backend_clang")]
+            super::ops_clang::register();
             #[cfg(feature = "backend_cuda")]
             super::ops_cuda::register();
+            #[cfg(feature = "backend_rust")]
+            super::ops_rust::register();
         }
     });
 }

@@ -49,6 +49,14 @@ backend_rayon = ["dep:rayon", "dep:bytemuck"]
 backend_cl = ["dep:opencl3"]
 # CUDA backend (operations/codegen on the CUDA driver API via `cudarc`).
 backend_cuda = ["dep:cudarc"]
+# Native CPU backend: render Rust kernels, compile them with `rustc` to a
+# cdylib, and load them with `libloading`. Parallel launches use `rayon`.
+backend_rust = ["dep:libloading", "dep:rayon"]
+# Native CPU C backend: render C kernels, compile with `$CC` (clang or gcc),
+# and load the shared library with `libloading`.
+backend_clang = ["dep:libloading", "dep:rayon"]
+# Capture a realized schedule and emit a self-contained Rust plan (AOT).
+freeze = ["dep:rayon", "backend_rust"]
 # Debug knobs, compiled out by default so hot paths never call getenv.
 # `trace`: TG_TRACE rule-firing trace.
 # `dump`:  TG_DUMP_PRE_EXPAND/TG_DUMP_IDX/TG_DUMP_LST/TG_DUMP_INTERP/TG_DEBUG_LOAD
@@ -60,6 +68,10 @@ dump = []
 name = "rayon_bench"
 required-features = ["backend_rayon"]
 
+[[example]]
+name = "vit_freeze"
+required-features = ["freeze"]
+
 [dependencies]
 nanoserde = "0.2.1"
 # Multithreaded CPU backend (`backend_rayon`); work-stealing parallelism.
@@ -67,6 +79,8 @@ rayon = { version = "1.12", optional = true }
 # dtype-native byte reinterpretation for the `ops_rayon` typed evaluator.
 bytemuck = { version = "1", optional = true }
 opencl3 = { version = "0.9", optional = true }
+# Runtime loading of the `rustc`-built kernel cdylibs (`backend_rust`).
+libloading = { version = "0.8", optional = true }
 # CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
 # needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.
 cudarc = { version = "0.19", optional = true, default-features = false, features = [

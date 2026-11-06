@@ -42,7 +42,7 @@ use crate::uop::ctx::UOpCtx;
 /// alive (so the session's `prune` cannot reclaim a replay's intermediates).
 pub struct Jit {
     linears: Vec<CompiledLinear>,
-    ret: Option<Tensor>,
+    rets: Vec<Tensor>,
     /// Strong refs to every buffer the captured linears touch.
     held: Vec<Buffer>,
 }
@@ -52,7 +52,7 @@ impl Jit {
     pub fn new() -> Self {
         Jit {
             linears: Vec::new(),
-            ret: None,
+            rets: Vec::new(),
             held: Vec::new(),
         }
     }
@@ -60,18 +60,28 @@ impl Jit {
     /// `TinyJit.reset` (jit.py:230): drop the capture so the next call captures.
     pub fn reset(&mut self) {
         self.linears.clear();
-        self.ret = None;
+        self.rets.clear();
         self.held.clear();
     }
 
     /// Whether a capture has completed and can be replayed.
     pub fn is_captured(&self) -> bool {
-        self.ret.is_some()
+        !self.rets.is_empty()
     }
 
     /// The number of captured LINEARS (kernels/copies), for diagnostics.
     pub fn n_linears(&self) -> usize {
         self.linears.len()
+    }
+
+    /// The captured compiled LINEARS (freeze/plan lowering).
+    pub fn linears(&self) -> &[CompiledLinear] {
+        &self.linears
+    }
+
+    /// The captured output tensors, in the order returned by `call_many`.
+    pub fn outputs(&self) -> &[Tensor] {
+        &self.rets
     }
 
     /// Run `f` once to capture and execute one step; thereafter replay the
@@ -80,19 +90,29 @@ impl Jit {
     where
         F: FnOnce(&Ctx, &mut Session) -> Tensor,
     {
+        self.call_many(ctx, sess, |ctx, sess| vec![f(ctx, sess)])
+            .pop()
+            .expect("TGERR: JIT call captured no result")
+    }
+
+    /// Multi-root variant of [`Jit::call`]: all returned tensors are realized
+    /// in **one** corealized schedule and replayed together.
+    pub fn call_many<F>(&mut self, ctx: &Ctx, sess: &mut Session, f: F) -> Vec<Tensor>
+    where
+        F: FnOnce(&Ctx, &mut Session) -> Vec<Tensor>,
+    {
         if !sess.jit_enabled() {
             // `if not JIT:` (jit.py:244) — run the step directly, no capture.
             return f(ctx, sess);
         }
-        if self.ret.is_none() {
+        if self.rets.is_empty() {
             // capture: run the step, collecting every planned LINEAR it realizes.
             sess.begin_capture();
-            let ret = f(ctx, sess);
+            let rets = f(ctx, sess);
             let mut c = ctx.borrow_mut();
             // `if len(params:=get_parameters(ret)): Tensor.realize(*params)`
-            // (jit.py:258): force the return to realize inside the capture (a
-            // lazy eval graph would otherwise capture nothing). Idempotent.
-            ret.realize_ctx(&mut c, sess);
+            // (jit.py:258): force every root to realize inside the capture.
+            Tensor::realize_many(&mut c, sess, rets.iter());
             let planned = sess.end_capture();
             assert!(
                 !planned.is_empty(),
@@ -105,17 +125,15 @@ impl Jit {
                 .collect();
             // hold all buffers the captured linears reference so `prune` keeps them.
             self.held = collect_buffers(&mut c, sess, &self.linears);
-            self.ret = Some(ret.clone());
-            ret
+            self.rets = rets.clone();
+            rets
         } else {
             // replay: execute the compiled schedules against the live buffers.
             let mut c = ctx.borrow_mut();
             for cl in &self.linears {
                 exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new());
             }
-            self.ret
-                .clone()
-                .expect("TGERR: JIT replay missing captured result")
+            self.rets.clone()
         }
     }
 }

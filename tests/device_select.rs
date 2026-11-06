@@ -1,5 +1,6 @@
 //! Device-selection tests for the backend priority (CURRENT_STATE.md §9.8):
-//! CUDA → CL → RAYON → INTERP, and the `RAYON` device executes correctly.
+//! CUDA → CL → RUST → RAYON → INTERP, and the `RAYON`/`RUST` devices execute
+//! correctly.
 
 #[cfg(feature = "backend_rayon")]
 use autorust::tensor::{Ctx, Tensor};
@@ -7,11 +8,13 @@ use autorust::tensor::{Ctx, Tensor};
 #[test]
 fn pick_device_priority() {
     use autorust::tensor::creation::pick_device;
-    // CUDA beats everything, CL beats RAYON/INTERP.
-    assert_eq!(pick_device(true, true), "CUDA");
-    assert_eq!(pick_device(true, false), "CUDA");
-    assert_eq!(pick_device(false, true), "CL");
-    let low = pick_device(false, false);
+    // CUDA beats everything; CL beats RUST/CC/RAYON/INTERP; RUST beats CC.
+    assert_eq!(pick_device(true, true, true, true), "CUDA");
+    assert_eq!(pick_device(true, false, false, false), "CUDA");
+    assert_eq!(pick_device(false, true, true, true), "CL");
+    assert_eq!(pick_device(false, false, true, true), "RUST");
+    assert_eq!(pick_device(false, false, false, true), "CC");
+    let low = pick_device(false, false, false, false);
     if cfg!(feature = "backend_rayon") {
         assert_eq!(low, "RAYON");
     } else {
@@ -25,6 +28,12 @@ fn rayon_is_registered() {
     if cfg!(feature = "backend_rayon") {
         assert!(devs.contains(&"RAYON".to_string()), "registered: {devs:?}");
     }
+    if cfg!(feature = "backend_rust") {
+        assert!(devs.contains(&"RUST".to_string()), "registered: {devs:?}");
+    }
+    if cfg!(feature = "backend_clang") {
+        assert!(devs.contains(&"CC".to_string()), "registered: {devs:?}");
+    }
     // INTERP is always present.
     assert!(devs.contains(&"INTERP".to_string()), "registered: {devs:?}");
 }
@@ -36,6 +45,38 @@ fn rayon_is_registered() {
 #[test]
 fn cuda_availability_probe_does_not_panic() {
     let _ = autorust::runtime::ops_cuda::available();
+}
+
+/// `RUST` is only selected when `rustc` is present; the probe must not panic.
+#[cfg(feature = "backend_rust")]
+#[test]
+fn rust_availability_probe_does_not_panic() {
+    let _ = autorust::runtime::ops_rust::available();
+}
+
+#[cfg(feature = "backend_rust")]
+#[test]
+fn rust_executes_elementwise() {
+    use autorust::tensor::{Ctx, Tensor};
+    let ctx = Ctx::new();
+    let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, Some("RUST"));
+    let out = a.add(&a).mul(2.0).to_list_fresh::<f32>();
+    assert_eq!(out, vec![4.0, 8.0, 12.0, 16.0]);
+}
+
+#[cfg(feature = "backend_rust")]
+#[test]
+fn rust_matches_interp() {
+    use autorust::tensor::{Ctx, Tensor};
+    let ctx = Ctx::new();
+    let data = [0.5f32, -1.0, 2.25, 3.0, 4.0, 5.5, -6.0, 7.75];
+    let build = |ctx: &Ctx, dev: &str| {
+        let x = Tensor::from_slice(ctx, &data, None, Some(dev));
+        x.mul(&x).add(1.0).sqrt().to_list_fresh::<f32>()
+    };
+    let r = build(&ctx, "RUST");
+    let i = build(&ctx, "INTERP");
+    assert_eq!(r, i, "RUST must match INTERP");
 }
 
 #[cfg(feature = "backend_rayon")]

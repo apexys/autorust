@@ -2061,3 +2061,84 @@ API shape, and missing user-facing features.
   `pm_number_params` stages, image path, multi-device, BEAM worker pool and
   `TC_OPT=2` typedefs are documented in the README as known limitations; no
   codegen work in this pass.
+
+### 9.10 Perf backlog — tiled/blocked kernels (2026-11)
+
+Tiling/register blocking is a likely big win across the CPU backends, not just
+matmul. The current generated GEMM computes a small output tile per work item
+and relies on LLVM to vectorize the reduction; the ViT-B/16 forward is ~4.1 s
+captured (vs ~0.3–0.45 s for PyTorch CPU oneDNN/MKL, ~14 s for tinygrad
+TinyJit). A register-blocked GEMM (`m`×`n` micro-tile, multiple accumulators,
+`mul_add`/FMA, K-blocking for cache reuse) is the obvious next step, and the
+same idea applies to conv, reductions and elementwise chains. FlashAttention is
+the attention-specific instance of this pattern (tile Q/K/V, stream the softmax
+normalizer). Track this after the freeze/AOT and C+clang backends; benchmark it
+on ViT-B/16, not just 512².
+
+### 9.11 Frozen CPU plans — `autorust::freeze` (2026-11) — DONE
+
+`Jit` now captures multiple corealized roots (`call_many`) and exposes its
+compiled LINEARS. `autorust::freeze` (feature `freeze`, which enables
+`backend_rust`) lowers a capture into a backend-independent `FrozenPlan`:
+
+- `StorageSpec` (base allocation, external/internal), `ViewSpec` (typed
+  window), and `Step::{Kernel, Copy}`.
+- Buffer identity is `(base allocation, byte offset, nbytes, dtype)`. Inputs
+  and weights are external storages; everything else is allocated once and
+  reused. `to_param`/bufferize can create a fresh buffer carrying the caller's
+  bytes as `initial_data`; the builder matches those by a content hash and
+  prepends an init `Copy`, so the runner receives the live tensor data.
+- `FrozenRunner` executes the plan with the fixed `(bufs, vals, gidx)` ABI,
+  chunking the first global dimension across `rayon` (the same policy as
+  `RustProgram`). It can use JIT-loaded kernels (`FrozenRunner::new`) or a
+  statically linked table (`from_fns`).
+- `emit_rust`/`emit_to` writes an AOT Rust file: each kernel in its own module
+  (duplicate names are safe, `no_mangle` stripped), a `KERNELS` table, and a
+  `plan()` constructor. `CompiledProg` now stores its rendered `source` because
+  a `ProgCache` hit re-interns PROGRAM without its SOURCE child.
+- `Engine` selects `Eager(model)` when CUDA/CL is available and
+  `Frozen(Frozen<M>)` otherwise; `ModuleForward` is the minimal model trait
+  (`Input`/`Output` associated types). `Frozen` supports one `Tensor` input and
+  one `Tensor` output today (tuple/multi-output wrappers are follow-ups).
+
+Gates: `tests/freeze.rs` (plan vs eager, multi-output/corealize, Engine
+selection), `tests/freeze_emit.rs` (emits a standalone crate, compiles it with
+Cargo, and byte-compares), and `examples/vit_freeze.rs` (full ViT-B/16: 405
+storages, 399 steps, output matches eager).
+
+Build-script layout: a **user-defined** model must be a separate crate that is
+a build-dependency of the app (or use an `xtask`), since a build script cannot
+import the crate under construction. A packaged model (e.g. `ViT`) needs no
+subcrate: `examples/frozen_vit/` includes a shared `make_vit.rs` from both
+`build.rs` and `main.rs`. `examples/vit_freeze.rs` with `FREEZE_EMIT=...` shows
+the in-process emit side.
+
+### 9.12 Portable C CPU backend — device `CC` (2026-11) — DONE
+
+`backend_clang` adds a second native CPU backend that renders the same
+linearized kernels as C (`render_cpu_c`) and compiles them with `$CC` (clang,
+else `cc`/gcc) to a shared library loaded by `libloading`. It uses the same
+fixed `(bufs, vals, gidx)` ABI, first-dimension chunking, CPU global-grid
+schedule and upcast policy as `RUST`, so it is a direct codegen oracle.
+
+- Portable bits: `vector_size` vector typedefs (clang + gcc), `TG_BITCAST`
+  (`__builtin_bit_cast` on clang, a union statement-expression on gcc), and a
+  `TG_F2U` clamp for tinygrad's float→unsigned truncate semantics.
+- `$CC` selection: `CC` env, else `clang`, else `cc`; `AUTORUST_CC_ARCH`
+  controls `-march` (default `native`, `none` disables).
+- Device selection is now `CUDA → CL → RUST → CC → RAYON → INTERP`.
+- Benchmarks (Ryzen 3900X, 24 threads, N=512, 3 iters): `CC` 17.9 ms vs `RUST`
+  18.8 ms matmul, 5.2 vs 5.5 ms elementwise. Full ViT-B/16 captured:
+  `CC` 4.22 s vs `RUST` 4.11 s (PyTorch CPU ~0.3–0.45 s, tinygrad TinyJit
+  ~14 s). The remaining gap to PyTorch is the schedule/kernel algorithm
+  (tiling/blocking), not the source language — see §9.10.
+- Gate: `backend_harness` passes for `CC` (all dtype/op batteries, including
+  the float→unsigned cast cases); `cargo test --features "backend_clang freeze"`
+  is green.
+
+`ModuleForward` now lives in `tensor::nn` and is implemented for `Linear`,
+`Conv2d`, `ConvTranspose2d`, `BatchNorm` (inference), `LayerNorm`, `LayerNorm2d`,
+`GroupNorm`, `InstanceNorm`, `RMSNorm`, `Embedding`, `LSTMCell` (tuple input),
+`TransformerBlock`, `Transformer` and `ViT`. `freeze::ModuleForward` is a
+re-export, and `examples/frozen_vit/` is a flat build-script package (no model
+subcrate) that runs the packaged `ViT` through capture → emit → `Engine`.

@@ -67,6 +67,8 @@
 pub mod codegen;
 pub mod dtype;
 pub mod engine;
+#[cfg(feature = "freeze")]
+pub mod freeze;
 pub mod helpers;
 pub mod renderer;
 

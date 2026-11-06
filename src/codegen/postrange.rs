@@ -12,7 +12,7 @@ use crate::uop::ops::Ops;
 use crate::uop::range::AxisType;
 use crate::uop::sint::SVal;
 use crate::uop::upat::{CtxVal, graph_rewrite};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// `axis_to_pos` (ops.py:45).
 fn axis_to_pos(t: AxisType) -> i32 {
@@ -281,7 +281,13 @@ impl<'a> Scheduler<'a> {
 
     /// `upcastable_dims`.
     pub fn upcastable_dims(&self, ctx: &mut UOpCtx) -> Vec<usize> {
-        self.axes_of(ctx, &[AxisType::Global, AxisType::Local, AxisType::Weak])
+        let mut types = vec![AxisType::Global, AxisType::Local, AxisType::Weak];
+        // CPU backends leave independent output `Loop`s in the kernel; they are
+        // safe to upcast (vectorize) once the outer loop is the global grid.
+        if self.ren.globalize_loops {
+            types.push(AxisType::Loop);
+        }
+        self.axes_of(ctx, &types)
             .into_iter()
             .filter(|&i| self.full_shape(ctx)[i] > 1)
             .collect()
@@ -361,11 +367,44 @@ impl<'a> Scheduler<'a> {
 
     /// `_globalizable_rngs`.
     fn globalizable_rngs(&self, ctx: &mut UOpCtx) -> Vec<UopId> {
-        let mut ret: Vec<UopId> = self
-            .output_rngs(ctx)
-            .into_iter()
-            .filter(|r| AxisType::range_axis_type(ctx, r.clone()) == AxisType::Weak)
-            .collect();
+        let out = self.output_rngs(ctx);
+        // Never globalize a loop with a conditional `END` (scans/cumsum): the
+        // iterations are ordered and a chunk split would be wrong.
+        let mut conditional: HashSet<UopId> = HashSet::new();
+        for x in ctx.toposort(&self.ast).iter() {
+            if ctx.op_of(x) == Ops::End {
+                let srcs = ctx.srcs(x);
+                if srcs.len() == 3
+                    && ctx.op_of(&srcs[1]) == Ops::Range
+                    && ctx.dt_of(&srcs[2]) == crate::dtype::BOOL
+                {
+                    conditional.insert(srcs[1].clone());
+                }
+            }
+        }
+        let mut ret: Vec<UopId> = Vec::new();
+        if self.ren.globalize_loops && !self.ren.has_local {
+            // CPU: expose only the *outermost* independent output range to the
+            // host. Leaving the inner output axes as loops lets the scheduler
+            // upcast/vectorize them (e.g. 4 adjacent matmul output columns).
+            for r in self.rngs(ctx) {
+                let t = AxisType::range_axis_type(ctx, r.clone());
+                if out.contains(&r)
+                    && matches!(t, AxisType::Loop | AxisType::Weak)
+                    && !conditional.contains(&r)
+                {
+                    ret.push(r);
+                    break;
+                }
+            }
+        } else {
+            ret = out
+                .iter()
+                .filter(|r| AxisType::range_axis_type(ctx, (*r).clone()) == AxisType::Weak)
+                .cloned()
+                .collect();
+            ret.retain(|r| !conditional.contains(r));
+        }
         for x in ctx.toposort(&self.ast).iter() {
             if ctx.op_of(x) == Ops::Stage {
                 let xr = ctx.ranges(&x.clone());
@@ -377,7 +416,7 @@ impl<'a> Scheduler<'a> {
 
     /// `convert_loop_to_global`.
     pub fn convert_loop_to_global(&mut self, ctx: &mut UOpCtx) {
-        if !self.ren.has_local {
+        if !self.ren.has_local && !self.ren.globalize_loops {
             return;
         }
         let globalizable = self.globalizable_rngs(ctx);
@@ -1352,7 +1391,9 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
                     break;
                 }
             }
-            if let Some(sz) = pick {
+            if let Some(sz) = pick
+                && tk.ren.has_local
+            {
                 let idx = tk.rngs(ctx).iter().position(|r| r == &rngs[0]).unwrap();
                 tk.apply_opt(ctx, OptOp::Local, Some(idx), Some(sz));
             }
@@ -1362,7 +1403,7 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
     }
 
     // are we grouping? (requires local shape support)
-    {
+    if k.ren.has_local {
         let ups = k.upcastable_dims(ctx);
         let prod: i64 = ups.iter().map(|&i| k.output_shape(ctx)[i]).product();
         if prod <= 2048 {
@@ -1385,6 +1426,19 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
     // no more opt if we are grouping
     if k.group_for_reduces(ctx) > 0 {
         return;
+    }
+
+    // CPU: vectorize the innermost output axis (the outer one is the global
+    // grid). Doing this before the reduction unroll lets each work item compute
+    // several adjacent outputs with independent accumulators.
+    if k.ren.globalize_loops && !k.ren.has_local && k.upcasted(ctx) == 0 {
+        let ups = k.upcastable_dims(ctx);
+        if let Some(last) = ups.len().checked_sub(1) {
+            let ax = ups[last];
+            if k.full_shape(ctx)[ax] % 4 == 0 {
+                k.apply_opt(ctx, OptOp::Upcast, Some(last), Some(4));
+            }
+        }
     }
 
     // if last reduce dim is small(ish), loop unroll the reduce

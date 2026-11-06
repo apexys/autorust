@@ -17,7 +17,12 @@ The core engine is complete and differentially tested against tinygrad:
 - Scheduler (`rangeify`/`indexing`/memory planning), `to_program` codegen,
   C-style rendering, and the uop interpreter.
 - Backends: `INTERP` (faithful reference), `RAYON` (multithreaded CPU),
-  `CL` (OpenCL), and `CUDA` (driver API + NVRTC, bf16/WMMA).
+  `RUST` (native CPU: Rust kernels compiled by `rustc`), `CC` (native CPU:
+  portable C compiled by clang/gcc), `CL` (OpenCL), and `CUDA` (driver API +
+  NVRTC, bf16/WMMA).
+- Frozen CPU plans: capture a `Jit` step, lower it to a `FrozenPlan`, and emit
+  a self-contained Rust file for `build.rs`/`include!` (no runtime `rustc`);
+  `Engine` selects eager GPU or frozen CPU automatically.
 - `TinyJit`-style capture/replay, BEAM search, and a content-keyed program cache.
 
 The public API is **0.1.0 and unstable**. A `Tensor` owns a shared `Ctx`
@@ -74,12 +79,38 @@ Runnable demos: `examples/xor.rs`, `examples/mnist.rs`,
 `examples/vit_mnist.rs`, plus `examples/fa_bench.rs` and
 `examples/rayon_bench.rs` for attention/CPU benchmarks.
 
-## Cargo features
+## Frozen CPU plans
+
+`freeze` captures a realized `Jit` trace and emits a self-contained Rust file
+(kernels + a `FrozenPlan`); the application `include!`s it, so no `rustc` is
+needed at run time. The model must live in a separate crate when used from
+`build.rs` (a build script cannot import the crate it is building):
+
+```toml
+[build-dependencies]
+autorust = { path = "../autorust", features = ["freeze"] }
+model = { path = "../model" }
+```
+
+The build script creates the model, runs one captured forward, lowers it with
+`autorust::freeze::plan::build`, and calls `autorust::freeze::emit_to`; the app
+then uses `include!(concat!(env!("OUT_DIR"), "/frozen.rs"))`,
+`FrozenRunner::from_fns(plan(), KERNELS.to_vec())`, and `Engine` to choose eager
+GPU vs frozen CPU. `ModuleForward` lives in `tensor::nn` and is implemented by
+the packaged layers/models, so a built-in model (e.g.
+`autorust::models::vit::ViT`) needs no wrapper. See
+`examples/frozen_vit/` for the complete build-script flow, `examples/vit_freeze.rs`
+for the in-process emit knob (`FREEZE_EMIT`), and `tests/freeze_emit.rs` (which
+compiles the emitted crate and diffs it against eager).
+
 
 | Feature | Default | What it enables |
 |---|---|---|
 | `capi` | yes | Small C ABI used by the development-only Python bridge. |
 | `backend_rayon` | yes | Multithreaded CPU backend (`RAYON`), via `rayon`/`bytemuck`. |
+| `backend_rust` | no | Native CPU backend (`RUST`): Rust kernel source → `rustc` cdylib → `libloading`. |
+| `backend_clang` | no | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |
+| `freeze` | no | Capture/emit frozen CPU plans (`autorust::freeze`); enables `backend_rust`. |
 | `backend_cl` | no | OpenCL backend (`CL`), via `opencl3`. |
 | `backend_cuda` | no | CUDA driver + NVRTC backend (`CUDA`), via `cudarc`. |
 | `trace` | no | Rule-firing trace (`TG_TRACE`). |
@@ -88,8 +119,9 @@ Runnable demos: `examples/xor.rs`, `examples/mnist.rs`,
 `--no-default-features` is std-only (plus `nanoserde`). Optional backend crates
 are the only sanctioned non-core dependencies.
 
-Device selection is `CUDA → CL → RAYON → INTERP` for the first available
-backend; set `DEFAULT_DEVICE` to override. Runtime knobs (device, dtype,
+Device selection is `CUDA → CL → RUST → CC → RAYON → INTERP` for the first
+available backend; `RUST` is only selected when `rustc` is on `PATH`, `CC` when
+`$CC` (or `clang`, else `cc`) works. Set `DEFAULT_DEVICE` to override. Runtime knobs (device, dtype,
 `BEAM`, `JIT`, `FA`, …) are environment variables read once and cached; build-
 time diagnostics/backends are Cargo features. Set runtime env vars before the
 first tensor/realize.
@@ -101,8 +133,8 @@ first tensor/realize.
   `get_transcendental_patterns`), parameter renumbering (`pm_number_params`),
   and the image path. Multi-device/sharding is out of scope.
 - **Backends**: CUDA tensor cores target `sm_86`; OpenCL has no offset views and
-  no native bf16; there is no AMD/Metal/WebGPU backend and no x86 CPU JIT
-  (the interpreter/RAYON paths are used instead).
+  no native bf16; there is no AMD/Metal/WebGPU backend. The `RUST` CPU backend
+  is x86-64-first (other architectures fall back to libm for math).
 - **Training**: eager autograd covers the ops used by the demos. Fused
   `Tensor.custom_kernel`/`@function` kernels are deferred.
 - **ONNX** covers the T0/T1 inference surface. Missing: `Scatter*`,

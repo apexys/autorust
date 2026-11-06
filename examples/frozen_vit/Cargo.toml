@@ -1,0 +1,13 @@
+[package]
+name = "frozen_vit"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+autorust = { path = "../..", features = ["freeze"] }
+
+[build-dependencies]
+autorust = { path = "../..", features = ["freeze"] }

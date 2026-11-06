@@ -52,6 +52,21 @@ pub trait Module {
         Self: Sized;
 }
 
+/// A model/layer that can run a forward pass.
+///
+/// The associated types let the same trait cover one-tensor layers, tuple
+/// inputs (e.g. `LSTMCell`), and multi-output models. The frozen-plan
+/// [`Engine`](crate::freeze::Engine) currently specializes to
+/// `Input = Tensor, Output = Tensor`.
+pub trait ModuleForward {
+    /// Input value (usually a `Tensor` or a tuple of tensors).
+    type Input;
+    /// Output value.
+    type Output;
+    /// Run the module eagerly.
+    fn forward(&self, input: Self::Input) -> Self::Output;
+}
+
 /// Prefix every param name in `it` with `parent` + `"."`, for nesting a child
 /// module's [`Module::named_params`] under a path segment.
 ///
@@ -1393,4 +1408,49 @@ pub fn rsqrt(x: &Tensor) -> Tensor {
 #[doc(hidden)]
 pub fn rsqrt_ctx(x: &Tensor, ctx: &mut UOpCtx) -> Tensor {
     x.sqrt_ctx(ctx).reciprocal_ctx(ctx)
+}
+
+// ---------------- ModuleForward impls ----------------
+
+macro_rules! impl_one_tensor_forward {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ModuleForward for $ty {
+                type Input = Tensor;
+                type Output = Tensor;
+                fn forward(&self, x: Tensor) -> Tensor {
+                    <$ty>::forward(self, &x)
+                }
+            }
+        )*
+    };
+}
+
+impl_one_tensor_forward!(
+    Linear,
+    Conv2d,
+    ConvTranspose2d,
+    LayerNorm,
+    GroupNorm,
+    InstanceNorm,
+    LayerNorm2d,
+    RMSNorm,
+    Embedding,
+);
+
+impl ModuleForward for BatchNorm {
+    type Input = Tensor;
+    type Output = Tensor;
+    fn forward(&self, x: Tensor) -> Tensor {
+        self.forward_inference(&x)
+    }
+}
+
+impl ModuleForward for LSTMCell {
+    type Input = (Tensor, Option<(Tensor, Tensor)>);
+    type Output = (Tensor, Tensor);
+    fn forward(&self, (x, hc): Self::Input) -> Self::Output {
+        let hc_ref = hc.as_ref().map(|(h, c)| (h, c));
+        LSTMCell::forward(self, &x, hc_ref)
+    }
 }

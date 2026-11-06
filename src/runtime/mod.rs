@@ -8,11 +8,15 @@ pub mod device;
 pub mod interp;
 #[cfg(feature = "backend_cl")]
 pub mod ops_cl;
+#[cfg(feature = "backend_clang")]
+pub mod ops_clang;
 #[cfg(feature = "backend_cuda")]
 pub mod ops_cuda;
 pub mod ops_interp;
 #[cfg(feature = "backend_rayon")]
 pub mod ops_rayon;
+#[cfg(feature = "backend_rust")]
+pub mod ops_rust;
 #[cfg(feature = "backend_rayon")]
 pub mod ray_kernel;
 #[cfg(feature = "backend_rayon")]

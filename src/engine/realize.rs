@@ -234,6 +234,9 @@ pub struct CompiledProg {
     pub pi: ProgramInfo,
     /// The compiled artifact.
     pub elf: Rc<TinyElf>,
+    /// The rendered kernel source (the compiler input). Kept here because a
+    /// cache-hit re-interns the PROGRAM uop without its SOURCE child.
+    pub source: String,
     /// Content hash of [`CompiledProg::elf`]'s `lib`, computed once at compile
     /// time. `Device::runtime` keys its program cache on this; recomputing it
     /// per launch cost 0.22 ms (97% of a kernel launch) on the DA3 replay path.
@@ -358,6 +361,7 @@ pub fn to_program(
             uop: prg,
             pi: p.pi.clone(),
             elf: p.elf.clone(),
+            source: p.source.clone(),
             elf_key: p.elf_key,
         });
     }
@@ -417,7 +421,7 @@ pub fn to_program(
         Ops::Source,
         Some(crate::dtype::VOID),
         vec![],
-        Arg::Str(src_text),
+        Arg::Str(src_text.clone()),
     );
     let binary_uop = ctx.uop(
         Ops::Binary,
@@ -451,6 +455,7 @@ pub fn to_program(
         uop: prg,
         pi,
         elf,
+        source: src_text,
         elf_key,
     });
     cache.insert(key, cp.clone());

@@ -194,6 +194,9 @@ impl Prog for RayonProgram {
         vals: &[i64],
         wait: bool,
     ) -> Option<f64> {
+        if std::env::var("AUTORUST_DEVICE_VERBOSE").is_ok() {
+            eprintln!("[rayon] gs={global_size:?} ls={local_size:?} vals={vals:?}");
+        }
         // python's PythonProgram iterates `global_size[::-1]` / `local_size[::-1]`;
         // the owned executors share that little-endian dim convention.
         if self.mode == Mode::Interp {

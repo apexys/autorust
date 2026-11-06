@@ -44,6 +44,37 @@ fn step(ctx: &Ctx, sess: &mut Session, w: &Tensor, x: &Tensor) -> Tensor {
 }
 
 #[test]
+fn jit_corealizes_multiple_outputs() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    sess.enable_jit();
+    let x = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, None).to_param();
+    let w = Tensor::from_slice(&ctx, &[2.0f32, 3.0, 4.0, 5.0], None, None).to_param();
+    let mut jit = Jit::new();
+    let outs = jit.call_many(&ctx, &mut sess, |_c, _s| {
+        let a = x.mul(&w);
+        let b = a.add(&x);
+        vec![a, b]
+    });
+    assert_eq!(outs.len(), 2);
+    assert_eq!(
+        outs[0].to_list::<f32>(&mut sess),
+        vec![2.0, 6.0, 12.0, 20.0]
+    );
+    assert_eq!(
+        outs[1].to_list::<f32>(&mut sess),
+        vec![3.0, 8.0, 15.0, 24.0]
+    );
+    assert!(jit.is_captured());
+    // Replay returns the same captured roots without rebuilding the graph.
+    let again = jit.call_many(&ctx, &mut sess, |_c, _s| unreachable!());
+    assert_eq!(
+        again[0].to_list::<f32>(&mut sess),
+        vec![2.0, 6.0, 12.0, 20.0]
+    );
+}
+
+#[test]
 fn jit_capture_then_replay_updates_params() {
     let ctx = Ctx::new();
     let mut sess = Session::new();

@@ -356,19 +356,28 @@ pub fn shape_from(args: impl super::ShapeArg) -> Shape {
 // **** constructors from host data (`Tensor.__init__` list/bytes paths -> `UOp._frompy`) ****
 
 /// Python `Device.DEFAULT` (device.py): env-configurable, else the best backend
-/// actually available. Selection priority mirrors tinygrad: **CUDA → CL → RAYON
-/// → INTERP**. `ops_interp` is always compiled; `RAYON` is compiled by default
-/// (`backend_rayon`); `CL`/`CUDA` are opt-in features and, when present and a
-/// device is available, win over `RAYON`. There is no ported `NV` backend.
+/// actually available. Selection priority: **CUDA → CL → RUST → CC → RAYON →
+/// INTERP**. `ops_interp` is always compiled; `RAYON` is compiled by default
+/// (`backend_rayon`); `CL`/`CUDA`/`RUST`/`CC` are opt-in features and, when
+/// present and usable, win over `RAYON`. There is no ported `NV` backend.
 pub static DEFAULT_DEVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The device-selection priority as a pure function of availability, so it can
 /// be unit-tested without touching the environment or a GPU.
-pub fn pick_device(cuda_available: bool, cl_available: bool) -> &'static str {
+pub fn pick_device(
+    cuda_available: bool,
+    cl_available: bool,
+    rust_available: bool,
+    cc_available: bool,
+) -> &'static str {
     if cuda_available {
         "CUDA"
     } else if cl_available {
         "CL"
+    } else if rust_available {
+        "RUST"
+    } else if cc_available {
+        "CC"
     } else if cfg!(feature = "backend_rayon") {
         "RAYON"
     } else {
@@ -391,7 +400,15 @@ pub fn default_device() -> String {
             let cl = crate::runtime::ops_cl::available();
             #[cfg(not(feature = "backend_cl"))]
             let cl = false;
-            pick_device(cuda, cl).to_string()
+            #[cfg(feature = "backend_rust")]
+            let rust = crate::runtime::ops_rust::available();
+            #[cfg(not(feature = "backend_rust"))]
+            let rust = false;
+            #[cfg(feature = "backend_clang")]
+            let cc = crate::runtime::ops_clang::available();
+            #[cfg(not(feature = "backend_clang"))]
+            let cc = false;
+            pick_device(cuda, cl, rust, cc).to_string()
         })
         .clone()
 }

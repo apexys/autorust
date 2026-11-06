@@ -84,6 +84,14 @@ fn cstyle_alu_keys_clang() -> Vec<Ops> {
         .collect()
 }
 
+/// `RUST` renderer table — the full C-style set plus FDIV (the generated Rust
+/// calls `libm` for the transcendentals).
+fn rust_alu_keys() -> Vec<Ops> {
+    let mut keys = cstyle_alu_keys();
+    keys.push(Ops::Fdiv);
+    keys
+}
+
 /// `Renderer` (renderer/__init__.py) — the renderer facts the codegen
 /// pipeline and opts consume (`has_local`, dim maxima, `code_for_op` keys).
 #[derive(Clone)]
@@ -96,6 +104,10 @@ pub struct Renderer {
     pub has_shared: bool,
     /// Whether the backend exposes explicit threads.
     pub has_threads: bool,
+    /// Whether the scheduler may turn independent output loops into a global
+    /// grid. CPU backends without local memory (`RUST`) use this to expose
+    /// parallelism to the host instead of emitting `LOCAL`/`BARRIER` ops.
+    pub globalize_loops: bool,
     /// Per-axis maximum global work size, `None` when unbounded.
     pub global_max: Option<[i64; 3]>,
     /// Per-axis maximum local work size, `None` when unbounded.
@@ -125,6 +137,7 @@ impl Renderer {
             has_local: true,
             has_shared: true,
             has_threads: false,
+            globalize_loops: false,
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
@@ -153,12 +166,62 @@ impl Renderer {
             has_local: false,
             has_shared: true,
             has_threads: false,
+            globalize_loops: false,
             global_max: Some([1024, 0, 0]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
             tensor_cores: Vec::new(),
             code_for_op: cstyle_alu_keys_clang(),
             // cstyle.py:300 — fp8s excluded everywhere; bf16 only on x86/arm arch.
+            supported_dtypes: crate::dtype::ALL
+                .iter()
+                .cloned()
+                .filter(|&d| !in_fp8s(d))
+                .collect(),
+            extra_matcher: extra::clang_extra_matcher(),
+        }
+    }
+
+    /// `RUST` renderer — native Rust source, compiled by `rustc` on demand.
+    ///
+    /// No local/shared memory (a CPU has neither), and f16/bf16/fp8 are
+    /// storage-only for now, so they are excluded from `supported_dtypes`.
+    pub fn rust() -> Renderer {
+        Renderer {
+            device: "RUST".to_string(),
+            has_local: false,
+            has_shared: false,
+            has_threads: false,
+            globalize_loops: true,
+            global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
+            local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
+            shared_max: 0,
+            tensor_cores: Vec::new(),
+            code_for_op: rust_alu_keys(),
+            supported_dtypes: crate::dtype::ALL
+                .iter()
+                .cloned()
+                .filter(|&d| !in_fp8s(d) && d != crate::dtype::FLOAT16)
+                .collect(),
+            // bf16 is stored as u16 and its ALU/casts go through f32.
+            extra_matcher: extra::create_non_native_float_pats(&[crate::dtype::BFLOAT16], true)
+                .add(&extra::pm_manual_bf16_cast()),
+        }
+    }
+
+    /// `CC` renderer — portable C with the fixed CPU ABI (clang or gcc).
+    pub fn cc() -> Renderer {
+        Renderer {
+            device: "CC".to_string(),
+            has_local: false,
+            has_shared: false,
+            has_threads: false,
+            globalize_loops: true,
+            global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
+            local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
+            shared_max: 0,
+            tensor_cores: Vec::new(),
+            code_for_op: cstyle_alu_keys_clang(),
             supported_dtypes: crate::dtype::ALL
                 .iter()
                 .cloned()
@@ -175,6 +238,7 @@ impl Renderer {
             has_local: true,
             has_shared: true,
             has_threads: false,
+            globalize_loops: false,
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
@@ -203,6 +267,7 @@ impl Renderer {
             has_local: true,
             has_shared: true,
             has_threads: false,
+            globalize_loops: false,
             global_max: Some([2147483647, 65535, 65535]),
             local_max: Some([1024, 1024, 64]),
             shared_max: 49152,

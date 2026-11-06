@@ -63,10 +63,45 @@ fn main() {
     let t0 = Instant::now();
     let (r_mm, r_ew) = time_device("RAYON", n, iters);
     let rayon_total = t0.elapsed().as_secs_f64();
+
+    #[cfg(feature = "backend_rust")]
+    let rust = if autorust::runtime::ops_rust::available() {
+        let t0 = Instant::now();
+        let v = time_device("RUST", n, iters);
+        Some((v, t0.elapsed().as_secs_f64()))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "backend_rust"))]
+    let rust: Option<((f64, f64), f64)> = None;
+
+    #[cfg(feature = "backend_clang")]
+    let cc = if autorust::runtime::ops_clang::available() {
+        let t0 = Instant::now();
+        let v = time_device("CC", n, iters);
+        Some((v, t0.elapsed().as_secs_f64()))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "backend_clang"))]
+    let cc: Option<((f64, f64), f64)> = None;
+
     if std::env::var("BENCH_SKIP_INTERP").is_ok() {
         println!("                 matmul      elementwise");
         println!("RAYON   {:>10.4} ms {:>10.4} ms", r_mm * 1e3, r_ew * 1e3);
-        println!("(skip INTERP; RAYON total incl. warmup/compile: {rayon_total:.2}s)");
+        if let Some(((mm, ew), total)) = rust {
+            println!("RUST    {:>10.4} ms {:>10.4} ms", mm * 1e3, ew * 1e3);
+            println!(
+                "(skip INTERP; RAYON total {rayon_total:.2}s, RUST total {total:.2}s incl. rustc)"
+            );
+        } else {
+            println!("(skip INTERP; RAYON total incl. warmup/compile: {rayon_total:.2}s)");
+        }
+        if let Some(((mm, ew), total)) = cc {
+            println!("CC      {:>10.4} ms {:>10.4} ms", mm * 1e3, ew * 1e3);
+            println!("(CC total {total:.2}s incl. C compile)");
+        }
+        autorust::engine::prof::report();
         return;
     }
     let t0 = Instant::now();
@@ -75,7 +110,14 @@ fn main() {
 
     println!("                 matmul      elementwise");
     println!("RAYON   {:>10.4} ms {:>10.4} ms", r_mm * 1e3, r_ew * 1e3);
+    if let Some(((mm, ew), _)) = rust {
+        println!("RUST    {:>10.4} ms {:>10.4} ms", mm * 1e3, ew * 1e3);
+    }
+    if let Some(((mm, ew), _)) = cc {
+        println!("CC      {:>10.4} ms {:>10.4} ms", mm * 1e3, ew * 1e3);
+    }
     println!("INTERP  {:>10.4} ms {:>10.4} ms", i_mm * 1e3, i_ew * 1e3);
     println!("speedup {:>10.2}x  {:>10.2}x", i_mm / r_mm, i_ew / r_ew);
     println!("(total incl. warmup/compile: RAYON {rayon_total:.2}s, INTERP {interp_total:.2}s)");
+    autorust::engine::prof::report();
 }
