@@ -2162,3 +2162,23 @@ in order of preference:
 
 Until then, ship a binary without `backend_cl` if it may run on OpenCL-less
 machines.
+
+### 9.14 Comparative benchmarks (2026-11, RTX 3060 / Ryzen 3900X)
+
+CPU (24 threads, captured steady state):
+- ViT-B/16 forward: `RUST` 4.1 s, `CC` 4.2 s, tinygrad `TinyJit` ~14 s,
+  PyTorch CPU ~0.3–0.45 s.
+- Per-kernel profile (`FROZEN_PROF=1`): the MLP/QKV matmuls are ~82% of the
+  frozen run (`r_3072_197_192_4` alone 2.1 s); attention is ~13%.
+- `FA=1` routes attention through the op-level FlashAttention port: 795 steps
+  / 36 kernels and **5.37 s**, vs 399/15 and 4.25 s for SDPA. It is an
+  algorithm/correctness reference, not a current speedup; a fused kernel is
+  required.
+
+CUDA (RTX 3060, same physical GPU; shared ~30% utilization):
+- ViT-B/16 captured (`JIT=1`, f32): `CUDA` 166 ms/iter.
+- PyTorch 2.14.1+cu126 f32: ~8.5–9.1 ms/iter steady state (first call 229 ms
+  includes cuBLAS/cuDNN warmup). The ~19x gap is expected: PyTorch uses
+  cuBLAS/cuDNN, while the port's f32 kernels are untiled scalar CUDA (no
+  tensor cores for f32). CUDA tiling/TC is a separate track from the CPU
+  register-blocking work.

@@ -77,11 +77,14 @@ fn main() {
 
     let t = Instant::now();
     for _ in 0..iters {
-        if jit_on {
-            let _ = jit.call(&ctx, &mut sess, |_ctx, _sess| model.forward(&x));
+        let out = if jit_on {
+            jit.call(&ctx, &mut sess, |_ctx, _sess| model.forward(&x))
         } else {
-            let _ = model.forward(&x).realize_fresh();
-        }
+            model.forward(&x)
+        };
+        // Force completion/readback: CUDA launches are asynchronous, so timing
+        // only the enqueue would under-report device time.
+        let _ = out.to_list_fresh::<f32>();
     }
     let secs = t.elapsed().as_secs_f64() / iters as f64;
     println!(
