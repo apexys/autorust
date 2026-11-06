@@ -441,6 +441,10 @@ pub fn safe_load_from<R: Read + Seek>(
 }
 
 /// Load a `.safetensors` file.
+///
+/// The tensors are lazy: each one stages as `COPY(device, BUFFER(PYTHON))`, so
+/// an unrealized weight is uploaded host→device by every realize that reads it.
+/// Realize each tensor once (or load onto a device) before a training loop.
 pub fn safe_load(path: impl AsRef<std::path::Path>) -> Result<State, String> {
     let mut f = File::open(path.as_ref()).map_err(|e| format!("safetensors: open: {e}"))?;
     safe_load_from(&mut f, None)

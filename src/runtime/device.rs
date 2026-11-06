@@ -278,9 +278,10 @@ impl Compiled {
         self.runtime_keyed(key, &elf)
     }
 
-    /// [`Device::runtime`] with a caller-supplied content key (computed once at
-    /// compile time and stored on [`CompiledProg`](crate::engine::realize::CompiledProg)),
-    /// so a launch does not re-hash the compiled artifact.
+    /// [`Compiled::runtime`] with a caller-supplied content key (computed once
+    /// at compile time and stored on
+    /// [`CompiledProg`](crate::engine::realize::CompiledProg)), so a launch does
+    /// not re-hash the compiled artifact.
     pub fn runtime_keyed(&self, key: u64, elf: &TinyElf) -> Rc<RefCell<dyn Prog>> {
         if let Some(rt) = self.runtime_cache.borrow().get(&key) {
             return rt.clone();
