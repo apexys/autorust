@@ -409,7 +409,13 @@ impl UopRenderer for CudaUopRenderer {
 /// loads `libcuda`/`libcudart` and calls `cuInit`; failure (no driver/device or
 /// no lib) returns `false` rather than panicking.
 pub fn available() -> bool {
-    cudarc::driver::CudaContext::new(0).is_ok()
+    // `CudaContext::new` ultimately calls cudarc's `culib()`, which *panics* if
+    // the driver library cannot be loaded. That would abort `default_device()`
+    // on a machine without CUDA even though `dynamic-loading` lets the backend
+    // be compiled in. Probe the library without panicking first; only then is
+    // a `cuInit` failure a normal `Err`.
+    (unsafe { cudarc::driver::sys::is_culib_present() })
+        && cudarc::driver::CudaContext::new(0).is_ok()
 }
 
 /// The `CUDADevice` composition + `Device._DeviceMap["CUDA"]` assignment.

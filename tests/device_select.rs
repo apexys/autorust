@@ -29,6 +29,15 @@ fn rayon_is_registered() {
     assert!(devs.contains(&"INTERP".to_string()), "registered: {devs:?}");
 }
 
+/// The default-device probe must be safe on a machine where the CUDA backend
+/// was compiled in but the driver library is not installed: cudarc's loader
+/// panics on a missing `libcuda`, so `available()` has to return `false`.
+#[cfg(feature = "backend_cuda")]
+#[test]
+fn cuda_availability_probe_does_not_panic() {
+    let _ = autorust::runtime::ops_cuda::available();
+}
+
 #[cfg(feature = "backend_rayon")]
 #[test]
 fn rayon_executes_elementwise() {
