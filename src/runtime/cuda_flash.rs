@@ -152,3 +152,30 @@ pub fn run(
     );
     let _ = device("CUDA");
 }
+
+/// The captured-launch descriptor for a fusable attention call.
+pub fn host_call(
+    bufs: Vec<crate::runtime::buffer::Buffer>,
+    b: i64,
+    h: i64,
+    n: i64,
+) -> crate::engine::session::HostCall {
+    crate::engine::session::HostCall {
+        device: "CUDA".into(),
+        src: SRC.to_string(),
+        name: NAME.to_string(),
+        signature: vec![
+            (0, crate::dtype::FLOAT32),
+            (1, crate::dtype::FLOAT32),
+            (2, crate::dtype::FLOAT32),
+            (3, crate::dtype::FLOAT32),
+            (4, crate::dtype::INT32),
+            (5, crate::dtype::INT32),
+            (6, crate::dtype::INT32),
+        ],
+        bufs,
+        global: [((n + BQ - 1) / BQ), b * h, 1],
+        local: Some([BQ, 1, 1]),
+        vals: vec![n, HEAD_DIM, 0],
+    }
+}

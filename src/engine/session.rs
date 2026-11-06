@@ -49,8 +49,9 @@ pub struct Session {
     /// Values for symbolic `Variable`s (empty on the concrete corpus).
     pub var_vals: HashMap<String, i64>,
     /// When `Some`, each realize appends its planned LINEAR here (JIT capture,
-    /// `engine/jit.py:capturing`).
-    pub capturing: Option<Vec<UopId>>,
+    /// `engine/jit.py:capturing`). Hand-written kernel launches are appended in
+    /// order as [`CaptureEntry::Host`], so replay reproduces the exact sequence.
+    pub capturing: Option<Vec<CaptureEntry>>,
     /// `JIT`: whether [`Jit`](crate::engine::jit::Jit) capture/replay is active.
     pub jit: bool,
     /// `TRAINING` (helpers.py:237): training vs eval mode. Set through
@@ -115,9 +116,24 @@ impl Session {
         self.capturing = Some(Vec::new());
     }
 
-    /// Stop collecting and return the captured planned linears (in order).
-    pub fn end_capture(&mut self) -> Vec<UopId> {
+    /// Stop collecting and return the captured steps (in order).
+    pub fn end_capture(&mut self) -> Vec<CaptureEntry> {
         self.capturing.take().unwrap_or_default()
+    }
+
+    /// Record a hand-written kernel launch in the capture stream.
+    ///
+    /// Returns `false` when the session is not capturing (JIT disabled), in
+    /// which case the caller runs it immediately. Doing it this way keeps the
+    /// launch in its exact position between generated linears.
+    pub fn capture_host(&mut self, call: HostCall) -> bool {
+        match self.capturing.as_mut() {
+            Some(v) => {
+                v.push(CaptureEntry::Host(Box::new(call)));
+                true
+            }
+            None => false,
+        }
     }
 
     /// Schedule + execute `tensor_uop`, returning its realized buffer, reusing
@@ -164,5 +180,66 @@ impl Session {
     /// `Tensor.to_list` (f64 decode) against this session.
     pub fn tensor_values(&mut self, ctx: &mut UOpCtx, tensor_uop: UopId) -> Vec<f64> {
         realize::buffer_values(&self.realize_tensor(ctx, tensor_uop).0)
+    }
+}
+
+/// One captured step: a generated LINEAR schedule, or a hand-written kernel
+/// launch (fused attention) recorded in the same order.
+#[derive(Clone)]
+pub enum CaptureEntry {
+    /// A generated linear schedule.
+    Linear(UopId),
+    /// A hand-written kernel launch.
+    Host(Box<HostCall>),
+}
+
+/// A hand-written kernel launch (`Compiled::run_host_kernel`) captured by the
+/// JIT so it replays with the generated linears.
+#[derive(Clone)]
+pub struct HostCall {
+    /// Backend the source is written for (`CUDA`, `CL`, ...).
+    pub device: String,
+    /// Kernel source in that backend's language.
+    pub src: String,
+    /// Entry-point name.
+    pub name: String,
+    /// `(slot, dtype)` argument list, as for a generated kernel.
+    pub signature: Vec<(i64, crate::dtype::DTypeId)>,
+    /// Buffers, in slot order (held so replay can resolve them).
+    pub bufs: Vec<crate::runtime::buffer::Buffer>,
+    /// Launch grid.
+    pub global: [i64; 3],
+    /// Launch block, when explicit.
+    pub local: Option<[i64; 3]>,
+    /// Scalar args.
+    pub vals: Vec<i64>,
+}
+
+impl HostCall {
+    /// Execute the launch now, against the current device.
+    pub fn exec(&self) {
+        let dev = crate::runtime::device::device(&self.device);
+        let bufs: Vec<crate::runtime::buffer::OpaqueView> =
+            self.bufs.iter().map(|b| b.get_buf(&dev)).collect();
+        dev.run_host_kernel(
+            &self.src,
+            &self.name,
+            &self.signature,
+            &bufs,
+            [
+                self.global[0].max(0) as usize,
+                self.global[1].max(0) as usize,
+                self.global[2].max(0) as usize,
+            ],
+            self.local.map(|l| {
+                [
+                    l[0].max(0) as usize,
+                    l[1].max(0) as usize,
+                    l[2].max(0) as usize,
+                ]
+            }),
+            &self.vals,
+            true,
+        );
     }
 }

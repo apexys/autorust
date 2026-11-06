@@ -245,7 +245,18 @@ pub fn build(
         b.plan.output_shapes.push(shape);
     }
 
-    for cl in jit.linears() {
+    for st in jit.steps() {
+        let cl = match st {
+            crate::engine::jit::JitStep::Linear(cl) => cl,
+            // A frozen plan is a list of kernels + copies; a hand-written
+            // launch would need its source and a device at run time. The CPU
+            // capture never emits one (fused attention is GPU-only).
+            crate::engine::jit::JitStep::Host(_) => {
+                panic!(
+                    "TGERR: freeze cannot serialize a host-kernel step (capture on a CPU backend)"
+                )
+            }
+        };
         let calls = ctx.srcs(&cl.line).to_vec();
         for call in calls {
             let body = ctx.srcs(&call)[0].clone();

@@ -757,7 +757,7 @@ pub fn realize_many(
     tensor_uops: &[UopId],
     t: &mut BufTable,
     cache: &mut ProgCache,
-    mut capture: Option<&mut Vec<UopId>>,
+    mut capture: Option<&mut Vec<crate::engine::session::CaptureEntry>>,
 ) -> (Vec<crate::runtime::buffer::Buffer>, Vec<UopId>) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
@@ -779,7 +779,9 @@ pub fn realize_many(
     let _ = linear;
     let t3 = prof.then(std::time::Instant::now);
     if let Some(c) = capture.as_mut() {
-        c.push(planned.clone());
+        c.push(crate::engine::session::CaptureEntry::Linear(
+            planned.clone(),
+        ));
     }
     run_linear(ctx, planned, t, &HashMap::new(), cache);
     if let (Some(a), Some(b), Some(c), Some(d)) = (t0, t1, t2, t3) {
@@ -838,7 +840,7 @@ pub fn realize_tensor(
     tensor_uop: UopId,
     t: &mut BufTable,
     cache: &mut ProgCache,
-    capture: Option<&mut Vec<UopId>>,
+    capture: Option<&mut Vec<crate::engine::session::CaptureEntry>>,
 ) -> (crate::runtime::buffer::Buffer, UopId) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
@@ -848,7 +850,9 @@ pub fn realize_tensor(
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
     let _ = linear;
     if let Some(c) = capture {
-        c.push(planned.clone());
+        c.push(crate::engine::session::CaptureEntry::Linear(
+            planned.clone(),
+        ));
     }
     run_linear(ctx, planned, t, &HashMap::new(), cache);
     // python `_apply_map_to_tensors`: the tensor's uop becomes its final

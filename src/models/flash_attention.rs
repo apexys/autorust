@@ -269,3 +269,118 @@ fn block_bounds(n: i64, b: i64) -> Vec<(i64, i64)> {
     }
     v
 }
+
+/// Fused CUDA attention through the hand-written FA2 kernel.
+///
+/// Returns `None` when the backend, dtype or shape is not covered (the caller
+/// then falls back to [`Tensor::scaled_dot_product_attention`]), and never
+/// handles masks or causality — those need the general path.
+///
+/// The launch is captured by the session in its exact position between the q/k/v
+/// projections and the output projection, so a JIT replay reproduces the same
+/// order.
+pub fn fused_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    sess: &mut crate::engine::session::Session,
+) -> Option<Tensor> {
+    let dims = q.shape();
+    let dims = dims.as_slice();
+    if dims.len() != 4 {
+        return None;
+    }
+    let i = |x: &SVal| x.clone().as_i64().unwrap_or(0);
+    let (b, h, n, d) = (i(&dims[0]), i(&dims[1]), i(&dims[2]), i(&dims[3]));
+    if !crate::runtime::cuda_flash::supports(n, d) {
+        return None;
+    }
+    if q.device().as_deref() != Some("CUDA") {
+        return None;
+    }
+    if q.dtype() != dtype::FLOAT32 {
+        return None;
+    }
+
+    {
+        let mut c = q.ctx().borrow_mut();
+        q.realize_device_ctx(&mut c, sess);
+        k.realize_device_ctx(&mut c, sess);
+        v.realize_device_ctx(&mut c, sess);
+    }
+    let ctx = q.ctx().clone();
+    let out = Tensor::from_slice(
+        &ctx,
+        &vec![0.0f32; (b * h * n * d) as usize],
+        None,
+        Some("CUDA"),
+    )
+    .reshape([b, h, n, d])
+    .to_param();
+    {
+        let mut c = ctx.borrow_mut();
+        out.realize_device_ctx(&mut c, sess);
+    }
+    let bufs = vec![
+        q.realized_buffer()?,
+        k.realized_buffer()?,
+        v.realized_buffer()?,
+        out.realized_buffer()?,
+    ];
+    let call = crate::runtime::cuda_flash::host_call(bufs, b, h, n);
+    if !sess.capture_host(call.clone()) {
+        call.exec();
+    }
+    Some(out)
+}
+
+/// Selectable attention implementation (`AUTORUST_ATTN`).
+///
+/// Mirrors the `FA=1` switch on `models::transformer`, but as a first-class
+/// choice so quantized variants can be added without touching call sites.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AttentionKind {
+    /// Generated `softmax(q·kᵀ)v` (the reference path).
+    Sdpa,
+    /// Fused FA2 hand-written kernel (`runtime::cuda_flash` / `cl_flash`).
+    Flash,
+    /// SageAttention-style quantized attention. Not implemented yet: selecting
+    /// it currently runs [`AttentionKind::Flash`] and says so once.
+    Sage,
+}
+
+impl AttentionKind {
+    /// `AUTORUST_ATTN=sdpa|flash|sage` (default `flash`).
+    pub fn from_env() -> AttentionKind {
+        match std::env::var("AUTORUST_ATTN").as_deref() {
+            Ok("sdpa") | Ok("0") => AttentionKind::Sdpa,
+            Ok("sage") => AttentionKind::Sage,
+            _ => AttentionKind::Flash,
+        }
+    }
+
+    /// Name for logging.
+    pub fn name(self) -> &'static str {
+        match self {
+            AttentionKind::Sdpa => "sdpa",
+            AttentionKind::Flash => "flash",
+            AttentionKind::Sage => "sage",
+        }
+    }
+
+    /// One-time warning when a requested variant degrades to another.
+    pub fn effective(self) -> AttentionKind {
+        match self {
+            AttentionKind::Sage => {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| {
+                    eprintln!(
+                        "AUTORUST_ATTN=sage: quantized attention not implemented, using flash"
+                    )
+                });
+                AttentionKind::Flash
+            }
+            k => k,
+        }
+    }
+}

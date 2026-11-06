@@ -40,8 +40,16 @@ use crate::uop::ctx::UOpCtx;
 /// `_TinyJit` (jit.py:220) — captures the compiled LINEARS of one `call` and
 /// replays them. Owns the captured result tensor and keeps every captured buffer
 /// alive (so the session's `prune` cannot reclaim a replay's intermediates).
+/// One replayed step: a compiled linear schedule or a hand-written launch.
+pub enum JitStep {
+    /// A compiled generated linear.
+    Linear(CompiledLinear),
+    /// A hand-written kernel launch (fused attention).
+    Host(Box<crate::engine::session::HostCall>),
+}
+
 pub struct Jit {
-    linears: Vec<CompiledLinear>,
+    steps: Vec<JitStep>,
     rets: Vec<Tensor>,
     /// Strong refs to every buffer the captured linears touch.
     held: Vec<Buffer>,
@@ -51,7 +59,7 @@ impl Jit {
     /// Create an empty (uncaptured) JIT.
     pub fn new() -> Self {
         Jit {
-            linears: Vec::new(),
+            steps: Vec::new(),
             rets: Vec::new(),
             held: Vec::new(),
         }
@@ -59,7 +67,7 @@ impl Jit {
 
     /// `TinyJit.reset` (jit.py:230): drop the capture so the next call captures.
     pub fn reset(&mut self) {
-        self.linears.clear();
+        self.steps.clear();
         self.rets.clear();
         self.held.clear();
     }
@@ -71,12 +79,15 @@ impl Jit {
 
     /// The number of captured LINEARS (kernels/copies), for diagnostics.
     pub fn n_linears(&self) -> usize {
-        self.linears.len()
+        self.steps
+            .iter()
+            .filter(|s| matches!(s, JitStep::Linear(_)))
+            .count()
     }
 
     /// The captured compiled LINEARS (freeze/plan lowering).
-    pub fn linears(&self) -> &[CompiledLinear] {
-        &self.linears
+    pub fn steps(&self) -> &[JitStep] {
+        &self.steps
     }
 
     /// The captured output tensors, in the order returned by `call_many`.
@@ -106,17 +117,27 @@ impl Jit {
                 !planned.is_empty(),
                 "TGERR: JIT captured no linears (did the step realize anything?)"
             );
-            self.linears = planned
+            self.steps = planned
                 .into_iter()
-                .map(|l| compile_linear_cached(&mut c, l, &mut sess.cache))
+                .map(|l| match l {
+                    crate::engine::session::CaptureEntry::Linear(u) => {
+                        JitStep::Linear(compile_linear_cached(&mut c, u, &mut sess.cache))
+                    }
+                    crate::engine::session::CaptureEntry::Host(h) => JitStep::Host(h),
+                })
                 .collect();
-            self.held = collect_buffers(&mut c, sess, &self.linears);
+            self.held = collect_buffers(&mut c, sess, &self.steps);
             self.rets = vec![ret.clone()];
             ret
         } else {
             let mut c = ctx.borrow_mut();
-            for cl in &self.linears {
-                exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new());
+            for st in &self.steps {
+                match st {
+                    JitStep::Linear(cl) => {
+                        exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new())
+                    }
+                    JitStep::Host(h) => h.exec(),
+                }
             }
             self.rets
                 .first()
@@ -149,19 +170,29 @@ impl Jit {
                 "TGERR: JIT captured no linears (did the step realize anything?)"
             );
             // `jit_lower`: lower + compile each linear once; replay executes these.
-            self.linears = planned
+            self.steps = planned
                 .into_iter()
-                .map(|l| compile_linear_cached(&mut c, l, &mut sess.cache))
+                .map(|l| match l {
+                    crate::engine::session::CaptureEntry::Linear(u) => {
+                        JitStep::Linear(compile_linear_cached(&mut c, u, &mut sess.cache))
+                    }
+                    crate::engine::session::CaptureEntry::Host(h) => JitStep::Host(h),
+                })
                 .collect();
-            // hold all buffers the captured linears reference so `prune` keeps them.
-            self.held = collect_buffers(&mut c, sess, &self.linears);
+            // hold all buffers the captured steps reference so `prune` keeps them.
+            self.held = collect_buffers(&mut c, sess, &self.steps);
             self.rets = rets.clone();
             rets
         } else {
             // replay: execute the compiled schedules against the live buffers.
             let mut c = ctx.borrow_mut();
-            for cl in &self.linears {
-                exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new());
+            for st in &self.steps {
+                match st {
+                    JitStep::Linear(cl) => {
+                        exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new())
+                    }
+                    JitStep::Host(h) => h.exec(),
+                }
             }
             self.rets.clone()
         }
@@ -178,14 +209,22 @@ impl Default for Jit {
 /// allocation, so the caller can hold them across future realizes (whose `prune`
 /// would otherwise drop an intermediate that only the table references). Each
 /// CALL's args (PARAM-globals plus arena buffers) are walked.
-fn collect_buffers(
-    ctx: &mut UOpCtx,
-    sess: &mut Session,
-    linears: &[CompiledLinear],
-) -> Vec<Buffer> {
+fn collect_buffers(ctx: &mut UOpCtx, sess: &mut Session, steps: &[JitStep]) -> Vec<Buffer> {
     let mut out: Vec<Buffer> = Vec::new();
     let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for c in linears {
+    for st in steps {
+        let c = match st {
+            JitStep::Linear(c) => c,
+            JitStep::Host(h) => {
+                for b in &h.bufs {
+                    let key = std::rc::Rc::as_ptr(&b.base) as usize as u32;
+                    if seen.insert(key) {
+                        out.push(b.clone());
+                    }
+                }
+                continue;
+            }
+        };
         for u in ctx.toposort(&c.line) {
             if ctx.op_of(&u) == crate::uop::Ops::Buffer && seen.insert(u.id()) {
                 out.push(buffer_of(ctx, &mut sess.buffers, u));
