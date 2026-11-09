@@ -495,7 +495,10 @@ fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
             // `CC`/`CLANG` only exist as compiled backends with the feature;
             // without it the name falls back to the interpreter, which has no
             // host-op dispatcher.
-            if s == "RUST" || (cfg!(feature = "backend_clang") && matches!(s, "CC" | "CLANG")) {
+            if s == "RUST"
+                || s == "RAYON"
+                || (cfg!(feature = "backend_clang") && matches!(s, "CC" | "CLANG"))
+            {
                 return Some(GemmDevice::Cpu);
             }
             return None;

@@ -244,7 +244,11 @@ pub fn register() {
         let compiler: Rc<dyn Comp> = Rc::new(IdentityCompiler::default());
         let ctor: Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>> =
             Rc::new(|elf| Rc::new(RefCell::new(RayonProgram::new(elf))));
-        Compiled::new("RAYON", renderer, LruAllocator::new(), compiler, ctor)
+        let dev = Compiled::new("RAYON", renderer, LruAllocator::new(), compiler, ctor);
+        // RAYON keeps operands in host memory like RUST/CC, so the packed CPU
+        // GEMM serves its contractions through the same HostGemm descriptor.
+        crate::runtime::cpu_gemm::install(&dev);
+        dev
     }
     register_device("RAYON", Rc::new(make));
 }

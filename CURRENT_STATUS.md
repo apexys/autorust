@@ -201,6 +201,16 @@ the per-context `library_gemm` decides whether to use it. That is what lets two
 contexts in one process make different choices (the cublas/clblast tests now do
 exactly that instead of toggling env vars, which the `OnceLock` would ignore).
 
+### Process-wide lowering cache
+
+`to_program` already reused arena-independent artifacts from the per-session
+`ProgCache`; it now also checks a capped process-wide cache keyed by
+`(device, AST content)`. A fresh session (or `*_fresh`) that rebuilds the same
+graph hits it instead of re-lowering/re-rendering/re-compiling: 120/126 hits in
+the Rayon bench, elementwise 6.2 -> 4.5 ms (Rayon) and 5.5 -> 3.0 ms (RUST).
+The schedule (`rangeify`/kernel split) still runs per realize; a persistent
+session or the JIT is the way to skip that.
+
 ### Fresh one-shot reads (`*_fresh`)
 
 `Tensor::to_list_fresh` / `realize_fresh` / `to_bytes_fresh` run in a temporary
@@ -252,10 +262,13 @@ app-side.
 3. **Attention output buffer** is allocated per layer per batch (~9.7 MB at
    batch 8). Reusing one scratch buffer should recover some of the gap between
    the 2.2x kernel win and the observed ~10% end-to-end win.
-4. **RAYON** (the interpreter-backed CPU backend) is not optimised: its renderer
-   facts still advertise the interpreter's capabilities, so it gets a GPU-shaped
-   schedule and runs the typed IR at ~0.9 GFLOP/s. It is not on the app's path
-   (the frozen plan uses the compiled `RUST` backend).
+4. **RAYON** contractions now use the packed CPU GEMM: `gemm_device` maps
+   `RAYON` to `GemmDevice::Cpu` and `ops_rayon` installs the host dispatcher, so
+   a 512^3 matmul went **118.8 -> 5.8 ms (20x)** and matches RUST/CC. Its own
+   typed-IR schedule is only used for non-contractions (elementwise ~4.5 ms vs
+   RUST ~3.0). The renderer still advertises the interpreter facts, and the
+   remaining per-realize cost is the schedule (`sched.rangeify` +
+   `kernel_graph` ~1.5 ms), which the JIT avoids.
 5. **GEMM headroom**: the generated f32 kernel now uses TF32 `mma` (5.4 TFLOP/s
    at 2048^3 vs 3.0 FFMA; cuBLAS TF32 5.8). bf16 is 10.8. The FFMA fallback
    for tall/wide shapes is still memory-bound (no shared tiling); the attention

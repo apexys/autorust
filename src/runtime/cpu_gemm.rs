@@ -52,9 +52,9 @@ pub fn available() -> bool {
 
 /// Install the CPU GEMM as a device's host-op dispatcher.
 ///
-/// Shared by the compiled-Rust (`RUST`) and clang (`CC`) backends: both keep
-/// their operands in host memory, so the same packed kernel serves them under
-/// the same `HostGemm` descriptor.
+/// Shared by the compiled-Rust (`RUST`), clang (`CC`) and `RAYON` backends:
+/// all keep their operands in host memory, so the same packed kernel serves
+/// them under the same `HostGemm` descriptor.
 pub fn install(dev: &std::rc::Rc<crate::runtime::device::Compiled>) {
     use crate::runtime::buffer::host_of;
     *dev.host_exec.borrow_mut() = Some(Box::new(|bufs, desc| {

@@ -334,6 +334,44 @@ impl ProgCache {
     }
 }
 
+thread_local! {
+    /// Process-wide lowered-program cache, keyed by `(device, AST content)`.
+    ///
+    /// The session cache avoids re-lowering within one persistent session; this
+    /// one also covers new/fresh sessions (`*_fresh`, eager loops that create a
+    /// session per call). The artifacts are arena-independent (the reuse path
+    /// re-interns a fresh PROGRAM node), so a content hit is safe. Capped so a
+    /// long-lived process cannot grow without bound.
+    static GLOBAL_PROGS: std::cell::RefCell<ProgCache> =
+        std::cell::RefCell::new(ProgCache::capped(1024));
+}
+
+fn global_program_key(ctx: &UOpCtx, dev: &crate::runtime::device::Compiled, ast: &UopId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    dev.device.hash(&mut h);
+    ctx.g.content_key(ast).hash(&mut h);
+    h.finish()
+}
+
+/// Re-intern a cached program's arena-independent artifacts in `ctx`.
+fn reuse_program(ctx: &mut UOpCtx, p: &CompiledProg) -> Rc<CompiledProg> {
+    let prg = ctx.uop(
+        Ops::Program,
+        Some(crate::dtype::VOID),
+        vec![],
+        p.pi.to_arg(),
+    );
+    Rc::new(CompiledProg {
+        uop: prg,
+        pi: p.pi.clone(),
+        elf: p.elf.clone(),
+        source: p.source.clone(),
+        elf_key: p.elf_key,
+        host: p.host.clone(),
+    })
+}
+
 /// `to_program` (codegen/__init__.py:500) — cached do_to_program. The device
 /// supplies its renderer (facts + render) and compiler through the public
 /// backend seams.
@@ -344,6 +382,7 @@ pub fn to_program(
     cache: &mut ProgCache,
 ) -> Rc<CompiledProg> {
     let key = ctx.g.content_key(&ast);
+    let gkey = global_program_key(ctx, dev, &ast);
     if crate::engine::prof::enabled() {
         // Kernel AST size, for comparing against tinygrad (see CURRENT_STATE 8.34).
         crate::engine::prof::add("codegen.ast_nodes", ctx.toposort(&ast).len() as f64);
@@ -354,20 +393,12 @@ pub fn to_program(
         // expensive artifacts (`elf`, `pi`) are arena-independent; re-intern a
         // fresh PROGRAM node in this ctx and reuse them (no re-lower/re-render/
         // re-compile).
-        let prg = ctx.uop(
-            Ops::Program,
-            Some(crate::dtype::VOID),
-            vec![],
-            p.pi.to_arg(),
-        );
-        return Rc::new(CompiledProg {
-            uop: prg,
-            pi: p.pi.clone(),
-            elf: p.elf.clone(),
-            source: p.source.clone(),
-            elf_key: p.elf_key,
-            host: p.host.clone(),
-        });
+        return reuse_program(ctx, &p);
+    }
+    if let Some(p) = GLOBAL_PROGS.with(|g| g.borrow_mut().get(gkey)) {
+        crate::engine::prof::count("codegen.global_prog_hit");
+        cache.insert(key, p.clone());
+        return reuse_program(ctx, &p);
     }
     // Host-dispatch kernel (library GEMM): no rendering/compilation. The AST is
     // still walked for its buffer slots so the executor can resolve `bufs`.
@@ -387,6 +418,7 @@ pub fn to_program(
             host: Some(gemm.to_data()),
         });
         cache.insert(key, cp.clone());
+        GLOBAL_PROGS.with(|g| g.borrow_mut().insert(gkey, cp.clone()));
         return cp;
     }
     // 1. full_rewrite_to_sink
@@ -495,6 +527,7 @@ pub fn to_program(
         host: None,
     });
     cache.insert(key, cp.clone());
+    GLOBAL_PROGS.with(|g| g.borrow_mut().insert(gkey, cp.clone()));
     cp
 }
 
