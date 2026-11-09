@@ -2186,10 +2186,7 @@ impl Tensor {
             .clone()
             .as_i64()
             .unwrap_or(0);
-        let tile = std::env::var("SDPA_TILE")
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
+        let tile = ctx.settings.sdpa_tile;
         if allow_pad
             && tile > 1
             && attn_mask.is_none()

@@ -389,7 +389,7 @@ pub fn pick_device(
 pub fn default_device() -> String {
     DEFAULT_DEVICE
         .get_or_init(|| {
-            if let Ok(dev) = std::env::var("DEFAULT_DEVICE") {
+            if let Some(dev) = crate::settings::global().device.clone() {
                 return dev;
             }
             #[cfg(feature = "backend_cuda")]

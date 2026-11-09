@@ -1452,9 +1452,13 @@ fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
     } else {
         (8, 8, 2, 64)
     };
-    let want_m = env_int("AUTORUST_MM_M", def_m).clamp(1, 16);
-    let want_n = env_int("AUTORUST_MM_N", def_n).clamp(1, 16);
-    let want_k = env_int("AUTORUST_MM_K", 4).clamp(1, 16);
+    let (dm, dn, dk, dlm, dln) = match ctx.settings.mm_tile {
+        Some(v) => v,
+        None => (def_m, def_n, 4, def_lm, def_ln),
+    };
+    let want_m = (dm as i64).clamp(1, 16);
+    let want_n = (dn as i64).clamp(1, 16);
+    let want_k = (dk as i64).clamp(1, 16);
 
     // NOTE: padded tiling (PADTO on an output axis) is deliberately disabled:
     // PADTO gates the store through the index, but an upcast store is a *vector*
@@ -1495,8 +1499,8 @@ fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
         // LOCAL is the *block tile*; UPCAST then splits it into
         // (threads x registers-per-thread). tinygrad's best 512^3 config is
         // 8x16 threads with a 4x4 register tile, i.e. a 32x64 block tile.
-        let want_lm = env_int("AUTORUST_MM_LM", def_lm).clamp(1, 64);
-        let want_ln = env_int("AUTORUST_MM_LN", def_ln).clamp(1, 64);
+        let want_lm = (dlm as i64).clamp(1, 64);
+        let want_ln = (dln as i64).clamp(1, 64);
         let mut local_picks: Vec<(UopId, i64, i64)> = Vec::new();
         for (rng, want_threads, want_up) in [
             (m_rng.clone(), want_lm, want_m),

@@ -39,7 +39,9 @@ fn pair(prefix: &str, p: &(Tensor, Tensor)) -> Vec<(String, Tensor)> {
 /// `scaled_dot_product_attention` (read once, like `JIT`/`TRAINING`).
 fn flash_enabled() -> bool {
     static FA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FA.get_or_init(|| std::env::var("FA").map(|v| v != "0").unwrap_or(false))
+    *FA.get_or_init(|| {
+        crate::settings::global().attention != crate::models::flash_attention::AttentionKind::Sdpa
+    })
 }
 
 /// `TransformerBlock` (extra/models/transformer.py:3-39).

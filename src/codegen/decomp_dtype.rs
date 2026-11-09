@@ -1249,13 +1249,19 @@ fn all_ops() -> Vec<Ops> {
 }
 
 /// `EMULATED_DTYPES` env (helpers.py:249): comma-separated dtype attrs.
+///
+/// Read once per process; lowering calls this for every kernel.
 pub fn emulated_dtypes() -> Vec<DTypeId> {
-    std::env::var("EMULATED_DTYPES")
-        .unwrap_or_default()
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .filter_map(dtype::to_dtype)
-        .collect()
+    static V: std::sync::OnceLock<Vec<DTypeId>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("EMULATED_DTYPES")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .filter_map(dtype::to_dtype)
+            .collect()
+    })
+    .clone()
 }
 
 fn should_emulate(dt: DTypeId, supported: &HashSet<DTypeId>, emulated: &[DTypeId]) -> bool {

@@ -2269,3 +2269,62 @@ CUDA (RTX 3060, same physical GPU; shared ~30% utilization):
 - Per-kernel profiler: `AUTORUST_KPROF=1` (syncs per launch; no GPU-counter
   permission needed). Nsight Compute needs
   `NVreg_RestrictProfilingToAdminUsers=0` (or root).
+
+
+## Attention variants and hardware capability (status note)
+
+One operation, three implementations. `sdpa` and `flash` compute the same
+function (`softmax(q·kᵀ/√d + mask)·v`); `flash` only changes the evaluation
+order (online softmax) and is algebraically identical (measured 1.2e-8). `sage`
+is a *different* function: QKᵀ runs on int8-quantized operands, so it
+approximates.
+
+| | coverage today |
+|---|---|
+| `sdpa` | everything: masks, causal, dropout, GQA, any `d`, any dtype |
+| `flash` | no mask, no causal, no dropout, `d == 64`, f32, contiguous, CUDA/CL only |
+| `sage` | same subset as flash, plus quantization assumptions |
+
+The `flash` gaps are unimplemented features, not limits of the approach:
+causal is (a) skip key tiles above the diagonal and (b) mask the diagonal tile;
+an additive mask is one extra shared-memory tile added before the max; GQA is a
+head-index divide. On CPU the fused kernel does not exist, and the graph-level
+FA port (`models::flash_attention`) measured 16x slower than split-SDPA, so
+`flash` there means "same math, no faster kernel".
+
+Fallbacks are therefore semantically safe, but they must be observable: the
+plan is per-context counters plus a one-time log line per (kind, reason), and an
+opt-in `strict_attention` for benchmarks. `AttentionKind::Sage` currently
+degrades to the exact f32 kernel with a notice.
+
+### What the current GPU (sm_86) has and we do not use
+
+| capability | status |
+|---|---|
+| tensor cores (`mma.sync` f16/bf16, TF32, INT8) | unused by our kernels. The renderer has the machinery (`tc::get_cuda`, `Ops::Wmma`, `mma.sync.aligned` wrapper) but `actions()` never includes `OptOp::Tc` and the hand tiling never selects it; cuBLAS uses TCs, our FA2 kernel does not |
+| `cp.async`, `ldmatrix` | unused; every key tile pays load → barrier → compute → barrier |
+| bf16/f16 arithmetic | unused in our kernels (f32 only) |
+| warp reductions, `__launch_bounds__`, double buffering | unused |
+| CUDA graphs | unused (own JIT replay) |
+
+Occupancy is the other gap: 64 threads/block, ~128 registers, 33 KB shared →
+~3 blocks/SM, about 10% occupancy.
+
+### Plan for a newer GPU
+
+Beneficial on every sm_80+ card, therefore first:
+
+1. bf16 tensor-core FA2 (`mma.m16n8k16`, f32 accumulate) — the 3-5x.
+2. `cp.async` double-buffered K/V staging.
+3. Causal / additive mask / GQA in the kernel.
+4. Occupancy pass (`__launch_bounds__`, BK 16 vs 32).
+
+Only for Ada/Hopper:
+
+5. FP8 (E4M3) QKᵀ — the real SageAttention2; sm_86 has no FP8 tensor cores.
+6. Hopper-only `wgmma`/TMA/warp specialization — a separate kernel; it does not
+   help the 3060.
+
+Arch detection and the PTX cache already key on `sm_XX`, so a newer card needs
+no code change to run; `tests/flash_cuda.rs` and `tests/sage_cuda.rs` give
+per-arch numbers to add to the README table.

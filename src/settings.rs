@@ -69,6 +69,12 @@ pub struct Settings {
     pub beam: usize,
     /// On-disk cache for compiled kernels and tuning results.
     pub cache: bool,
+    /// `SDPA_TILE`: pad attention to a multiple of this (0 = off).
+    pub sdpa_tile: i64,
+    /// `AUTORUST_MM_{M,N,K,LM,LN}` overrides for the generated matmul tile.
+    pub mm_tile: Option<(usize, usize, usize, usize, usize)>,
+    /// `DEFAULT_DEVICE`: device used by tensor creation when none is given.
+    pub device: Option<String>,
 }
 
 impl Default for Settings {
@@ -80,6 +86,9 @@ impl Default for Settings {
             cpu_gemm_tile: None,
             beam: 0,
             cache: true,
+            sdpa_tile: 0,
+            mm_tile: None,
+            device: None,
         }
     }
 }
@@ -137,6 +146,21 @@ impl Settings {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
         let cache = env("CACHELEVEL").as_deref() != Some("0");
+        let sdpa_tile = env("SDPA_TILE")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let mm = |k: &str| env(k).and_then(|v| v.parse::<usize>().ok());
+        let mm_tile = match (
+            mm("AUTORUST_MM_M"),
+            mm("AUTORUST_MM_N"),
+            mm("AUTORUST_MM_K"),
+            mm("AUTORUST_MM_LM"),
+            mm("AUTORUST_MM_LN"),
+        ) {
+            (Some(m), Some(n), Some(k), Some(lm), Some(ln)) => Some((m, n, k, lm, ln)),
+            _ => None,
+        };
+        let device = env("DEFAULT_DEVICE").filter(|d| !d.is_empty());
         Settings {
             attention,
             library_gemm,
@@ -144,6 +168,9 @@ impl Settings {
             cpu_gemm_tile,
             beam,
             cache,
+            sdpa_tile,
+            mm_tile,
+            device,
         }
     }
 
