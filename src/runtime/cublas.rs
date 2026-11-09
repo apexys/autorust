@@ -229,13 +229,10 @@ pub fn available() -> bool {
     lib().is_some()
 }
 
-/// Math mode: `AUTORUST_CUBLAS_TF32=1` allows TF32 on f32 GEMMs (faster,
+/// Math mode: TF32 on f32 GEMMs unless `AUTORUST_CUBLAS_TF32=0` (faster,
 /// slightly less precise). Default off to match PyTorch's default.
 fn tf32_enabled() -> bool {
-    matches!(
-        std::env::var("AUTORUST_CUBLAS_TF32").as_deref(),
-        Ok("1") | Ok("true") | Ok("on")
-    )
+    crate::settings::global().allow_tf32
 }
 
 /// An owned cuBLAS handle bound to one CUDA stream.
@@ -263,7 +260,10 @@ impl Handle {
         }
         if let Some(set_math) = lib.set_math_mode {
             // CUBLAS_TF32_TENSOR_OP_MATH = 3, CUBLAS_DEFAULT_MATH = 0.
-            let mode = if tf32_enabled() { 3 } else { 0 };
+            // 3 = CUBLAS_TF32_TENSOR_OP_MATH, 2 = CUBLAS_PEDANTIC_MATH.
+            // 0 (the old default) also allows TF32 on CUDA >= 11, so `false`
+            // has to be pedantic to actually mean full-precision f32.
+            let mode = if tf32_enabled() { 3 } else { 2 };
             let _ = unsafe { set_math(raw, mode) };
         }
         Some(Handle { raw, lib })

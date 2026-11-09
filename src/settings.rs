@@ -61,7 +61,11 @@ pub struct Settings {
     pub attention: AttentionKind,
     /// Library-GEMM policy, per backend.
     pub library_gemm: LibraryGemmPolicy,
-    /// Allow TF32 for f32 CUDA GEMMs.
+    /// Use TF32 (f32 mantissa, 10 bits) for f32 CUDA matmuls.
+    ///
+    /// On by default: it is the only tensor-core format that accepts f32
+    /// storage, and it is ~2x the FP32 rate. Turn it off when bit-exact f32 is
+    /// required (`AUTORUST_CUBLAS_TF32=0`).
     pub allow_tf32: bool,
     /// CPU packed-GEMM tile `(mc, nc, kc)`, when overridden.
     pub cpu_gemm_tile: Option<(usize, usize, usize)>,
@@ -82,7 +86,7 @@ impl Default for Settings {
         Settings {
             attention: AttentionKind::Flash,
             library_gemm: LibraryGemmPolicy::default(),
-            allow_tf32: false,
+            allow_tf32: true,
             cpu_gemm_tile: None,
             beam: 0,
             cache: true,

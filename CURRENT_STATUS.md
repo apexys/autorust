@@ -227,3 +227,25 @@ AUTORUST_ATTN=sdpa ./target/release/clusterfun <images> /tmp/out --device cuda -
 FROZEN_PROF=1 ./target/release/clusterfun <images> /tmp/out --device cpu
 AUTORUST_KPROF=1 ./target/release/clusterfun <images> /tmp/out --device cuda
 ```
+
+
+## Tensor-core / TF32 note (measured)
+
+`allow_tf32` now defaults to **on** and `AUTORUST_CUBLAS_TF32=0` maps to
+`CUBLAS_PEDANTIC_MATH` (the old `false` used math mode 0, which already allows
+TF32 on CUDA >= 11 — the switch was a no-op).
+
+Measured on the 3060, cuBLAS f32:
+
+| shape | pedantic f32 | TF32 |
+|---|---|---|
+| 2048^3 | 15.03 ms (1143 GFLOP/s) | 15.47 ms (1110) |
+| 789x1536x384 | 7.83 ms (119) | 8.86 ms (105) |
+| 789x384x384 | 0.904 ms (258) | 0.888 ms (262) |
+
+No meaningful difference, and 2048^3 at ~1.1 TFLOP/s is far below the card's
+capability, so these runs are **not compute-bound** — the flag is not the lever
+here. TF32 only pays off once the matmuls are actually compute-bound, i.e. in
+the fused attention kernel with `mma`, which is a warp-tiled rewrite (the scalar
+one-thread-per-row kernel cannot use `mma`). Default-on is therefore harmless
+for accuracy (it was already the effective mode) but buys nothing by itself.
