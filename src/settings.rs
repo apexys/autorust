@@ -61,12 +61,22 @@ pub struct Settings {
     pub attention: AttentionKind,
     /// Library-GEMM policy, per backend.
     pub library_gemm: LibraryGemmPolicy,
-    /// Use TF32 (f32 mantissa, 10 bits) for f32 CUDA matmuls.
+    /// Use TF32 (f32 mantissa, 10 bits) for f32 CUDA math.
     ///
     /// On by default: it is the only tensor-core format that accepts f32
-    /// storage, and it is ~2x the FP32 rate. Turn it off when bit-exact f32 is
-    /// required (`AUTORUST_CUBLAS_TF32=0`).
+    /// storage, and it is ~2x the FP32 rate. It controls cuBLAS math mode and
+    /// whether the fused attention kernel may use TF32 `mma`. Turn it off when
+    /// bit-exact f32 is required (`AUTORUST_CUBLAS_TF32=0`).
     pub allow_tf32: bool,
+    /// Allow hand-written kernels to use warp-tiled tensor-core instructions.
+    ///
+    /// On by default. Only takes effect where the device has the instructions
+    /// (`sm_80+` for TF32 `mma`); older cards and non-NVIDIA backends keep the
+    /// scalar kernels, so this is safe to leave on. `AUTORUST_TENSOR_CORES=0`
+    /// forces the scalar path everywhere (useful for bit-exact comparisons).
+    ///
+    /// Tensor-core attention is TF32, so it also honours [`Settings::allow_tf32`].
+    pub tensor_cores: bool,
     /// CPU packed-GEMM tile `(mc, nc, kc)`, when overridden.
     pub cpu_gemm_tile: Option<(usize, usize, usize)>,
     /// BEAM search width (`0` = off).
@@ -87,6 +97,7 @@ impl Default for Settings {
             attention: AttentionKind::Flash,
             library_gemm: LibraryGemmPolicy::default(),
             allow_tf32: true,
+            tensor_cores: true,
             cpu_gemm_tile: None,
             beam: 0,
             cache: true,
@@ -131,11 +142,22 @@ impl Settings {
             Some("sage") => AttentionKind::Sage,
             _ => AttentionKind::Flash,
         };
-        let allow_tf32 = matches!(
+        // On unless explicitly disabled: TF32 is the f32 tensor-core format and
+        // roughly doubles the matmul rate.
+        let allow_tf32 = !matches!(
             env("AUTORUST_CUBLAS_TF32")
                 .or_else(|| env("ALLOW_TF32"))
                 .as_deref(),
-            Some("1") | Some("true")
+            Some("0") | Some("false")
+        );
+        // Master switch for hand-written tensor-core kernels. Independent of
+        // `allow_tf32` so a caller can keep TF32 cuBLAS but demand the exact
+        // scalar attention kernel (or the other way round).
+        let tensor_cores = !matches!(
+            env("AUTORUST_TENSOR_CORES")
+                .or_else(|| env("AUTORUST_TC"))
+                .as_deref(),
+            Some("0") | Some("false")
         );
         let cpu_gemm_tile = match (
             env("AUTORUST_CPU_GEMM_MC").and_then(|v| v.parse().ok()),
@@ -169,6 +191,7 @@ impl Settings {
             attention,
             library_gemm,
             allow_tf32,
+            tensor_cores,
             cpu_gemm_tile,
             beam,
             cache,

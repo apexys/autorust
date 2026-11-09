@@ -33,6 +33,37 @@ use crate::uop::ctx::UOpCtx;
 
 // ---------------- device inner ----------------
 
+thread_local! {
+    /// SM version of the open device, as `major * 10 + minor` (86 for sm_86).
+    /// `0` = not opened on this thread yet. Set by [`CudaInner::open`]; read by
+    /// kernels that need to gate on an instruction-set generation.
+    static ARCH_SM: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// SM version of the open CUDA device (`86` for `sm_86`), or `None` when the
+/// backend is compiled out / no device is present.
+///
+/// Opens the device on first use, so callers can ask before any tensor exists.
+/// Thread-local like the device registry itself.
+pub fn arch_sm() -> Option<i64> {
+    let v = ARCH_SM.with(|a| a.get());
+    if v > 0 {
+        return Some(v);
+    }
+    if !available() {
+        return None;
+    }
+    let _ = crate::runtime::device::device("CUDA");
+    let v = ARCH_SM.with(|a| a.get());
+    (v > 0).then_some(v)
+}
+
+/// Whether the open device has warp-level tensor-core instructions usable by
+/// our hand-written kernels (TF32 `mma` needs `sm_80`).
+pub fn has_tensor_cores() -> bool {
+    arch_sm().is_some_and(|sm| sm >= 80)
+}
+
 /// Bounded source→PTX cache (`CUDADevice.compiler.compile_cached`, CCACHE-based
 /// upstream). FIFO-capped so a BEAM search can't grow it without bound.
 struct CompileCache {
@@ -94,6 +125,7 @@ impl CudaInner {
             CudaContext::new(ordinal).unwrap_or_else(|e| panic!("TGERR: cuInit/cuCtxCreate: {e}"));
         let (major, minor) = ctx.compute_capability().unwrap_or((0, 0));
         let arch = format!("sm_{major}{minor}");
+        ARCH_SM.with(|a| a.set(((major * 10 + minor) as i64).max(0)));
         let device_name = ctx.name().unwrap_or_else(|_| "CUDA".to_string());
         eprintln!("CUDADevice: opening {device_name} ({arch})");
         let stream = ctx.default_stream();

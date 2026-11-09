@@ -276,6 +276,11 @@ fn block_bounds(n: i64, b: i64) -> Vec<(i64, i64)> {
 /// then falls back to [`Tensor::scaled_dot_product_attention`]), and never
 /// handles masks or causality — those need the general path.
 ///
+/// On `sm_80+` with tensor cores enabled the warp-tiled TF32 kernel
+/// ([`cuda_flash_tc`](crate::runtime::cuda_flash_tc)) is preferred; every other
+/// case keeps the scalar f32 kernel
+/// ([`cuda_flash`](crate::runtime::cuda_flash)). Both compute the same math.
+///
 /// The launch is captured by the session in its exact position between the q/k/v
 /// projections and the output projection, so a JIT replay reproduces the same
 /// order.
@@ -295,7 +300,12 @@ pub fn fused_attention(
     if q.dtype() != dtype::FLOAT32 {
         return None;
     }
+    let settings = q.ctx().borrow().settings.clone();
     let dev = q.device().unwrap_or_default();
+    #[cfg(feature = "backend_cuda")]
+    let tc = dev.starts_with("CUDA") && crate::runtime::cuda_flash_tc::supported(n, d, &settings);
+    #[cfg(not(feature = "backend_cuda"))]
+    let tc = false;
     #[cfg(feature = "backend_cuda")]
     let cuda = dev.starts_with("CUDA") && crate::runtime::cuda_flash::supports(n, d);
     #[cfg(not(feature = "backend_cuda"))]
@@ -304,8 +314,15 @@ pub fn fused_attention(
     let cl = dev.starts_with("CL") && crate::runtime::cl_flash::supports(n, d);
     #[cfg(not(feature = "backend_cl"))]
     let cl = false;
-    if !cuda && !cl {
+    if !tc && !cuda && !cl {
         return None;
+    }
+    if tc {
+        #[cfg(feature = "backend_cuda")]
+        crate::runtime::cuda_flash_tc::note_selected();
+    } else if dev.starts_with("CUDA") {
+        #[cfg(feature = "backend_cuda")]
+        crate::runtime::cuda_flash::note_scalar_selected(&settings);
     }
 
     {
@@ -333,7 +350,16 @@ pub fn fused_attention(
         v.realized_buffer()?,
         out.realized_buffer()?,
     ];
-    let call = if cuda {
+    let call = if tc {
+        #[cfg(feature = "backend_cuda")]
+        {
+            crate::runtime::cuda_flash_tc::host_call(bufs, b, h, n)
+        }
+        #[cfg(not(feature = "backend_cuda"))]
+        {
+            return None;
+        }
+    } else if cuda {
         #[cfg(feature = "backend_cuda")]
         {
             crate::runtime::cuda_flash::host_call(bufs, b, h, n)

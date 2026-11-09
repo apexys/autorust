@@ -119,6 +119,26 @@ pub fn supports(n: i64, d: i64) -> bool {
     d == HEAD_DIM && n > 0
 }
 
+/// One-time notice when TF32 tensor cores were wanted but the device predates
+/// `sm_80`, so this scalar kernel runs instead. A deliberate opt-out
+/// (`AUTORUST_TENSOR_CORES=0` / `AUTORUST_CUBLAS_TF32=0`) stays quiet.
+pub fn note_scalar_selected(settings: &crate::settings::Settings) {
+    if !settings.tensor_cores || !settings.allow_tf32 {
+        return;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(sm) = crate::runtime::ops_cuda::arch_sm() {
+            if sm < 80 {
+                eprintln!(
+                    "[attention] tensor-core attention needs sm_80+, device is sm_{sm}: \
+                     using scalar f32 FA2"
+                );
+            }
+        }
+    });
+}
+
 /// Launch the fused kernel: `q/k/v/o` are `[b, h, n, 64]` contiguous f32.
 pub fn run(
     dev: &std::rc::Rc<Compiled>,

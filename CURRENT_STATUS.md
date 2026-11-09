@@ -15,8 +15,8 @@ With default preprocessing, 260 frames: CUDA 14.1 s, OpenCL 20.1 s,
 candle CUDA 15.4 s. Projection to the real ~10k-image set: ~470 s vs ~590 s.
 
 All GPU libraries and backends are dynamically loaded; nothing is needed at
-build time. `cargo test`: default 224, `backend_cuda` 231,
-`backend_clang+freeze` 226.
+build time. `cargo test`: default 224, `backend_cuda` 237,
+`backend_clang+freeze` 227.
 
 ## What was built, in the order it landed
 
@@ -56,6 +56,12 @@ build time. `cargo test`: default 224, `backend_cuda` 231,
 - `AttentionKind::{Sdpa, Flash, Sage}` via `AUTORUST_ATTN` (default `flash`).
   `sage` is the placeholder for the quantized variant and currently degrades to
   `flash` with a one-time notice.
+- **TF32 tensor-core FA2** (`runtime::cuda_flash_tc`) on `sm_80+`: warp-tiled
+  `mma.sync.m16n8k8`, Q in A fragments, K/V streamed through 16.6 KB of shared,
+  score tile and output accumulator in registers. 5.9x over the scalar kernel
+  at the app shape (7.0 ms -> 1.18 ms, batch 8, h 6, n 789) with ~1e-5 error.
+  Gated on `Settings.tensor_cores` + `Settings.allow_tf32` (`AUTORUST_TENSOR_CORES`,
+  `AUTORUST_CUBLAS_TF32`), both default on; `sm < 80` keeps the scalar kernel.
 - The fused launch is a **captured step**: `Session::capturing` is an ordered
   `Vec<CaptureEntry>` and the JIT replays `JitStep::{Linear, Host}` in order, so
   eager replay reproduces the exact sequence.
@@ -245,7 +251,26 @@ Measured on the 3060, cuBLAS f32:
 
 No meaningful difference, and 2048^3 at ~1.1 TFLOP/s is far below the card's
 capability, so these runs are **not compute-bound** — the flag is not the lever
-here. TF32 only pays off once the matmuls are actually compute-bound, i.e. in
-the fused attention kernel with `mma`, which is a warp-tiled rewrite (the scalar
-one-thread-per-row kernel cannot use `mma`). Default-on is therefore harmless
-for accuracy (it was already the effective mode) but buys nothing by itself.
+for cuBLAS. TF32 pays off in the **fused attention kernel**, where the scalar
+one-thread-per-row kernel was the bottleneck. The new warp-tiled
+`mma.sync.m16n8k8` kernel (`runtime/cuda_flash_tc.rs`) measures, on the 3060,
+batch 8 / h 6 / n 789:
+
+| kernel | time | error vs f32 reference |
+|---|---|---|
+| scalar f32 FA2 | 7.0 ms | 1.2e-8 |
+| warp-tiled TF32 | **1.18 ms** (5.9x) | 9e-6 |
+
+and every tested length (8, 33, 64, 100, 224, 789) agrees with the scalar
+reference to < 3e-5. The flag defaults on, and `AUTORUST_TENSOR_CORES=0` forces
+the scalar kernel for bit-exact comparisons.
+
+Note: `Settings::default()` had `allow_tf32: true` but `Settings::from_env`
+(which `global()` actually uses) still mapped "unset" to `false`; that is fixed
+here, so the documented default is the effective one.
+
+The mma fragment layouts are not obvious and cost a debugging round: for
+`m16n8k8` the A layout is `(g,2t), (g+8,2t), (g,2t+1), (g+8,2t+1)`, the C layout
+is the same with registers 1 and 2 swapped. `tests/tc_mma_probe.rs` pins this
+down.
+

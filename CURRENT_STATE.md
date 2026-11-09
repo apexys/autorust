@@ -2285,6 +2285,15 @@ approximates.
 | `flash` | no mask, no causal, no dropout, `d == 64`, f32, contiguous, CUDA/CL only |
 | `sage` | same subset as flash, plus quantization assumptions |
 
+`flash` has two CUDA kernels behind the same math: the scalar f32 FA2 kernel
+and, on `sm_80+`, a warp-tiled **TF32 tensor-core** kernel
+(`runtime/cuda_flash_tc.rs`). TF32 is the f32-storage tensor-core format, so it
+rounds Q/K/P/V to a 10-bit mantissa; it is selected only when both
+`Settings.allow_tf32` and `Settings.tensor_cores` are on (both default on).
+`AUTORUST_TENSOR_CORES=0` or `AUTORUST_CUBLAS_TF32=0` forces the exact scalar
+kernel. An older card (e.g. `sm_61`, GTX 1060) never compiles the tensor-core
+source and keeps the scalar kernel; a one-time notice says so.
+
 The `flash` gaps are unimplemented features, not limits of the approach:
 causal is (a) skip key tiles above the diagonal and (b) mask the diagonal tile;
 an additive mask is one extra shared-memory tile added before the max; GQA is a
@@ -2297,32 +2306,42 @@ plan is per-context counters plus a one-time log line per (kind, reason), and an
 opt-in `strict_attention` for benchmarks. `AttentionKind::Sage` currently
 degrades to the exact f32 kernel with a notice.
 
-### What the current GPU (sm_86) has and we do not use
+### What the current GPU (sm_86) has and we use
 
 | capability | status |
 |---|---|
-| tensor cores (`mma.sync` f16/bf16, TF32, INT8) | unused by our kernels. The renderer has the machinery (`tc::get_cuda`, `Ops::Wmma`, `mma.sync.aligned` wrapper) but `actions()` never includes `OptOp::Tc` and the hand tiling never selects it; cuBLAS uses TCs, our FA2 kernel does not |
-| `cp.async`, `ldmatrix` | unused; every key tile pays load → barrier → compute → barrier |
-| bf16/f16 arithmetic | unused in our kernels (f32 only) |
-| warp reductions, `__launch_bounds__`, double buffering | unused |
+| TF32 tensor cores (`mma.sync.m16n8k8`) | **used by the fused attention kernel** (`runtime/cuda_flash_tc.rs`): warp-tiled, Q in fragments, K/V through shared, scores in registers. 5.9x over the scalar FA2 kernel at the app shape (7.0 ms -> 1.18 ms for batch 8, h 6, n 789) and ~1e-5 vs the f32 reference. cuBLAS uses TCs for the host GEMMs |
+| bf16/f16 tensor cores (`mma.m16n8k16`) | unused in our kernels; the attention dtype is f32 today, so it would need a bf16 model (or an explicit downcast) to be meaningful |
+| `cp.async`, `ldmatrix` | unused; every key tile pays load -> barrier -> compute -> barrier, and the fragments are loaded element-by-element |
+| warp reductions | used in the new kernel (`__shfl_xor_sync` for the row max/sum); the scalar kernel reduces through memory |
+| `__launch_bounds__` | used in the new kernel (128 threads); no occupancy tuning yet |
+| double buffering | unused |
 | CUDA graphs | unused (own JIT replay) |
 
-Occupancy is the other gap: 64 threads/block, ~128 registers, 33 KB shared →
-~3 blocks/SM, about 10% occupancy.
+The generated GEMM is still register-tiled FFMA, and 2048^3 at ~1.1 TFLOP/s
+(two-thirds of cuBLAS) is below the card's peak, so the *GEMM* path is not
+compute-bound either. The attention kernel now reaches ~6.5 TFLOP/s on the same
+card.
 
 ### Plan for a newer GPU
 
-Beneficial on every sm_80+ card, therefore first:
+Done on every sm_80+ card:
 
-1. bf16 tensor-core FA2 (`mma.m16n8k16`, f32 accumulate) — the 3-5x.
-2. `cp.async` double-buffered K/V staging.
-3. Causal / additive mask / GQA in the kernel.
-4. Occupancy pass (`__launch_bounds__`, BK 16 vs 32).
+1. ~~TF32 tensor-core FA2 (`mma.m16n8k8`)~~ — `runtime/cuda_flash_tc.rs`.
+2. ~~Warp reductions / `__launch_bounds__` in the fused kernel.~~
+
+Next, still beneficial on every sm_80+ card:
+
+3. bf16 tensor-core FA2 (`mma.m16n8k16`, f32 accumulate) — 2x the TF32 rate; the
+   natural kernel once the model runs in bf16.
+4. `cp.async` double-buffered K/V staging (removes the per-tile barrier stall).
+5. Causal / additive mask / GQA in the kernel.
+6. Occupancy pass (`BK` 16 vs 32, register count).
 
 Only for Ada/Hopper:
 
-5. FP8 (E4M3) QKᵀ — the real SageAttention2; sm_86 has no FP8 tensor cores.
-6. Hopper-only `wgmma`/TMA/warp specialization — a separate kernel; it does not
+7. FP8 (E4M3) QKᵀ — the real SageAttention2; sm_86 has no FP8 tensor cores.
+8. Hopper-only `wgmma`/TMA/warp specialization — a separate kernel; it does not
    help the 3060.
 
 Arch detection and the PTX cache already key on `sm_XX`, so a newer card needs

@@ -2074,7 +2074,11 @@ impl Tensor {
         sess: Option<&mut Session>,
     ) -> Tensor {
         use crate::models::flash_attention::AttentionKind;
-        let kind = force.unwrap_or_else(AttentionKind::from_env).effective();
+        // Policy comes from the *context*, not the process env, so a model can
+        // be reconfigured per context; explicit `flash_attention` /
+        // `sage_attention` calls are never overridden.
+        let configured = self.ctx().borrow().settings.attention;
+        let kind = force.unwrap_or(configured).effective();
         // The fused kernel covers the plain, unmasked, non-causal case only.
         if kind != AttentionKind::Sdpa
             && attn_mask.is_none()
