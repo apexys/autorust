@@ -84,13 +84,86 @@ CPU now beats candle CPU (~0.37 vs ~0.63 s/image).
 - CL fused attention vs SDPA: 7.9e-7, cosine 0.9999995.
 - `examples/frozen_check`: 5.5e-6.
 
+## SageAttention (prototype, not enabled)
+
+`runtime::sage_flash` implements the SageAttention idea on the FA2 schedule:
+symmetric per-row INT8 quantization of Q and K, `__dp4a` for QK^T, f32 softmax
+and P·V. Measured at the DINOv3 shape (6 heads, 789 tokens, D=64):
+
+| variant | time/layer | accuracy vs SDPA |
+|---|---|---|
+| f32 FA2 (`cuda_flash`) | 1.22 ms | 1.2e-8 |
+| INT8 dp4a (`sage_flash`) | 1.43 ms | cosine 0.83 |
+
+Two findings, both structural:
+
+- **It is slower, not faster.** `dp4a` is 4 MACs/instruction on the same CUDA
+  cores, but the kernel is bound by softmax, quantization and memory, and the
+  per-key-block max+quantize pass (plus two barriers) costs more than the f32
+  FMAs it removes. SageAttention's 2x comes from `mma.s8` **tensor cores**, not
+  from dp4a.
+- **Accuracy needs SmoothK.** Naive per-row int8 loses too much (cosine 0.83 on
+  the synthetic test); SageAttention's per-block mean subtraction is what makes
+  int8 safe, and it needs a pass over the whole key sequence before the
+  streaming loop.
+
+So `AttentionKind::Sage` stays a placeholder that degrades to `Flash` with a
+one-time notice, and `Tensor::sage_attention` runs the fused f32 kernel. The
+module is kept as the measured starting point for a tensor-core (`mma.s8`)
+implementation.
+
+## Attention API
+
+Three tensor methods select the implementation explicitly (plus `_with`
+variants that take a `Session`, needed for the fused kernels):
+
+```rust
+q.attention(&k, &v, mask, dropout, is_causal)        // AUTORUST_ATTN default
+q.flash_attention(&k, &v, mask, dropout, is_causal)  // fused FA2, falls back
+q.sage_attention(&k, &v, mask, dropout, is_causal)   // quantized (-> flash today)
+```
+
+All three fall back to `scaled_dot_product_attention` for masked, causal or
+dropout cases, and for shapes the kernel does not cover.
+
+## Environment variables: keep vs. settings
+
+~55 variables are read across the crate. Proposed split:
+
+**Keep as env (diagnostics/toolchain — easy to flip in a finished app):**
+
+| group | variables |
+|---|---|
+| profiling | `AUTORUST_PROF`, `AUTORUST_KPROF`, `FROZEN_PROF` |
+| debug dumps | `AUTORUST_CUBLAS_DEBUG`, `AUTORUST_CPU_GEMM_DEBUG`, `AUTORUST_MM_DEBUG`, `AUTORUST_DEVICE_VERBOSE`, `TG_DUMP_{SRC,LST,IDX,INTERP,PRE_EXPAND}`, `TG_DEBUG_{LOAD,RANGEIFY}`, `TG_{TRACE,RW_TRACE,RW_VISITS}`, `TG_M5_{CODEGEN,EXEC,RENDER,STAGES}`, `TG_{CUDA,OCL}_RENDER`, `BEAM_DEBUG`, `CACHELEVEL` |
+| toolchain/paths | `CUDA_PATH`, `RUSTC`, `CC`, `AUTORUST_CACHE_DIR`, `XDG_CACHE_HOME`, `HOME`, `AUTORUST_RUST_CPU`, `AUTORUST_CC_ARCH`, `AUTORUST_CUBLAS_LIB`, `AUTORUST_CLBLAST_LIB`, `AUTORUST_CL_LIB`, `{CUDA,CL}_COMPILE_CACHE`, `AUTORUST_{RUST,CC}_DUMP` |
+
+**Should become `Ctx` settings (behavioural policy):**
+
+| variable | proposed settings call |
+|---|---|
+| `AUTORUST_ATTN`, `FA` | `ctx.settings.default_attention(AttentionKind::Flash)` |
+| `AUTORUST_GEMM`, `AUTORUST_CUBLAS`, `AUTORUST_CLBLAST` | `ctx.settings.library_gemm(LibraryGemm::Auto \| Always \| Never)` |
+| `AUTORUST_CUBLAS_TF32`, `ALLOW_TF32` | `ctx.settings.allow_tf32(false)` |
+| `AUTORUST_CPU_GEMM_{MC,NC,KC}` | `ctx.settings.cpu_gemm_tile(CpuTile { mc, nc, kc })` |
+| `SDPA_TILE` | `ctx.settings.sdpa_tile(0)` |
+| `DEFAULT_DEVICE` | `ctx.settings.device("CUDA")` |
+| `EMULATED_DTYPES` | `ctx.settings.emulated_dtypes(&[..])` |
+| `BEAM`, `BEAM_TEST_GLOBAL_MAX` | `ctx.settings.beam_width(0)` |
+| `RAYON_{SERIAL,F64,INTERP,VERBOSE}` | `ctx.settings.rayon(RayonMode)` |
+| `CLUSTERFUN_{NO_JIT,TIMING}` | app settings (not the library) |
+
+Kept env-only on purpose: anything that must be settable before a `Ctx` exists
+(paths, toolchain) or that a developer flips on a built binary (profiling,
+dumps). Note `DEFAULT_DEVICE` is read during tensor creation and would need a
+process-global until every creation path takes `&Ctx`.
+
 ## Known limitations / next steps
 
-1. **SageAttention** is not implemented. On sm_86 there are no FP8 tensor cores,
-   so the target is INT8 QK^T (`mma.s8` or `dp4a`) with SmoothK (subtract the
-   per-block K mean, add the correction) and per-block scales; P·V stays
-   bf16/f32. Accuracy must be gated on embedding drift *and* cluster-assignment
-   stability over the real ~10k set, not just maxabs.
+1. **SageAttention** needs tensor cores. `dp4a` measured 1.43 ms vs 1.22 ms for
+   f32 FA2 and cosine 0.83, so the next attempt is `mma.s8` (sm_86 has no FP8)
+   with SmoothK and per-block scales; P·V stays bf16/f32. Gate on embedding
+   drift *and* cluster-assignment stability over the real ~10k set.
 2. **`freeze` cannot serialise a host-kernel step.** It panics with a clear
    message; harmless today because the CPU capture never emits one, but a
    GPU-side AOT plan needs `Step::Host` plus a runtime that can bind raw

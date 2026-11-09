@@ -296,8 +296,14 @@ pub fn fused_attention(
         return None;
     }
     let dev = q.device().unwrap_or_default();
+    #[cfg(feature = "backend_cuda")]
     let cuda = dev.starts_with("CUDA") && crate::runtime::cuda_flash::supports(n, d);
+    #[cfg(not(feature = "backend_cuda"))]
+    let cuda = false;
+    #[cfg(feature = "backend_cl")]
     let cl = dev.starts_with("CL") && crate::runtime::cl_flash::supports(n, d);
+    #[cfg(not(feature = "backend_cl"))]
+    let cl = false;
     if !cuda && !cl {
         return None;
     }

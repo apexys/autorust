@@ -35,3 +35,5 @@ pub mod ray_kernel;
 pub mod ray_typed;
 #[cfg(feature = "backend_rayon")]
 pub mod ray_value;
+#[cfg(feature = "backend_cuda")]
+pub mod sage_flash;

@@ -1938,6 +1938,156 @@ impl Tensor {
             enable_gqa,
         )
     }
+    /// Attention with the configured default implementation
+    /// ([`AttentionKind`](crate::models::flash_attention::AttentionKind)).
+    ///
+    /// Without a session this is the reference `softmax(q·kᵀ)v`; use
+    /// [`Tensor::attention_with`] to let the fused kernels run.
+    pub fn attention(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+    ) -> Tensor {
+        self.attention_kind(key, value, attn_mask, dropout_p, is_causal, None, None)
+    }
+
+    /// [`Tensor::attention`] with a session, so CUDA/OpenCL can run the fused
+    /// FA2 kernel instead of materializing the score matrix.
+    pub fn attention_with(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+        sess: &mut Session,
+    ) -> Tensor {
+        self.attention_kind(
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            None,
+            Some(sess),
+        )
+    }
+
+    /// Fused FA2 attention (explicit choice).
+    pub fn flash_attention(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+    ) -> Tensor {
+        self.attention_kind(
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            Some(crate::models::flash_attention::AttentionKind::Flash),
+            None,
+        )
+    }
+
+    /// [`Tensor::flash_attention`] with a session.
+    pub fn flash_attention_with(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+        sess: &mut Session,
+    ) -> Tensor {
+        self.attention_kind(
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            Some(crate::models::flash_attention::AttentionKind::Flash),
+            Some(sess),
+        )
+    }
+
+    /// SageAttention-style quantized attention (explicit choice).
+    ///
+    /// The INT8 QKᵀ kernel is still a prototype: it falls back to the fused
+    /// f32 kernel until the tensor-core variant lands.
+    pub fn sage_attention(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+    ) -> Tensor {
+        self.attention_kind(
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            Some(crate::models::flash_attention::AttentionKind::Sage),
+            None,
+        )
+    }
+
+    /// [`Tensor::sage_attention`] with a session.
+    pub fn sage_attention_with(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+        sess: &mut Session,
+    ) -> Tensor {
+        self.attention_kind(
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            Some(crate::models::flash_attention::AttentionKind::Sage),
+            Some(sess),
+        )
+    }
+
+    /// Shared dispatch for the three public attention entry points.
+    #[allow(clippy::too_many_arguments)]
+    fn attention_kind(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64,
+        is_causal: bool,
+        force: Option<crate::models::flash_attention::AttentionKind>,
+        sess: Option<&mut Session>,
+    ) -> Tensor {
+        use crate::models::flash_attention::AttentionKind;
+        let kind = force.unwrap_or_else(AttentionKind::from_env).effective();
+        // The fused kernel covers the plain, unmasked, non-causal case only.
+        if kind != AttentionKind::Sdpa
+            && attn_mask.is_none()
+            && dropout_p == 0.0
+            && !is_causal
+            && let Some(s) = sess
+            && let Some(t) = crate::models::flash_attention::fused_attention(self, key, value, s)
+        {
+            return t;
+        }
+        self.scaled_dot_product_attention(key, value, attn_mask, dropout_p, is_causal, false)
+    }
+
     /// Session-aware [`Tensor::scaled_dot_product_attention`].
     ///
     /// Same math, but the score matrix (`softmax(q·kᵀ/√d)`) is materialized so

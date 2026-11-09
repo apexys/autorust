@@ -208,12 +208,14 @@ fn main() {
         sess.cache.misses, sess.cache.hits
     );
     if env_flag("VERBOSE") && jit_on {
-        for (i, l) in jit.linears().iter().enumerate() {
-            for p in l.progs.values() {
-                println!(
-                    "  linear {i}: {} global={:?} local={:?}",
-                    p.pi.name, p.pi.global_size, p.pi.local_size
-                );
+        for (i, st) in jit.steps().iter().enumerate() {
+            if let autorust::engine::jit::JitStep::Linear(l) = st {
+                for p in l.progs.values() {
+                    println!(
+                        "  linear {i}: {} global={:?} local={:?}",
+                        p.pi.name, p.pi.global_size, p.pi.local_size
+                    );
+                }
             }
         }
     }
