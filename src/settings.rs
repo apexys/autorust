@@ -94,9 +94,12 @@ pub struct Settings {
     pub device: Option<String>,
     /// Double-buffer K/V tiles with `cp.async` in the fused attention kernels.
     ///
-    /// On by default (`AUTORUST_ASYNC=0` disables). `cp.async` needs `sm_80+`,
-    /// the same gate as the tensor-core kernels, so it never affects older
-    /// cards; it is a latency optimisation, not a change in the math.
+    /// On by default (`AUTORUST_ASYNC=0` disables). Used by the bf16 kernel,
+    /// where it measures 1.3-1.4x over synchronous staging; the TF32 kernel
+    /// keeps synchronous staging by default because there the copy cannot round
+    /// to TF32 and the doubled shared memory halves occupancy (measured
+    /// neutral-to-worse). `cp.async` needs `sm_80+`, the same gate as the
+    /// tensor-core kernels, so older cards are unaffected.
     pub async_pipeline: bool,
 }
 

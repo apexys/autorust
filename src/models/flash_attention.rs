@@ -470,7 +470,11 @@ pub fn fused_attention_ex(
                     causal: is_causal,
                     has_mask,
                     h_kv: hk,
-                    async_pipeline: settings.async_pipeline,
+                    // The TF32 kernel keeps synchronous staging: `cp.async`
+                    // measured neutral-to-worse there (the copy cannot round to
+                    // TF32, and the doubled shared halves occupancy). `run_ex`
+                    // can still force it.
+                    async_pipeline: false,
                 },
             )
         }

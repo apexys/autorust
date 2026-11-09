@@ -69,7 +69,8 @@ build time. `cargo test`: default 224, `backend_cuda` 244,
   kernel: the next tile is issued before the wait for the current one, giving
   1.3-1.4x at the app shape (0.70-0.75 ms -> 0.52-0.54 ms). The TF32 kernel has
   the same path; there it is within noise because the TF32 conversion moves to
-  the fragment loads and the doubled shared memory halves occupancy.
+  the fragment loads and the doubled shared memory halves occupancy, so the
+  dispatcher leaves TF32 on the synchronous path.
 - **Causal, additive `[n, n]` f32 mask, and GQA** in all three CUDA kernels.
   Causal bounds the key loop to `block_q + BQ` as well as masking the diagonal
   tiles; the additive mask is added to the scores before the max; GQA divides
