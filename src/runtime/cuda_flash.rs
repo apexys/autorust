@@ -119,11 +119,11 @@ pub fn supports(n: i64, d: i64) -> bool {
     d == HEAD_DIM && n > 0
 }
 
-/// One-time notice when TF32 tensor cores were wanted but the device predates
-/// `sm_80`, so this scalar kernel runs instead. A deliberate opt-out
-/// (`AUTORUST_TENSOR_CORES=0` / `AUTORUST_CUBLAS_TF32=0`) stays quiet.
+/// One-time notice when tensor-core attention was wanted but the device
+/// predates `sm_80`, so this scalar kernel runs instead. A deliberate opt-out
+/// (`AUTORUST_TENSOR_CORES=0`) stays quiet.
 pub fn note_scalar_selected(settings: &crate::settings::Settings) {
-    if !settings.tensor_cores || !settings.allow_tf32 {
+    if !settings.tensor_cores {
         return;
     }
     static ONCE: std::sync::Once = std::sync::Once::new();

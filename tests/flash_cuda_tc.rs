@@ -168,10 +168,10 @@ fn tc_gate_respects_settings() {
     }
     let mut s = Settings::default();
     assert!(autorust::runtime::cuda_flash_tc::supported(64, 64, &s));
-    s.tensor_cores = false;
-    assert!(!autorust::runtime::cuda_flash_tc::supported(64, 64, &s));
-    s.tensor_cores = true;
+    // `allow_tf32` is cuBLAS-only; TF32 is inherent to the tensor-core kernel.
     s.allow_tf32 = false;
+    assert!(autorust::runtime::cuda_flash_tc::supported(64, 64, &s));
+    s.tensor_cores = false;
     assert!(!autorust::runtime::cuda_flash_tc::supported(64, 64, &s));
     assert!(!autorust::runtime::cuda_flash_tc::supported(
         64,

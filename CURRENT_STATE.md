@@ -2288,11 +2288,12 @@ approximates.
 `flash` has two CUDA kernels behind the same math: the scalar f32 FA2 kernel
 and, on `sm_80+`, a warp-tiled **TF32 tensor-core** kernel
 (`runtime/cuda_flash_tc.rs`). TF32 is the f32-storage tensor-core format, so it
-rounds Q/K/P/V to a 10-bit mantissa; it is selected only when both
-`Settings.allow_tf32` and `Settings.tensor_cores` are on (both default on).
-`AUTORUST_TENSOR_CORES=0` or `AUTORUST_CUBLAS_TF32=0` forces the exact scalar
-kernel. An older card (e.g. `sm_61`, GTX 1060) never compiles the tensor-core
-source and keeps the scalar kernel; a one-time notice says so.
+rounds Q/K/P/V to a 10-bit mantissa; it is selected when
+`Settings.tensor_cores` is on (the default), independently of
+`Settings.allow_tf32` (which only controls cuBLAS). `AUTORUST_TENSOR_CORES=0`
+forces the exact scalar kernel. An older card (e.g. `sm_61`, GTX 1060) never
+compiles the tensor-core source and keeps the scalar kernel; a one-time notice
+says so.
 
 The `flash` gaps are unimplemented features, not limits of the approach:
 causal is (a) skip key tiles above the diagonal and (b) mask the diagonal tile;

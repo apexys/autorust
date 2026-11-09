@@ -237,9 +237,12 @@ AUTORUST_KPROF=1 ./target/release/clusterfun <images> /tmp/out --device cuda
 
 ## Tensor-core / TF32 note (measured)
 
-`allow_tf32` now defaults to **on** and `AUTORUST_CUBLAS_TF32=0` maps to
-`CUBLAS_PEDANTIC_MATH` (the old `false` used math mode 0, which already allows
-TF32 on CUDA >= 11 — the switch was a no-op).
+`allow_tf32` controls **cuBLAS only** and is **off by default**: TF32 cuBLAS is
+within noise of pedantic f32 at our shapes (below), while it changes the model
+output, so there is no reason to pay for it. `AUTORUST_CUBLAS_TF32=1` enables
+it. `AUTORUST_CUBLAS_TF32=0` maps to `CUBLAS_PEDANTIC_MATH` (the pre-existing
+`false` used math mode 0, which already allows TF32 on CUDA >= 11 — the switch
+was a no-op before that mapping).
 
 Measured on the 3060, cuBLAS f32:
 
@@ -252,22 +255,33 @@ Measured on the 3060, cuBLAS f32:
 No meaningful difference, and 2048^3 at ~1.1 TFLOP/s is far below the card's
 capability, so these runs are **not compute-bound** — the flag is not the lever
 for cuBLAS. TF32 pays off in the **fused attention kernel**, where the scalar
-one-thread-per-row kernel was the bottleneck. The new warp-tiled
-`mma.sync.m16n8k8` kernel (`runtime/cuda_flash_tc.rs`) measures, on the 3060,
-batch 8 / h 6 / n 789:
+one-thread-per-row kernel was the bottleneck and TF32 is the only f32-storage
+tensor-core format. The new warp-tiled `mma.sync.m16n8k8` kernel
+(`runtime/cuda_flash_tc.rs`) measures, on the 3060, batch 8 / h 6 / n 789:
 
 | kernel | time | error vs f32 reference |
 |---|---|---|
 | scalar f32 FA2 | 7.0 ms | 1.2e-8 |
 | warp-tiled TF32 | **1.18 ms** (5.9x) | 9e-6 |
 
-and every tested length (8, 33, 64, 100, 224, 789) agrees with the scalar
-reference to < 3e-5. The flag defaults on, and `AUTORUST_TENSOR_CORES=0` forces
-the scalar kernel for bit-exact comparisons.
+and every tested length (1, 7, 8, 31, 32, 33, 63, 64, 65, 100, 224, 789)
+agrees with the scalar reference to < 3e-5. `tensor_cores` defaults on;
+`AUTORUST_TENSOR_CORES=0` forces the scalar kernel for bit-exact comparisons.
 
-Note: `Settings::default()` had `allow_tf32: true` but `Settings::from_env`
-(which `global()` actually uses) still mapped "unset" to `false`; that is fixed
-here, so the documented default is the effective one.
+End to end in clusterfun (8 images, 448px), CUDA vs the frozen CPU plan:
+
+| CUDA settings | max abs | min cosine |
+|---|---|---|
+| pedantic cuBLAS + scalar attention | 1.6e-6 | 1.0000000 |
+| TF32 cuBLAS + scalar attention | 3.1e-4 | 0.9999985 |
+| pedantic cuBLAS + TF32 attention | 3.8e-4 | 0.9999971 |
+
+so the tensor-core attention costs about the same as TF32 cuBLAS and is worth
+it; TF32 cuBLAS is not, hence the default.
+
+Note: `Settings::default()` had `allow_tf32: true` while `Settings::from_env`
+(which `global()` actually uses) still mapped "unset" to `false`; both now say
+`false`, so the documented default is the effective one.
 
 The mma fragment layouts are not obvious and cost a debugging round: for
 `m16n8k8` the A layout is `(g,2t), (g+8,2t), (g,2t+1), (g+8,2t+1)`, the C layout

@@ -9,8 +9,9 @@
 //!
 //! There is no full-precision f32 tensor core: the f32-storage format is TF32
 //! (10-bit mantissa). This kernel therefore rounds Q/K/P/V to TF32 in hardware
-//! and is selected only when [`Settings::allow_tf32`] is on.
-//! `AUTORUST_CUBLAS_TF32=0` keeps the exact scalar kernel.
+//! and is selected when [`Settings::tensor_cores`] is on (the default).
+//! `AUTORUST_TENSOR_CORES=0` keeps the exact scalar kernel; `allow_tf32` is
+//! cuBLAS-only and does not gate this kernel.
 //!
 //! # Availability
 //!
@@ -35,7 +36,6 @@
 //! dodge bank conflicts), so shared memory is not the occupancy limit and the
 //! kernel does not need the >48 KB dynamic-shared opt-in.
 //!
-//! [`Settings::allow_tf32`]: crate::settings::Settings::allow_tf32
 //! [`Settings::tensor_cores`]: crate::settings::Settings::tensor_cores
 
 use crate::runtime::buffer::OpaqueView;
@@ -251,10 +251,11 @@ pub fn shape_supported(n: i64, d: i64) -> bool {
     d == HEAD_DIM && n > 0
 }
 
-/// Whether this device can run the kernel: TF32 tensor cores are `sm_80+`, and
-/// both the master switch and the TF32 precision switch must agree.
+/// Whether this device can run the kernel: TF32 tensor cores are `sm_80+` and
+/// the master switch must be on. `Settings::allow_tf32` is cuBLAS-only and does
+/// not gate this kernel; TF32 is the only f32-storage tensor-core format.
 pub fn supported(n: i64, d: i64, s: &Settings) -> bool {
-    if !shape_supported(n, d) || !s.tensor_cores || !s.allow_tf32 {
+    if !shape_supported(n, d) || !s.tensor_cores {
         return false;
     }
     crate::runtime::ops_cuda::has_tensor_cores()
