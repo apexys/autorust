@@ -141,14 +141,6 @@ pub fn library_present() -> bool {
 ///
 /// `AUTORUST_CLBLAST=0` disables it; any other value keeps the default.
 pub fn available() -> bool {
-    if matches!(
-        std::env::var("AUTORUST_GEMM")
-            .or_else(|_| std::env::var("AUTORUST_CLBLAST"))
-            .as_deref(),
-        Ok("0")
-    ) {
-        return false;
-    }
     lib().is_some()
 }
 

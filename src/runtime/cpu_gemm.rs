@@ -48,14 +48,6 @@ fn env_usize(name: &str, default: usize) -> usize {
 ///
 /// `AUTORUST_GEMM=0` (or the older `AUTORUST_CPU_GEMM=0`) disables it.
 pub fn available() -> bool {
-    if matches!(
-        std::env::var("AUTORUST_GEMM")
-            .or_else(|_| std::env::var("AUTORUST_CPU_GEMM"))
-            .as_deref(),
-        Ok("0")
-    ) {
-        return false;
-    }
     true
 }
 
@@ -109,10 +101,17 @@ struct Tile {
 }
 
 fn tile() -> Tile {
-    Tile {
-        mc: env_usize("AUTORUST_CPU_GEMM_MC", 48).max(MR),
-        nc: env_usize("AUTORUST_CPU_GEMM_NC", 96).max(NR),
-        kc: env_usize("AUTORUST_CPU_GEMM_KC", 256).max(1),
+    match crate::settings::global().cpu_gemm_tile {
+        Some((mc, nc, kc)) => Tile {
+            mc: mc.max(MR),
+            nc: nc.max(NR),
+            kc: kc.max(1),
+        },
+        None => Tile {
+            mc: 48.max(MR),
+            nc: 96.max(NR),
+            kc: 256.max(1),
+        },
     }
 }
 

@@ -1968,7 +1968,7 @@ fn split_store(ctx: &mut UOpCtx, x: UopId) -> Option<UopId> {
     // affine `INDEX` expressions, so a pure contraction can be described
     // without pattern-matching the high-level tensor graph. Anything that does
     // not match keeps the normal generated kernel.
-    let host = if crate::schedule::host_gemm::library_available() {
+    let host = if crate::schedule::host_gemm::library_available(&ctx.settings) {
         crate::schedule::host_gemm::extract(ctx, ret.clone())
     } else {
         None

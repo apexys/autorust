@@ -1369,10 +1369,8 @@ pub fn full_rewrite_to_sink_with(
             return cur;
         }
         // do postrange optimization, BEAM or hand_coded_optimizations
-        let beam: usize = std::env::var("BEAM")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        // Read once from the process settings (env `BEAM` is folded in there).
+        let beam: usize = crate::settings::global().beam;
         cur = apply_opts(ctx, cur, ren, beam);
         i += 1;
         #[cfg(feature = "dump")]

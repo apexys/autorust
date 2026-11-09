@@ -44,6 +44,9 @@ pub struct UOpCtx {
     /// `Tensor::from_uop` capture the same handle without threading it through
     /// every internal function.
     pub(crate) self_ref: Weak<RefCell<UOpCtx>>,
+    /// Per-context configuration (cloned from [`crate::settings::global`] at
+    /// creation, so env vars are read once per process).
+    pub settings: crate::settings::Settings,
 }
 
 impl Default for UOpCtx {
@@ -59,6 +62,7 @@ impl UOpCtx {
             g: Graph::new(),
             range_idx: 0,
             self_ref: Weak::new(),
+            settings: crate::settings::global().clone(),
         }
     }
 
@@ -71,6 +75,7 @@ impl UOpCtx {
                 g: Graph::new(),
                 range_idx: 0,
                 self_ref: weak.clone(),
+                settings: crate::settings::global().clone(),
             })
         })
     }

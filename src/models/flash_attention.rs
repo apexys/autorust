@@ -377,11 +377,12 @@ pub enum AttentionKind {
 impl AttentionKind {
     /// `AUTORUST_ATTN=sdpa|flash|sage` (default `flash`).
     pub fn from_env() -> AttentionKind {
-        match std::env::var("AUTORUST_ATTN").as_deref() {
-            Ok("sdpa") | Ok("0") => AttentionKind::Sdpa,
-            Ok("sage") => AttentionKind::Sage,
-            _ => AttentionKind::Flash,
-        }
+        crate::settings::global().attention
+    }
+
+    /// The kind configured on a context.
+    pub fn from_settings(s: &crate::settings::Settings) -> AttentionKind {
+        s.attention
     }
 
     /// Name for logging.

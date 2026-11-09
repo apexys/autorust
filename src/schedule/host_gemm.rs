@@ -403,7 +403,10 @@ fn unwrap(ctx: &UOpCtx, mut u: UopId) -> UopId {
     }
 }
 
-fn library_ready(kind: GemmDevice) -> bool {
+fn library_ready(ctx: &UOpCtx, kind: GemmDevice) -> bool {
+    if ctx.settings.library_gemm == crate::settings::LibraryGemm::Never {
+        return false;
+    }
     match kind {
         GemmDevice::Cpu => {
             #[cfg(feature = "backend_rust")]
@@ -442,7 +445,10 @@ fn library_ready(kind: GemmDevice) -> bool {
 ///
 /// The per-device check happens in [`extract`]: a CUDA store needs cuBLAS and an
 /// OpenCL store needs CLBlast.
-pub fn library_available() -> bool {
+pub fn library_available(settings: &crate::settings::Settings) -> bool {
+    if settings.library_gemm == crate::settings::LibraryGemm::Never {
+        return false;
+    }
     #[cfg(feature = "backend_rust")]
     if crate::runtime::cpu_gemm::available() {
         return true;
@@ -520,7 +526,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
     let kind = gemm_device(ctx, &store)?;
-    if !library_ready(kind) {
+    if !library_ready(ctx, kind) {
         return None;
     }
 
@@ -804,12 +810,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // sequence is the motivating case) the library wins; for shapes that tile
     // cleanly the generated kernel is faster (and avoids a library call).
     // `AUTORUST_CUBLAS=all` forces the library for every eligible contraction.
-    let force = matches!(
-        std::env::var("AUTORUST_GEMM")
-            .or_else(|_| std::env::var("AUTORUST_CUBLAS"))
-            .as_deref(),
-        Ok("all") | Ok("force")
-    );
+    let force = ctx.settings.library_gemm == crate::settings::LibraryGemm::Always;
     // The CPU host GEMM is a *different* implementation, not just a library
     // swap: it blocks and parallelizes, so it wins on every shape where the
     // generated kernel's 1-row tile loses its `B` reuse. Do not apply the

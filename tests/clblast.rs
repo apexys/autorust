@@ -29,11 +29,13 @@ fn values(seed: usize, len: usize) -> Vec<f32> {
         .collect()
 }
 
-fn run<F>(f: F) -> Vec<f32>
+fn run<F>(policy: autorust::settings::LibraryGemm, f: F) -> Vec<f32>
 where
     F: Fn(&Ctx) -> Vec<Tensor>,
 {
     let ctx = Ctx::new();
+    // Policy is per-context; the process defaults are read once from env.
+    ctx.borrow_mut().settings.library_gemm = policy;
     let outs = f(&ctx);
     let mut out = Vec::new();
     for t in outs {
@@ -60,14 +62,20 @@ fn clblast_matches_generated_gemm() {
         let ad = values(0, m * k);
         let bd = values(7, k * n);
         let run_case = |lib: bool| {
-            set_lib(lib);
-            run(|ctx| {
-                let a =
-                    Tensor::from_slice(ctx, &ad, None, Some("CL")).reshape([m as i64, k as i64]);
-                let b =
-                    Tensor::from_slice(ctx, &bd, None, Some("CL")).reshape([k as i64, n as i64]);
-                vec![a.dot(&b)]
-            })
+            run(
+                if lib {
+                    autorust::settings::LibraryGemm::Always
+                } else {
+                    autorust::settings::LibraryGemm::Never
+                },
+                |ctx| {
+                    let a = Tensor::from_slice(ctx, &ad, None, Some("CL"))
+                        .reshape([m as i64, k as i64]);
+                    let b = Tensor::from_slice(ctx, &bd, None, Some("CL"))
+                        .reshape([k as i64, n as i64]);
+                    vec![a.dot(&b)]
+                },
+            )
         };
         let want = run_case(false);
         let got = run_case(true);
@@ -87,16 +95,23 @@ fn clblast_matches_transposed_weight_with_bias() {
     let wd = values(3, n * k);
     let bd = values(5, n);
     let run_case = |lib: bool| {
-        set_lib(lib);
-        run(|ctx| {
-            let a = Tensor::from_slice(ctx, &ad, None, Some("CL")).reshape([m as i64, k as i64]);
-            let lin = Linear {
-                weight: Tensor::from_slice(ctx, &wd, None, Some("CL"))
-                    .reshape([n as i64, k as i64]),
-                bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CL"))),
-            };
-            vec![lin.forward(&a)]
-        })
+        run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let a =
+                    Tensor::from_slice(ctx, &ad, None, Some("CL")).reshape([m as i64, k as i64]);
+                let lin = Linear {
+                    weight: Tensor::from_slice(ctx, &wd, None, Some("CL"))
+                        .reshape([n as i64, k as i64]),
+                    bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CL"))),
+                };
+                vec![lin.forward(&a)]
+            },
+        )
     };
     let d = maxdiff(&run_case(false), &run_case(true));
     assert!(d < 1e-3, "transposed weight: CLBlast diff {d:e}");
@@ -115,18 +130,26 @@ fn clblast_matches_scale_and_residual_epilogue() {
     let sd = values(8, n);
     let xd = values(11, m * n);
     let run_case = |lib: bool| {
-        set_lib(lib);
-        run(|ctx| {
-            let h = Tensor::from_slice(ctx, &hd, None, Some("CL")).reshape([m as i64, k as i64]);
-            let x = Tensor::from_slice(ctx, &xd, None, Some("CL")).reshape([m as i64, n as i64]);
-            let lin = Linear {
-                weight: Tensor::from_slice(ctx, &wd, None, Some("CL"))
-                    .reshape([n as i64, k as i64]),
-                bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CL"))),
-            };
-            let scale = Tensor::from_slice(ctx, &sd, None, Some("CL"));
-            vec![x.add(&lin.forward(&h).mul(&scale))]
-        })
+        run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let h =
+                    Tensor::from_slice(ctx, &hd, None, Some("CL")).reshape([m as i64, k as i64]);
+                let x =
+                    Tensor::from_slice(ctx, &xd, None, Some("CL")).reshape([m as i64, n as i64]);
+                let lin = Linear {
+                    weight: Tensor::from_slice(ctx, &wd, None, Some("CL"))
+                        .reshape([n as i64, k as i64]),
+                    bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CL"))),
+                };
+                let scale = Tensor::from_slice(ctx, &sd, None, Some("CL"));
+                vec![x.add(&lin.forward(&h).mul(&scale))]
+            },
+        )
     };
     let d = maxdiff(&run_case(false), &run_case(true));
     assert!(d < 1e-3, "scale+residual: CLBlast diff {d:e}");
@@ -142,16 +165,22 @@ fn clblast_matches_strided_batched_attention() {
     let qd = values(2, b * h * m * k);
     let kd = values(9, b * h * n * k);
     let run_case = |lib: bool| {
-        set_lib(lib);
-        run(|ctx| {
-            let q = Tensor::from_slice(ctx, &qd, None, Some("CL"))
-                .reshape([b as i64, m as i64, h as i64, k as i64]);
-            let kk = Tensor::from_slice(ctx, &kd, None, Some("CL"))
-                .reshape([b as i64, n as i64, h as i64, k as i64]);
-            let q = q.transpose(1, 2);
-            let kt = kk.transpose(1, 2).transpose(2, 3);
-            vec![q.dot(&kt)]
-        })
+        run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let q = Tensor::from_slice(ctx, &qd, None, Some("CL"))
+                    .reshape([b as i64, m as i64, h as i64, k as i64]);
+                let kk = Tensor::from_slice(ctx, &kd, None, Some("CL"))
+                    .reshape([b as i64, n as i64, h as i64, k as i64]);
+                let q = q.transpose(1, 2);
+                let kt = kk.transpose(1, 2).transpose(2, 3);
+                vec![q.dot(&kt)]
+            },
+        )
     };
     let d = maxdiff(&run_case(false), &run_case(true));
     assert!(d < 1e-3, "batched attention: CLBlast diff {d:e}");

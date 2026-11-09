@@ -78,6 +78,7 @@ pub mod models;
 pub mod onnx;
 pub mod runtime;
 pub mod schedule;
+pub mod settings;
 pub mod tensor;
 pub mod uop;
 

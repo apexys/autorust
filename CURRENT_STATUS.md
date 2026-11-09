@@ -126,9 +126,35 @@ q.sage_attention(&k, &v, mask, dropout, is_causal)   // quantized (-> flash toda
 All three fall back to `scaled_dot_product_attention` for masked, causal or
 dropout cases, and for shapes the kernel does not cover.
 
+## Settings on `Ctx`
+
+`src/settings.rs` holds the per-context configuration. `Settings::from_env()` is
+called **once per process** by `settings::global()` (`OnceLock`), so no lowering
+path pays a `getenv`; each `Ctx` clones the process defaults at creation and can
+then be reconfigured:
+
+```rust
+let ctx = Ctx::new();
+ctx.borrow_mut().settings.attention = AttentionKind::Sdpa;
+ctx.borrow_mut().settings.library_gemm = LibraryGemm::Never;   // generated only
+let s = Settings::default().with_attention(AttentionKind::Flash).with_beam(4);
+```
+
+Migrated so far: `attention` (`AUTORUST_ATTN`, `FA`), `library_gemm`
+(`AUTORUST_GEMM`/`AUTORUST_CUBLAS`/`AUTORUST_CLBLAST`), `allow_tf32`
+(`AUTORUST_CUBLAS_TF32`, `ALLOW_TF32`), `cpu_gemm_tile`
+(`AUTORUST_CPU_GEMM_*`), `beam` (`BEAM`), `cache` (`CACHELEVEL`).
+
+The policy is deliberately split from presence: `cublas::available()` /
+`clblast::available()` / `cpu_gemm::available()` mean "the library loaded", and
+the per-context `library_gemm` decides whether to use it. That is what lets two
+contexts in one process make different choices (the cublas/clblast tests now do
+exactly that instead of toggling env vars, which the `OnceLock` would ignore).
+
 ## Environment variables: keep vs. settings
 
-~55 variables are read across the crate. Proposed split:
+~55 variables are read across the crate. Split, with the first group already
+migrated:
 
 **Keep as env (diagnostics/toolchain — easy to flip in a finished app):**
 
@@ -142,15 +168,16 @@ dropout cases, and for shapes the kernel does not cover.
 
 | variable | proposed settings call |
 |---|---|
-| `AUTORUST_ATTN`, `FA` | `ctx.settings.default_attention(AttentionKind::Flash)` |
-| `AUTORUST_GEMM`, `AUTORUST_CUBLAS`, `AUTORUST_CLBLAST` | `ctx.settings.library_gemm(LibraryGemm::Auto \| Always \| Never)` |
-| `AUTORUST_CUBLAS_TF32`, `ALLOW_TF32` | `ctx.settings.allow_tf32(false)` |
-| `AUTORUST_CPU_GEMM_{MC,NC,KC}` | `ctx.settings.cpu_gemm_tile(CpuTile { mc, nc, kc })` |
-| `SDPA_TILE` | `ctx.settings.sdpa_tile(0)` |
-| `DEFAULT_DEVICE` | `ctx.settings.device("CUDA")` |
-| `EMULATED_DTYPES` | `ctx.settings.emulated_dtypes(&[..])` |
-| `BEAM`, `BEAM_TEST_GLOBAL_MAX` | `ctx.settings.beam_width(0)` |
-| `RAYON_{SERIAL,F64,INTERP,VERBOSE}` | `ctx.settings.rayon(RayonMode)` |
+| `AUTORUST_ATTN`, `FA` | **done** — `settings.attention` |
+| `AUTORUST_GEMM`, `AUTORUST_CUBLAS`, `AUTORUST_CLBLAST` | **done** — `settings.library_gemm` |
+| `AUTORUST_CUBLAS_TF32`, `ALLOW_TF32` | **done** — `settings.allow_tf32` |
+| `AUTORUST_CPU_GEMM_{MC,NC,KC}` | **done** — `settings.cpu_gemm_tile` |
+| `BEAM` | **done** — `settings.beam` |
+| `CACHELEVEL` | **done** — `settings.cache` |
+| `SDPA_TILE` | todo — `settings.sdpa_tile(n)` |
+| `DEFAULT_DEVICE` | todo — `settings.device("CUDA")` (read before a `Ctx` exists; needs a process-global) |
+| `EMULATED_DTYPES` | todo — `settings.emulated_dtypes(&[..])` |
+| `RAYON_{SERIAL,F64,INTERP,VERBOSE}` | todo — `settings.rayon(RayonMode)` |
 | `CLUSTERFUN_{NO_JIT,TIMING}` | app settings (not the library) |
 
 Kept env-only on purpose: anything that must be settable before a `Ctx` exists
