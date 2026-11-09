@@ -61,6 +61,15 @@ build time. `cargo test`: default/CL 225, `backend_cuda` 253,
 - `AttentionKind::{Sdpa, Flash, Sage}` via `AUTORUST_ATTN` (default `flash`).
   `sage` is the placeholder for the quantized variant and currently degrades to
   `flash` with a one-time notice.
+- **Generated GEMM tensor cores**: `hand_coded_optimizations` already tried
+  `OptOp::TC` first; two bugs stopped it — the f32 gate read a bare
+  `ALLOW_TF32` env (not the context setting) and it ignored our `tensor_cores`
+  switch. Fixed: f32 uses the TF32 layout and bf16 the bf16 layout, gated on
+  `Settings.tensor_cores` (default on). Kernel-only 2048^3: f32 **5.37 vs
+  3.00 TFLOP/s** FFMA (1.79x), 512^3 1.73 vs 1.10 (1.58x), 384^3 1.44 vs 1.09
+  (1.32x); bf16 10.8 vs 9.8. An output-aspect gate (max/min <= 2) keeps the
+  FFMA tiling for tall/wide shapes, where WMMA loses (6312x384 -15%).
+  `tests/tc_gemm.rs` checks the lowering against the FFMA path.
 - **TF32 tensor-core FA2** (`runtime::cuda_flash_tc`) on `sm_80+`: warp-tiled
   `mma.sync.m16n8k8`, Q in A fragments, K/V streamed through 16.6 KB of shared,
   score tile and output accumulator in registers. 5.9x over the scalar kernel
@@ -247,10 +256,10 @@ app-side.
    facts still advertise the interpreter's capabilities, so it gets a GPU-shaped
    schedule and runs the typed IR at ~0.9 GFLOP/s. It is not on the app's path
    (the frozen plan uses the compiled `RUST` backend).
-5. **GEMM headroom**: the generated f32 kernel is memory-bound (0 B shared,
-   3.6 TFLOP/s at 2048^3); cuBLAS f32 reaches 4.8 and TF32 5.8. The generated
-   bf16 kernel is 10.7 TFLOP/s but emits no `mma`; tensor cores are the next
-   2-3x. The attention kernels already use `mma` (TF32/bf16) and Sage (INT8/FP8).
+5. **GEMM headroom**: the generated f32 kernel now uses TF32 `mma` (5.4 TFLOP/s
+   at 2048^3 vs 3.0 FFMA; cuBLAS TF32 5.8). bf16 is 10.8. The FFMA fallback
+   for tall/wide shapes is still memory-bound (no shared tiling); the attention
+   kernels use `mma` (TF32/bf16) and Sage (INT8/FP8).
 6. Measurement note: this machine occasionally carries unrelated load (seen at
    load average ~11), which inflated one CPU run to 66 s. Re-measure before
    trusting a single outlier.

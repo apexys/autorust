@@ -100,11 +100,14 @@ fn reduce_alu_op(ctx: &mut UOpCtx, reduceop: &UopId) -> Ops {
     }
 }
 
-/// `ALLOW_TF32` (helpers.py) — default off, so float-input tensor cores skip.
-fn allow_tf32() -> bool {
-    crate::helpers::env::get("ALLOW_TF32")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+/// Whether the generated kernels may use tensor cores for f32 operands.
+///
+/// There is no full-precision f32 tensor core: f32 uses TF32 (10-bit mantissa),
+/// the same rule as the fused attention kernels. Governed by
+/// [`Settings::tensor_cores`] (default on), not by the cuBLAS-only
+/// `allow_tf32` switch.
+fn allow_tf32(ctx: &UOpCtx) -> bool {
+    ctx.settings.tensor_cores
 }
 
 /// `getenv(name, default)` for integer knobs.
@@ -737,9 +740,20 @@ impl<'a> Scheduler<'a> {
             vec![self.ren.tensor_cores[tc_select as usize].clone()]
         };
         for tc in tensor_cores {
+            if crate::helpers::env::get("TC_DEBUG").is_some() {
+                eprintln!(
+                    "[tc]   cand in={:?} out={:?} vs in0={:?} in1={:?} redt={:?} tf32={}",
+                    tc.dtype_in,
+                    tc.dtype_out,
+                    ctx.dt_of(&in0),
+                    ctx.dt_of(&in1),
+                    redt,
+                    allow_tf32(ctx)
+                );
+            }
             if (self.ren.device == "CUDA" || self.ren.device == "NV")
                 && tc.dtype_in == crate::dtype::FLOAT32
-                && !allow_tf32()
+                && !allow_tf32(ctx)
             {
                 continue;
             }
@@ -787,6 +801,18 @@ impl<'a> Scheduler<'a> {
                 let mut m = HashMap::new();
                 m.insert(reduceop.clone(), tagged);
                 self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), m, false, false);
+            }
+            // The WMMA tiling loses to the register tiling when the output is
+            // very asymmetric (measured: 6312x384x384 -15%, 6312x512x384 -12%;
+            // square shapes win 1.1-1.9x). Keep the TC for roughly square
+            // outputs only and let the FFMA tiling handle tall/wide ones.
+            let n_ext = self.rng_vmax(ctx, axes[0].clone()) + 1;
+            let m_ext = self.rng_vmax(ctx, axes[1].clone()) + 1;
+            if crate::helpers::env::get("TC_DEBUG").is_some() {
+                eprintln!("[tc]   aspect axes0={n_ext} axes1={m_ext}");
+            }
+            if n_ext.max(m_ext) > 2 * n_ext.min(m_ext) {
+                return Err("tensor core output is too asymmetric".into());
             }
             // PADTO when an axis doesn't divide the tensor-core dim
             let dims = [tc.dims.0, tc.dims.1, tc.dims.2];
@@ -1575,6 +1601,18 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
     let use_tc: i64 = env_int("USE_TC", 1);
     let tc_opt: i64 = env_int("TC_OPT", 0);
     let tc_select: i64 = env_int("TC_SELECT", -1);
+    let tc_dbg = crate::helpers::env::get("TC_DEBUG").is_some();
+    if tc_dbg {
+        let red = k
+            .axes_of(ctx, &[AxisType::GroupReduce, AxisType::Reduce])
+            .len();
+        eprintln!(
+            "[tc] use_tc={use_tc} tc_opt={tc_opt} tc_select={tc_select} reduce_axes={red} \
+             tcs={} applied={}",
+            k.ren.tensor_cores.len(),
+            k.applied_opts.len()
+        );
+    }
     if use_tc > 0
         && (k
             .axes_of(ctx, &[AxisType::GroupReduce, AxisType::Reduce])
@@ -1585,8 +1623,18 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
         for axis in 0..3usize {
             let mut tk = k.copy();
             let mut rngs = match tk.apply_opt_tc(ctx, axis, tc_select, tc_opt, use_tc) {
-                Ok(r) => r,
-                Err(_) => continue,
+                Ok(r) => {
+                    if tc_dbg {
+                        eprintln!("[tc] axis {axis}: engaged ({} ranges)", r.len());
+                    }
+                    r
+                }
+                Err(e) => {
+                    if tc_dbg {
+                        eprintln!("[tc] axis {axis}: {e}");
+                    }
+                    continue;
+                }
             };
             // attempt to upcast M and N
             for &tc_dim in &[1usize, 0usize] {

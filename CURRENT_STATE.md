@@ -2330,11 +2330,12 @@ degrades to the exact f32 kernel with a notice.
 | double buffering | used by the bf16 kernel (`cp.async`, 2 stages) |
 | CUDA graphs | unused (own JIT replay) |
 
-The generated GEMM is register-tiled FFMA with **no shared memory**: it
-re-reads A/B from global and is DRAM-bound at ~3.6 TFLOP/s (2048^3); cuBLAS
-reaches 4.8 (5.8 with TF32). The generated bf16 kernel hits 10.7 TFLOP/s only
-because bf16 halves the traffic — it emits no `mma`. The attention kernels do
-use `mma` (TF32/bf16) and are at ~15 TFLOP/s bf16.
+The generated GEMM now emits `mma` for roughly square outputs: f32 uses the
+TF32 layout (5.4 TFLOP/s at 2048^3 vs 3.0 for the FFMA tiling) and bf16 the
+bf16 layout (10.8 vs 9.8). The FFMA fallback for tall/wide outputs is still
+register-only with **no shared memory** (DRAM-bound at ~3.6 TFLOP/s), so it
+wants shared-memory tiling. The attention kernels use `mma` (TF32/bf16, ~15
+TFLOP/s bf16) and Sage (INT8/FP8).
 
 ### Plan for a newer GPU
 

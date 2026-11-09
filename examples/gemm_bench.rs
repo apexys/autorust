@@ -128,6 +128,22 @@ fn main() {
         };
         let t1 = Instant::now();
         let was_realized = y.realized_buffer().is_some();
+        if prof {
+            eprintln!(
+                "iter {it}: buffer device={:?} (cuda available={})",
+                y.realized_buffer().map(|b| b.device().to_string()),
+                {
+                    #[cfg(feature = "backend_cuda")]
+                    {
+                        autorust::runtime::ops_cuda::available()
+                    }
+                    #[cfg(not(feature = "backend_cuda"))]
+                    {
+                        false
+                    }
+                }
+            );
+        }
         if sync_mode {
             // No host copy: enqueue (realize if needed), then wait on the stream.
             let t3 = Instant::now();

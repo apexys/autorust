@@ -70,7 +70,8 @@ pub struct Settings {
     /// enables it, and this does not affect the tensor-core attention kernel —
     /// that is governed by [`Settings::tensor_cores`].
     pub allow_tf32: bool,
-    /// Allow hand-written kernels to use warp-tiled tensor-core instructions.
+    /// Allow generated matmuls and hand-written kernels to use warp-level
+    /// tensor-core instructions.
     ///
     /// On by default. Only takes effect where the device has the instructions
     /// (`sm_80+`), so older cards and non-NVIDIA backends keep the scalar
