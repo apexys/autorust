@@ -1,11 +1,14 @@
 //! Warp-tiled bf16 tensor-core flash-attention kernel for CUDA.
 //!
 //! The bf16 sibling of [`cuda_flash_tc`](crate::runtime::cuda_flash_tc): same
-//! schedule (`BQ = 64`, `BK = 32`, non-causal, no mask, `d == 64`), but the two
-//! matmuls use `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` — bf16
-//! operands, f32 accumulate. Selected when the tensors themselves are bf16, so
-//! the dtype contract is unchanged: an f32 model keeps TF32 attention, a bf16
-//! model gets the bf16 kernel.
+//! schedule (`BQ = 64`, `BK = 32`, `d == 64`), but the two matmuls use
+//! `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` — bf16 operands, f32
+//! accumulate. Selected when the tensors themselves are bf16, so the dtype
+//! contract is unchanged: an f32 model keeps TF32 attention, a bf16 model gets
+//! the bf16 kernel.
+//!
+//! Supported: causal, an additive f32 mask of shape `[n, n]`, and GQA (K/V may
+//! have fewer heads than Q).
 //!
 //! # Why this is the next step
 //!
@@ -27,10 +30,10 @@
 //!
 //! | A | B | C/D |
 //! |---|---|---|
-//! | a0 = A[g][2t:2t+2]     | b0 = B[2t:2t+2][g]     | c0 = C[g][2t]     |
-//! | a1 = A[g+8][2t:2t+2]   | b1 = B[2t+8:2t+10][g]  | c1 = C[g][2t+1]   |
-//! | a2 = A[g][2t+8:2t+10]  |                        | c2 = C[g+8][2t]   |
-//! | a3 = A[g+8][2t+8:2t+10]|                        | c3 = C[g+8][2t+1] |
+//! | a0 = A[g][2t:2t+2]      | b0 = B[2t:2t+2][g]    | c0 = C[g][2t]     |
+//! | a1 = A[g+8][2t:2t+2]    | b1 = B[2t+8:2t+10][g] | c1 = C[g][2t+1]   |
+//! | a2 = A[g][2t+8:2t+10]   |                       | c2 = C[g+8][2t]   |
+//! | a3 = A[g+8][2t+8:2t+10] |                       | c3 = C[g+8][2t+1] |
 //!
 //! Two score tiles (16 keys) pack into one A fragment for `P·V` with no
 //! cross-lane exchange, so the probabilities again stay in registers.
@@ -53,6 +56,17 @@ pub const THREADS: i64 = 128;
 
 /// Entry point name.
 pub const NAME: &str = "ar_flash_bf16";
+
+/// The per-call options the fused kernel understands beyond the tensors.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// Apply the causal (lower-triangular) mask.
+    pub causal: bool,
+    /// `mask` is a real additive `[n, n]` f32 tensor (else it is ignored).
+    pub has_mask: bool,
+    /// Number of K/V heads (`h_q / h_kv` is the GQA group size).
+    pub h_kv: i64,
+}
 
 /// The CUDA source.
 pub const SRC: &str = r#"
@@ -95,7 +109,8 @@ __device__ __forceinline__ void ar_mma(float d[4], const unsigned a[4],
 extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
     const unsigned short* __restrict__ Q, const unsigned short* __restrict__ K,
     const unsigned short* __restrict__ V, unsigned short* __restrict__ O,
-    int N, int head_dim, int unused)
+    const float* __restrict__ M,
+    int N, int head_dim, int causal, int has_mask, int hq, int hkv)
 {
     /* bf16 [key][d], padded to 66 elements (132 B) so the 4-byte pair loads
      * rotate banks: bank = (row*66*2/4 + word) & 31 = (row*33 + word) & 31. */
@@ -108,9 +123,17 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
     const int g    = lane >> 2;        /* row within the 16-row warp tile */
     const int t2   = (lane & 3) * 2;   /* column pair within an 8-wide tile */
 
-    const int q0  = blockIdx.x * AR_BQ + warp * 16;
-    const int bh  = blockIdx.y;
-    const long base = (long)bh * (long)N * AR_D;
+    const int qblk = blockIdx.x * AR_BQ;
+    const int q0   = qblk + warp * 16;
+    const int bh   = blockIdx.y;
+    const int b_idx   = bh / hq;
+    const int head    = bh - b_idx * hq;
+    const int group   = hq / hkv;
+    const int kh      = head / group;
+    const int kv_bh   = b_idx * hkv + kh;
+    const long qbase  = (long)bh * (long)N * AR_D;
+    const long kvbase = (long)kv_bh * (long)N * AR_D;
+    const int kend    = causal ? min(N, qblk + AR_BQ) : N;
 
     /* ---- Q into A fragments: d = 64 -> 4 k steps of 16 ---- */
     unsigned qa[4][4];
@@ -120,10 +143,10 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
         const int r0 = q0 + g;
         const int r1 = q0 + g + 8;
         const bool ok0 = r0 < N, ok1 = r1 < N;
-        qa[s][0] = ok0 ? ar_ld2(Q + base + (long)r0 * AR_D, d0 + t2)     : 0u;
-        qa[s][1] = ok1 ? ar_ld2(Q + base + (long)r1 * AR_D, d0 + t2)     : 0u;
-        qa[s][2] = ok0 ? ar_ld2(Q + base + (long)r0 * AR_D, d0 + t2 + 8) : 0u;
-        qa[s][3] = ok1 ? ar_ld2(Q + base + (long)r1 * AR_D, d0 + t2 + 8) : 0u;
+        qa[s][0] = ok0 ? ar_ld2(Q + qbase + (long)r0 * AR_D, d0 + t2)     : 0u;
+        qa[s][1] = ok1 ? ar_ld2(Q + qbase + (long)r1 * AR_D, d0 + t2)     : 0u;
+        qa[s][2] = ok0 ? ar_ld2(Q + qbase + (long)r0 * AR_D, d0 + t2 + 8) : 0u;
+        qa[s][3] = ok1 ? ar_ld2(Q + qbase + (long)r1 * AR_D, d0 + t2 + 8) : 0u;
     }
 
     /* ---- online-softmax state and the 16x64 output accumulator ---- */
@@ -135,15 +158,15 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
     float m0 = AR_NEG, l0 = 0.f;
     float m1 = AR_NEG, l1 = 0.f;
 
-    for (int k0 = 0; k0 < N; k0 += AR_BK) {
+    for (int k0 = 0; k0 < kend; k0 += AR_BK) {
         /* ---- stage K/V (already bf16) ---- */
         for (int i = tid; i < AR_BK * AR_D; i += 128) {
             const int r  = i >> 6;
             const int d  = i & 63;
             const int gr = k0 + r;
             if (gr < N) {
-                ks[r][d] = K[base + (long)gr * AR_D + d];
-                vs[r][d] = V[base + (long)gr * AR_D + d];
+                ks[r][d] = K[kvbase + (long)gr * AR_D + d];
+                vs[r][d] = V[kvbase + (long)gr * AR_D + d];
             } else {
                 ks[r][d] = 0;
                 vs[r][d] = 0;
@@ -169,20 +192,34 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
             }
         }
 
+        /* ---- 1/sqrt(64), causal and additive mask ---- */
+        const int row0 = q0 + g;
+        const int row1 = row0 + 8;
+        #pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            const int key = k0 + t * 8 + t2;
+            sc[t][0] *= 0.125f; sc[t][1] *= 0.125f;
+            sc[t][2] *= 0.125f; sc[t][3] *= 0.125f;
+            if (has_mask) {
+                if (key < N) {
+                    if (row0 < N) sc[t][0] += M[(long)row0 * N + key];
+                    if (row1 < N) sc[t][2] += M[(long)row1 * N + key];
+                }
+                if (key + 1 < N) {
+                    if (row0 < N) sc[t][1] += M[(long)row0 * N + key + 1];
+                    if (row1 < N) sc[t][3] += M[(long)row1 * N + key + 1];
+                }
+            }
+            if (key >= N || (causal && key > row0))     { sc[t][0] = AR_NEG; }
+            if (key + 1 >= N || (causal && key + 1 > row0)) { sc[t][1] = AR_NEG; }
+            if (key >= N || (causal && key > row1))     { sc[t][2] = AR_NEG; }
+            if (key + 1 >= N || (causal && key + 1 > row1)) { sc[t][3] = AR_NEG; }
+        }
+
         /* ---- row-wise online softmax over the 32 keys ---- */
         float mx0 = m0, mx1 = m1;
         #pragma unroll
         for (int t = 0; t < 4; ++t) {
-            const int key = k0 + t * 8 + t2;
-            /* 1/sqrt(64), applied in f32 after the bf16 matmul. */
-            sc[t][0] *= 0.125f; sc[t][1] *= 0.125f;
-            sc[t][2] *= 0.125f; sc[t][3] *= 0.125f;
-            if (key >= N) {
-                sc[t][0] = AR_NEG; sc[t][2] = AR_NEG;
-            }
-            if (key + 1 >= N) {
-                sc[t][1] = AR_NEG; sc[t][3] = AR_NEG;
-            }
             mx0 = fmaxf(mx0, fmaxf(sc[t][0], sc[t][1]));
             mx1 = fmaxf(mx1, fmaxf(sc[t][2], sc[t][3]));
         }
@@ -249,11 +286,11 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
     #pragma unroll
     for (int nt = 0; nt < 8; ++nt) {
         if (r0 < N) {
-            ar_st2(O + base + (long)r0 * AR_D, nt * 8 + t2,
+            ar_st2(O + qbase + (long)r0 * AR_D, nt * 8 + t2,
                    ar_pack(o[nt][0] * inv0, o[nt][1] * inv0));
         }
         if (r1 < N) {
-            ar_st2(O + base + (long)r1 * AR_D, nt * 8 + t2,
+            ar_st2(O + qbase + (long)r1 * AR_D, nt * 8 + t2,
                    ar_pack(o[nt][2] * inv1, o[nt][3] * inv1));
         }
     }
@@ -293,7 +330,8 @@ pub fn selections() -> u64 {
     SELECTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Launch the fused kernel: `q/k/v/o` are `[b, h, n, 64]` contiguous bf16.
+/// Launch with the default options (no mask, no causal, one K/V head per Q
+/// head).
 pub fn run(
     dev: &std::rc::Rc<crate::runtime::device::Compiled>,
     q: &OpaqueView,
@@ -304,8 +342,42 @@ pub fn run(
     h: i64,
     n: i64,
 ) {
-    assert!(shape_supported(n, HEAD_DIM), "flash bf16: unsupported shape");
-    launch(dev, q, k, v, o, b, h, n, true);
+    run_ex(
+        dev,
+        q,
+        k,
+        v,
+        o,
+        None,
+        b,
+        h,
+        n,
+        Options {
+            h_kv: h,
+            ..Options::default()
+        },
+    );
+}
+
+/// Launch the fused kernel with masks/GQA.
+#[allow(clippy::too_many_arguments)]
+pub fn run_ex(
+    dev: &std::rc::Rc<crate::runtime::device::Compiled>,
+    q: &OpaqueView,
+    k: &OpaqueView,
+    v: &OpaqueView,
+    o: &OpaqueView,
+    mask: Option<&OpaqueView>,
+    b: i64,
+    h: i64,
+    n: i64,
+    opts: Options,
+) {
+    assert!(
+        shape_supported(n, HEAD_DIM),
+        "flash bf16: unsupported shape"
+    );
+    launch(dev, q, k, v, o, mask, b, h, n, opts, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,42 +387,72 @@ fn launch(
     k: &OpaqueView,
     v: &OpaqueView,
     o: &OpaqueView,
+    mask: Option<&OpaqueView>,
     b: i64,
     h: i64,
     n: i64,
+    opts: Options,
     wait: bool,
 ) -> Option<f64> {
+    let dummy;
+    let m = match mask {
+        Some(m) => m,
+        None => {
+            dummy = o.clone();
+            &dummy
+        }
+    };
     let grid = [((n + BQ - 1) / BQ) as usize, (b * h) as usize, 1];
     dev.run_host_kernel(
         SRC,
         NAME,
         &signature(),
-        &[q.clone(), k.clone(), v.clone(), o.clone()],
+        &[q.clone(), k.clone(), v.clone(), o.clone(), m.clone()],
         grid,
         Some([THREADS as usize, 1, 1]),
-        &[n, HEAD_DIM, 0],
+        &vals(n, h, opts),
         wait,
     )
 }
 
-fn signature() -> Vec<(i64, crate::dtype::DTypeId)> {
+fn vals(n: i64, h: i64, opts: Options) -> Vec<i64> {
     vec![
-        (0, crate::dtype::BFLOAT16),
-        (1, crate::dtype::BFLOAT16),
-        (2, crate::dtype::BFLOAT16),
-        (3, crate::dtype::BFLOAT16),
-        (4, crate::dtype::INT32),
-        (5, crate::dtype::INT32),
-        (6, crate::dtype::INT32),
+        n,
+        HEAD_DIM,
+        opts.causal as i64,
+        opts.has_mask as i64,
+        h,
+        opts.h_kv,
+    ]
+}
+
+fn signature() -> Vec<(i64, crate::dtype::DTypeId)> {
+    let b = crate::dtype::BFLOAT16;
+    let f = crate::dtype::FLOAT32;
+    let i = crate::dtype::INT32;
+    vec![
+        (0, b),
+        (1, b),
+        (2, b),
+        (3, b),
+        (4, f),
+        (5, i),
+        (6, i),
+        (7, i),
+        (8, i),
+        (9, i),
+        (10, i),
     ]
 }
 
 /// The captured-launch descriptor for a fusable bf16 attention call.
+#[allow(clippy::too_many_arguments)]
 pub fn host_call(
     bufs: Vec<crate::runtime::buffer::Buffer>,
     b: i64,
     h: i64,
     n: i64,
+    opts: Options,
 ) -> crate::engine::session::HostCall {
     crate::engine::session::HostCall {
         device: "CUDA".into(),
@@ -360,6 +462,6 @@ pub fn host_call(
         bufs,
         global: [((n + BQ - 1) / BQ), b * h, 1],
         local: Some([THREADS, 1, 1]),
-        vals: vec![n, HEAD_DIM, 0],
+        vals: vals(n, h, opts),
     }
 }

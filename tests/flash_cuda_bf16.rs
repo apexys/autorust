@@ -91,16 +91,7 @@ fn run_bf16(
     }
     let dev = device("CUDA");
     let ov = |t: &Tensor| t.realized_buffer().expect("realized").get_buf(&dev);
-    autorust::runtime::cuda_flash_bf16::run(
-        &dev,
-        &ov(&qb),
-        &ov(&kb),
-        &ov(&vb),
-        &ov(&out),
-        b,
-        h,
-        n,
-    );
+    autorust::runtime::cuda_flash_bf16::run(&dev, &ov(&qb), &ov(&kb), &ov(&vb), &ov(&out), b, h, n);
     out.cast(dtype::FLOAT32).to_list::<f32>(sess)
 }
 
@@ -234,8 +225,20 @@ fn bf16_timing_vs_f32_tc() {
     let tf32_ms = t0.elapsed().as_secs_f64() * 1e3 / 5.0;
     let t1 = Instant::now();
     for _ in 0..5 {
-        autorust::runtime::cuda_flash_bf16::run(&dev, &ov(&qb), &ov(&kb), &ov(&vb), &ov(&ob), b, h, n);
+        autorust::runtime::cuda_flash_bf16::run(
+            &dev,
+            &ov(&qb),
+            &ov(&kb),
+            &ov(&vb),
+            &ov(&ob),
+            b,
+            h,
+            n,
+        );
     }
     let bf16_ms = t1.elapsed().as_secs_f64() * 1e3 / 5.0;
-    eprintln!("batch {b}, h {h}, n {n}: tf32 {tf32_ms:.2} ms, bf16 {bf16_ms:.2} ms ({:.2}x)", tf32_ms / bf16_ms);
+    eprintln!(
+        "batch {b}, h {h}, n {n}: tf32 {tf32_ms:.2} ms, bf16 {bf16_ms:.2} ms ({:.2}x)",
+        tf32_ms / bf16_ms
+    );
 }

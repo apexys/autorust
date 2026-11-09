@@ -2282,7 +2282,7 @@ approximates.
 | | coverage today |
 |---|---|
 | `sdpa` | everything: masks, causal, dropout, GQA, any `d`, any dtype |
-| `flash` | no mask, no causal, no dropout, `d == 64`, f32, contiguous, CUDA/CL only |
+| `flash` | CUDA (`d == 64`, contiguous): causal, additive f32 `[n, n]` mask, GQA, f32 or bf16. OpenCL: plain f32 only. No dropout anywhere |
 | `sage` | same subset as flash, plus quantization assumptions |
 
 `flash` has three CUDA kernels behind the same math: the scalar f32 FA2 kernel,
@@ -2297,12 +2297,14 @@ forces the exact scalar f32 kernel; bf16 then falls back to SDPA. An older card
 (e.g. `sm_61`, GTX 1060) never compiles the tensor-core sources and keeps the
 scalar kernel; a one-time notice says so.
 
-The `flash` gaps are unimplemented features, not limits of the approach:
-causal is (a) skip key tiles above the diagonal and (b) mask the diagonal tile;
-an additive mask is one extra shared-memory tile added before the max; GQA is a
-head-index divide. On CPU the fused kernel does not exist, and the graph-level
-FA port (`models::flash_attention`) measured 16x slower than split-SDPA, so
-`flash` there means "same math, no faster kernel".
+The CUDA kernels implement the features rather than treating them as limits:
+causal skips key tiles above the diagonal at block level and masks the diagonal
+tiles per row; an additive `[n, n]` f32 mask is added to the scores before the
+max; GQA divides the Q head index by `h_q / h_kv` when indexing K/V. Dropout
+still needs the general path (it consumes RNG state per element), and the
+OpenCL kernel is unchanged (no mask/causal/GQA). On CPU the fused kernel does
+not exist, and the graph-level FA port (`models::flash_attention`) measured 16x
+slower than split-SDPA, so `flash` there means "same math, no faster kernel".
 
 Fallbacks are therefore semantically safe, but they must be observable: the
 plan is per-context counters plus a one-time log line per (kind, reason), and an
@@ -2335,17 +2337,19 @@ Done on every sm_80+ card:
 3. ~~bf16 tensor-core FA2 (`mma.m16n8k16`, f32 accumulate)~~ —
    `runtime/cuda_flash_bf16.rs`, selected when the tensors are bf16. 1.8-2.4x
    the TF32 kernel, matching a bf16-emulating reference to <1e-4.
+4. ~~Causal / additive mask / GQA~~ — all three CUDA kernels; causal also
+   bounds the key loop to the diagonal block.
 
 Next:
 
-4. `cp.async` double-buffered K/V staging (removes the per-tile barrier stall).
-5. Causal / additive mask / GQA in the kernel.
+5. `cp.async` double-buffered K/V staging (removes the per-tile barrier stall).
 6. Occupancy pass (`BK` 16 vs 32, register count).
+7. Masks/causal/GQA in the OpenCL kernel.
 
 Only for Ada/Hopper:
 
-7. FP8 (E4M3) QKᵀ — the real SageAttention2; sm_86 has no FP8 tensor cores.
-8. Hopper-only `wgmma`/TMA/warp specialization — a separate kernel; it does not
+8. FP8 (E4M3) QKᵀ — the real SageAttention2; sm_86 has no FP8 tensor cores.
+9. Hopper-only `wgmma`/TMA/warp specialization — a separate kernel; it does not
    help the 3060.
 
 Arch detection and the PTX cache already key on `sm_XX`, so a newer card needs

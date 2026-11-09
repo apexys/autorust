@@ -1,9 +1,12 @@
 //! Warp-tiled TF32 tensor-core flash-attention kernel for CUDA.
 //!
-//! Same math and the same tiling as [`cuda_flash`](crate::runtime::cuda_flash)
-//! (`BQ = 64`, `BK = 32`, non-causal, no mask, `d == 64`, f32 in/out), but the
-//! two matmuls run on `mma.sync.aligned.m16n8k8` TF32 tensor cores instead of
-//! scalar FMAs. The online softmax stays in f32.
+//! Same math as [`cuda_flash`](crate::runtime::cuda_flash) (`BQ = 64`, `BK =
+//! 32`, `d == 64`, f32 in/out), but the two matmuls run on
+//! `mma.sync.aligned.m16n8k8` TF32 tensor cores instead of scalar FMAs. The
+//! online softmax stays in f32.
+//!
+//! Supported: causal, an additive f32 mask of shape `[n, n]`, and GQA (K/V may
+//! have fewer heads than Q; the head is divided by the group size).
 //!
 //! # Why TF32 and not f32
 //!
@@ -17,10 +20,9 @@
 //!
 //! TF32 `mma` needs `sm_80+`. [`supported`] checks the device generation and
 //! [`Settings::tensor_cores`], so an older card (e.g. GTX 1060 / `sm_61`) never
-//! compiles this source and keeps the scalar kernel. Nothing about the shape
-//! contract changes: the caller (`models::flash_attention::fused_attention`)
-//! falls back to [`cuda_flash`](crate::runtime::cuda_flash) in exactly the same
-//! place it already falls back from the fused kernel to SDPA.
+//! compiles this source and keeps the scalar kernel. The caller
+//! (`models::flash_attention::fused_attention`) falls back to the scalar kernel
+//! (f32) or SDPA (mask/causal on an old card) in exactly the same place.
 //!
 //! # Layout
 //!
@@ -53,6 +55,17 @@ pub const THREADS: i64 = 128;
 /// Entry point name.
 pub const NAME: &str = "ar_flash_tc_f32";
 
+/// The per-call options the fused kernel understands beyond the tensors.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// Apply the causal (lower-triangular) mask.
+    pub causal: bool,
+    /// `mask` is a real additive `[n, n]` f32 tensor (else it is ignored).
+    pub has_mask: bool,
+    /// Number of K/V heads (`h_q / h_kv` is the GQA group size).
+    pub h_kv: i64,
+}
+
 /// The CUDA source.
 pub const SRC: &str = r#"
 #define AR_D 64
@@ -81,10 +94,10 @@ __device__ __forceinline__ void ar_mma(float d[4], const unsigned a[4],
 extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
     const float* __restrict__ Q, const float* __restrict__ K,
     const float* __restrict__ V, float* __restrict__ O,
-    int N, int head_dim, int unused)
+    const float* __restrict__ M,
+    int N, int head_dim, int causal, int has_mask, int hq, int hkv)
 {
-    /* K is [key][d] and V is [key][d]; both padded to 65 floats. The mma
-     * fragments index them directly (see the load sites below). */
+    /* K is [key][d] and V is [key][d]; both padded to 65 floats. */
     __shared__ float ks[AR_BK][AR_D + 1];
     __shared__ float vs[AR_BK][AR_D + 1];
 
@@ -94,9 +107,18 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
     const int g    = lane >> 2;        /* row within the 16-row warp tile */
     const int t2   = (lane & 3) * 2;   /* column pair within an 8-wide tile */
 
-    const int q0  = blockIdx.x * AR_BQ + warp * 16;  /* first query of this warp */
-    const int bh  = blockIdx.y;
-    const long base = (long)bh * (long)N * AR_D;
+    const int qblk = blockIdx.x * AR_BQ;
+    const int q0   = qblk + warp * 16;
+    const int bh   = blockIdx.y;
+    /* GQA: Q has hq heads, K/V have hkv; repeat each K/V head hq/hkv times. */
+    const int b_idx   = bh / hq;
+    const int head    = bh - b_idx * hq;
+    const int group   = hq / hkv;
+    const int kh      = head / group;
+    const int kv_bh   = b_idx * hkv + kh;
+    const long qbase  = (long)bh * (long)N * AR_D;
+    const long kvbase = (long)kv_bh * (long)N * AR_D;
+    const int kend    = causal ? min(N, qblk + AR_BQ) : N;
 
     /* ---- Q into A fragments, one per 8-wide k step (d = 64 -> 8 steps) ---- */
     unsigned qa[8][4];
@@ -105,10 +127,10 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
         const int d0 = s * 8;
         const int r0 = q0 + g;
         const int r1 = q0 + g + 8;
-        const float a0 = (r0 < N) ? Q[base + (long)r0 * AR_D + d0 + t2 + 0] : 0.f;
-        const float a1 = (r1 < N) ? Q[base + (long)r1 * AR_D + d0 + t2 + 0] : 0.f;
-        const float a2 = (r0 < N) ? Q[base + (long)r0 * AR_D + d0 + t2 + 1] : 0.f;
-        const float a3 = (r1 < N) ? Q[base + (long)r1 * AR_D + d0 + t2 + 1] : 0.f;
+        const float a0 = (r0 < N) ? Q[qbase + (long)r0 * AR_D + d0 + t2 + 0] : 0.f;
+        const float a1 = (r1 < N) ? Q[qbase + (long)r1 * AR_D + d0 + t2 + 0] : 0.f;
+        const float a2 = (r0 < N) ? Q[qbase + (long)r0 * AR_D + d0 + t2 + 1] : 0.f;
+        const float a3 = (r1 < N) ? Q[qbase + (long)r1 * AR_D + d0 + t2 + 1] : 0.f;
         /* 1/sqrt(64) folded into Q. It is a power of two, so applying it before
          * the TF32 rounding is exactly the same as scaling the scores after. */
         qa[s][0] = ar_tf32(a0 * 0.125f);
@@ -126,15 +148,15 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
     float m0 = AR_NEG, l0 = 0.f;   /* row g     */
     float m1 = AR_NEG, l1 = 0.f;   /* row g + 8 */
 
-    for (int k0 = 0; k0 < N; k0 += AR_BK) {
+    for (int k0 = 0; k0 < kend; k0 += AR_BK) {
         /* ---- stage K/V, converted to TF32 once ---- */
         for (int i = tid; i < AR_BK * AR_D; i += 128) {
             const int r  = i >> 6;
             const int d  = i & 63;
             const int gr = k0 + r;
             if (gr < N) {
-                ks[r][d] = __uint_as_float(ar_tf32(K[base + (long)gr * AR_D + d]));
-                vs[r][d] = __uint_as_float(ar_tf32(V[base + (long)gr * AR_D + d]));
+                ks[r][d] = __uint_as_float(ar_tf32(K[kvbase + (long)gr * AR_D + d]));
+                vs[r][d] = __uint_as_float(ar_tf32(V[kvbase + (long)gr * AR_D + d]));
             } else {
                 ks[r][d] = 0.f;
                 vs[r][d] = 0.f;
@@ -161,21 +183,35 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
             }
         }
 
+        /* ---- causal + additive mask ---- */
+        const int row0 = q0 + g;
+        const int row1 = row0 + 8;
+        #pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            const int key = k0 + t * 8 + t2;
+            if (has_mask) {
+                if (key < N) {
+                    if (row0 < N) sc[t][0] += M[(long)row0 * N + key];
+                    if (row1 < N) sc[t][2] += M[(long)row1 * N + key];
+                }
+                if (key + 1 < N) {
+                    if (row0 < N) sc[t][1] += M[(long)row0 * N + key + 1];
+                    if (row1 < N) sc[t][3] += M[(long)row1 * N + key + 1];
+                }
+            }
+            if (key >= N || (causal && key > row0))     { sc[t][0] = AR_NEG; }
+            if (key + 1 >= N || (causal && key + 1 > row0)) { sc[t][1] = AR_NEG; }
+            if (key >= N || (causal && key > row1))     { sc[t][2] = AR_NEG; }
+            if (key + 1 >= N || (causal && key + 1 > row1)) { sc[t][3] = AR_NEG; }
+        }
+
         /* ---- row-wise online softmax over the 32 keys ---- */
         float mx0 = m0, mx1 = m1;
         #pragma unroll
         for (int t = 0; t < 4; ++t) {
-            const int key = k0 + t * 8 + t2;
-            if (key >= N) {                 /* padded keys contribute nothing */
-                sc[t][0] = AR_NEG; sc[t][2] = AR_NEG;
-            }
-            if (key + 1 >= N) {
-                sc[t][1] = AR_NEG; sc[t][3] = AR_NEG;
-            }
             mx0 = fmaxf(mx0, fmaxf(sc[t][0], sc[t][1]));
             mx1 = fmaxf(mx1, fmaxf(sc[t][2], sc[t][3]));
         }
-        /* The 4 lanes of a group hold the 32 keys of one row: reduce with xor. */
         mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, 1));
         mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, 2));
         mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, 1));
@@ -208,15 +244,12 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
         }
         #pragma unroll
         for (int t = 0; t < 4; ++t) {       /* k step: 8 keys */
-            /* A-fragment layout is the C layout with registers 1 and 2
-             * swapped, so the probabilities feed the mma from registers. */
             const unsigned a[4] = {
                 ar_tf32(sc[t][0]), ar_tf32(sc[t][2]),
                 ar_tf32(sc[t][1]), ar_tf32(sc[t][3]),
             };
             #pragma unroll
             for (int nt = 0; nt < 8; ++nt) { /* n tiles: 8 of the 64 dims */
-                /* B[k][j] = V[t*8 + k][nt*8 + j]. */
                 const unsigned b[2] = {
                     __float_as_uint(vs[t * 8 + t2 + 0][nt * 8 + g]),
                     __float_as_uint(vs[t * 8 + t2 + 1][nt * 8 + g]),
@@ -235,12 +268,12 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
     #pragma unroll
     for (int nt = 0; nt < 8; ++nt) {
         if (r0 < N) {
-            O[base + (long)r0 * AR_D + nt * 8 + t2 + 0] = o[nt][0] * inv0;
-            O[base + (long)r0 * AR_D + nt * 8 + t2 + 1] = o[nt][1] * inv0;
+            O[qbase + (long)r0 * AR_D + nt * 8 + t2 + 0] = o[nt][0] * inv0;
+            O[qbase + (long)r0 * AR_D + nt * 8 + t2 + 1] = o[nt][1] * inv0;
         }
         if (r1 < N) {
-            O[base + (long)r1 * AR_D + nt * 8 + t2 + 0] = o[nt][2] * inv1;
-            O[base + (long)r1 * AR_D + nt * 8 + t2 + 1] = o[nt][3] * inv1;
+            O[qbase + (long)r1 * AR_D + nt * 8 + t2 + 0] = o[nt][2] * inv1;
+            O[qbase + (long)r1 * AR_D + nt * 8 + t2 + 1] = o[nt][3] * inv1;
         }
     }
 }
@@ -282,7 +315,8 @@ pub fn selections() -> u64 {
     SELECTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Launch the fused kernel: `q/k/v/o` are `[b, h, n, 64]` contiguous f32.
+/// Launch with the default options (no mask, no causal, one K/V head per Q
+/// head).
 pub fn run(
     dev: &std::rc::Rc<crate::runtime::device::Compiled>,
     q: &OpaqueView,
@@ -293,8 +327,41 @@ pub fn run(
     h: i64,
     n: i64,
 ) {
+    run_ex(
+        dev,
+        q,
+        k,
+        v,
+        o,
+        None,
+        b,
+        h,
+        n,
+        Options {
+            h_kv: h,
+            ..Options::default()
+        },
+    );
+}
+
+/// Launch the fused kernel with masks/GQA: `q/k/v/o` are `[b, h, n, 64]`
+/// contiguous f32, `mask` is an additive `[n, n]` f32 tensor when
+/// `opts.has_mask`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_ex(
+    dev: &std::rc::Rc<crate::runtime::device::Compiled>,
+    q: &OpaqueView,
+    k: &OpaqueView,
+    v: &OpaqueView,
+    o: &OpaqueView,
+    mask: Option<&OpaqueView>,
+    b: i64,
+    h: i64,
+    n: i64,
+    opts: Options,
+) {
     assert!(shape_supported(n, HEAD_DIM), "flash tc: unsupported shape");
-    launch(dev, q, k, v, o, b, h, n, true);
+    launch(dev, q, k, v, o, mask, b, h, n, opts, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,42 +371,72 @@ fn launch(
     k: &OpaqueView,
     v: &OpaqueView,
     o: &OpaqueView,
+    mask: Option<&OpaqueView>,
     b: i64,
     h: i64,
     n: i64,
+    opts: Options,
     wait: bool,
 ) -> Option<f64> {
+    let dummy;
+    let m = match mask {
+        Some(m) => m,
+        None => {
+            dummy = o.clone();
+            &dummy
+        }
+    };
+    let vals = vals(n, h, opts);
     let grid = [((n + BQ - 1) / BQ) as usize, (b * h) as usize, 1];
     dev.run_host_kernel(
         SRC,
         NAME,
         &signature(),
-        &[q.clone(), k.clone(), v.clone(), o.clone()],
+        &[q.clone(), k.clone(), v.clone(), o.clone(), m.clone()],
         grid,
         Some([THREADS as usize, 1, 1]),
-        &[n, HEAD_DIM, 0],
+        &vals,
         wait,
     )
 }
 
-fn signature() -> Vec<(i64, crate::dtype::DTypeId)> {
+fn vals(n: i64, h: i64, opts: Options) -> Vec<i64> {
     vec![
-        (0, crate::dtype::FLOAT32),
-        (1, crate::dtype::FLOAT32),
-        (2, crate::dtype::FLOAT32),
-        (3, crate::dtype::FLOAT32),
-        (4, crate::dtype::INT32),
-        (5, crate::dtype::INT32),
-        (6, crate::dtype::INT32),
+        n,
+        HEAD_DIM,
+        opts.causal as i64,
+        opts.has_mask as i64,
+        h,
+        opts.h_kv,
+    ]
+}
+
+fn signature() -> Vec<(i64, crate::dtype::DTypeId)> {
+    let f = crate::dtype::FLOAT32;
+    let i = crate::dtype::INT32;
+    vec![
+        (0, f),
+        (1, f),
+        (2, f),
+        (3, f),
+        (4, f),
+        (5, i),
+        (6, i),
+        (7, i),
+        (8, i),
+        (9, i),
+        (10, i),
     ]
 }
 
 /// The captured-launch descriptor for a fusable attention call.
+#[allow(clippy::too_many_arguments)]
 pub fn host_call(
     bufs: Vec<crate::runtime::buffer::Buffer>,
     b: i64,
     h: i64,
     n: i64,
+    opts: Options,
 ) -> crate::engine::session::HostCall {
     crate::engine::session::HostCall {
         device: "CUDA".into(),
@@ -349,6 +446,6 @@ pub fn host_call(
         bufs,
         global: [((n + BQ - 1) / BQ), b * h, 1],
         local: Some([THREADS, 1, 1]),
-        vals: vec![n, HEAD_DIM, 0],
+        vals: vals(n, h, opts),
     }
 }

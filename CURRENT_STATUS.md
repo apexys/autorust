@@ -15,7 +15,7 @@ With default preprocessing, 260 frames: CUDA 14.1 s, OpenCL 20.1 s,
 candle CUDA 15.4 s. Projection to the real ~10k-image set: ~470 s vs ~590 s.
 
 All GPU libraries and backends are dynamically loaded; nothing is needed at
-build time. `cargo test`: default 224, `backend_cuda` 241,
+build time. `cargo test`: default 224, `backend_cuda` 244,
 `backend_clang+freeze` 227.
 
 ## What was built, in the order it landed
@@ -64,6 +64,11 @@ build time. `cargo test`: default 224, `backend_cuda` 241,
   bf16 operands and f32 accumulate, 8.4 KB of shared, 1.8-2.4x the TF32 kernel
   (0.74 ms vs 1.2-1.7 ms at the same shape) and <1e-4 against a reference that
   rounds operands and probabilities to bf16. Chosen by tensor dtype.
+- **Causal, additive `[n, n]` f32 mask, and GQA** in all three CUDA kernels.
+  Causal bounds the key loop to `block_q + BQ` as well as masking the diagonal
+  tiles; the additive mask is added to the scores before the max; GQA divides
+  the Q head index by `h_q / h_kv`. `Tensor::attention*` infers GQA from the
+  head counts, and unsupported mask shapes fall back to SDPA.
 - Both are gated on `Settings.tensor_cores` (`AUTORUST_TENSOR_CORES`, default
   on); `sm < 80` keeps the scalar f32 kernel and bf16 falls back to SDPA.
 - The fused launch is a **captured step**: `Session::capturing` is an ordered

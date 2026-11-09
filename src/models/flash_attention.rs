@@ -273,13 +273,18 @@ fn block_bounds(n: i64, b: i64) -> Vec<(i64, i64)> {
 /// Fused CUDA attention through the hand-written FA2 kernel.
 ///
 /// Returns `None` when the backend, dtype or shape is not covered (the caller
-/// then falls back to [`Tensor::scaled_dot_product_attention`]), and never
-/// handles masks or causality — those need the general path.
+/// then falls back to [`Tensor::scaled_dot_product_attention`]).
 ///
-/// On `sm_80+` with tensor cores enabled the warp-tiled TF32 kernel
-/// ([`cuda_flash_tc`](crate::runtime::cuda_flash_tc)) is preferred; every other
-/// case keeps the scalar f32 kernel
-/// ([`cuda_flash`](crate::runtime::cuda_flash)). Both compute the same math.
+/// Handles causal masking, an additive f32 `[n, n]` mask, and GQA (K/V with
+/// fewer heads than Q) in all three CUDA kernels. Anything else (a bool or
+/// broadcast mask, dropout, another dtype, an unsupported shape) returns
+/// `None`, and the caller falls back to SDPA.
+///
+/// Kernel choice on `sm_80+` with tensor cores enabled: bf16 tensors use
+/// [`cuda_flash_bf16`](crate::runtime::cuda_flash_bf16), f32 tensors the TF32
+/// kernel [`cuda_flash_tc`](crate::runtime::cuda_flash_tc); otherwise the
+/// scalar f32 kernel [`cuda_flash`](crate::runtime::cuda_flash) runs. All
+/// compute the same math.
 ///
 /// The launch is captured by the session in its exact position between the q/k/v
 /// projections and the output projection, so a JIT replay reproduces the same
@@ -290,19 +295,58 @@ pub fn fused_attention(
     v: &Tensor,
     sess: &mut crate::engine::session::Session,
 ) -> Option<Tensor> {
-    let dims = q.shape();
-    let dims = dims.as_slice();
-    if dims.len() != 4 {
+    fused_attention_ex(q, k, v, None, false, false, sess)
+}
+
+/// [`fused_attention`] with the full option set.
+#[allow(clippy::too_many_arguments)]
+pub fn fused_attention_ex(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attn_mask: Option<&Tensor>,
+    is_causal: bool,
+    enable_gqa: bool,
+    sess: &mut crate::engine::session::Session,
+) -> Option<Tensor> {
+    let qdims = q.shape();
+    let qdims = qdims.as_slice();
+    if qdims.len() != 4 {
         return None;
     }
     let i = |x: &SVal| x.clone().as_i64().unwrap_or(0);
-    let (b, h, n, d) = (i(&dims[0]), i(&dims[1]), i(&dims[2]), i(&dims[3]));
+    let (b, h, n, d) = (i(&qdims[0]), i(&qdims[1]), i(&qdims[2]), i(&qdims[3]));
+    let kdims = k.shape();
+    let vdims = v.shape();
+    if kdims.len() != 4 || vdims.len() != 4 {
+        return None;
+    }
+    let (hk, nk, dk) = (i(&kdims[1]), i(&kdims[2]), i(&kdims[3]));
+    let (hv, nv, dv) = (i(&vdims[1]), i(&vdims[2]), i(&vdims[3]));
+    if nk != n || nv != n || dk != d || dv != d || hk != hv {
+        return None;
+    }
+    if enable_gqa {
+        if hk <= 0 || h % hk != 0 {
+            return None;
+        }
+    } else if hk != h {
+        return None;
+    }
     let dt = q.dtype();
     if dt != dtype::FLOAT32 && dt != dtype::BFLOAT16 {
         return None;
     }
     if k.dtype() != dt || v.dtype() != dt {
         return None;
+    }
+    // The fused kernels take a dense additive f32 `[n, n]` mask. Anything
+    // broadcast/bool/4-D goes through SDPA.
+    if let Some(m) = attn_mask {
+        let ms = m.shape();
+        if m.dtype() != dtype::FLOAT32 || ms.len() != 2 || i(&ms[0]) != n || i(&ms[1]) != n {
+            return None;
+        }
     }
     let settings = q.ctx().borrow().settings.clone();
     let dev = q.device().unwrap_or_default();
@@ -323,8 +367,14 @@ pub fn fused_attention(
     let cuda = cuda_dev && dt == dtype::FLOAT32 && crate::runtime::cuda_flash::supports(n, d);
     #[cfg(not(feature = "backend_cuda"))]
     let cuda = false;
+    // The OpenCL kernel is the original f32 one: no masks, causal or GQA.
     #[cfg(feature = "backend_cl")]
-    let cl = dev.starts_with("CL") && dt == dtype::FLOAT32 && crate::runtime::cl_flash::supports(n, d);
+    let cl = dev.starts_with("CL")
+        && dt == dtype::FLOAT32
+        && crate::runtime::cl_flash::supports(n, d)
+        && attn_mask.is_none()
+        && !is_causal
+        && !enable_gqa;
     #[cfg(not(feature = "backend_cl"))]
     let cl = false;
     if !bf16 && !tc && !cuda && !cl {
@@ -341,11 +391,17 @@ pub fn fused_attention(
         crate::runtime::cuda_flash::note_scalar_selected(&settings);
     }
 
+    // `contiguous()` is a no-op for the usual dense mask and gives the kernel a
+    // known `[n, n]` layout otherwise.
+    let mask_tensor = attn_mask.map(|m| m.contiguous());
     {
         let mut c = q.ctx().borrow_mut();
         q.realize_device_ctx(&mut c, sess);
         k.realize_device_ctx(&mut c, sess);
         v.realize_device_ctx(&mut c, sess);
+        if let Some(m) = &mask_tensor {
+            m.realize_device_ctx(&mut c, sess);
+        }
     }
     let ctx = q.ctx().clone();
     let out = if bf16 {
@@ -369,16 +425,33 @@ pub fn fused_attention(
         let mut c = ctx.borrow_mut();
         out.realize_device_ctx(&mut c, sess);
     }
+    let out_buf = out.realized_buffer()?;
+    let mask_buf = match &mask_tensor {
+        Some(m) => m.realized_buffer()?,
+        None => out_buf.clone(),
+    };
     let bufs = vec![
         q.realized_buffer()?,
         k.realized_buffer()?,
         v.realized_buffer()?,
-        out.realized_buffer()?,
+        out_buf,
+        mask_buf,
     ];
+    let has_mask = attn_mask.is_some();
     let call = if bf16 {
         #[cfg(feature = "backend_cuda")]
         {
-            crate::runtime::cuda_flash_bf16::host_call(bufs, b, h, n)
+            crate::runtime::cuda_flash_bf16::host_call(
+                bufs,
+                b,
+                h,
+                n,
+                crate::runtime::cuda_flash_bf16::Options {
+                    causal: is_causal,
+                    has_mask,
+                    h_kv: hk,
+                },
+            )
         }
         #[cfg(not(feature = "backend_cuda"))]
         {
@@ -387,7 +460,17 @@ pub fn fused_attention(
     } else if tc {
         #[cfg(feature = "backend_cuda")]
         {
-            crate::runtime::cuda_flash_tc::host_call(bufs, b, h, n)
+            crate::runtime::cuda_flash_tc::host_call(
+                bufs,
+                b,
+                h,
+                n,
+                crate::runtime::cuda_flash_tc::Options {
+                    causal: is_causal,
+                    has_mask,
+                    h_kv: hk,
+                },
+            )
         }
         #[cfg(not(feature = "backend_cuda"))]
         {
@@ -396,7 +479,17 @@ pub fn fused_attention(
     } else if cuda {
         #[cfg(feature = "backend_cuda")]
         {
-            crate::runtime::cuda_flash::host_call(bufs, b, h, n)
+            crate::runtime::cuda_flash::host_call(
+                bufs,
+                b,
+                h,
+                n,
+                crate::runtime::cuda_flash::Options {
+                    causal: is_causal,
+                    has_mask,
+                    h_kv: hk,
+                },
+            )
         }
         #[cfg(not(feature = "backend_cuda"))]
         {
@@ -405,7 +498,7 @@ pub fn fused_attention(
     } else {
         #[cfg(feature = "backend_cl")]
         {
-            crate::runtime::cl_flash::host_call(bufs, b, h, n)
+            crate::runtime::cl_flash::host_call(bufs[..4].to_vec(), b, h, n)
         }
         #[cfg(not(feature = "backend_cl"))]
         {

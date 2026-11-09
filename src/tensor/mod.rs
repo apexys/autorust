@@ -2079,17 +2079,31 @@ impl Tensor {
         // `sage_attention` calls are never overridden.
         let configured = self.ctx().borrow().settings.attention;
         let kind = force.unwrap_or(configured).effective();
-        // The fused kernel covers the plain, unmasked, non-causal case only.
+        // Fewer K/V heads than Q heads means GQA. The fused kernels implement
+        // the head mapping; SDPA needs the same flag to repeat-interleave.
+        let gqa = {
+            let qs = self.shape();
+            let ks = key.shape();
+            let qs = qs.as_slice();
+            let ks = ks.as_slice();
+            if qs.len() == 4 && ks.len() == 4 {
+                ks[1].clone().as_i64() != qs[1].clone().as_i64()
+            } else {
+                false
+            }
+        };
+        // The fused kernels cover causal and a dense additive f32 [n, n] mask;
+        // anything they decline falls through to SDPA.
         if kind != AttentionKind::Sdpa
-            && attn_mask.is_none()
             && dropout_p == 0.0
-            && !is_causal
             && let Some(s) = sess
-            && let Some(t) = crate::models::flash_attention::fused_attention(self, key, value, s)
+            && let Some(t) = crate::models::flash_attention::fused_attention_ex(
+                self, key, value, attn_mask, is_causal, gqa, s,
+            )
         {
             return t;
         }
-        self.scaled_dot_product_attention(key, value, attn_mask, dropout_p, is_causal, false)
+        self.scaled_dot_product_attention(key, value, attn_mask, dropout_p, is_causal, gqa)
     }
 
     /// Session-aware [`Tensor::scaled_dot_product_attention`].
