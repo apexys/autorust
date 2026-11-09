@@ -25,13 +25,42 @@ pub enum LibraryGemm {
     Never,
 }
 
+/// Per-backend library-GEMM policy, so `AUTORUST_CLBLAST=0` does not silently
+/// disable cuBLAS (or the CPU path) as well.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LibraryGemmPolicy {
+    /// CUDA driver (cuBLAS).
+    pub cuda: LibraryGemm,
+    /// OpenCL driver (CLBlast).
+    pub cl: LibraryGemm,
+    /// Native CPU backends (packed kernel).
+    pub cpu: LibraryGemm,
+}
+
+impl LibraryGemmPolicy {
+    /// The same policy on every backend.
+    pub const fn uniform(p: LibraryGemm) -> LibraryGemmPolicy {
+        LibraryGemmPolicy {
+            cuda: p,
+            cl: p,
+            cpu: p,
+        }
+    }
+}
+
+impl Default for LibraryGemmPolicy {
+    fn default() -> Self {
+        LibraryGemmPolicy::uniform(LibraryGemm::Auto)
+    }
+}
+
 /// Configuration for one context.
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// Attention implementation used by `Tensor::attention`.
     pub attention: AttentionKind,
-    /// Library-GEMM policy.
-    pub library_gemm: LibraryGemm,
+    /// Library-GEMM policy, per backend.
+    pub library_gemm: LibraryGemmPolicy,
     /// Allow TF32 for f32 CUDA GEMMs.
     pub allow_tf32: bool,
     /// CPU packed-GEMM tile `(mc, nc, kc)`, when overridden.
@@ -46,7 +75,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             attention: AttentionKind::Flash,
-            library_gemm: LibraryGemm::Auto,
+            library_gemm: LibraryGemmPolicy::default(),
             allow_tf32: false,
             cpu_gemm_tile: None,
             beam: 0,
@@ -63,15 +92,27 @@ impl Settings {
     /// Read the process defaults from the environment. Called exactly once by
     /// [`global`].
     pub fn from_env() -> Settings {
-        let gemm = env("AUTORUST_GEMM").or_else(|| env("AUTORUST_CUBLAS"));
-        let library_gemm = match gemm.as_deref() {
-            Some("0") => LibraryGemm::Never,
-            Some("all") | Some("force") => LibraryGemm::Always,
-            _ => match env("AUTORUST_CLBLAST").as_deref() {
-                Some("0") => LibraryGemm::Never,
+        // Default is "use the library whenever it is there": `Auto` resolves to
+        // the library on every backend, and is only downgraded by an explicit
+        // opt-out. Per-backend switches win over the device-neutral one.
+        fn parse(v: Option<&str>) -> LibraryGemm {
+            match v {
+                Some("0") | Some("never") => LibraryGemm::Never,
+                Some("all") | Some("force") | Some("always") => LibraryGemm::Always,
                 _ => LibraryGemm::Auto,
-            },
-        };
+            }
+        }
+        let neutral = env("AUTORUST_GEMM");
+        let mut library_gemm = LibraryGemmPolicy::uniform(parse(neutral.as_deref()));
+        if let Some(v) = env("AUTORUST_CUBLAS") {
+            library_gemm.cuda = parse(Some(&v));
+        }
+        if let Some(v) = env("AUTORUST_CLBLAST") {
+            library_gemm.cl = parse(Some(&v));
+        }
+        if let Some(v) = env("AUTORUST_CPU_GEMM") {
+            library_gemm.cpu = parse(Some(&v));
+        }
         let attention = match env("AUTORUST_ATTN").as_deref() {
             Some("sdpa") | Some("0") => AttentionKind::Sdpa,
             Some("sage") => AttentionKind::Sage,
@@ -112,10 +153,25 @@ impl Settings {
         self
     }
 
-    /// Builder: library-GEMM policy.
+    /// Builder: the same library-GEMM policy on every backend.
     pub fn with_library_gemm(mut self, policy: LibraryGemm) -> Settings {
-        self.library_gemm = policy;
+        self.library_gemm = LibraryGemmPolicy::uniform(policy);
         self
+    }
+
+    /// Policy for a backend (`"cuda"`, `"cl"`, `"cpu"`).
+    pub fn library_gemm_for(&self, backend: &str) -> LibraryGemm {
+        match backend {
+            "cuda" => self.library_gemm.cuda,
+            "cl" => self.library_gemm.cl,
+            _ => self.library_gemm.cpu,
+        }
+    }
+
+    /// Whether any backend may use a library GEMM.
+    pub fn any_library_gemm(&self) -> bool {
+        let p = self.library_gemm;
+        p.cuda != LibraryGemm::Never || p.cl != LibraryGemm::Never || p.cpu != LibraryGemm::Never
     }
 
     /// Builder: BEAM width.

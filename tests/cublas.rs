@@ -39,7 +39,7 @@ where
 {
     let ctx = Ctx::new();
     // Policy is per-context; the process defaults are read once from env.
-    ctx.borrow_mut().settings.library_gemm = policy;
+    ctx.borrow_mut().settings.library_gemm = autorust::settings::LibraryGemmPolicy::uniform(policy);
     let outs = f(&ctx);
     let mut out = Vec::new();
     for t in outs {

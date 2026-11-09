@@ -145,6 +145,14 @@ Migrated so far: `attention` (`AUTORUST_ATTN`, `FA`), `library_gemm`
 (`AUTORUST_CUBLAS_TF32`, `ALLOW_TF32`), `cpu_gemm_tile`
 (`AUTORUST_CPU_GEMM_*`), `beam` (`BEAM`), `cache` (`CACHELEVEL`).
 
+Defaults are "use what is available": `library_gemm` is
+`LibraryGemmPolicy { cuda, cl, cpu }`, all `Auto`, which resolves to the
+library on every backend and is only downgraded by an explicit opt-out. The
+policy is per backend, so `AUTORUST_CLBLAST=0` no longer disables cuBLAS or the
+CPU path (it did in the first cut, which the dispatch counts caught:
+`AUTORUST_CLBLAST=0` still emits the CPU host GEMM, `AUTORUST_CPU_GEMM=0` does
+not). Precedence: backend-specific env > `AUTORUST_GEMM` > default.
+
 The policy is deliberately split from presence: `cublas::available()` /
 `clblast::available()` / `cpu_gemm::available()` mean "the library loaded", and
 the per-context `library_gemm` decides whether to use it. That is what lets two
