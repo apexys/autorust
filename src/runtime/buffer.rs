@@ -268,6 +268,10 @@ impl Buffer {
 pub struct BufTable {
     bases: HashMap<u32, Rc<BufferBase>>,
     views: HashMap<u32, WeakBuffer>,
+    /// Fallback device for a `BUFFER` uop that carries none. A fresh one-shot
+    /// session inherits the tensor's selected device here, so a graph without
+    /// per-buffer device metadata does not silently land on the CPU renderer.
+    device: Option<String>,
 }
 
 /// A non-owning `Buffer` handle (base + window metadata).
@@ -299,6 +303,16 @@ impl WeakBuffer {
 }
 
 impl BufTable {
+    /// Device used for `BUFFER` uops that have no device of their own.
+    pub fn set_device(&mut self, device: Option<String>) {
+        self.device = device;
+    }
+
+    /// Device used for `BUFFER` uops that have no device of their own.
+    pub fn device(&self) -> Option<&str> {
+        self.device.as_deref()
+    }
+
     /// Number of base allocations still referenced by a live caller (leak
     /// observability: a repeated realize that reuses storage must not grow).
     pub fn n_bases(&self) -> usize {
@@ -362,7 +376,7 @@ pub fn buffer_of(ctx: &mut UOpCtx, t: &mut BufTable, u: UopId) -> Buffer {
             let dev = match &pa.device {
                 Some(DeviceSpec::Single(s)) => s.clone(),
                 Some(DeviceSpec::Multi(v)) => v[0].clone(),
-                None => "CPU".to_string(),
+                None => t.device().unwrap_or("CPU").to_string(),
             };
             let size = ctx.max_numel(u.clone()) as usize;
             let dt = pa.dtype;

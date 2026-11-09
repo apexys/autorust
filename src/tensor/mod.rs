@@ -424,16 +424,19 @@ impl Tensor {
 
     /// [`Tensor::to_bytes`] with a throwaway [`Session`] (one-shot reads).
     ///
-    /// If the tensor is not realized this **re-schedules** the graph in the
-    /// fresh session, which also re-allocates its params; for a loop use
-    /// [`Tensor::realize`] / [`Tensor::realize_device_ctx`] with a persistent
-    /// session (or the JIT) instead.
+    /// An already realized tensor only copies. Otherwise the graph is scheduled
+    /// in a fresh session **on this tensor's device** (the fresh session
+    /// inherits it). Note that a graph built on parameters realized in another
+    /// session cannot reconstruct their data there: realize with that session
+    /// first (or use the JIT) if you are going to read the result more than
+    /// once.
     pub fn to_bytes_fresh(&self) -> Vec<u8> {
         self.to_bytes_fresh_ctx(&mut self.ctx.borrow_mut())
     }
     #[doc(hidden)]
     pub fn to_bytes_fresh_ctx(&self, ctx: &mut UOpCtx) -> Vec<u8> {
-        self.to_bytes_ctx(ctx, &mut Session::new())
+        let dev = self.device_ctx(ctx);
+        self.to_bytes_ctx(ctx, &mut Session::with_device(dev))
     }
 
     /// The write effect for `self = value` (tinygrad tensor.py:455):
@@ -692,12 +695,16 @@ impl Tensor {
     }
 
     /// [`Tensor::to_list`] with a throwaway [`Session`] (one-shot reads).
+    ///
+    /// See [`Tensor::to_bytes_fresh`]: it inherits this tensor's device; realize
+    /// in your own session first if the graph depends on that session's params.
     pub fn to_list_fresh<T: ReadDtype>(&self) -> Vec<T> {
         self.to_list_fresh_ctx(&mut self.ctx.borrow_mut())
     }
     #[doc(hidden)]
     pub fn to_list_fresh_ctx<T: ReadDtype>(&self, ctx: &mut UOpCtx) -> Vec<T> {
-        self.to_list_ctx(ctx, &mut Session::new())
+        let dev = self.device_ctx(ctx);
+        self.to_list_ctx(ctx, &mut Session::with_device(dev))
     }
 
     /// Read a single-element tensor out as `T` (python `item()`); asserts `numel()==1`.

@@ -71,6 +71,15 @@ impl Session {
         Session::default()
     }
 
+    /// A session whose buffer table falls back to `device` for `BUFFER` uops
+    /// that carry no device. Used by the one-shot `*_fresh` reads, which must
+    /// schedule on the tensor's device rather than the CPU fallback.
+    pub fn with_device(device: Option<String>) -> Self {
+        let mut s = Session::default();
+        s.buffers.set_device(device);
+        s
+    }
+
     /// Keep a realized storage alive for the session's lifetime.
     pub fn pin(&mut self, b: Buffer) {
         self.pinned.push(b);

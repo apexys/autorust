@@ -117,7 +117,6 @@ fn main() {
     let nosync = env_flag("NOSYNC");
     let prof = env_flag("PROF");
     let sync_mode = env_flag("SYNC");
-    let sess_realize = env_flag("SESS_REALIZE");
     let t = Instant::now();
     let mut last = None;
     for it in 0..iters {
@@ -145,15 +144,15 @@ fn main() {
                     y.realized_buffer().is_some()
                 );
             }
-        } else if sess_realize {
-            y.realize_device_ctx(&mut ctx.borrow_mut(), &mut sess);
         } else {
-            let _ = y.realize_fresh();
+            // Realize in the persistent session: a fresh session cannot see the
+            // params realized here (it would allocate empty replacements).
+            y.realize_device_ctx(&mut ctx.borrow_mut(), &mut sess);
         }
         let t2 = Instant::now();
         if prof && !sync_mode {
             eprintln!(
-                "iter {it}: build/jit {:.2} ms (realized={was_realized}), realize_fresh {:.2} ms, devices a={:?} b={:?} y={:?} default={:?}",
+                "iter {it}: build/jit {:.2} ms (realized={was_realized}), realize {:.2} ms, devices a={:?} b={:?} y={:?} default={:?}",
                 (t1 - t0).as_secs_f64() * 1e3,
                 (t2 - t1).as_secs_f64() * 1e3,
                 a.device(),

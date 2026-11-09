@@ -192,6 +192,18 @@ the per-context `library_gemm` decides whether to use it. That is what lets two
 contexts in one process make different choices (the cublas/clblast tests now do
 exactly that instead of toggling env vars, which the `OnceLock` would ignore).
 
+### Fresh one-shot reads (`*_fresh`)
+
+`Tensor::to_list_fresh` / `realize_fresh` / `to_bytes_fresh` run in a temporary
+`Session`. That session now inherits the tensor's device
+(`Session::with_device`; `BufTable` uses it for `BUFFER` uops that carry no
+device), so a self-contained graph is scheduled on CUDA/CL instead of falling
+back to the CPU renderer. An already realized tensor only copies. A graph whose
+parameters were realized in **another** session cannot reconstruct their data
+in the temporary one (it would allocate empty replacements), so realize with
+that session first or use the JIT; `examples/gemm_bench` now realizes in its
+persistent session. `tests/fresh_device.rs` covers both paths.
+
 ## Environment variables: one OS read per name
 
 Every env read in `src/` goes through `helpers::env::{get,get_os}`, which caches
