@@ -35,9 +35,9 @@ build time. `cargo test`: default/CL 225, `backend_cuda` 253,
   `m*n*k >= 1e6` because the generated CPU kernel tiles a single row.
   **Re-measured 2026-11 with kernel-only timing (`SYNC=1`, no per-iteration
   readback): cuBLAS f32 wins on clean squares and at the batch-8 projection
-  shapes; the "generated wins" rationale came from readback-inflated numbers.
-  `LibraryGemm::Auto` is under review (the app's m=789 path already picks
-  cuBLAS because 789 is not divisible by 4).**
+  shapes. `LibraryGemm::Auto` on CUDA now always uses the library for f32
+  (1.3x at 2048^3, 2.3-3.5x at the flattened batch shapes); 16-bit/CL/CPU keep
+  the shape heuristic, and `AUTORUST_GEMM=0` opts out.**
 - Switches: `AUTORUST_GEMM=all|0`, `AUTORUST_CUBLAS=all|0` (alias),
   `AUTORUST_CUBLAS_LIB`, `AUTORUST_CLBLAST_LIB`,
   `AUTORUST_CPU_GEMM_{MC,NC,KC}`, `AUTORUST_CPU_GEMM_DEBUG`.

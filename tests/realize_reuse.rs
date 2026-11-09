@@ -77,5 +77,16 @@ fn realized_intermediate_survives_reuse() {
     let cls = Tensor::from_slice(&ctx, &[0.5f32; 8], None, gpu()).reshape([1, 1, 8]);
     let got = cls.cat(&[view], 1).to_list::<f32>(&mut b);
 
-    assert_eq!(want, got, "realized intermediate changed after reuse");
+    // The two graphs may take different GEMM paths (generated vs cuBLAS after
+    // the CUDA Auto policy change), so compare numerically rather than bitwise.
+    assert_eq!(want.len(), got.len(), "length changed after reuse");
+    let maxd = want
+        .iter()
+        .zip(&got)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        maxd < 1e-5,
+        "realized intermediate changed after reuse: maxabs {maxd:e}"
+    );
 }

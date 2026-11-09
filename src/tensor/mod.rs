@@ -423,6 +423,11 @@ impl Tensor {
     }
 
     /// [`Tensor::to_bytes`] with a throwaway [`Session`] (one-shot reads).
+    ///
+    /// If the tensor is not realized this **re-schedules** the graph in the
+    /// fresh session, which also re-allocates its params; for a loop use
+    /// [`Tensor::realize`] / [`Tensor::realize_device_ctx`] with a persistent
+    /// session (or the JIT) instead.
     pub fn to_bytes_fresh(&self) -> Vec<u8> {
         self.to_bytes_fresh_ctx(&mut self.ctx.borrow_mut())
     }

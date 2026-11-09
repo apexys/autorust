@@ -116,6 +116,8 @@ fn main() {
     // measure device time rather than per-iteration D2H latency.
     let nosync = env_flag("NOSYNC");
     let prof = env_flag("PROF");
+    let sync_mode = env_flag("SYNC");
+    let sess_realize = env_flag("SESS_REALIZE");
     let t = Instant::now();
     let mut last = None;
     for it in 0..iters {
@@ -127,7 +129,7 @@ fn main() {
         };
         let t1 = Instant::now();
         let was_realized = y.realized_buffer().is_some();
-        if env_flag("SYNC") {
+        if sync_mode {
             // No host copy: enqueue (realize if needed), then wait on the stream.
             let t3 = Instant::now();
             y.realize_device_ctx(&mut ctx.borrow_mut(), &mut sess);
@@ -143,13 +145,13 @@ fn main() {
                     y.realized_buffer().is_some()
                 );
             }
-        } else if env_flag("SESS_REALIZE") {
+        } else if sess_realize {
             y.realize_device_ctx(&mut ctx.borrow_mut(), &mut sess);
         } else {
             let _ = y.realize_fresh();
         }
         let t2 = Instant::now();
-        if prof && !env_flag("SYNC") {
+        if prof && !sync_mode {
             eprintln!(
                 "iter {it}: build/jit {:.2} ms (realized={was_realized}), realize_fresh {:.2} ms, devices a={:?} b={:?} y={:?} default={:?}",
                 (t1 - t0).as_secs_f64() * 1e3,

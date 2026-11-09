@@ -810,11 +810,15 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     }
     let (batch_count, a_b, b_b, c_b) = fold_batches(&mut batch)?;
 
-    // Our own kernels register-tile the output, which only pays off when the
-    // axes divide by the upcast width. For prime/thin shapes (ViT's 197-token
-    // sequence is the motivating case) the library wins; for shapes that tile
-    // cleanly the generated kernel is faster (and avoids a library call).
-    // `AUTORUST_CUBLAS=all` forces the library for every eligible contraction.
+    // Kernel-only measurements (2026-11, RTX 3060) show cuBLAS winning f32 at
+    // the square and batch-8 projection shapes and tying/winning elsewhere;
+    // the old "generated wins on clean squares" rule came from readback-
+    // inflated numbers. The generated f32 kernel has no shared-memory tiling
+    // (register-only, DRAM-bound), so CUDA Auto now prefers cuBLAS for f32.
+    // bf16 is a wash (generated 10.7 vs cuBLAS 9.8 TFLOP/s at 2048^3), so the
+    // divisibility heuristic stays for 16-bit, CL and the CPU host path.
+    // `AUTORUST_CUBLAS=all` still forces the library for every contraction and
+    // `=0` keeps the generated kernel.
     let backend = match kind {
         GemmDevice::Cuda => "cuda",
         GemmDevice::Cl => "cl",
@@ -822,6 +826,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     };
     let policy = ctx.settings.library_gemm_for(backend);
     let force = policy == crate::settings::LibraryGemm::Always;
+    let cuda_f32 = kind == GemmDevice::Cuda && ctx.dt_of(&mul) == crate::dtype::FLOAT32;
     // The CPU host GEMM is a *different* implementation, not just a library
     // swap: it blocks and parallelizes, so it wins on every shape where the
     // generated kernel's 1-row tile loses its `B` reuse. Do not apply the
@@ -830,7 +835,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         if !force && !crate::runtime::cpu_gemm::worth_dispatching(m, n, k) {
             return None;
         }
-    } else if !force && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
+    } else if !force && !cuda_f32 && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
         return None;
     }
 

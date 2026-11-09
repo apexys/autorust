@@ -16,8 +16,9 @@ use crate::models::flash_attention::AttentionKind;
 /// How the library GEMM (cuBLAS / CLBlast / packed CPU kernel) is selected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LibraryGemm {
-    /// Use it only where the generated kernel loses (clean shapes stay
-    /// generated on CUDA/OpenCL; the CPU host path wins above a size floor).
+    /// Use the library where it wins. On CUDA, f32 now always takes the
+    /// library (measured faster at square and batch-8 projection shapes); 16-bit,
+    /// OpenCL and the CPU path keep the shape heuristic.
     Auto,
     /// Use it for every eligible contraction.
     Always,

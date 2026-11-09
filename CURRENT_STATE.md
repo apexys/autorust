@@ -2128,8 +2128,9 @@ shapes". **Re-measured (kernel-only): it does not.** cuBLAS wins f32 at
 1024/2048/4096 and at 6312x384x384 / 6312x384x1536 (2.6x / 4.0x); the earlier
 claim came from per-iteration readback inflation. The generated bf16 path is
 competitive (10.7 vs 9.8 TFLOP/s) because bf16 storage halves the traffic, not
-because of `mma`. `Auto` should prefer the library for f32 until the generated
-kernel gets shared-memory tiling.
+because of `mma`. `Auto` now prefers the library for f32 on CUDA (16-bit/CL/CPU keep the
+heuristic); the generated f32 kernel wants shared-memory tiling before it can
+compete.
 `AUTORUST_CUBLAS=0` disables, `=all` forces, `=1` (default) is the heuristic.
 `AUTORUST_CUBLAS_TF32=1` enables TF32, `AUTORUST_CUBLAS_LIB` overrides the path.
 A correctness bug found by the FlashAttention tests (double-counting the slice
