@@ -38,6 +38,20 @@ thread_local! {
     /// `0` = not opened on this thread yet. Set by [`CudaInner::open`]; read by
     /// kernels that need to gate on an instruction-set generation.
     static ARCH_SM: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    /// The device stream, for the benchmark-only synchronize hook below.
+    static STREAM: std::cell::RefCell<Option<Arc<CudaStream>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Block until all queued work on the open CUDA stream finishes.
+///
+/// Benchmark seam only: launches are asynchronous, so timing a loop of them
+/// without a host readback needs an explicit stream sync. No-op when CUDA has
+/// not been opened on this thread.
+pub fn synchronize() {
+    if let Some(s) = STREAM.with(|s| s.borrow().clone()) {
+        let _ = s.synchronize();
+    }
 }
 
 /// SM version of the open CUDA device (`86` for `sm_86`), or `None` when the
@@ -128,6 +142,7 @@ impl CudaInner {
         let device_name = ctx.name().unwrap_or_else(|_| "CUDA".to_string());
         eprintln!("CUDADevice: opening {device_name} ({arch})");
         let stream = ctx.default_stream();
+        STREAM.with(|s| *s.borrow_mut() = Some(stream.clone()));
         CudaInner {
             ctx,
             stream,

@@ -115,19 +115,59 @@ fn main() {
     // `NOSYNC=1` queues all iterations and reads back once, so GPU numbers
     // measure device time rather than per-iteration D2H latency.
     let nosync = env_flag("NOSYNC");
+    let prof = env_flag("PROF");
     let t = Instant::now();
     let mut last = None;
-    for _ in 0..iters {
+    for it in 0..iters {
+        let t0 = Instant::now();
         let y = if jit_on {
             jit.call(&ctx, &mut sess, build)
         } else {
             build(&ctx, &mut sess)
         };
-        let _ = y.realize_fresh();
+        let t1 = Instant::now();
+        let was_realized = y.realized_buffer().is_some();
+        if env_flag("SYNC") {
+            // No host copy: enqueue (realize if needed), then wait on the stream.
+            let t3 = Instant::now();
+            y.realize_device_ctx(&mut ctx.borrow_mut(), &mut sess);
+            let t4 = Instant::now();
+            #[cfg(feature = "backend_cuda")]
+            autorust::runtime::ops_cuda::synchronize();
+            let t5 = Instant::now();
+            if prof {
+                eprintln!(
+                    "iter {it}: realize_dev {:.2} ms, sync {:.2} ms, realized_after={}",
+                    (t4 - t3).as_secs_f64() * 1e3,
+                    (t5 - t4).as_secs_f64() * 1e3,
+                    y.realized_buffer().is_some()
+                );
+            }
+        } else if env_flag("SESS_REALIZE") {
+            y.realize_device_ctx(&mut ctx.borrow_mut(), &mut sess);
+        } else {
+            let _ = y.realize_fresh();
+        }
+        let t2 = Instant::now();
+        if prof && !env_flag("SYNC") {
+            eprintln!(
+                "iter {it}: build/jit {:.2} ms (realized={was_realized}), realize_fresh {:.2} ms, devices a={:?} b={:?} y={:?} default={:?}",
+                (t1 - t0).as_secs_f64() * 1e3,
+                (t2 - t1).as_secs_f64() * 1e3,
+                a.device(),
+                b.device(),
+                y.device(),
+                autorust::tensor::creation::default_device(),
+            );
+        }
         if nosync {
             last = Some(y.clone());
         } else {
+            let t3 = Instant::now();
             let _ = y.to_list::<f32>(&mut sess);
+            if prof {
+                eprintln!("iter {it}: to_list {:.2} ms", (t3 - t1).as_secs_f64() * 1e3);
+            }
         }
     }
     if let Some(y) = &last {

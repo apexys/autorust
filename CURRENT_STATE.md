@@ -2123,7 +2123,13 @@ installed whenever the library loads, independently of the `AUTORUST_CUBLAS`
 toggle, so a device opened before the toggle still works.
 
 Default policy: use the library only when `m`, `n` or `k` is not divisible by 4
-(197 is the motivating case); our 8x8 register tile wins on clean square shapes.
+(197 is the motivating case); our 8x8 register tile "wins on clean square
+shapes". **Re-measured (kernel-only): it does not.** cuBLAS wins f32 at
+1024/2048/4096 and at 6312x384x384 / 6312x384x1536 (2.6x / 4.0x); the earlier
+claim came from per-iteration readback inflation. The generated bf16 path is
+competitive (10.7 vs 9.8 TFLOP/s) because bf16 storage halves the traffic, not
+because of `mma`. `Auto` should prefer the library for f32 until the generated
+kernel gets shared-memory tiling.
 `AUTORUST_CUBLAS=0` disables, `=all` forces, `=1` (default) is the heuristic.
 `AUTORUST_CUBLAS_TF32=1` enables TF32, `AUTORUST_CUBLAS_LIB` overrides the path.
 A correctness bug found by the FlashAttention tests (double-counting the slice
@@ -2138,10 +2144,9 @@ cuDNN is intentionally not wired up: the demos' only conv (patch embed) is
 negligible, and `HostGemm` is the seam a library conv/attention op would use.
 
 Benchmarks (RTX 3060 / Ryzen 3900X, 24 threads):
-- GEMM 512³ f32: CPU `RUST` ~0.84 ms (319 GFLOP/s), CUDA ~0.41-0.50 ms
-  (540-656 GFLOP/s); CUDA 2048³ ~7.8 ms (2.2 TFLOP/s).
-- bf16 GEMM 512³ CUDA (TC): ~0.26 ms (~1.0 TFLOP/s); 2048³ ~5-8 ms
-  (~2-3.5 TFLOP/s).
+- GEMM kernel-only (2026-11): 2048³ f32 generated 3.6 TFLOP/s, cuBLAS 4.8,
+  cuBLAS TF32 5.8; 4096³ 3.1 / 4.5. bf16 2048³ generated 10.7 (FFMA, no `mma`),
+  cuBLAS 9.8. The old 2.2 TFLOP/s figures included a per-iteration D2H copy.
 - ViT-B/16 forward (`JIT=1`): `RUST` ~0.66 s, `CC` ~0.7 s, CUDA **~29-30 ms**
   (was 166 ms), frozen `RUST` plan ~0.87 s.
 - ViT-B/16 training step (`vit_train_bench`, forward+backward+Adam, 404
@@ -2260,9 +2265,9 @@ CUDA (RTX 3060, same physical GPU; shared ~30% utilization):
 - ViT-B/16 forward (`JIT=1`, f32): **~21-22 ms/iter** with the cuBLAS path
   (~28-29 ms with generated kernels; was 166 ms before tiling).
 - ViT-B/16 train step (fwd+bwd+Adam, f32, `vit_train_bench`): ~387 ms.
-- 512³ f32 GEMM: 0.3-0.5 ms pure kernel (0.8-0.9 ms with the per-iteration
-  sync); 2048³ 2.2 TFLOP/s. bf16 tensor-core GEMM: ~1 TFLOP/s (512³),
-  ~2-3.5 TFLOP/s (2048³).
+- 2048³ f32 GEMM kernel-only: 3.6 TFLOP/s generated, 4.8 cuBLAS, 5.8 TF32.
+  bf16: 10.7 generated (FFMA) / 9.8 cuBLAS. (Old numbers included the bench's
+  per-iteration D2H copy; see CURRENT_STATUS.)
 - PyTorch 2.14.1+cu126 f32: ~8.5–9.1 ms/iter steady state. The remaining ~3.4x
   gap is cuBLAS/cuDNN + tensor cores; our f32 path is register-tiled FFMA and
   the bf16 TC path cannot tile the prime 197 dimensions without padding.
@@ -2320,14 +2325,15 @@ degrades to the exact f32 kernel with a notice.
 | `cp.async` | **used by the bf16 kernel** (2-stage K/V pipeline, `AUTORUST_ASYNC`, default on): the next tile's copy is issued before the wait for the current one, so the transfer overlaps the MMA. 1.3-1.4x over synchronous staging at the app shape. The same implementation exists in the TF32 kernel but is shape-dependent there (median ~1.04x), so the dispatcher leaves the TF32 kernel on synchronous staging |
 | `ldmatrix` | **used by the bf16 kernel**: `m8n8.x2` for the K fragment and `x2.trans` for V, replacing the element-wise shared loads. `tests/ldmatrix_probe.rs` pins both orientations (K and V need opposite forms) |
 | warp reductions | used in the new kernel (`__shfl_xor_sync` for the row max/sum); the scalar kernel reduces through memory |
-| `__launch_bounds__` | used in the new kernel (128 threads); no occupancy tuning yet |
-| double buffering | unused |
+| `__launch_bounds__` | tuned: bf16 `(128,5)` -> 96 regs / 5 blocks/SM, no spills |
+| double buffering | used by the bf16 kernel (`cp.async`, 2 stages) |
 | CUDA graphs | unused (own JIT replay) |
 
-The generated GEMM is still register-tiled FFMA, and 2048^3 at ~1.1 TFLOP/s
-(two-thirds of cuBLAS) is below the card's peak, so the *GEMM* path is not
-compute-bound either. The attention kernel now reaches ~6.5 TFLOP/s on the same
-card.
+The generated GEMM is register-tiled FFMA with **no shared memory**: it
+re-reads A/B from global and is DRAM-bound at ~3.6 TFLOP/s (2048^3); cuBLAS
+reaches 4.8 (5.8 with TF32). The generated bf16 kernel hits 10.7 TFLOP/s only
+because bf16 halves the traffic — it emits no `mma`. The attention kernels do
+use `mma` (TF32/bf16) and are at ~15 TFLOP/s bf16.
 
 ### Plan for a newer GPU
 

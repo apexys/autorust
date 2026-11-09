@@ -33,6 +33,11 @@ build time. `cargo test`: default/CL 225, `backend_cuda` 253,
 - Selection: CUDA/CL use the library only for shapes that do not tile cleanly
   (any of `m,n,k` not divisible by 4); CPU always uses the host path above
   `m*n*k >= 1e6` because the generated CPU kernel tiles a single row.
+  **Re-measured 2026-11 with kernel-only timing (`SYNC=1`, no per-iteration
+  readback): cuBLAS f32 wins on clean squares and at the batch-8 projection
+  shapes; the "generated wins" rationale came from readback-inflated numbers.
+  `LibraryGemm::Auto` is under review (the app's m=789 path already picks
+  cuBLAS because 789 is not divisible by 4).**
 - Switches: `AUTORUST_GEMM=all|0`, `AUTORUST_CUBLAS=all|0` (alias),
   `AUTORUST_CUBLAS_LIB`, `AUTORUST_CLBLAST_LIB`,
   `AUTORUST_CPU_GEMM_{MC,NC,KC}`, `AUTORUST_CPU_GEMM_DEBUG`.
@@ -230,9 +235,10 @@ app-side.
    facts still advertise the interpreter's capabilities, so it gets a GPU-shaped
    schedule and runs the typed IR at ~0.9 GFLOP/s. It is not on the app's path
    (the frozen plan uses the compiled `RUST` backend).
-5. **GPU attention tuning**: the FA2 kernels are scalar f32 on CUDA cores
-   (~1.3 TFLOP/s, ~10% of FP32 peak). Tensor-core bf16 `mma` is the next 4-8x;
-   the quantization above is a further ~1.3-1.5x on top.
+5. **GEMM headroom**: the generated f32 kernel is memory-bound (0 B shared,
+   3.6 TFLOP/s at 2048^3); cuBLAS f32 reaches 4.8 and TF32 5.8. The generated
+   bf16 kernel is 10.7 TFLOP/s but emits no `mma`; tensor cores are the next
+   2-3x. The attention kernels already use `mma` (TF32/bf16) and Sage (INT8/FP8).
 6. Measurement note: this machine occasionally carries unrelated load (seen at
    load average ~11), which inflated one CPU run to 66 s. Re-measure before
    trusting a single outlier.
@@ -258,19 +264,37 @@ it. `AUTORUST_CUBLAS_TF32=0` maps to `CUBLAS_PEDANTIC_MATH` (the pre-existing
 `false` used math mode 0, which already allows TF32 on CUDA >= 11 — the switch
 was a no-op before that mapping).
 
-Measured on the 3060, cuBLAS f32:
+Kernel-only measurements (2026-11, `SYNC=1` + `NOSYNC=1`, which wait on the
+stream without the per-iteration D2H copy the old bench did):
 
-| shape | pedantic f32 | TF32 |
-|---|---|---|
-| 2048^3 | 15.03 ms (1143 GFLOP/s) | 15.47 ms (1110) |
-| 789x1536x384 | 7.83 ms (119) | 8.86 ms (105) |
-| 789x384x384 | 0.904 ms (258) | 0.888 ms (262) |
+| shape | generated f32 | cuBLAS f32 | cuBLAS TF32 |
+|---|---|---|---|
+| 1024^3 | 2.54 TFLOP/s | 4.11 | - |
+| 2048^3 | 3.58 | 4.76 | **5.79** |
+| 4096^3 | 3.09 | 4.48 | - |
+| 6312x384x384 (batch-8 qkv) | 0.85 | **2.23** | 1.85 |
+| 6312x1536x384 (up) | 0.62 | 1.23 | **1.29** |
+| 6312x384x1536 (down) | 0.89 | **3.57** | 3.49 |
+| 2048^3, bf16 | **10.68** (no `mma`) | 9.84 | - |
 
-No meaningful difference, and 2048^3 at ~1.1 TFLOP/s is far below the card's
-capability, so these runs are **not compute-bound** — the flag is not the lever
-for cuBLAS. TF32 pays off in the **fused attention kernel**, where the scalar
-one-thread-per-row kernel was the bottleneck and TF32 is the only f32-storage
-tensor-core format. The new warp-tiled `mma.sync.m16n8k8` kernel
+Three findings:
+
+1. **The old ceiling was a harness artifact.** `realize_fresh` in the timing
+   loop performs a synchronous D2H copy every iteration, and `JIT=0` also
+   re-schedules through the interpreter (one core at 100%, 0 GFLOP/s). The
+   previous 1143 / 495 GFLOP/s numbers were those artifacts, and the
+   generated-vs-cuBLAS comparison was distorted by them.
+2. **The generated f32 kernel is memory-bound, not compute-bound.** It has
+   `0 B` shared memory, 64 threads and 128 registers (`r_64_16_4_16_8_8_512_4`),
+   so every block re-reads A/B from global: ~1.3 GB of DRAM traffic for a
+   2048^3 GEMM. Shared-memory tiling (or just cuBLAS) is the fix.
+3. **bf16 is fast because the storage halves the traffic**, not because of
+   tensor cores: the generated bf16 kernel contains **zero `mma` instructions**
+   (10.7 TFLOP/s, even edging out cuBLAS bf16). Emitting real `mma.bf16` is the
+   remaining 2-3x.
+
+TF32 gives cuBLAS +22% at 2048^3, but still changes the model output; the
+attention kernels use TF32/bf16 `mma` independently of this flag. The new warp-tiled `mma.sync.m16n8k8` kernel
 (`runtime/cuda_flash_tc.rs`) measures, on the 3060, batch 8 / h 6 / n 789:
 
 | kernel | time | error vs f32 reference |
