@@ -295,7 +295,39 @@ pub fn fused_attention(
     v: &Tensor,
     sess: &mut crate::engine::session::Session,
 ) -> Option<Tensor> {
-    fused_attention_ex(q, k, v, None, false, false, sess)
+    fused_attention_ex(q, k, v, None, false, false, false, sess)
+}
+
+/// [`fused_attention`] with an explicit [`AttentionKind`]: `Sage` selects the
+/// quantized QKᵀ kernel when the device can run it.
+pub fn fused_attention_kind(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    kind: AttentionKind,
+    sess: &mut crate::engine::session::Session,
+) -> Option<Tensor> {
+    fused_attention_ex(
+        q,
+        k,
+        v,
+        None,
+        false,
+        false,
+        kind == AttentionKind::Sage,
+        sess,
+    )
+}
+
+/// One-time notice when `sage` was requested but cannot run here.
+fn note_sage_unsupported() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "[attention] sage: quantized attention needs CUDA sm_80+ tensor cores \
+             (FP8 needs sm_89): using the exact kernel"
+        )
+    });
 }
 
 /// [`fused_attention`] with the full option set.
@@ -307,6 +339,7 @@ pub fn fused_attention_ex(
     attn_mask: Option<&Tensor>,
     is_causal: bool,
     enable_gqa: bool,
+    quantized: bool,
     sess: &mut crate::engine::session::Session,
 ) -> Option<Tensor> {
     let qdims = q.shape();
@@ -352,6 +385,16 @@ pub fn fused_attention_ex(
     let dev = q.device().unwrap_or_default();
     let cuda_dev = dev.starts_with("CUDA");
     #[cfg(feature = "backend_cuda")]
+    let sage = quantized
+        && cuda_dev
+        && dt == dtype::FLOAT32
+        && crate::runtime::cuda_flash_sage::supported(n, d, &settings);
+    #[cfg(not(feature = "backend_cuda"))]
+    let sage = false;
+    if quantized && !sage {
+        note_sage_unsupported();
+    }
+    #[cfg(feature = "backend_cuda")]
     let bf16 = cuda_dev
         && dt == dtype::BFLOAT16
         && crate::runtime::cuda_flash_bf16::supported(n, d, &settings);
@@ -367,20 +410,18 @@ pub fn fused_attention_ex(
     let cuda = cuda_dev && dt == dtype::FLOAT32 && crate::runtime::cuda_flash::supports(n, d);
     #[cfg(not(feature = "backend_cuda"))]
     let cuda = false;
-    // The OpenCL kernel is the original f32 one: no masks, causal or GQA.
     #[cfg(feature = "backend_cl")]
-    let cl = dev.starts_with("CL")
-        && dt == dtype::FLOAT32
-        && crate::runtime::cl_flash::supports(n, d)
-        && attn_mask.is_none()
-        && !is_causal
-        && !enable_gqa;
+    let cl =
+        dev.starts_with("CL") && dt == dtype::FLOAT32 && crate::runtime::cl_flash::supports(n, d);
     #[cfg(not(feature = "backend_cl"))]
     let cl = false;
-    if !bf16 && !tc && !cuda && !cl {
+    if !sage && !bf16 && !tc && !cuda && !cl {
         return None;
     }
-    if bf16 {
+    if sage {
+        #[cfg(feature = "backend_cuda")]
+        crate::runtime::cuda_flash_sage::note_selected();
+    } else if bf16 {
         #[cfg(feature = "backend_cuda")]
         crate::runtime::cuda_flash_bf16::note_selected();
     } else if tc {
@@ -438,7 +479,27 @@ pub fn fused_attention_ex(
         mask_buf,
     ];
     let has_mask = attn_mask.is_some();
-    let call = if bf16 {
+    let call = if sage {
+        #[cfg(feature = "backend_cuda")]
+        {
+            crate::runtime::cuda_flash_sage::host_call(
+                bufs,
+                b,
+                h,
+                n,
+                crate::runtime::cuda_flash_sage::Options {
+                    causal: is_causal,
+                    has_mask,
+                    h_kv: hk,
+                    fp8: crate::runtime::cuda_flash_sage::fp8_available(),
+                },
+            )
+        }
+        #[cfg(not(feature = "backend_cuda"))]
+        {
+            return None;
+        }
+    } else if bf16 {
         #[cfg(feature = "backend_cuda")]
         {
             crate::runtime::cuda_flash_bf16::host_call(
@@ -504,7 +565,17 @@ pub fn fused_attention_ex(
     } else {
         #[cfg(feature = "backend_cl")]
         {
-            crate::runtime::cl_flash::host_call(bufs[..4].to_vec(), b, h, n)
+            crate::runtime::cl_flash::host_call(
+                bufs,
+                b,
+                h,
+                n,
+                crate::runtime::cl_flash::Options {
+                    causal: is_causal,
+                    has_mask,
+                    h_kv: hk,
+                },
+            )
         }
         #[cfg(not(feature = "backend_cl"))]
         {
@@ -553,19 +624,12 @@ impl AttentionKind {
         }
     }
 
-    /// One-time warning when a requested variant degrades to another.
+    /// The kind actually used by the reference/fused selection.
+    ///
+    /// `Sage` now has a real kernel (`runtime::cuda_flash_sage`); when the
+    /// device cannot run it the dispatcher prints a one-time notice and uses
+    /// the exact fused path, so this is the identity.
     pub fn effective(self) -> AttentionKind {
-        match self {
-            AttentionKind::Sage => {
-                static ONCE: std::sync::Once = std::sync::Once::new();
-                ONCE.call_once(|| {
-                    eprintln!(
-                        "AUTORUST_ATTN=sage: quantized attention not implemented, using flash"
-                    )
-                });
-                AttentionKind::Flash
-            }
-            k => k,
-        }
+        self
     }
 }

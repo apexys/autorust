@@ -2348,13 +2348,21 @@ Next:
 7. ~~Occupancy pass~~ — bf16 `__launch_bounds__(128,5)`: 118 -> 96 regs,
    4 -> 5 blocks/SM, no spills. TF32 stays at 122 regs (5 blocks spills).
    `AUTORUST_KERNEL_INFO=1` reports regs/shared/local.
-8. Masks/causal/GQA in the OpenCL kernel.
+8. ~~Masks/causal/GQA in the OpenCL kernel~~ — same semantics as CUDA
+   (additive f32 `[n,n]`, causal key-loop bound, `kh = head / group`).
+9. SageAttention: INT8 `mma.s16n8k32` (sm_80+) and FP8 E4M3 (sm_89+) QKᵀ,
+   per-row Q / per-key K scales, f32 softmax, bf16 P·V. INT8 is tested on
+   sm_86; FP8 is compile-tested for sm_89 and tested by `tests/sage_int8.rs`
+   on an Ada/Hopper card.
+10. **Sage pre-quantization pass**: the current kernel quantizes K once per
+    query block, which makes INT8 slower than TF32 on the 3060 (1.26 vs
+    0.97 ms). SageAttention quantizes K once per head into global int8/FP8 +
+    scales; that removes the per-block conversion and is the next step.
 
 Only for Ada/Hopper:
 
-9. FP8 (E4M3) QKᵀ — the real SageAttention2; sm_86 has no FP8 tensor cores.
-10. Hopper-only `wgmma`/TMA/warp specialization — a separate kernel; it does not
-    help the 3060.
+11. Hopper-only `wgmma`/TMA/warp specialization — a separate kernel; it does
+    not help the 3060.
 
 Arch detection and the PTX cache already key on `sm_XX`, so a newer card needs
 no code change to run; `tests/flash_cuda.rs` and `tests/sage_cuda.rs` give

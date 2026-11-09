@@ -15,8 +15,8 @@ With default preprocessing, 260 frames: CUDA 14.1 s, OpenCL 20.1 s,
 candle CUDA 15.4 s. Projection to the real ~10k-image set: ~470 s vs ~590 s.
 
 All GPU libraries and backends are dynamically loaded; nothing is needed at
-build time. `cargo test`: default 224, `backend_cuda` 246,
-`backend_clang+freeze` 227.
+build time. `cargo test`: default/CL 225, `backend_cuda` 253,
+`backend_clang+freeze` 228.
 
 ## What was built, in the order it landed
 
@@ -77,7 +77,14 @@ build time. `cargo test`: default 224, `backend_cuda` 246,
   the same path; there it is within noise because the TF32 conversion moves to
   the fragment loads and the doubled shared memory halves occupancy, so the
   dispatcher leaves TF32 on the synchronous path.
-- **Causal, additive `[n, n]` f32 mask, and GQA** in all three CUDA kernels.
+- **Causal, additive `[n, n]` f32 mask, and GQA** in all three CUDA kernels and
+  in the OpenCL kernel.
+- **SageAttention** (`runtime::cuda_flash_sage`, opt-in): QKᵀ on 8-bit tensor
+  cores — INT8 `mma.s16n8k32` on sm_80+ (tested on the 3060) and FP8 E4M3 on
+  sm_89+ (compile-tested for sm_89; runtime test ready) — with per-row Q /
+  per-key K scales, f32 softmax and bf16 P·V. On sm_86 it is slower than TF32
+  (1.26 vs 0.97 ms at the app shape) because K is re-quantized per query block;
+  a per-head pre-quantization pass is the next optimisation.
   Causal bounds the key loop to `block_q + BQ` as well as masking the diagonal
   tiles; the additive mask is added to the scores before the max; GQA divides
   the Q head index by `h_q / h_kv`. `Tensor::attention*` infers GQA from the
@@ -112,33 +119,26 @@ CPU now beats candle CPU (~0.37 vs ~0.63 s/image).
 - CL fused attention vs SDPA: 7.9e-7, cosine 0.9999995.
 - `examples/frozen_check`: 5.5e-6.
 
-## SageAttention (prototype, not enabled)
+## SageAttention (implemented, opt-in)
 
-`runtime::sage_flash` implements the SageAttention idea on the FA2 schedule:
-symmetric per-row INT8 quantization of Q and K, `__dp4a` for QK^T, f32 softmax
-and P·V. Measured at the DINOv3 shape (6 heads, 789 tokens, D=64):
+`runtime::cuda_flash_sage` runs QKᵀ on 8-bit tensor cores:
 
-| variant | time/layer | accuracy vs SDPA |
+| arch | instruction | quantization |
 |---|---|---|
-| f32 FA2 (`cuda_flash`) | 1.22 ms | 1.2e-8 |
-| INT8 dp4a (`sage_flash`) | 1.43 ms | cosine 0.83 |
+| sm_80..88 | `mma.m16n8k32.s32.s8.s8.s32` | symmetric int8, `max/127` per Q row / K row |
+| sm_89+ | `mma.m16n8k32.f32.e4m3.e4m3.f32` | E4M3, `max/448` per Q row / K row |
 
-Two findings, both structural:
+Softmax is f32 and `P·V` stays on the bf16 tensor cores, so only the logits are
+approximate. INT8 matches a reference that performs the same quantization to
+~2e-5 at the DINOv3 shape (`tests/sage_int8.rs`, sm_86). FP8 compiles for sm_89
+(unit test) and has the same runtime test ready for an Ada/Hopper card.
 
-- **It is slower, not faster.** `dp4a` is 4 MACs/instruction on the same CUDA
-  cores, but the kernel is bound by softmax, quantization and memory, and the
-  per-key-block max+quantize pass (plus two barriers) costs more than the f32
-  FMAs it removes. SageAttention's 2x comes from `mma.s8` **tensor cores**, not
-  from dp4a.
-- **Accuracy needs SmoothK.** Naive per-row int8 loses too much (cosine 0.83 on
-  the synthetic test); SageAttention's per-block mean subtraction is what makes
-  int8 safe, and it needs a pass over the whole key sequence before the
-  streaming loop.
-
-So `AttentionKind::Sage` stays a placeholder that degrades to `Flash` with a
-one-time notice, and `Tensor::sage_attention` runs the fused f32 kernel. The
-module is kept as the measured starting point for a tensor-core (`mma.s8`)
-implementation.
+On the 3060, INT8 is 1.26 ms vs 0.97 ms for TF32: the 8-bit `mma` is faster,
+but K is re-quantized once per query block (13x per head) and the f32 staging +
+conversion dominates. SageAttention pre-quantizes K once per head into global
+int8/FP8 plus scales; that removes the per-block pass and is the next step
+(together with SmoothK). The earlier `dp4a` prototype
+(`runtime/sage_flash.rs`) is kept only as the measured starting point.
 
 ## Attention API
 
@@ -214,10 +214,11 @@ app-side.
 
 ## Known limitations / next steps
 
-1. **SageAttention** needs tensor cores. `dp4a` measured 1.43 ms vs 1.22 ms for
-   f32 FA2 and cosine 0.83, so the next attempt is `mma.s8` (sm_86 has no FP8)
-   with SmoothK and per-block scales; P·V stays bf16/f32. Gate on embedding
-   drift *and* cluster-assignment stability over the real ~10k set.
+1. **SageAttention** is implemented (INT8 on sm_80+, FP8 on sm_89+) but still
+   quantizes K per query block, so it loses to TF32 on the 3060. Next: a
+   per-head pre-quantization pass (global int8/FP8 K + scales) and SmoothK,
+   then gate on embedding drift and cluster-assignment stability over the real
+   ~10k set. The FP8 path needs an Ada/Hopper card to run `tests/sage_int8.rs`.
 2. **`freeze` cannot serialise a host-kernel step.** It panics with a clear
    message; harmless today because the CPU capture never emits one, but a
    GPU-side AOT plan needs `Step::Host` plus a runtime that can bind raw

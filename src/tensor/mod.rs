@@ -2078,7 +2078,9 @@ impl Tensor {
         // be reconfigured per context; explicit `flash_attention` /
         // `sage_attention` calls are never overridden.
         let configured = self.ctx().borrow().settings.attention;
-        let kind = force.unwrap_or(configured).effective();
+        let requested = force.unwrap_or(configured);
+        let quantized = requested == AttentionKind::Sage;
+        let kind = requested.effective();
         // Fewer K/V heads than Q heads means GQA. The fused kernels implement
         // the head mapping; SDPA needs the same flag to repeat-interleave.
         let gqa = {
@@ -2098,7 +2100,7 @@ impl Tensor {
             && dropout_p == 0.0
             && let Some(s) = sess
             && let Some(t) = crate::models::flash_attention::fused_attention_ex(
-                self, key, value, attn_mask, is_causal, gqa, s,
+                self, key, value, attn_mask, is_causal, gqa, quantized, s,
             )
         {
             return t;

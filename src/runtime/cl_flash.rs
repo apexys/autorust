@@ -1,12 +1,15 @@
-//! Fused flash-attention kernel for OpenCL (`D == 64`, non-causal, no mask).
+//! Fused flash-attention kernel for OpenCL (`D == 64`).
 //!
-//! Same FA2 schedule as `cuda_flash`: one work-group per `(batch*head, 64-query
-//! tile)`, 32-key streaming steps with online softmax, Q staged in (padded)
-//! local memory, K/V streamed through local, accumulators in private memory.
+//! Same FA2 schedule as `cuda_flash`: one work-group per `(batch*head,
+//! 64-query tile)`, 32-key streaming steps with online softmax, Q staged in
+//! (padded) local memory, K/V streamed through local, accumulators in private
+//! memory.
 //!
-//! The sequence length is baked into the source (instead of a scalar arg) so the
-//! launch is four buffers on every backend; the compiled binary is cached by
-//! source text, so one kernel per shape is all that is ever built.
+//! Supported: causal, an additive f32 `[n, n]` mask, and GQA (K/V may have
+//! fewer heads than Q). The sequence length is baked into the source (so the
+//! program is cached per shape); the per-call options are scalar arguments.
+//!
+//! [`Compiled::run_host_kernel`]: crate::runtime::device::Compiled::run_host_kernel
 
 use crate::runtime::buffer::OpaqueView;
 use crate::runtime::device::{Compiled, device};
@@ -19,6 +22,27 @@ pub const BQ: i64 = 64;
 pub const BK: i64 = 32;
 /// Entry point name.
 pub const NAME: &str = "ar_flash_f32";
+
+/// Per-call options beyond the tensors.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Apply the causal (lower-triangular) mask.
+    pub causal: bool,
+    /// `mask` is a real additive `[n, n]` f32 tensor.
+    pub has_mask: bool,
+    /// Number of K/V heads (`h_q / h_kv` is the GQA group size).
+    pub h_kv: i64,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            causal: false,
+            has_mask: false,
+            h_kv: 1,
+        }
+    }
+}
 
 /// Whether the kernel can run this shape.
 pub fn supports(n: i64, d: i64) -> bool {
@@ -37,22 +61,33 @@ pub fn src(n: i64) -> String {
 
 __kernel void {NAME}(
     __global const float* restrict Q, __global const float* restrict K,
-    __global const float* restrict V, __global float* restrict O)
+    __global const float* restrict V, __global float* restrict O,
+    __global const float* restrict M,
+    int causal, int has_mask, int hq, int hkv)
 {{
     __local float qs[AR_BQ][AR_D + 1];
     __local float ks[AR_BK][AR_D];
     __local float vs[AR_BK][AR_D];
 
     const int t = get_local_id(0);          /* query row within the tile */
-    const int row = get_group_id(0) * AR_BQ + t;
+    const int qblk = get_group_id(0) * AR_BQ;
+    const int row = qblk + t;               /* global query row */
     const int bh = get_group_id(1);
-    const long base = (long)bh * (long)AR_N * AR_D;
+    /* GQA: Q has hq heads, K/V have hkv; repeat each K/V head hq/hkv times. */
+    const int b_idx = bh / hq;
+    const int head = bh % hq;
+    const int group = hq / hkv;
+    const int kh = head / group;
+    const int kv_bh = b_idx * hkv + kh;
+    const long qbase = (long)bh * (long)AR_N * AR_D;
+    const long kvbase = (long)kv_bh * (long)AR_N * AR_D;
+    const int kend = causal ? min(AR_N, qblk + AR_BQ) : AR_N;
     const int lsz = get_local_size(0);
 
     for (int i = t; i < AR_BQ * AR_D; i += lsz) {{
         int r = i / AR_D, d = i % AR_D;
-        int gr = get_group_id(0) * AR_BQ + r;
-        qs[r][d] = (gr < AR_N) ? Q[base + (long)gr * AR_D + d] : 0.0f;
+        int gr = qblk + r;
+        qs[r][d] = (gr < AR_N) ? Q[qbase + (long)gr * AR_D + d] : 0.0f;
     }}
     barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -61,12 +96,12 @@ __kernel void {NAME}(
     float m = -1e30f, l = 0.0f;
     const float scale = 0.125f;
 
-    for (int k0 = 0; k0 < AR_N; k0 += AR_BK) {{
+    for (int k0 = 0; k0 < kend; k0 += AR_BK) {{
         for (int i = t; i < AR_BK * AR_D; i += lsz) {{
             int r = i / AR_D, d = i % AR_D;
             int gr = k0 + r;
-            ks[r][d] = (gr < AR_N) ? K[base + (long)gr * AR_D + d] : 0.0f;
-            vs[r][d] = (gr < AR_N) ? V[base + (long)gr * AR_D + d] : 0.0f;
+            ks[r][d] = (gr < AR_N) ? K[kvbase + (long)gr * AR_D + d] : 0.0f;
+            vs[r][d] = (gr < AR_N) ? V[kvbase + (long)gr * AR_D + d] : 0.0f;
         }}
         barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -79,6 +114,8 @@ __kernel void {NAME}(
                 dot = 0.0f;
                 for (int d = 0; d < AR_D; ++d) dot += qs[t][d] * ks[j][d];
                 dot *= scale;
+                if (has_mask && row < AR_N) dot += M[(long)row * AR_N + gj];
+                if (causal && gj > row) dot = -1e30f;
             }}
             s[j] = dot;
             mnew = fmax(mnew, dot);
@@ -102,15 +139,35 @@ __kernel void {NAME}(
 
     if (row < AR_N) {{
         const float inv = (l > 0.0f) ? 1.0f / l : 0.0f;
-        for (int d = 0; d < AR_D; ++d) O[base + (long)row * AR_D + d] = acc[d] * inv;
+        for (int d = 0; d < AR_D; ++d) O[qbase + (long)row * AR_D + d] = acc[d] * inv;
     }}
 }}
 "#
     )
 }
 
-/// Launch the fused kernel: `q/k/v/o` are `[b, h, n, 64]` contiguous f32.
-#[allow(clippy::too_many_arguments)]
+fn signature() -> Vec<(i64, crate::dtype::DTypeId)> {
+    let f = crate::dtype::FLOAT32;
+    let i = crate::dtype::INT32;
+    vec![
+        (0, f),
+        (1, f),
+        (2, f),
+        (3, f),
+        (4, f),
+        (5, i),
+        (6, i),
+        (7, i),
+        (8, i),
+    ]
+}
+
+fn vals(opts: Options, h: i64) -> Vec<i64> {
+    vec![opts.causal as i64, opts.has_mask as i64, h, opts.h_kv]
+}
+
+/// Launch with the default options (no mask, no causal, one K/V head per Q
+/// head).
 pub fn run(
     dev: &std::rc::Rc<Compiled>,
     q: &OpaqueView,
@@ -121,46 +178,78 @@ pub fn run(
     h: i64,
     n: i64,
 ) {
+    run_ex(
+        dev,
+        q,
+        k,
+        v,
+        o,
+        None,
+        b,
+        h,
+        n,
+        Options {
+            h_kv: h,
+            ..Options::default()
+        },
+    );
+}
+
+/// Launch with masks/GQA. `mask` is an additive `[n, n]` f32 tensor when
+/// `opts.has_mask`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_ex(
+    dev: &std::rc::Rc<Compiled>,
+    q: &OpaqueView,
+    k: &OpaqueView,
+    v: &OpaqueView,
+    o: &OpaqueView,
+    mask: Option<&OpaqueView>,
+    b: i64,
+    h: i64,
+    n: i64,
+    opts: Options,
+) {
     assert!(supports(n, HEAD_DIM), "flash kernel: unsupported shape");
+    let dummy;
+    let m = match mask {
+        Some(m) => m,
+        None => {
+            dummy = o.clone();
+            &dummy
+        }
+    };
     let grid = [((n + BQ - 1) / BQ) as usize, (b * h) as usize, 1];
     dev.run_host_kernel(
         &src(n),
         NAME,
-        &[
-            (0, crate::dtype::FLOAT32),
-            (1, crate::dtype::FLOAT32),
-            (2, crate::dtype::FLOAT32),
-            (3, crate::dtype::FLOAT32),
-        ],
-        &[q.clone(), k.clone(), v.clone(), o.clone()],
+        &signature(),
+        &[q.clone(), k.clone(), v.clone(), o.clone(), m.clone()],
         grid,
         Some([BQ as usize, 1, 1]),
-        &[],
+        &vals(opts, h),
         true,
     );
     let _ = device("CL");
 }
 
 /// The captured-launch descriptor for a fusable attention call.
+#[allow(clippy::too_many_arguments)]
 pub fn host_call(
     bufs: Vec<crate::runtime::buffer::Buffer>,
     b: i64,
     h: i64,
     n: i64,
+    opts: Options,
 ) -> crate::engine::session::HostCall {
     crate::engine::session::HostCall {
         device: "CL".into(),
         src: src(n),
         name: NAME.to_string(),
-        signature: vec![
-            (0, crate::dtype::FLOAT32),
-            (1, crate::dtype::FLOAT32),
-            (2, crate::dtype::FLOAT32),
-            (3, crate::dtype::FLOAT32),
-        ],
+        signature: signature(),
         bufs,
         global: [((n + BQ - 1) / BQ), b * h, 1],
         local: Some([BQ, 1, 1]),
-        vals: Vec::new(),
+        vals: vals(opts, h),
     }
 }

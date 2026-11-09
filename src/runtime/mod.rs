@@ -19,6 +19,8 @@ pub mod cuda_flash;
 #[cfg(feature = "backend_cuda")]
 pub mod cuda_flash_bf16;
 #[cfg(feature = "backend_cuda")]
+pub mod cuda_flash_sage;
+#[cfg(feature = "backend_cuda")]
 pub mod cuda_flash_tc;
 pub mod device;
 pub mod interp;
