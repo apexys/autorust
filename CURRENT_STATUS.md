@@ -15,7 +15,7 @@ With default preprocessing, 260 frames: CUDA 14.1 s, OpenCL 20.1 s,
 candle CUDA 15.4 s. Projection to the real ~10k-image set: ~470 s vs ~590 s.
 
 All GPU libraries and backends are dynamically loaded; nothing is needed at
-build time. `cargo test`: default 224, `backend_cuda` 237,
+build time. `cargo test`: default 224, `backend_cuda` 241,
 `backend_clang+freeze` 227.
 
 ## What was built, in the order it landed
@@ -60,8 +60,12 @@ build time. `cargo test`: default 224, `backend_cuda` 237,
   `mma.sync.m16n8k8`, Q in A fragments, K/V streamed through 16.6 KB of shared,
   score tile and output accumulator in registers. 5.9x over the scalar kernel
   at the app shape (7.0 ms -> 1.18 ms, batch 8, h 6, n 789) with ~1e-5 error.
-  Gated on `Settings.tensor_cores` + `Settings.allow_tf32` (`AUTORUST_TENSOR_CORES`,
-  `AUTORUST_CUBLAS_TF32`), both default on; `sm < 80` keeps the scalar kernel.
+- **bf16 tensor-core FA2** (`runtime::cuda_flash_bf16`): `mma.sync.m16n8k16`,
+  bf16 operands and f32 accumulate, 8.4 KB of shared, 1.8-2.4x the TF32 kernel
+  (0.74 ms vs 1.2-1.7 ms at the same shape) and <1e-4 against a reference that
+  rounds operands and probabilities to bf16. Chosen by tensor dtype.
+- Both are gated on `Settings.tensor_cores` (`AUTORUST_TENSOR_CORES`, default
+  on); `sm < 80` keeps the scalar f32 kernel and bf16 falls back to SDPA.
 - The fused launch is a **captured step**: `Session::capturing` is an ordered
   `Vec<CaptureEntry>` and the JIT replays `JitStep::{Linear, Host}` in order, so
   eager replay reproduces the exact sequence.

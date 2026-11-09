@@ -297,30 +297,46 @@ pub fn fused_attention(
     }
     let i = |x: &SVal| x.clone().as_i64().unwrap_or(0);
     let (b, h, n, d) = (i(&dims[0]), i(&dims[1]), i(&dims[2]), i(&dims[3]));
-    if q.dtype() != dtype::FLOAT32 {
+    let dt = q.dtype();
+    if dt != dtype::FLOAT32 && dt != dtype::BFLOAT16 {
+        return None;
+    }
+    if k.dtype() != dt || v.dtype() != dt {
         return None;
     }
     let settings = q.ctx().borrow().settings.clone();
     let dev = q.device().unwrap_or_default();
+    let cuda_dev = dev.starts_with("CUDA");
     #[cfg(feature = "backend_cuda")]
-    let tc = dev.starts_with("CUDA") && crate::runtime::cuda_flash_tc::supported(n, d, &settings);
+    let bf16 = cuda_dev
+        && dt == dtype::BFLOAT16
+        && crate::runtime::cuda_flash_bf16::supported(n, d, &settings);
+    #[cfg(not(feature = "backend_cuda"))]
+    let bf16 = false;
+    #[cfg(feature = "backend_cuda")]
+    let tc = cuda_dev
+        && dt == dtype::FLOAT32
+        && crate::runtime::cuda_flash_tc::supported(n, d, &settings);
     #[cfg(not(feature = "backend_cuda"))]
     let tc = false;
     #[cfg(feature = "backend_cuda")]
-    let cuda = dev.starts_with("CUDA") && crate::runtime::cuda_flash::supports(n, d);
+    let cuda = cuda_dev && dt == dtype::FLOAT32 && crate::runtime::cuda_flash::supports(n, d);
     #[cfg(not(feature = "backend_cuda"))]
     let cuda = false;
     #[cfg(feature = "backend_cl")]
-    let cl = dev.starts_with("CL") && crate::runtime::cl_flash::supports(n, d);
+    let cl = dev.starts_with("CL") && dt == dtype::FLOAT32 && crate::runtime::cl_flash::supports(n, d);
     #[cfg(not(feature = "backend_cl"))]
     let cl = false;
-    if !tc && !cuda && !cl {
+    if !bf16 && !tc && !cuda && !cl {
         return None;
     }
-    if tc {
+    if bf16 {
+        #[cfg(feature = "backend_cuda")]
+        crate::runtime::cuda_flash_bf16::note_selected();
+    } else if tc {
         #[cfg(feature = "backend_cuda")]
         crate::runtime::cuda_flash_tc::note_selected();
-    } else if dev.starts_with("CUDA") {
+    } else if cuda_dev {
         #[cfg(feature = "backend_cuda")]
         crate::runtime::cuda_flash::note_scalar_selected(&settings);
     }
@@ -332,12 +348,21 @@ pub fn fused_attention(
         v.realize_device_ctx(&mut c, sess);
     }
     let ctx = q.ctx().clone();
-    let out = Tensor::from_slice(
-        &ctx,
-        &vec![0.0f32; (b * h * n * d) as usize],
-        None,
-        Some(&dev),
-    )
+    let out = if bf16 {
+        Tensor::from_slice(
+            &ctx,
+            &vec![0.0f32; (b * h * n * d) as usize],
+            Some(dtype::BFLOAT16),
+            Some(&dev),
+        )
+    } else {
+        Tensor::from_slice(
+            &ctx,
+            &vec![0.0f32; (b * h * n * d) as usize],
+            None,
+            Some(&dev),
+        )
+    }
     .reshape([b, h, n, d])
     .to_param();
     {
@@ -350,7 +375,16 @@ pub fn fused_attention(
         v.realized_buffer()?,
         out.realized_buffer()?,
     ];
-    let call = if tc {
+    let call = if bf16 {
+        #[cfg(feature = "backend_cuda")]
+        {
+            crate::runtime::cuda_flash_bf16::host_call(bufs, b, h, n)
+        }
+        #[cfg(not(feature = "backend_cuda"))]
+        {
+            return None;
+        }
+    } else if tc {
         #[cfg(feature = "backend_cuda")]
         {
             crate::runtime::cuda_flash_tc::host_call(bufs, b, h, n)

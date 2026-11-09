@@ -2285,15 +2285,17 @@ approximates.
 | `flash` | no mask, no causal, no dropout, `d == 64`, f32, contiguous, CUDA/CL only |
 | `sage` | same subset as flash, plus quantization assumptions |
 
-`flash` has two CUDA kernels behind the same math: the scalar f32 FA2 kernel
-and, on `sm_80+`, a warp-tiled **TF32 tensor-core** kernel
-(`runtime/cuda_flash_tc.rs`). TF32 is the f32-storage tensor-core format, so it
-rounds Q/K/P/V to a 10-bit mantissa; it is selected when
-`Settings.tensor_cores` is on (the default), independently of
+`flash` has three CUDA kernels behind the same math: the scalar f32 FA2 kernel,
+and on `sm_80+` a warp-tiled **TF32 tensor-core** kernel
+(`runtime/cuda_flash_tc.rs`) for f32 tensors and a **bf16 tensor-core** kernel
+(`runtime/cuda_flash_bf16.rs`) for bf16 tensors. TF32 is the f32-storage
+tensor-core format, so the f32 kernel rounds Q/K/P/V to a 10-bit mantissa; the
+bf16 kernel uses `mma.m16n8k16` with f32 accumulation. They are selected by the
+tensor dtype when `Settings.tensor_cores` is on (the default), independently of
 `Settings.allow_tf32` (which only controls cuBLAS). `AUTORUST_TENSOR_CORES=0`
-forces the exact scalar kernel. An older card (e.g. `sm_61`, GTX 1060) never
-compiles the tensor-core source and keeps the scalar kernel; a one-time notice
-says so.
+forces the exact scalar f32 kernel; bf16 then falls back to SDPA. An older card
+(e.g. `sm_61`, GTX 1060) never compiles the tensor-core sources and keeps the
+scalar kernel; a one-time notice says so.
 
 The `flash` gaps are unimplemented features, not limits of the approach:
 causal is (a) skip key tiles above the diagonal and (b) mask the diagonal tile;
@@ -2330,11 +2332,12 @@ Done on every sm_80+ card:
 
 1. ~~TF32 tensor-core FA2 (`mma.m16n8k8`)~~ — `runtime/cuda_flash_tc.rs`.
 2. ~~Warp reductions / `__launch_bounds__` in the fused kernel.~~
+3. ~~bf16 tensor-core FA2 (`mma.m16n8k16`, f32 accumulate)~~ —
+   `runtime/cuda_flash_bf16.rs`, selected when the tensors are bf16. 1.8-2.4x
+   the TF32 kernel, matching a bf16-emulating reference to <1e-4.
 
-Next, still beneficial on every sm_80+ card:
+Next:
 
-3. bf16 tensor-core FA2 (`mma.m16n8k16`, f32 accumulate) — 2x the TF32 rate; the
-   natural kernel once the model runs in bf16.
 4. `cp.async` double-buffered K/V staging (removes the per-tile barrier stall).
 5. Causal / additive mask / GQA in the kernel.
 6. Occupancy pass (`BK` 16 vs 32, register count).
