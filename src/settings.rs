@@ -122,7 +122,7 @@ impl Default for Settings {
 }
 
 fn env(name: &str) -> Option<String> {
-    std::env::var(name).ok()
+    crate::helpers::env::get(name)
 }
 
 impl Settings {

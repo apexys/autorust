@@ -102,16 +102,14 @@ fn reduce_alu_op(ctx: &mut UOpCtx, reduceop: &UopId) -> Ops {
 
 /// `ALLOW_TF32` (helpers.py) — default off, so float-input tensor cores skip.
 fn allow_tf32() -> bool {
-    std::env::var("ALLOW_TF32")
-        .ok()
+    crate::helpers::env::get("ALLOW_TF32")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 /// `getenv(name, default)` for integer knobs.
 fn env_int(name: &str, default: i64) -> i64 {
-    std::env::var(name)
-        .ok()
+    crate::helpers::env::get(name)
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(default)
 }
@@ -1423,7 +1421,7 @@ fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
     let idx_of = |k: &Scheduler, ctx: &mut UOpCtx, rng: &UopId| -> Option<usize> {
         k.rngs(ctx).iter().position(|r| r == rng)
     };
-    let dbg = std::env::var("AUTORUST_MM_DEBUG").is_ok();
+    let dbg = crate::helpers::env::get("AUTORUST_MM_DEBUG").is_some();
     if dbg {
         eprintln!(
             "MM dev={} m={:?} n={:?} red={red_dt:?} mul_dt={:?}",
@@ -1794,7 +1792,7 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, beam: usize) -> 
         _ => None,
     };
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_IDX").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         dump_index_exprs(ctx, k.ast.clone(), "PRE");
     }
     match opts_to_apply {
@@ -1806,7 +1804,7 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, beam: usize) -> 
     }
 
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_IDX").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         dump_index_exprs(ctx, k.ast.clone(), "POST");
     }
     let name_override = match ctx.arg_of(&ast) {
@@ -1818,7 +1816,7 @@ pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, beam: usize) -> 
     };
     let out = k.get_optimized_ast(ctx, name_override.as_deref());
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_IDX").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         dump_index_exprs(ctx, out.clone(), "RESULT");
     }
     out

@@ -36,18 +36,35 @@ pub fn with_context<T>(overrides: &[(&str, String)], f: impl FnOnce() -> T) -> T
     out
 }
 
-/// Process-environment cache. tinygrad reads `os.environ` on every `getenv`;
-/// the port reads each name once (Context overrides are still checked live).
-fn env_value(name: &str) -> Option<String> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+/// Process-environment cache. Read each name from the OS at most once per
+/// process; Context overrides are still checked live by [`lookup`].
+fn env_os(name: &str) -> Option<std::ffi::OsString> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<std::ffi::OsString>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut c = cache.lock().expect("env cache poisoned");
     if let Some(v) = c.get(name) {
         return v.clone();
     }
-    let v = std::env::var(name).ok();
+    let v = std::env::var_os(name);
     c.insert(name.to_string(), v.clone());
     v
+}
+
+fn env_value(name: &str) -> Option<String> {
+    env_os(name).and_then(|v| v.into_string().ok())
+}
+
+/// `std::env::var(name).ok()`, read from the OS at most once per process.
+///
+/// Bypasses Context overrides (unlike [`getenv_int`]/[`getenv_str`]), matching
+/// the `std::env::var` semantics this replaces.
+pub fn get(name: &str) -> Option<String> {
+    env_value(name)
+}
+
+/// `std::env::var_os(name)`, read from the OS at most once per process.
+pub fn get_os(name: &str) -> Option<std::ffi::OsString> {
+    env_os(name)
 }
 
 fn lookup(name: &str) -> Option<String> {

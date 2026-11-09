@@ -94,8 +94,7 @@ pub fn actions() -> Vec<Action> {
 }
 
 fn env_i64(key: &str, default: i64) -> i64 {
-    std::env::var(key)
-        .ok()
+    crate::helpers::env::get(key)
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
 }
@@ -221,7 +220,9 @@ struct CompiledCand<'a> {
 }
 
 fn env_flag(key: &str) -> bool {
-    std::env::var(key).map(|v| v != "0").unwrap_or(false)
+    crate::helpers::env::get(key)
+        .map(|v| v != "0")
+        .unwrap_or(false)
 }
 
 /// The concrete extent of a `RANGE`/`SPECIAL` (`src[0]`); 1 for symbolic extents
@@ -362,8 +363,7 @@ fn time_candidate(
     }
     // `get_test_global_size`: cap the timing launch so a huge candidate can't
     // exhaust the driver; scale the measured time back up.
-    let max_global: usize = std::env::var("BEAM_TEST_GLOBAL_MAX")
-        .ok()
+    let max_global: usize = crate::helpers::env::get("BEAM_TEST_GLOBAL_MAX")
         .and_then(|s| s.parse().ok())
         .unwrap_or(65536);
     let orig: usize = gs.iter().product();
@@ -573,7 +573,7 @@ pub fn beam_search<'a>(ctx: &mut UOpCtx, base: Scheduler<'a>, amt: usize) -> Sch
             beam = timed.into_iter().take(1).collect();
         }
         rounds += 1;
-        if std::env::var("BEAM_DEBUG").is_ok() {
+        if crate::helpers::env::get("BEAM_DEBUG").is_some() {
             eprintln!(
                 "[beam] round {rounds}: {:.2}s best={:.6}s applied={:?}",
                 start.elapsed().as_secs_f64(),

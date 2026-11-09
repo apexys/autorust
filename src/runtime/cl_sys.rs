@@ -269,9 +269,9 @@ impl ClLib {
         // Test/deployment override: trying a single explicit path makes it
         // possible to verify the missing-library fallback without touching the
         // system loader configuration.
-        let names: Vec<String> = match std::env::var("AUTORUST_CL_LIB") {
-            Ok(n) => vec![n],
-            Err(_) => default_names.iter().map(|s| s.to_string()).collect(),
+        let names: Vec<String> = match crate::helpers::env::get("AUTORUST_CL_LIB") {
+            Some(n) => vec![n],
+            None => default_names.iter().map(|s| s.to_string()).collect(),
         };
 
         for name in &names {

@@ -2045,8 +2045,11 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
 
     // convert movement ops to ranges
     let t = prof.then(std::time::Instant::now);
-    let tsink =
-        super::indexing::run_rangeify(ctx, tsink, std::env::var("TG_DEBUG_RANGEIFY").is_ok());
+    let tsink = super::indexing::run_rangeify(
+        ctx,
+        tsink,
+        crate::helpers::env::get("TG_DEBUG_RANGEIFY").is_some(),
+    );
     lap("rng.run_rangeify", t);
 
     // cleanups for speed and runability

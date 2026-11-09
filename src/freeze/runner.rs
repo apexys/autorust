@@ -72,7 +72,7 @@ impl FrozenRunner {
             _progs: Vec::new(),
             prof: vec![(0u64, 0.0f64); fns.len()],
             gemm_prof: (0, 0.0),
-            prof_on: std::env::var("FROZEN_PROF").is_ok(),
+            prof_on: crate::helpers::env::get("FROZEN_PROF").is_some(),
             fns,
             internal,
         }

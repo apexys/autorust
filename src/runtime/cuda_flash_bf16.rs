@@ -142,7 +142,6 @@ __device__ __forceinline__ void ar_mma(float d[4], const unsigned a[4],
           "r"(b[0]), "r"(b[1]));
 }
 
-#if AR_ASYNC
 __device__ __forceinline__ unsigned ar_smem(const void* p) {
     unsigned r;
     asm("{ .reg .u64 t; cvta.to.shared.u64 t, %1; cvt.u32.u64 %0, t; }"
@@ -150,6 +149,24 @@ __device__ __forceinline__ unsigned ar_smem(const void* p) {
     return r;
 }
 
+/* One 8x8 bf16 matrix per address group, transposed: r0 = {s[2t][g],
+ * s[2t+1][g]}, r1 = {s[8+2t][g], s[9+2t][g]}. This is the col-major B
+ * fragment for a source laid out [k][n] (used for V). */
+__device__ __forceinline__ void ar_ldm2t(unsigned& r0, unsigned& r1, const void* addr) {
+    unsigned a = ar_smem(addr);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
+                 : "=r"(r0), "=r"(r1) : "r"(a));
+}
+
+/* Non-transposed: r0 = {s[g][2t], s[g][2t+1]}, r1 = {s[8+g][2t], s[8+g][2t+1]}.
+ * This is the B fragment for a source laid out [n][k] (used for K). */
+__device__ __forceinline__ void ar_ldm2(unsigned& r0, unsigned& r1, const void* addr) {
+    unsigned a = ar_smem(addr);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+                 : "=r"(r0), "=r"(r1) : "r"(a));
+}
+
+#if AR_ASYNC
 /* 16-byte async copy; `bytes` < 16 zero-fills the tail. */
 __device__ __forceinline__ void ar_cp16(unsigned dst, const void* src, int bytes) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
@@ -206,7 +223,7 @@ __device__ __forceinline__ void ar_load_tile(
 }
 #endif
 
-extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
+extern "C" __global__ void __launch_bounds__(128, 5) ar_flash_bf16(
     const unsigned short* __restrict__ Q, const unsigned short* __restrict__ K,
     const unsigned short* __restrict__ V, unsigned short* __restrict__ O,
     const float* __restrict__ M,
@@ -295,8 +312,13 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
             const int d0 = s * 16;
             #pragma unroll
             for (int t = 0; t < 4; ++t) {
-                const unsigned b0 = ar_ld2(ksb[t * 8 + g], d0 + t2);
-                const unsigned b1 = ar_ld2(ksb[t * 8 + g], d0 + t2 + 8);
+                /* ldmatrix.x2.trans: the two 8x8 k-halves for this 8-key tile
+                 * land directly in the col-major B fragment. */
+                const int l = lane & 15;
+                const int krow = t * 8 + (l & 7);
+                const int kcol = d0 + (l >= 8 ? 8 : 0);
+                unsigned b0, b1;
+                ar_ldm2(b0, b1, &ksb[krow][kcol]);
                 const unsigned b[2] = { b0, b1 };
                 ar_mma(sc[t], qa[s], b);
             }
@@ -373,12 +395,12 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
                 ar_pack(sc[s0 + 1][0], sc[s0 + 1][1]),
                 ar_pack(sc[s0 + 1][2], sc[s0 + 1][3]),
             };
+            const int l = lane & 15;
+            const int vrow = kb + l;   /* keys kb..kb+15, addressed by threads 0..15 */
             #pragma unroll
             for (int nt = 0; nt < 8; ++nt) {
-                const unsigned b0 = (unsigned)vsb[kb + t2 + 0][nt * 8 + g]
-                                  | ((unsigned)vsb[kb + t2 + 1][nt * 8 + g] << 16);
-                const unsigned b1 = (unsigned)vsb[kb + t2 + 8][nt * 8 + g]
-                                  | ((unsigned)vsb[kb + t2 + 9][nt * 8 + g] << 16);
+                unsigned b0, b1;
+                ar_ldm2t(b0, b1, &vsb[vrow][nt * 8]);
                 const unsigned b[2] = { b0, b1 };
                 ar_mma(o[nt], a, b);
             }
@@ -426,7 +448,7 @@ pub fn note_selected() {
     SELECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if std::env::var_os("AUTORUST_ATTN_DEBUG").is_some() {
+        if crate::helpers::env::get_os("AUTORUST_ATTN_DEBUG").is_some() {
             let sm = crate::runtime::ops_cuda::arch_sm().unwrap_or(0);
             eprintln!("[attention] flash: warp-tiled bf16 tensor cores (sm_{sm})");
         }

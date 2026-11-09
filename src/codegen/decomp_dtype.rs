@@ -1254,7 +1254,7 @@ fn all_ops() -> Vec<Ops> {
 pub fn emulated_dtypes() -> Vec<DTypeId> {
     static V: std::sync::OnceLock<Vec<DTypeId>> = std::sync::OnceLock::new();
     V.get_or_init(|| {
-        std::env::var("EMULATED_DTYPES")
+        crate::helpers::env::get("EMULATED_DTYPES")
             .unwrap_or_default()
             .split(',')
             .filter(|s| !s.is_empty())

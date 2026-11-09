@@ -74,8 +74,7 @@ struct CompileCache {
 
 impl CompileCache {
     fn new() -> CompileCache {
-        let cap = std::env::var("CUDA_COMPILE_CACHE")
-            .ok()
+        let cap = crate::helpers::env::get("CUDA_COMPILE_CACHE")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1024);
         CompileCache {
@@ -220,8 +219,8 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             other => panic!("TGERR: unsupported epilogue dtype {other:?}"),
         };
         let mut options = vec![format!("--gpu-architecture={}", self.arch)];
-        match std::env::var("CUDA_PATH") {
-            Ok(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
+        match crate::helpers::env::get("CUDA_PATH") {
+            Some(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
             _ => {
                 options.push("-I/usr/local/cuda/include".to_string());
                 options.push("-I/usr/include".to_string());
@@ -532,8 +531,8 @@ impl Comp for CudaCompiler {
         // python: `--gpu-architecture={arch}` (arch = "sm_86") plus the CUDA
         // include search paths for cuda_bf16.h/cuda_fp16.h/cuda_fp8.h.
         let mut options = vec![format!("--gpu-architecture={}", self.inner.arch)];
-        match std::env::var("CUDA_PATH") {
-            Ok(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
+        match crate::helpers::env::get("CUDA_PATH") {
+            Some(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
             _ => {
                 options.push("-I/usr/local/cuda/include".to_string());
                 options.push("-I/usr/include".to_string());
@@ -594,7 +593,7 @@ pub struct CudaProgram {
 /// but it works without GPU performance-counter permissions.
 fn kprof_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AUTORUST_KPROF").is_ok())
+    *ON.get_or_init(|| crate::helpers::env::get("AUTORUST_KPROF").is_some())
 }
 
 impl CudaProgram {
@@ -608,6 +607,23 @@ impl CudaProgram {
         let func = module
             .load_function(&obj.name)
             .unwrap_or_else(|e| panic!("TGERR: cuModuleGetFunction({}): {e}", obj.name));
+        if crate::helpers::env::get_os("AUTORUST_KERNEL_INFO").is_some() {
+            use cudarc::driver::sys;
+            let f = func.cu_function();
+            let get = |a: sys::CUfunction_attribute| -> i32 {
+                let mut v: std::ffi::c_int = 0;
+                unsafe { sys::cuFuncGetAttribute(&mut v, a, f) };
+                v
+            };
+            eprintln!(
+                "[cuda] {}: {} regs, {} max threads, {} B shared, {} B local",
+                obj.name,
+                get(sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_NUM_REGS),
+                get(sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK),
+                get(sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES),
+                get(sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES),
+            );
+        }
         CudaProgram {
             inner,
             module,

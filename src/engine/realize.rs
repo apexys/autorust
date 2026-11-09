@@ -393,7 +393,7 @@ pub fn to_program(
     let optimize = matches!(ctx.tag_of(&ast), Arg::None);
     let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts(), optimize);
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_IDX").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         crate::codegen::postrange::dump_index_exprs(ctx, sunk.clone(), "SUNK");
     }
     // 2. ProgramInfo.from_sink
@@ -401,18 +401,18 @@ pub fn to_program(
     // 3. do_linearize: linearize + pm_linearize_cleanups
     let lst = linearize(ctx, sunk.clone());
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_IDX").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "LINEAR");
     }
     let lst = pm_linearize_cleanups(ctx, lst);
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_IDX").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "CLEAN");
     }
     // 4. do_render: SOURCE through the device's renderer seam
     let src_text = dev.renderer.render(ctx, &lst);
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_SRC").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_SRC").is_some() {
         let pname = crate::codegen::postrange::kernel_name(ctx, &lst);
         eprintln!(
             "SRC### BEGIN name={} dev={}",
@@ -423,7 +423,7 @@ pub fn to_program(
         eprintln!("SRC### END name={}", pname);
     }
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_LST").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_LST").is_some() {
         let pname = crate::codegen::postrange::kernel_name(ctx, &lst);
         eprintln!("LST### BEGIN name={}", pname);
         for o in &lst {

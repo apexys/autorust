@@ -834,7 +834,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
 
-    if std::env::var("AUTORUST_CUBLAS_DEBUG").is_ok() {
+    if crate::helpers::env::get("AUTORUST_CUBLAS_DEBUG").is_some() {
         eprintln!(
             "CUBLAS m={m} n={n} k={k} batch={batch_count} \
              a=[{a_m},{a_k}] b=[{b_k},{b_n}] c=[{c_m},{c_n}] alpha={alpha} bias={bias_slot} scale={scale_slot} res={res_slot} \

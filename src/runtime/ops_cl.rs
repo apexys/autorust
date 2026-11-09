@@ -44,8 +44,7 @@ struct CompileCache {
 
 impl CompileCache {
     fn new() -> CompileCache {
-        let cap = std::env::var("CL_COMPILE_CACHE")
-            .ok()
+        let cap = crate::helpers::env::get("CL_COMPILE_CACHE")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1024);
         CompileCache {

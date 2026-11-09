@@ -1226,7 +1226,7 @@ impl PatternMatcher {
                 .match_uop(ctx, uop.clone(), Store::new(), &mut stores);
             for store in &stores {
                 #[cfg(feature = "trace")]
-                if std::env::var("TG_TRACE").is_ok() {
+                if crate::helpers::env::get("TG_TRACE").is_some() {
                     eprintln!(
                         "RULE[{}/{}] pat={:?} ops={:?} fire on u{} op {:?}",
                         i,
@@ -1239,7 +1239,7 @@ impl PatternMatcher {
                 }
                 let _r = (rule.f)(ctx, store, ctxval);
                 #[cfg(feature = "trace")]
-                if std::env::var("TG_TRACE").is_ok() {
+                if crate::helpers::env::get("TG_TRACE").is_some() {
                     eprintln!(
                         "  -> u{} op {:?}",
                         _r.clone().map(|x| x.id()).unwrap_or(0),
@@ -1504,7 +1504,7 @@ impl<'a> RewriteCtxt<'a> {
         // A well-behaved DAG walk visits each node a handful of times; if some
         // node shows hundreds of visits the waitlist retry loop is thrashing.
         let mut visits: Option<HashMap<UopId, u32>> =
-            std::env::var("TG_RW_VISITS").ok().map(|_| HashMap::new());
+            crate::helpers::env::get("TG_RW_VISITS").map(|_| HashMap::new());
         while let Some((n, stage, new_n)) = stack.pop() {
             iters += 1;
             if let Some(v) = visits.as_mut() {
@@ -1694,7 +1694,7 @@ pub fn graph_rewrite(
         enter_calls,
     };
     let _ = &mut rc;
-    let trace = std::env::var("TG_RW_TRACE").is_ok();
+    let trace = crate::helpers::env::get("TG_RW_TRACE").is_some();
     let t = trace.then(std::time::Instant::now);
     let steps0 = if trace {
         crate::engine::prof::get("rw.steps")

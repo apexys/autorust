@@ -53,7 +53,7 @@ fn next_build_id() -> u64 {
 }
 
 fn cc_cmd() -> String {
-    if let Ok(cc) = std::env::var("CC") {
+    if let Some(cc) = crate::helpers::env::get("CC") {
         return cc;
     }
     // Prefer clang; fall back to the system cc (typically gcc).
@@ -90,7 +90,7 @@ pub fn available() -> bool {
 }
 
 fn arch_flag() -> String {
-    std::env::var("AUTORUST_CC_ARCH").unwrap_or_else(|_| "native".to_string())
+    crate::helpers::env::get("AUTORUST_CC_ARCH").unwrap_or_else(|| "native".to_string())
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -115,13 +115,13 @@ fn cache_key(src: &str) -> u64 {
 }
 
 fn cache_root() -> PathBuf {
-    if let Some(d) = std::env::var_os("AUTORUST_CACHE_DIR") {
+    if let Some(d) = crate::helpers::env::get_os("AUTORUST_CACHE_DIR") {
         return PathBuf::from(d);
     }
-    if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
+    if let Some(d) = crate::helpers::env::get_os("XDG_CACHE_HOME") {
         return PathBuf::from(d).join("autorust");
     }
-    if let Some(d) = std::env::var_os("HOME") {
+    if let Some(d) = crate::helpers::env::get_os("HOME") {
         return PathBuf::from(d).join(".cache").join("autorust");
     }
     std::env::temp_dir().join("autorust-cache")
@@ -162,7 +162,7 @@ impl ClangCompiler {
         let cs = dir.join("k.c");
         let so = dir.join(format!("k.{}", dylib_ext()));
         std::fs::write(&cs, &text).expect("TGERR: write C kernel source");
-        if std::env::var("AUTORUST_CC_DUMP").is_ok() {
+        if crate::helpers::env::get("AUTORUST_CC_DUMP").is_some() {
             eprintln!("--- C kernel ---\n{text}");
         }
         let mut cmd = Command::new(cc_cmd());
@@ -282,7 +282,7 @@ impl Prog for ClangProgram {
         vals: &[i64],
         wait: bool,
     ) -> Option<f64> {
-        if std::env::var("AUTORUST_DEVICE_VERBOSE").is_ok() {
+        if crate::helpers::env::get("AUTORUST_DEVICE_VERBOSE").is_some() {
             eprintln!(
                 "[cc] gs={global_size:?} ls={_local_size:?} vals={vals:?} bufs={}",
                 self.signature.len()

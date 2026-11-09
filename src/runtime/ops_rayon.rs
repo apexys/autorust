@@ -99,15 +99,15 @@ fn mode() -> Mode {
 
 fn verbose() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("RAYON_VERBOSE").is_ok())
+    *V.get_or_init(|| crate::helpers::env::get("RAYON_VERBOSE").is_some())
 }
 
 fn mode_from_env() -> Mode {
-    if std::env::var("RAYON_INTERP").is_ok() {
+    if crate::helpers::env::get("RAYON_INTERP").is_some() {
         Mode::Interp
-    } else if std::env::var("RAYON_SERIAL").is_ok() {
+    } else if crate::helpers::env::get("RAYON_SERIAL").is_some() {
         Mode::Serial
-    } else if std::env::var("RAYON_F64").is_ok() {
+    } else if crate::helpers::env::get("RAYON_F64").is_some() {
         Mode::F64
     } else {
         Mode::Parallel
@@ -194,7 +194,7 @@ impl Prog for RayonProgram {
         vals: &[i64],
         wait: bool,
     ) -> Option<f64> {
-        if std::env::var("AUTORUST_DEVICE_VERBOSE").is_ok() {
+        if crate::helpers::env::get("AUTORUST_DEVICE_VERBOSE").is_some() {
             eprintln!("[rayon] gs={global_size:?} ls={local_size:?} vals={vals:?}");
         }
         // python's PythonProgram iterates `global_size[::-1]` / `local_size[::-1]`;

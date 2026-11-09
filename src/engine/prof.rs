@@ -34,10 +34,11 @@ thread_local! {
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        let prof = std::env::var("AUTORUST_PROF")
+        let prof = crate::helpers::env::get("AUTORUST_PROF")
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(false);
-        prof || std::env::var("TG_RW_TRACE").is_ok() || std::env::var("TG_RW_VISITS").is_ok()
+        prof || crate::helpers::env::get("TG_RW_TRACE").is_some()
+            || crate::helpers::env::get("TG_RW_VISITS").is_some()
     })
 }
 

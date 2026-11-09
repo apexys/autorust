@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 /// Truncation for stage-by-stage differentials (default: run everything).
 fn stage_limit() -> usize {
     #[cfg(feature = "dump")]
-    if let Ok(v) = std::env::var("TG_M5_STAGES")
+    if let Some(v) = crate::helpers::env::get("TG_M5_STAGES")
         && let Ok(n) = v.parse::<usize>()
     {
         return n;
@@ -1360,7 +1360,7 @@ pub fn full_rewrite_to_sink_with(
             i += 1;
             // temporary: dump the pre-expander AST (TG_DUMP_PRE_EXPAND=1)
             #[cfg(feature = "dump")]
-            if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
+            if crate::helpers::env::get("TG_DUMP_PRE_EXPAND").as_deref() == Some("1") {
                 eprintln!("=== after stage {} ({}) ===", i, st.name);
                 eprintln!("{}", dump_ast(ctx, cur.clone()));
             }
@@ -1374,7 +1374,7 @@ pub fn full_rewrite_to_sink_with(
         cur = apply_opts(ctx, cur, ren, beam);
         i += 1;
         #[cfg(feature = "dump")]
-        if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
+        if crate::helpers::env::get("TG_DUMP_PRE_EXPAND").as_deref() == Some("1") {
             eprintln!("=== after stage {} (apply_opts) ===", i);
             eprintln!("{}", dump_ast(ctx, cur.clone()));
         }
@@ -1444,11 +1444,11 @@ pub fn full_rewrite_to_sink_with(
         };
         i += 1;
         #[cfg(feature = "dump")]
-        if std::env::var("TG_DUMP_IDX").is_ok() {
+        if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
             crate::codegen::postrange::dump_index_exprs(ctx, cur.clone(), st.name);
         }
         #[cfg(feature = "dump")]
-        if std::env::var("TG_DUMP_PRE_EXPAND").as_deref() == Ok("1") {
+        if crate::helpers::env::get("TG_DUMP_PRE_EXPAND").as_deref() == Some("1") {
             eprintln!("=== after stage {} ({}) ===", i, st.name);
             eprintln!("{}", dump_ast(ctx, cur.clone()));
         }

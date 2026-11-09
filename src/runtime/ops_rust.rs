@@ -120,7 +120,7 @@ fn next_build_id() -> u64 {
 }
 
 fn rustc_cmd() -> String {
-    std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string())
+    crate::helpers::env::get("RUSTC").unwrap_or_else(|| "rustc".to_string())
 }
 
 fn rustc_version() -> &'static str {
@@ -135,7 +135,7 @@ fn rustc_version() -> &'static str {
 }
 
 fn target_cpu() -> String {
-    std::env::var("AUTORUST_RUST_CPU").unwrap_or_else(|_| "native".to_string())
+    crate::helpers::env::get("AUTORUST_RUST_CPU").unwrap_or_else(|| "native".to_string())
 }
 
 /// Shared-library magic check (ELF / Mach-O / PE). Guards both the compile
@@ -171,13 +171,13 @@ fn cache_key(src: &str) -> u64 {
 }
 
 fn cache_root() -> PathBuf {
-    if let Some(d) = std::env::var_os("AUTORUST_CACHE_DIR") {
+    if let Some(d) = crate::helpers::env::get_os("AUTORUST_CACHE_DIR") {
         return PathBuf::from(d);
     }
-    if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
+    if let Some(d) = crate::helpers::env::get_os("XDG_CACHE_HOME") {
         return PathBuf::from(d).join("autorust");
     }
-    if let Some(d) = std::env::var_os("HOME") {
+    if let Some(d) = crate::helpers::env::get_os("HOME") {
         return PathBuf::from(d).join(".cache").join("autorust");
     }
     std::env::temp_dir().join("autorust-cache")
@@ -223,7 +223,7 @@ impl RustcCompiler {
         let rs = dir.join("k.rs");
         let so = dir.join(format!("k.{}", dylib_ext()));
         std::fs::write(&rs, &text).expect("TGERR: write rust kernel source");
-        if std::env::var("AUTORUST_RUST_DUMP").is_ok() {
+        if crate::helpers::env::get("AUTORUST_RUST_DUMP").is_some() {
             eprintln!("--- rust kernel ---\n{text}");
         }
         let out = Command::new(rustc_cmd())
@@ -394,7 +394,7 @@ impl Prog for RustProgram {
         vals: &[i64],
         wait: bool,
     ) -> Option<f64> {
-        if std::env::var("AUTORUST_DEVICE_VERBOSE").is_ok() {
+        if crate::helpers::env::get("AUTORUST_DEVICE_VERBOSE").is_some() {
             eprintln!(
                 "[rust] gs={global_size:?} ls={_local_size:?} vals={vals:?} bufs={}",
                 self.signature.len()

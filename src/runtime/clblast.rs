@@ -82,7 +82,7 @@ unsafe impl Sync for ClblastLib {}
 
 fn candidates() -> Vec<String> {
     let mut v = Vec::new();
-    if let Ok(path) = std::env::var("AUTORUST_CLBLAST_LIB")
+    if let Some(path) = crate::helpers::env::get("AUTORUST_CLBLAST_LIB")
         && !path.is_empty()
     {
         v.push(path);

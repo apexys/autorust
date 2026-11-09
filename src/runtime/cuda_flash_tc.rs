@@ -399,7 +399,7 @@ pub fn note_selected() {
     SELECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if std::env::var_os("AUTORUST_ATTN_DEBUG").is_some() {
+        if crate::helpers::env::get_os("AUTORUST_ATTN_DEBUG").is_some() {
             let sm = crate::runtime::ops_cuda::arch_sm().unwrap_or(0);
             eprintln!("[attention] flash: warp-tiled TF32 tensor cores (sm_{sm})");
         }

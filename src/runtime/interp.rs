@@ -508,7 +508,7 @@ fn exec_launch(
                     let dim: usize = name[name.len() - 1..].parse().unwrap();
                     let vv: Vec<f64> = warp.iter().map(|w| w[2 - dim] as f64).collect();
                     #[cfg(feature = "dump")]
-                    if std::env::var("TG_DEBUG_LOAD").is_ok() {
+                    if crate::helpers::env::get("TG_DEBUG_LOAD").is_some() {
                         eprintln!(
                             "TGDBG lidx name={} dim={} vals={:?} warp={:?}",
                             name, dim, vv, warp
@@ -670,7 +670,7 @@ fn exec_launch(
                     values.insert(u.clone(), Val::V(lanes));
                 } else {
                     #[cfg(feature = "dump")]
-                    if std::env::var("TG_DEBUG_LOAD").is_ok() {
+                    if crate::helpers::env::get("TG_DEBUG_LOAD").is_some() {
                         let offs: Vec<usize> = pairs.iter().map(|(_, o)| *o).collect();
                         eprintln!(
                             "TGDBG load uop={} size={} offs={:?}",
@@ -924,7 +924,7 @@ pub fn exec_kernel_with_dims(
 ) {
     let local = local.unwrap_or([1usize; 3]);
     #[cfg(feature = "dump")]
-    if std::env::var("TG_DUMP_INTERP").is_ok() {
+    if crate::helpers::env::get("TG_DUMP_INTERP").is_some() {
         let pname = crate::codegen::postrange::kernel_name(ctx, uops);
         eprintln!("INT### BEGIN name={}", pname);
         for u in uops {

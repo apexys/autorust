@@ -302,19 +302,19 @@ fn main() {
         let (linear, planned, _held) =
             autorust::schedule::sched::create_linear_with_vars(&mut ctx.raw(), call);
         let root = linear;
-        if std::env::var("TG_M5_RENDER").is_ok() {
+        if autorust::helpers::env::get("TG_M5_RENDER").is_some() {
             render_calls(&mut ctx.raw(), planned);
             return;
         }
-        if std::env::var("TG_OCL_RENDER").is_ok() {
+        if autorust::helpers::env::get("TG_OCL_RENDER").is_some() {
             render_calls_opencl(&mut ctx.raw(), planned);
             return;
         }
-        if std::env::var("TG_CUDA_RENDER").is_ok() {
+        if autorust::helpers::env::get("TG_CUDA_RENDER").is_some() {
             render_calls_cuda(&mut ctx.raw(), planned);
             return;
         }
-        if std::env::var("TG_M5_EXEC").is_ok() {
+        if autorust::helpers::env::get("TG_M5_EXEC").is_some() {
             let steps: Vec<ExecStep> = prog
                 .prog
                 .iter()
@@ -326,7 +326,7 @@ fn main() {
             exec_linear(&mut ctx.raw(), planned, &steps);
             return;
         }
-        if std::env::var("TG_M5_CODEGEN").is_ok() {
+        if autorust::helpers::env::get("TG_M5_CODEGEN").is_some() {
             // lower the first compute kernel body through the M5 pipeline
             let mut ast: Option<UopId> = None;
             for c in ctx.raw().srcs(&root).iter() {

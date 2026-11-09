@@ -15,7 +15,7 @@ With default preprocessing, 260 frames: CUDA 14.1 s, OpenCL 20.1 s,
 candle CUDA 15.4 s. Projection to the real ~10k-image set: ~470 s vs ~590 s.
 
 All GPU libraries and backends are dynamically loaded; nothing is needed at
-build time. `cargo test`: default 224, `backend_cuda` 244,
+build time. `cargo test`: default 224, `backend_cuda` 246,
 `backend_clang+freeze` 227.
 
 ## What was built, in the order it landed
@@ -65,6 +65,12 @@ build time. `cargo test`: default 224, `backend_cuda` 244,
   async pipeline), 1.8-2.4x the TF32 kernel (0.52-0.54 ms vs 0.9-1.3 ms at the
   same shape) and <1e-4 against a reference that rounds operands and
   probabilities to bf16. Chosen by tensor dtype.
+- **`ldmatrix` fragment loads** in the bf16 kernel (`m8n8.x2` for K,
+  `x2.trans` for V); `tests/ldmatrix_probe.rs` pins both orientations.
+- **Occupancy pass**: bf16 is `__launch_bounds__(128, 5)` -> 96 regs, 18.4 KB
+  shared, 5 blocks/SM, 0 B local (was 118 regs / 4 blocks). TF32 keeps 122 regs
+  / 4 blocks: forcing 5 blocks there spills 16 B. `AUTORUST_KERNEL_INFO=1`
+  prints regs/shared/local per compiled kernel.
 - **`cp.async` double-buffered K/V** (`AUTORUST_ASYNC`, default on) in the bf16
   kernel: the next tile is issued before the wait for the current one, giving
   1.3-1.4x at the app shape (0.70-0.75 ms -> 0.52-0.54 ms). The TF32 kernel has
@@ -181,39 +187,30 @@ the per-context `library_gemm` decides whether to use it. That is what lets two
 contexts in one process make different choices (the cublas/clblast tests now do
 exactly that instead of toggling env vars, which the `OnceLock` would ignore).
 
-## Environment variables: keep vs. settings
+## Environment variables: one OS read per name
 
-~55 variables are read across the crate. Split, with the first group already
-migrated:
+Every env read in `src/` goes through `helpers::env::{get,get_os}`, which caches
+the raw `OsString` per name in a process-wide map. A name is read from the OS
+**at most once**, whether it is a behavioural setting, a toolchain path, or a
+debug switch, and `get`/`get_os` share the same entry so mixing them cannot
+read twice.
 
-**Keep as env (diagnostics/toolchain — easy to flip in a finished app):**
+Behavioural policy lives in `Settings` (read once by `global()`): `attention`,
+`library_gemm` (per backend), `allow_tf32`, `tensor_cores`, `async_pipeline`,
+`cpu_gemm_tile`, `beam`, `cache`, `sdpa_tile`, `mm_tile`, `device`.
 
-| group | variables |
-|---|---|
-| profiling | `AUTORUST_PROF`, `AUTORUST_KPROF`, `FROZEN_PROF` |
-| debug dumps | `AUTORUST_CUBLAS_DEBUG`, `AUTORUST_CPU_GEMM_DEBUG`, `AUTORUST_MM_DEBUG`, `AUTORUST_DEVICE_VERBOSE`, `TG_DUMP_{SRC,LST,IDX,INTERP,PRE_EXPAND}`, `TG_DEBUG_{LOAD,RANGEIFY}`, `TG_{TRACE,RW_TRACE,RW_VISITS}`, `TG_M5_{CODEGEN,EXEC,RENDER,STAGES}`, `TG_{CUDA,OCL}_RENDER`, `BEAM_DEBUG`, `CACHELEVEL` |
-| toolchain/paths | `CUDA_PATH`, `RUSTC`, `CC`, `AUTORUST_CACHE_DIR`, `XDG_CACHE_HOME`, `HOME`, `AUTORUST_RUST_CPU`, `AUTORUST_CC_ARCH`, `AUTORUST_CUBLAS_LIB`, `AUTORUST_CLBLAST_LIB`, `AUTORUST_CL_LIB`, `{CUDA,CL}_COMPILE_CACHE`, `AUTORUST_{RUST,CC}_DUMP` |
+Diagnostics/toolchain keep their env interface (settable before a `Ctx`, easy to
+flip on a finished binary) but are still cached: `AUTORUST_PROF`,
+`AUTORUST_KPROF`, `AUTORUST_KERNEL_INFO`, `FROZEN_PROF`,
+`AUTORUST_{CUBLAS,CPU_GEMM,MM,DEVICE,ATTN_DEBUG}`/`AUTORUST_ATTN_DEBUG`,
+`TG_DUMP_*`, `TG_DEBUG_*`, `TG_{TRACE,RW_TRACE,RW_VISITS}`, `TG_M5_*`,
+`TG_{CUDA,OCL}_RENDER`, `BEAM_DEBUG`, `CACHELEVEL`, `CUDA_PATH`, `RUSTC`, `CC`,
+`AUTORUST_CACHE_DIR`, `XDG_CACHE_HOME`, `HOME`, `AUTORUST_RUST_CPU`,
+`AUTORUST_CC_ARCH`, the library paths and `{CUDA,CL}_COMPILE_CACHE`.
 
-**Should become `Ctx` settings (behavioural policy):**
-
-| variable | proposed settings call |
-|---|---|
-| `AUTORUST_ATTN`, `FA` | **done** — `settings.attention` |
-| `AUTORUST_GEMM`, `AUTORUST_CUBLAS`, `AUTORUST_CLBLAST` | **done** — `settings.library_gemm` |
-| `AUTORUST_CUBLAS_TF32`, `ALLOW_TF32` | **done** — `settings.allow_tf32` |
-| `AUTORUST_CPU_GEMM_{MC,NC,KC}` | **done** — `settings.cpu_gemm_tile` |
-| `BEAM` | **done** — `settings.beam` |
-| `CACHELEVEL` | **done** — `settings.cache` |
-| `SDPA_TILE` | todo — `settings.sdpa_tile(n)` |
-| `DEFAULT_DEVICE` | todo — `settings.device("CUDA")` (read before a `Ctx` exists; needs a process-global) |
-| `EMULATED_DTYPES` | todo — `settings.emulated_dtypes(&[..])` |
-| `RAYON_{SERIAL,F64,INTERP,VERBOSE}` | todo — `settings.rayon(RayonMode)` |
-| `CLUSTERFUN_{NO_JIT,TIMING}` | app settings (not the library) |
-
-Kept env-only on purpose: anything that must be settable before a `Ctx` exists
-(paths, toolchain) or that a developer flips on a built binary (profiling,
-dumps). Note `DEFAULT_DEVICE` is read during tensor creation and would need a
-process-global until every creation path takes `&Ctx`.
+`EMULATED_DTYPES` and `RAYON_*` are also env (they must be visible to lowering /
+the thread pool) and are cached the same way. `CLUSTERFUN_{NO_JIT,TIMING}` are
+app-side.
 
 ## Known limitations / next steps
 

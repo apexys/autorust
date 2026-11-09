@@ -145,7 +145,7 @@ unsafe impl Sync for CublasLib {}
 /// Candidate shared-library names, most specific first.
 fn candidates() -> Vec<String> {
     let mut v = Vec::new();
-    if let Ok(path) = std::env::var("AUTORUST_CUBLAS_LIB")
+    if let Some(path) = crate::helpers::env::get("AUTORUST_CUBLAS_LIB")
         && !path.is_empty()
     {
         v.push(path);

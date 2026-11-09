@@ -38,8 +38,7 @@ thread_local! {
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
+    crate::helpers::env::get(name)
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
 }
@@ -71,7 +70,7 @@ pub fn install(dev: &std::rc::Rc<crate::runtime::device::Compiled>) {
             ptrs.push(unsafe { mem.as_ptr().add(h.offset) as *mut u8 });
         }
         DISPATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dbg = std::env::var("AUTORUST_CPU_GEMM_DEBUG").is_ok();
+        let dbg = crate::helpers::env::get("AUTORUST_CPU_GEMM_DEBUG").is_some();
         let t0 = dbg.then(std::time::Instant::now);
         if let Err(e) = unsafe { run_raw(&g, &ptrs) } {
             panic!("TGERR: cpu gemm: {e}");

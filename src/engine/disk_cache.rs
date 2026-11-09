@@ -14,8 +14,7 @@ use std::path::PathBuf;
 /// `CACHELEVEL` (tinygrad default 1): `>= 1` enables the on-disk cache; `0`
 /// disables it. An unparsable value falls back to the default.
 pub fn cache_enabled() -> bool {
-    std::env::var("CACHELEVEL")
-        .ok()
+    crate::helpers::env::get("CACHELEVEL")
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(1)
         >= 1
@@ -24,17 +23,17 @@ pub fn cache_enabled() -> bool {
 /// The cache root: `AUTORUST_CACHE_DIR`, else `$XDG_CACHE_HOME/autorust`, else
 /// `$HOME/.cache/autorust`, else a `/tmp` fallback.
 fn cache_root() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("AUTORUST_CACHE_DIR")
+    if let Some(d) = crate::helpers::env::get("AUTORUST_CACHE_DIR")
         && !d.is_empty()
     {
         return Some(PathBuf::from(d));
     }
-    if let Ok(d) = std::env::var("XDG_CACHE_HOME")
+    if let Some(d) = crate::helpers::env::get("XDG_CACHE_HOME")
         && !d.is_empty()
     {
         return Some(PathBuf::from(d).join("autorust"));
     }
-    if let Ok(h) = std::env::var("HOME")
+    if let Some(h) = crate::helpers::env::get("HOME")
         && !h.is_empty()
     {
         return Some(PathBuf::from(h).join(".cache").join("autorust"));
