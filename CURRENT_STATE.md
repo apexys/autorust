@@ -2350,7 +2350,7 @@ Next:
    `AUTORUST_KERNEL_INFO=1` reports regs/shared/local.
 8. ~~Masks/causal/GQA in the OpenCL kernel~~ — same semantics as CUDA
    (additive f32 `[n,n]`, causal key-loop bound, `kh = head / group`).
-9. SageAttention: INT8 `mma.s16n8k32` (sm_80+) and FP8 E4M3 (sm_89+) QKᵀ,
+9. SageAttention: INT8 `mma.m16n8k32` (sm_80+) and FP8 E4M3 (sm_89+) QKᵀ,
    per-row Q / per-key K scales, f32 softmax, bf16 P·V. INT8 is tested on
    sm_86; FP8 is compile-tested for sm_89 and tested by `tests/sage_int8.rs`
    on an Ada/Hopper card.

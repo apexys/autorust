@@ -80,7 +80,7 @@ build time. `cargo test`: default/CL 225, `backend_cuda` 253,
 - **Causal, additive `[n, n]` f32 mask, and GQA** in all three CUDA kernels and
   in the OpenCL kernel.
 - **SageAttention** (`runtime::cuda_flash_sage`, opt-in): QKᵀ on 8-bit tensor
-  cores — INT8 `mma.s16n8k32` on sm_80+ (tested on the 3060) and FP8 E4M3 on
+  cores — INT8 `mma.m16n8k32` on sm_80+ (tested on the 3060) and FP8 E4M3 on
   sm_89+ (compile-tested for sm_89; runtime test ready) — with per-row Q /
   per-key K scales, f32 softmax and bf16 P·V. On sm_86 it is slower than TF32
   (1.26 vs 0.97 ms at the app shape) because K is re-quantized per query block;
