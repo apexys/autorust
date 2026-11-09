@@ -347,3 +347,76 @@ fn dispatch_handles_gqa() {
         .fold(0.0f32, f32::max);
     assert!(maxd < 2e-4, "dispatch gqa maxabs {maxd:e}");
 }
+
+/// Causal should nearly halve the key tiles at the app shape.
+#[test]
+fn causal_skips_half_the_work() {
+    if !autorust::runtime::ops_cuda::has_tensor_cores() {
+        return;
+    }
+    use std::time::Instant;
+    let (b, h, n, d) = (8i64, 6i64, 789i64, 64i64);
+    let ctx = Ctx::new();
+    let mut sess = autorust::engine::session::Session::new();
+    let qd = fill((b * h * n * d) as usize, 5);
+    let kd = fill((b * h * n * d) as usize, 13);
+    let vd = fill((b * h * n * d) as usize, 23);
+    let q = Tensor::from_slice(&ctx, &qd, None, Some("CUDA")).reshape([b, h, n, d]);
+    let k = Tensor::from_slice(&ctx, &kd, None, Some("CUDA")).reshape([b, h, n, d]);
+    let v = Tensor::from_slice(&ctx, &vd, None, Some("CUDA")).reshape([b, h, n, d]);
+    let o = Tensor::from_slice(
+        &ctx,
+        &vec![0.0f32; (b * h * n * d) as usize],
+        None,
+        Some("CUDA"),
+    )
+    .reshape([b, h, n, d])
+    .to_param();
+    {
+        let mut c = ctx.borrow_mut();
+        for t in [&q, &k, &v, &o] {
+            t.realize_device_ctx(&mut c, &mut sess);
+        }
+    }
+    let dev = device("CUDA");
+    let ov = |t: &Tensor| t.realized_buffer().expect("realized").get_buf(&dev);
+    let run = |causal: bool| {
+        let opts = autorust::runtime::cuda_flash_tc::Options {
+            causal,
+            has_mask: false,
+            h_kv: h,
+        };
+        autorust::runtime::cuda_flash_tc::run_ex(
+            &dev,
+            &ov(&q),
+            &ov(&k),
+            &ov(&v),
+            &ov(&o),
+            None,
+            b,
+            h,
+            n,
+            opts,
+        );
+    };
+    run(false);
+    run(true);
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        run(false);
+    }
+    let full = t0.elapsed().as_secs_f64() * 1e3 / 5.0;
+    let t1 = Instant::now();
+    for _ in 0..5 {
+        run(true);
+    }
+    let causal = t1.elapsed().as_secs_f64() * 1e3 / 5.0;
+    eprintln!(
+        "tf32 n={n}: full {full:.2} ms, causal {causal:.2} ms ({:.2}x)",
+        full / causal
+    );
+    assert!(
+        causal < full * 0.8,
+        "causal should skip key tiles: {causal} vs {full}"
+    );
+}
