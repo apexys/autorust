@@ -61,9 +61,15 @@ build time. `cargo test`: default 224, `backend_cuda` 244,
   score tile and output accumulator in registers. 5.9x over the scalar kernel
   at the app shape (7.0 ms -> 1.18 ms, batch 8, h 6, n 789) with ~1e-5 error.
 - **bf16 tensor-core FA2** (`runtime::cuda_flash_bf16`): `mma.sync.m16n8k16`,
-  bf16 operands and f32 accumulate, 8.4 KB of shared, 1.8-2.4x the TF32 kernel
-  (0.74 ms vs 1.2-1.7 ms at the same shape) and <1e-4 against a reference that
-  rounds operands and probabilities to bf16. Chosen by tensor dtype.
+  bf16 operands and f32 accumulate, 9 KB of shared per stage (18 KB with the
+  async pipeline), 1.8-2.4x the TF32 kernel (0.52-0.54 ms vs 0.9-1.3 ms at the
+  same shape) and <1e-4 against a reference that rounds operands and
+  probabilities to bf16. Chosen by tensor dtype.
+- **`cp.async` double-buffered K/V** (`AUTORUST_ASYNC`, default on) in the bf16
+  kernel: the next tile is issued before the wait for the current one, giving
+  1.3-1.4x at the app shape (0.70-0.75 ms -> 0.52-0.54 ms). The TF32 kernel has
+  the same path; there it is within noise because the TF32 conversion moves to
+  the fragment loads and the doubled shared memory halves occupancy.
 - **Causal, additive `[n, n]` f32 mask, and GQA** in all three CUDA kernels.
   Causal bounds the key loop to `block_q + BQ` as well as masking the diagonal
   tiles; the additive mask is added to the scores before the max; GQA divides

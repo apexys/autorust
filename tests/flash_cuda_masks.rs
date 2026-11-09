@@ -187,6 +187,7 @@ fn run_kernel(
                 causal: opts_common.0,
                 has_mask: opts_common.1,
                 h_kv: opts_common.2,
+                async_pipeline: true,
             },
         ),
         Kernel::Bf16 => autorust::runtime::cuda_flash_bf16::run_ex(
@@ -203,6 +204,7 @@ fn run_kernel(
                 causal: opts_common.0,
                 has_mask: opts_common.1,
                 h_kv: opts_common.2,
+                async_pipeline: true,
             },
         ),
     }
@@ -385,6 +387,7 @@ fn causal_skips_half_the_work() {
             causal,
             has_mask: false,
             h_kv: h,
+            async_pipeline: true,
         };
         autorust::runtime::cuda_flash_tc::run_ex(
             &dev,

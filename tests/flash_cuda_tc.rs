@@ -224,22 +224,48 @@ fn tc_timing_vs_scalar() {
     let (qv, kv, vv, ovv) = (ov(&q), ov(&k), ov(&v), ov(&o));
 
     autorust::runtime::cuda_flash::run(&dev, &qv, &kv, &vv, &ovv, b, h, n);
-    autorust::runtime::cuda_flash_tc::run(&dev, &qv, &kv, &vv, &ovv, b, h, n);
+    let run_tc = |async_pipeline: bool| {
+        autorust::runtime::cuda_flash_tc::run_ex(
+            &dev,
+            &qv,
+            &kv,
+            &vv,
+            &ovv,
+            None,
+            b,
+            h,
+            n,
+            autorust::runtime::cuda_flash_tc::Options {
+                causal: false,
+                has_mask: false,
+                h_kv: h,
+                async_pipeline,
+            },
+        );
+    };
+    run_tc(true);
+    run_tc(false);
 
-    let t0 = Instant::now();
-    for _ in 0..5 {
-        autorust::runtime::cuda_flash::run(&dev, &qv, &kv, &vv, &ovv, b, h, n);
-    }
-    let scalar_ms = t0.elapsed().as_secs_f64() * 1e3 / 5.0;
-
-    let t1 = Instant::now();
-    for _ in 0..5 {
-        autorust::runtime::cuda_flash_tc::run(&dev, &qv, &kv, &vv, &ovv, b, h, n);
-    }
-    let tc_ms = t1.elapsed().as_secs_f64() * 1e3 / 5.0;
+    let time = |iters: usize, f: &dyn Fn()| {
+        let t = Instant::now();
+        for _ in 0..iters {
+            f();
+        }
+        t.elapsed().as_secs_f64() * 1e3 / iters as f64
+    };
+    let scalar_ms = time(10, &|| {
+        autorust::runtime::cuda_flash::run(&dev, &qv, &kv, &vv, &ovv, b, h, n)
+    });
+    let tc_ms = time(10, &|| run_tc(true));
+    let sync_ms = time(10, &|| run_tc(false));
     eprintln!(
-        "batch {b}, h {h}, n {n}: scalar {scalar_ms:.2} ms, tf32 {tc_ms:.2} ms ({:.2}x)",
-        scalar_ms / tc_ms
+        "batch {b}, h {h}, n {n}: scalar {scalar_ms:.2} ms, tf32 {tc_ms:.2} ms, tf32 sync {sync_ms:.2} ms ({:.2}x, async/sync {:.2}x)",
+        scalar_ms / tc_ms,
+        sync_ms / tc_ms
+    );
+    assert!(
+        tc_ms < sync_ms,
+        "cp.async pipeline should beat synchronous staging: {tc_ms} vs {sync_ms}"
     );
 }
 

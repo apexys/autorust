@@ -92,6 +92,12 @@ pub struct Settings {
     pub mm_tile: Option<(usize, usize, usize, usize, usize)>,
     /// `DEFAULT_DEVICE`: device used by tensor creation when none is given.
     pub device: Option<String>,
+    /// Double-buffer K/V tiles with `cp.async` in the fused attention kernels.
+    ///
+    /// On by default (`AUTORUST_ASYNC=0` disables). `cp.async` needs `sm_80+`,
+    /// the same gate as the tensor-core kernels, so it never affects older
+    /// cards; it is a latency optimisation, not a change in the math.
+    pub async_pipeline: bool,
 }
 
 impl Default for Settings {
@@ -107,6 +113,7 @@ impl Default for Settings {
             sdpa_tile: 0,
             mm_tile: None,
             device: None,
+            async_pipeline: true,
         }
     }
 }
@@ -190,6 +197,7 @@ impl Settings {
             _ => None,
         };
         let device = env("DEFAULT_DEVICE").filter(|d| !d.is_empty());
+        let async_pipeline = !matches!(env("AUTORUST_ASYNC").as_deref(), Some("0") | Some("false"));
         Settings {
             attention,
             library_gemm,
@@ -201,6 +209,7 @@ impl Settings {
             sdpa_tile,
             mm_tile,
             device,
+            async_pipeline,
         }
     }
 

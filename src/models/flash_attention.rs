@@ -450,6 +450,7 @@ pub fn fused_attention_ex(
                     causal: is_causal,
                     has_mask,
                     h_kv: hk,
+                    async_pipeline: settings.async_pipeline,
                 },
             )
         }
@@ -469,6 +470,7 @@ pub fn fused_attention_ex(
                     causal: is_causal,
                     has_mask,
                     h_kv: hk,
+                    async_pipeline: settings.async_pipeline,
                 },
             )
         }

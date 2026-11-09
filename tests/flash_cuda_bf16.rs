@@ -215,30 +215,48 @@ fn bf16_timing_vs_f32_tc() {
     }
     let dev = device("CUDA");
     let ov = |t: &Tensor| t.realized_buffer().expect("realized").get_buf(&dev);
-    autorust::runtime::cuda_flash_tc::run(&dev, &ov(&q), &ov(&k), &ov(&v), &ov(&of), b, h, n);
-    autorust::runtime::cuda_flash_bf16::run(&dev, &ov(&qb), &ov(&kb), &ov(&vb), &ov(&ob), b, h, n);
-
-    let t0 = Instant::now();
-    for _ in 0..5 {
-        autorust::runtime::cuda_flash_tc::run(&dev, &ov(&q), &ov(&k), &ov(&v), &ov(&of), b, h, n);
-    }
-    let tf32_ms = t0.elapsed().as_secs_f64() * 1e3 / 5.0;
-    let t1 = Instant::now();
-    for _ in 0..5 {
-        autorust::runtime::cuda_flash_bf16::run(
+    let run_bf16 = |async_pipeline: bool| {
+        autorust::runtime::cuda_flash_bf16::run_ex(
             &dev,
             &ov(&qb),
             &ov(&kb),
             &ov(&vb),
             &ov(&ob),
+            None,
             b,
             h,
             n,
+            autorust::runtime::cuda_flash_bf16::Options {
+                causal: false,
+                has_mask: false,
+                h_kv: h,
+                async_pipeline,
+            },
         );
-    }
-    let bf16_ms = t1.elapsed().as_secs_f64() * 1e3 / 5.0;
+    };
+    autorust::runtime::cuda_flash_tc::run(&dev, &ov(&q), &ov(&k), &ov(&v), &ov(&of), b, h, n);
+    run_bf16(true);
+    run_bf16(false);
+
+    let time = |iters: usize, f: &dyn Fn()| {
+        let t = Instant::now();
+        for _ in 0..iters {
+            f();
+        }
+        t.elapsed().as_secs_f64() * 1e3 / iters as f64
+    };
+    let tf32_ms = time(10, &|| {
+        autorust::runtime::cuda_flash_tc::run(&dev, &ov(&q), &ov(&k), &ov(&v), &ov(&of), b, h, n)
+    });
+    let bf16_ms = time(10, &|| run_bf16(true));
+    let sync_ms = time(10, &|| run_bf16(false));
     eprintln!(
-        "batch {b}, h {h}, n {n}: tf32 {tf32_ms:.2} ms, bf16 {bf16_ms:.2} ms ({:.2}x)",
-        tf32_ms / bf16_ms
+        "batch {b}, h {h}, n {n}: tf32 {tf32_ms:.2} ms, bf16 {bf16_ms:.2} ms, bf16 sync {sync_ms:.2} ms  (bf16/tf32 {:.2}x, async/sync {:.2}x)",
+        tf32_ms / bf16_ms,
+        sync_ms / bf16_ms
+    );
+    assert!(
+        bf16_ms < sync_ms,
+        "cp.async pipeline should beat synchronous staging: {bf16_ms} vs {sync_ms}"
     );
 }

@@ -10,18 +10,26 @@
 //! Supported: causal, an additive f32 mask of shape `[n, n]`, and GQA (K/V may
 //! have fewer heads than Q).
 //!
-//! # Why this is the next step
+//! # Async K/V pipeline
+//!
+//! With `Options::async_pipeline` (default, `AUTORUST_ASYNC=0` disables) the
+//! K/V tiles are staged with `cp.async.cg.shared.global` into two shared
+//! buffers. The copy of tile `s+1` is issued before the wait for tile `s`, so
+//! the global→shared transfer overlaps the QKᵀ/softmax/P·V of the current tile
+//! instead of serialising in front of it. `cp.async` bypasses registers and
+//! takes a source-size operand, so the tail tile's out-of-range rows are
+//! zero-filled without a separate masking pass.
+//!
+//! # Why bf16
 //!
 //! bf16 is the model-level way to use tensor cores at full rate: on sm_86 the
-//! bf16 `mma` is ~2x the TF32 rate, and the fragments are half the size. The
-//! kernel is also where a bf16 model wants its attention to run, rather than
-//! casting to f32 and back.
+//! bf16 `mma` is ~2x the TF32 rate, and the fragments are half the size.
 //!
 //! # Availability
 //!
-//! bf16 `mma` needs `sm_80+`, same as TF32. [`supported`] checks
-//! [`Settings::tensor_cores`] and the device generation; an older card keeps the
-//! general SDPA path (which computes bf16 through f32).
+//! bf16 `mma` needs `sm_80+`, same as TF32 (and `cp.async`). [`supported`]
+//! checks [`Settings::tensor_cores`] and the device generation; an older card
+//! keeps the general SDPA path (which computes bf16 through f32).
 //!
 //! # Layout
 //!
@@ -38,7 +46,8 @@
 //! Two score tiles (16 keys) pack into one A fragment for `P·V` with no
 //! cross-lane exchange, so the probabilities again stay in registers.
 //!
-//! Shared = `K` + `V` as bf16: `2 * 32 * 66 * 2 = 8.4 KB`.
+//! Shared = `K` + `V` as bf16: `2 * 32 * 72 * 2 = 9 KB` per stage (144-byte
+//! rows, so every `cp.async` destination is 16-byte aligned).
 //!
 //! [`Settings::tensor_cores`]: crate::settings::Settings::tensor_cores
 
@@ -58,7 +67,7 @@ pub const THREADS: i64 = 128;
 pub const NAME: &str = "ar_flash_bf16";
 
 /// The per-call options the fused kernel understands beyond the tensors.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Options {
     /// Apply the causal (lower-triangular) mask.
     pub causal: bool,
@@ -66,14 +75,41 @@ pub struct Options {
     pub has_mask: bool,
     /// Number of K/V heads (`h_q / h_kv` is the GQA group size).
     pub h_kv: i64,
+    /// Double-buffer K/V with `cp.async` (`AUTORUST_ASYNC`).
+    pub async_pipeline: bool,
 }
 
-/// The CUDA source.
-pub const SRC: &str = r#"
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            causal: false,
+            has_mask: false,
+            h_kv: 1,
+            async_pipeline: true,
+        }
+    }
+}
+
+/// The CUDA source, parameterised on the pipeline depth.
+pub fn src(async_pipeline: bool) -> String {
+    format!("#define AR_ASYNC {}\n{BODY}", async_pipeline as u8)
+}
+
+const BODY: &str = r#"
 #define AR_D 64
 #define AR_BQ 64
 #define AR_BK 32
+/* Row stride in elements: 72 bf16 = 144 B, a multiple of 16 so every cp.async
+ * destination is 16-byte aligned; bank rotation 36 words & 31 = 4. */
+#define AR_PAD 8
+#define AR_CHUNKS (AR_D * 2 / 16)   /* 16-byte chunks per row */
 #define AR_NEG -1e30f
+
+#if AR_ASYNC
+  #define AR_STAGES 2
+#else
+  #define AR_STAGES 1
+#endif
 
 __device__ __forceinline__ unsigned short ar_bf16(float x) {
     unsigned short r;
@@ -106,16 +142,78 @@ __device__ __forceinline__ void ar_mma(float d[4], const unsigned a[4],
           "r"(b[0]), "r"(b[1]));
 }
 
+#if AR_ASYNC
+__device__ __forceinline__ unsigned ar_smem(const void* p) {
+    unsigned r;
+    asm("{ .reg .u64 t; cvta.to.shared.u64 t, %1; cvt.u32.u64 %0, t; }"
+        : "=r"(r) : "l"(p));
+    return r;
+}
+
+/* 16-byte async copy; `bytes` < 16 zero-fills the tail. */
+__device__ __forceinline__ void ar_cp16(unsigned dst, const void* src, int bytes) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+                 :: "r"(dst), "l"(src), "r"(bytes) : "memory");
+}
+
+__device__ __forceinline__ void ar_commit() {
+    asm volatile("cp.async.commit_group;" ::: "memory");
+}
+__device__ __forceinline__ void ar_wait1() {
+    asm volatile("cp.async.wait_group 1;" ::: "memory");
+}
+__device__ __forceinline__ void ar_wait0() {
+    asm volatile("cp.async.wait_group 0;" ::: "memory");
+}
+
+/* Stage one K/V tile with cp.async. Out-of-range rows use a valid source
+ * address and a zero source size, so the destination is zero-filled. */
+__device__ __forceinline__ void ar_copy_tile(
+    unsigned short (*dk)[AR_D + AR_PAD], unsigned short (*dv)[AR_D + AR_PAD],
+    const unsigned short* K, const unsigned short* V,
+    long kvbase, int k0, int N, int tid)
+{
+    for (int i = tid; i < AR_BK * AR_CHUNKS; i += 128) {
+        const int r = i / AR_CHUNKS;
+        const int c = (i % AR_CHUNKS) * 8;   /* element offset, 8 bf16 = 16 B */
+        const int gr = k0 + r;
+        const int ok = (gr < N);
+        const long src = kvbase + (long)(ok ? gr : 0) * AR_D + c;
+        const int bytes = ok ? 16 : 0;
+        ar_cp16(ar_smem(&dk[r][c]), K + src, bytes);
+        ar_cp16(ar_smem(&dv[r][c]), V + src, bytes);
+    }
+}
+#else
+/* Synchronous staging (the pre-cp.async path). */
+__device__ __forceinline__ void ar_load_tile(
+    unsigned short (*dk)[AR_D + AR_PAD], unsigned short (*dv)[AR_D + AR_PAD],
+    const unsigned short* K, const unsigned short* V,
+    long kvbase, int k0, int N, int tid)
+{
+    for (int i = tid; i < AR_BK * AR_D; i += 128) {
+        const int r = i >> 6;
+        const int d = i & 63;
+        const int gr = k0 + r;
+        if (gr < N) {
+            dk[r][d] = K[kvbase + (long)gr * AR_D + d];
+            dv[r][d] = V[kvbase + (long)gr * AR_D + d];
+        } else {
+            dk[r][d] = 0;
+            dv[r][d] = 0;
+        }
+    }
+}
+#endif
+
 extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
     const unsigned short* __restrict__ Q, const unsigned short* __restrict__ K,
     const unsigned short* __restrict__ V, unsigned short* __restrict__ O,
     const float* __restrict__ M,
     int N, int head_dim, int causal, int has_mask, int hq, int hkv)
 {
-    /* bf16 [key][d], padded to 66 elements (132 B) so the 4-byte pair loads
-     * rotate banks: bank = (row*66*2/4 + word) & 31 = (row*33 + word) & 31. */
-    __shared__ unsigned short ks[AR_BK][AR_D + 2];
-    __shared__ unsigned short vs[AR_BK][AR_D + 2];
+    __shared__ __align__(16) unsigned short ks[AR_STAGES][AR_BK][AR_D + AR_PAD];
+    __shared__ __align__(16) unsigned short vs[AR_STAGES][AR_BK][AR_D + AR_PAD];
 
     const int tid  = threadIdx.x;
     const int warp = tid >> 5;
@@ -158,21 +256,33 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
     float m0 = AR_NEG, l0 = 0.f;
     float m1 = AR_NEG, l1 = 0.f;
 
-    for (int k0 = 0; k0 < kend; k0 += AR_BK) {
-        /* ---- stage K/V (already bf16) ---- */
-        for (int i = tid; i < AR_BK * AR_D; i += 128) {
-            const int r  = i >> 6;
-            const int d  = i & 63;
-            const int gr = k0 + r;
-            if (gr < N) {
-                ks[r][d] = K[kvbase + (long)gr * AR_D + d];
-                vs[r][d] = V[kvbase + (long)gr * AR_D + d];
-            } else {
-                ks[r][d] = 0;
-                vs[r][d] = 0;
-            }
+#if AR_ASYNC
+    if (kend > 0) {
+        ar_copy_tile(ks[0], vs[0], K, V, kvbase, 0, N, tid);
+        ar_commit();
+    }
+#endif
+
+    int step = 0;
+    for (int k0 = 0; k0 < kend; k0 += AR_BK, ++step) {
+#if AR_ASYNC
+        const int nk = k0 + AR_BK;
+        /* Issue the *next* tile before waiting for this one, then wait with one
+         * group left outstanding so the prefetch keeps running. */
+        if (nk < kend) {
+            ar_copy_tile(ks[(step + 1) & 1], vs[(step + 1) & 1], K, V, kvbase, nk, N, tid);
+            ar_commit();
         }
+        if (nk < kend) ar_wait1(); else ar_wait0();
         __syncthreads();
+        const int stage = step & 1;
+#else
+        ar_load_tile(ks[0], vs[0], K, V, kvbase, k0, N, tid);
+        __syncthreads();
+        const int stage = 0;
+#endif
+        unsigned short (*ksb)[AR_D + AR_PAD] = ks[stage];
+        unsigned short (*vsb)[AR_D + AR_PAD] = vs[stage];
 
         /* ---- S = Q * K^T : 16 queries x 32 keys ---- */
         float sc[4][4];
@@ -185,8 +295,8 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
             const int d0 = s * 16;
             #pragma unroll
             for (int t = 0; t < 4; ++t) {
-                const unsigned b0 = ar_ld2(ks[t * 8 + g], d0 + t2);
-                const unsigned b1 = ar_ld2(ks[t * 8 + g], d0 + t2 + 8);
+                const unsigned b0 = ar_ld2(ksb[t * 8 + g], d0 + t2);
+                const unsigned b1 = ar_ld2(ksb[t * 8 + g], d0 + t2 + 8);
                 const unsigned b[2] = { b0, b1 };
                 ar_mma(sc[t], qa[s], b);
             }
@@ -257,8 +367,6 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
         for (int kk = 0; kk < 2; ++kk) {    /* k step: 16 keys = 2 score tiles */
             const int s0 = kk * 2;
             const int kb = kk * 16;
-            /* A layout packs consecutive keys, so one fragment is two score
-             * tiles with no register shuffle. */
             const unsigned a[4] = {
                 ar_pack(sc[s0][0],     sc[s0][1]),
                 ar_pack(sc[s0][2],     sc[s0][3]),
@@ -267,10 +375,10 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_bf16(
             };
             #pragma unroll
             for (int nt = 0; nt < 8; ++nt) {
-                const unsigned b0 = (unsigned)vs[kb + t2 + 0][nt * 8 + g]
-                                  | ((unsigned)vs[kb + t2 + 1][nt * 8 + g] << 16);
-                const unsigned b1 = (unsigned)vs[kb + t2 + 8][nt * 8 + g]
-                                  | ((unsigned)vs[kb + t2 + 9][nt * 8 + g] << 16);
+                const unsigned b0 = (unsigned)vsb[kb + t2 + 0][nt * 8 + g]
+                                  | ((unsigned)vsb[kb + t2 + 1][nt * 8 + g] << 16);
+                const unsigned b1 = (unsigned)vsb[kb + t2 + 8][nt * 8 + g]
+                                  | ((unsigned)vsb[kb + t2 + 9][nt * 8 + g] << 16);
                 const unsigned b[2] = { b0, b1 };
                 ar_mma(o[nt], a, b);
             }
@@ -331,7 +439,7 @@ pub fn selections() -> u64 {
 }
 
 /// Launch with the default options (no mask, no causal, one K/V head per Q
-/// head).
+/// head, async pipeline on).
 pub fn run(
     dev: &std::rc::Rc<crate::runtime::device::Compiled>,
     q: &OpaqueView,
@@ -402,9 +510,10 @@ fn launch(
             &dummy
         }
     };
+    let source = src(opts.async_pipeline);
     let grid = [((n + BQ - 1) / BQ) as usize, (b * h) as usize, 1];
     dev.run_host_kernel(
-        SRC,
+        &source,
         NAME,
         &signature(),
         &[q.clone(), k.clone(), v.clone(), o.clone(), m.clone()],
@@ -456,7 +565,7 @@ pub fn host_call(
 ) -> crate::engine::session::HostCall {
     crate::engine::session::HostCall {
         device: "CUDA".into(),
-        src: SRC.to_string(),
+        src: src(opts.async_pipeline),
         name: NAME.to_string(),
         signature: signature(),
         bufs,

@@ -6,7 +6,15 @@
 //! online softmax stays in f32.
 //!
 //! Supported: causal, an additive f32 mask of shape `[n, n]`, and GQA (K/V may
-//! have fewer heads than Q; the head is divided by the group size).
+//! have fewer heads than Q).
+//!
+//! # Async K/V pipeline
+//!
+//! `Options::async_pipeline` double-buffers K/V with `cp.async`, like the bf16
+//! kernel. Unlike bf16, the values must still be rounded to TF32; the copy
+//! cannot do that, so the conversion happens at the fragment loads. Shared
+//! doubles to ~34 KB, which caps this kernel at two blocks/SM, so the win is
+//! smaller than for bf16 — measure with `AUTORUST_ASYNC=0` before relying on it.
 //!
 //! # Why TF32 and not f32
 //!
@@ -20,9 +28,7 @@
 //!
 //! TF32 `mma` needs `sm_80+`. [`supported`] checks the device generation and
 //! [`Settings::tensor_cores`], so an older card (e.g. GTX 1060 / `sm_61`) never
-//! compiles this source and keeps the scalar kernel. The caller
-//! (`models::flash_attention::fused_attention`) falls back to the scalar kernel
-//! (f32) or SDPA (mask/causal on an old card) in exactly the same place.
+//! compiles this source and keeps the scalar kernel.
 //!
 //! # Layout
 //!
@@ -34,9 +40,8 @@
 //! `P·V` mma without a shared-memory round trip; only the 16x64 output
 //! accumulator is scaled by the online-softmax correction, in registers.
 //!
-//! Shared = `K` + `V` only: `2 * 32 * 65 * 4 = 16.6 KB` (padded to 65 floats to
-//! dodge bank conflicts), so shared memory is not the occupancy limit and the
-//! kernel does not need the >48 KB dynamic-shared opt-in.
+//! Shared = `K` + `V`: `2 * 32 * 68 * 4 = 17.4 KB` per stage (272-byte rows,
+//! so every `cp.async` destination is 16-byte aligned).
 //!
 //! [`Settings::tensor_cores`]: crate::settings::Settings::tensor_cores
 
@@ -56,7 +61,7 @@ pub const THREADS: i64 = 128;
 pub const NAME: &str = "ar_flash_tc_f32";
 
 /// The per-call options the fused kernel understands beyond the tensors.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Options {
     /// Apply the causal (lower-triangular) mask.
     pub causal: bool,
@@ -64,14 +69,41 @@ pub struct Options {
     pub has_mask: bool,
     /// Number of K/V heads (`h_q / h_kv` is the GQA group size).
     pub h_kv: i64,
+    /// Double-buffer K/V with `cp.async` (`AUTORUST_ASYNC`).
+    pub async_pipeline: bool,
 }
 
-/// The CUDA source.
-pub const SRC: &str = r#"
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            causal: false,
+            has_mask: false,
+            h_kv: 1,
+            async_pipeline: true,
+        }
+    }
+}
+
+/// The CUDA source, parameterised on the pipeline depth.
+pub fn src(async_pipeline: bool) -> String {
+    format!("#define AR_ASYNC {}\n{BODY}", async_pipeline as u8)
+}
+
+const BODY: &str = r#"
 #define AR_D 64
 #define AR_BQ 64
 #define AR_BK 32
+/* Row stride: 68 floats = 272 B, a multiple of 16 for cp.async alignment;
+ * bank rotation 68 & 31 = 4. */
+#define AR_PAD 4
+#define AR_CHUNKS (AR_D * 4 / 16)   /* 16-byte chunks per row */
 #define AR_NEG -1e30f
+
+#if AR_ASYNC
+  #define AR_STAGES 2
+#else
+  #define AR_STAGES 1
+#endif
 
 /* Round f32 to the TF32 storage format the mma consumes (round-to-nearest). */
 __device__ __forceinline__ unsigned ar_tf32(float x) {
@@ -91,15 +123,69 @@ __device__ __forceinline__ void ar_mma(float d[4], const unsigned a[4],
           "r"(b[0]), "r"(b[1]));
 }
 
+#if AR_ASYNC
+__device__ __forceinline__ unsigned ar_smem(const void* p) {
+    unsigned r;
+    asm("{ .reg .u64 t; cvta.to.shared.u64 t, %1; cvt.u32.u64 %0, t; }"
+        : "=r"(r) : "l"(p));
+    return r;
+}
+__device__ __forceinline__ void ar_cp16(unsigned dst, const void* src, int bytes) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+                 :: "r"(dst), "l"(src), "r"(bytes) : "memory");
+}
+__device__ __forceinline__ void ar_commit() {
+    asm volatile("cp.async.commit_group;" ::: "memory");
+}
+__device__ __forceinline__ void ar_wait1() {
+    asm volatile("cp.async.wait_group 1;" ::: "memory");
+}
+__device__ __forceinline__ void ar_wait0() {
+    asm volatile("cp.async.wait_group 0;" ::: "memory");
+}
+__device__ __forceinline__ void ar_copy_tile(
+    float (*dk)[AR_D + AR_PAD], float (*dv)[AR_D + AR_PAD],
+    const float* K, const float* V, long kvbase, int k0, int N, int tid)
+{
+    for (int i = tid; i < AR_BK * AR_CHUNKS; i += 128) {
+        const int r = i / AR_CHUNKS;
+        const int c = (i % AR_CHUNKS) * 4;   /* element offset, 4 floats = 16 B */
+        const int gr = k0 + r;
+        const int ok = (gr < N);
+        const long src = kvbase + (long)(ok ? gr : 0) * AR_D + c;
+        const int bytes = ok ? 16 : 0;
+        ar_cp16(ar_smem(&dk[r][c]), K + src, bytes);
+        ar_cp16(ar_smem(&dv[r][c]), V + src, bytes);
+    }
+}
+#else
+__device__ __forceinline__ void ar_load_tile(
+    float (*dk)[AR_D + AR_PAD], float (*dv)[AR_D + AR_PAD],
+    const float* K, const float* V, long kvbase, int k0, int N, int tid)
+{
+    for (int i = tid; i < AR_BK * AR_D; i += 128) {
+        const int r = i >> 6;
+        const int d = i & 63;
+        const int gr = k0 + r;
+        if (gr < N) {
+            dk[r][d] = K[kvbase + (long)gr * AR_D + d];
+            dv[r][d] = V[kvbase + (long)gr * AR_D + d];
+        } else {
+            dk[r][d] = 0.f;
+            dv[r][d] = 0.f;
+        }
+    }
+}
+#endif
+
 extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
     const float* __restrict__ Q, const float* __restrict__ K,
     const float* __restrict__ V, float* __restrict__ O,
     const float* __restrict__ M,
     int N, int head_dim, int causal, int has_mask, int hq, int hkv)
 {
-    /* K is [key][d] and V is [key][d]; both padded to 65 floats. */
-    __shared__ float ks[AR_BK][AR_D + 1];
-    __shared__ float vs[AR_BK][AR_D + 1];
+    __shared__ __align__(16) float ks[AR_STAGES][AR_BK][AR_D + AR_PAD];
+    __shared__ __align__(16) float vs[AR_STAGES][AR_BK][AR_D + AR_PAD];
 
     const int tid  = threadIdx.x;
     const int warp = tid >> 5;
@@ -145,24 +231,34 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
     for (int nt = 0; nt < 8; ++nt) {
         o[nt][0] = 0.f; o[nt][1] = 0.f; o[nt][2] = 0.f; o[nt][3] = 0.f;
     }
-    float m0 = AR_NEG, l0 = 0.f;   /* row g     */
-    float m1 = AR_NEG, l1 = 0.f;   /* row g + 8 */
+    float m0 = AR_NEG, l0 = 0.f;
+    float m1 = AR_NEG, l1 = 0.f;
 
-    for (int k0 = 0; k0 < kend; k0 += AR_BK) {
-        /* ---- stage K/V, converted to TF32 once ---- */
-        for (int i = tid; i < AR_BK * AR_D; i += 128) {
-            const int r  = i >> 6;
-            const int d  = i & 63;
-            const int gr = k0 + r;
-            if (gr < N) {
-                ks[r][d] = __uint_as_float(ar_tf32(K[kvbase + (long)gr * AR_D + d]));
-                vs[r][d] = __uint_as_float(ar_tf32(V[kvbase + (long)gr * AR_D + d]));
-            } else {
-                ks[r][d] = 0.f;
-                vs[r][d] = 0.f;
-            }
+#if AR_ASYNC
+    if (kend > 0) {
+        ar_copy_tile(ks[0], vs[0], K, V, kvbase, 0, N, tid);
+        ar_commit();
+    }
+#endif
+
+    int step = 0;
+    for (int k0 = 0; k0 < kend; k0 += AR_BK, ++step) {
+#if AR_ASYNC
+        const int nk = k0 + AR_BK;
+        if (nk < kend) {
+            ar_copy_tile(ks[(step + 1) & 1], vs[(step + 1) & 1], K, V, kvbase, nk, N, tid);
+            ar_commit();
         }
+        if (nk < kend) ar_wait1(); else ar_wait0();
         __syncthreads();
+        const int stage = step & 1;
+#else
+        ar_load_tile(ks[0], vs[0], K, V, kvbase, k0, N, tid);
+        __syncthreads();
+        const int stage = 0;
+#endif
+        float (*ksb)[AR_D + AR_PAD] = ks[stage];
+        float (*vsb)[AR_D + AR_PAD] = vs[stage];
 
         /* ---- S = Q * K^T : 16 queries x 32 keys, C fragments ---- */
         float sc[4][4];
@@ -176,8 +272,8 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
             for (int t = 0; t < 4; ++t) {
                 /* B[k][j] = K[t*8 + j][s*8 + k], col-major from shared. */
                 const unsigned b[2] = {
-                    __float_as_uint(ks[t * 8 + g][s * 8 + t2 + 0]),
-                    __float_as_uint(ks[t * 8 + g][s * 8 + t2 + 1]),
+                    ar_tf32(ksb[t * 8 + g][s * 8 + t2 + 0]),
+                    ar_tf32(ksb[t * 8 + g][s * 8 + t2 + 1]),
                 };
                 ar_mma(sc[t], qa[s], b);
             }
@@ -251,8 +347,8 @@ extern "C" __global__ void __launch_bounds__(128) ar_flash_tc_f32(
             #pragma unroll
             for (int nt = 0; nt < 8; ++nt) { /* n tiles: 8 of the 64 dims */
                 const unsigned b[2] = {
-                    __float_as_uint(vs[t * 8 + t2 + 0][nt * 8 + g]),
-                    __float_as_uint(vs[t * 8 + t2 + 1][nt * 8 + g]),
+                    ar_tf32(vsb[t * 8 + t2 + 0][nt * 8 + g]),
+                    ar_tf32(vsb[t * 8 + t2 + 1][nt * 8 + g]),
                 };
                 ar_mma(o[nt], a, b);
             }
@@ -316,7 +412,7 @@ pub fn selections() -> u64 {
 }
 
 /// Launch with the default options (no mask, no causal, one K/V head per Q
-/// head).
+/// head, async pipeline on).
 pub fn run(
     dev: &std::rc::Rc<crate::runtime::device::Compiled>,
     q: &OpaqueView,
@@ -344,9 +440,7 @@ pub fn run(
     );
 }
 
-/// Launch the fused kernel with masks/GQA: `q/k/v/o` are `[b, h, n, 64]`
-/// contiguous f32, `mask` is an additive `[n, n]` f32 tensor when
-/// `opts.has_mask`.
+/// Launch the fused kernel with masks/GQA.
 #[allow(clippy::too_many_arguments)]
 pub fn run_ex(
     dev: &std::rc::Rc<crate::runtime::device::Compiled>,
@@ -386,16 +480,16 @@ fn launch(
             &dummy
         }
     };
-    let vals = vals(n, h, opts);
+    let source = src(opts.async_pipeline);
     let grid = [((n + BQ - 1) / BQ) as usize, (b * h) as usize, 1];
     dev.run_host_kernel(
-        SRC,
+        &source,
         NAME,
         &signature(),
         &[q.clone(), k.clone(), v.clone(), o.clone(), m.clone()],
         grid,
         Some([THREADS as usize, 1, 1]),
-        &vals,
+        &vals(n, h, opts),
         wait,
     )
 }
@@ -440,7 +534,7 @@ pub fn host_call(
 ) -> crate::engine::session::HostCall {
     crate::engine::session::HostCall {
         device: "CUDA".into(),
-        src: SRC.to_string(),
+        src: src(opts.async_pipeline),
         name: NAME.to_string(),
         signature: signature(),
         bufs,
