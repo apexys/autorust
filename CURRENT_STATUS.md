@@ -211,6 +211,18 @@ the Rayon bench, elementwise 6.2 -> 4.5 ms (Rayon) and 5.5 -> 3.0 ms (RUST).
 The schedule (`rangeify`/kernel split) still runs per realize; a persistent
 session or the JIT is the way to skip that.
 
+### Device fallback for virtual buffers
+
+A virtual result (the output of a dot, etc.) carries no device of its own. The
+allocator now uses the **sink-side** device (scanning back through the graph and
+ignoring host creation leaves `PYTHON`/`NPY`/`DISK`), and `realize_tensor` /
+`realize_many` seed the session's `BufTable` device from the realized graph.
+Before, a missing device fell back to `default_device()`: one transient CUDA
+availability-probe failure made the process default CL and silently moved a
+CUDA graph onto the OpenCL/CPU backend (0 GFLOP/s, one core). `tests/generated_device.rs`
+forces `DEFAULT_DEVICE=CPU` and checks that a CUDA dot still runs and allocates
+on CUDA.
+
 ### Fresh one-shot reads (`*_fresh`)
 
 `Tensor::to_list_fresh` / `realize_fresh` / `to_bytes_fresh` run in a temporary

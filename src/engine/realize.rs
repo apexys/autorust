@@ -794,6 +794,13 @@ pub fn realize_many(
 ) -> (Vec<crate::runtime::buffer::Buffer>, Vec<UopId>) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
+    // Same device fallback as the single-root path (see `realize_tensor`).
+    if let Some(crate::uop::arg::DeviceSpec::Single(s)) = tensor_uops
+        .iter()
+        .find_map(|u| crate::schedule::indexing::device_of(ctx, u.clone()))
+    {
+        t.set_device(Some(s));
+    }
     let prof = crate::engine::prof::enabled();
     let t0 = prof.then(std::time::Instant::now);
     let targets: Vec<UopId> = tensor_uops
@@ -877,6 +884,13 @@ pub fn realize_tensor(
 ) -> (crate::runtime::buffer::Buffer, UopId) {
     // Drop buffers no live caller still references (bounded across repeated steps).
     t.prune();
+    // Device-less BUFFER uops inherit the realized graph's device instead of
+    // the process default (which may be a stale probe result).
+    if let Some(crate::uop::arg::DeviceSpec::Single(s)) =
+        crate::schedule::indexing::device_of(ctx, tensor_uop.clone())
+    {
+        t.set_device(Some(s));
+    }
     let target = materialize_target(ctx, tensor_uop.clone());
     let sink = crate::tensor::sink(ctx, vec![target.clone()]);
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);

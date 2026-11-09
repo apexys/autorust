@@ -27,6 +27,10 @@ pub struct AllocCtx {
     pub replacements: Vec<UopId>,
     /// Buffers backing contiguous views created from movement ops.
     pub views: Vec<UopId>,
+    /// Fallback device for allocations whose uop carries none. Taken from the
+    /// sink side of the graph (never the process default, which can be a stale
+    /// or transient probe result).
+    pub device: Option<String>,
 }
 
 impl AllocCtx {
@@ -91,7 +95,7 @@ fn disk_like(ctx: &mut UOpCtx, u: UopId) -> bool {
 fn disk_copy_is_buffer(actx: &mut AllocCtx, ctx: &mut UOpCtx, u: UopId) -> Option<UopId> {
     let tagged_none = matches!(ctx.tag_of(&u), Arg::None);
     if disk_like(ctx, u.clone()) && tagged_none {
-        let el = empty_like(ctx, u.clone());
+        let el = empty_like(ctx, u.clone(), actx.device.as_deref());
         actx.buffer_map_insert(u.clone(), el);
         return Some(ctx.uop_tag(
             ctx.op_of(&u),
@@ -115,7 +119,11 @@ fn disk_copy_is_buffer(actx: &mut AllocCtx, ctx: &mut UOpCtx, u: UopId) -> Optio
 }
 
 /// `UOp.empty_like` (ops.py:823) — canonicalized device, strong dtype.
-pub fn empty_like(ctx: &mut UOpCtx, u: UopId) -> UopId {
+///
+/// `fallback` is used when the uop carries no device (a virtual result): it
+/// comes from the sink's operands, so a CUDA graph stays on CUDA even if the
+/// process default device is something else.
+pub fn empty_like(ctx: &mut UOpCtx, u: UopId, fallback: Option<&str>) -> UopId {
     let dev = crate::schedule::indexing::device_of(ctx, u.clone());
     let dev_s: Option<String> = match dev {
         Some(crate::uop::arg::DeviceSpec::Single(s)) => Some(s),
@@ -124,7 +132,7 @@ pub fn empty_like(ctx: &mut UOpCtx, u: UopId) -> UopId {
         }
         None => None,
     };
-    let canon = super::creation::canonicalize_device(dev_s.as_deref());
+    let canon = super::creation::canonicalize_device(dev_s.as_deref().or(fallback));
     let shape = ctx
         .shape(&u)
         .expect("TGERR: empty_like shape")
@@ -135,7 +143,7 @@ pub fn empty_like(ctx: &mut UOpCtx, u: UopId) -> UopId {
 
 /// `replace_contig_with_store_after` (tensor.py:62).
 fn replace_contig_with_store_after(
-    _actx: &mut AllocCtx,
+    actx: &mut AllocCtx,
     ctx: &mut UOpCtx,
     u: UopId,
 ) -> Option<UopId> {
@@ -158,7 +166,7 @@ fn replace_contig_with_store_after(
             Arg::None,
         ));
     }
-    let buf = empty_like(ctx, u.clone());
+    let buf = empty_like(ctx, u.clone(), actx.device.as_deref());
     let st = crate::tensor::store(ctx, buf.clone(), ctx.srcs(&u)[0].clone(), None);
     let aft = crate::tensor::after(ctx, buf, vec![st]);
     let tag = ctx.tag_of(&u).clone();
@@ -641,6 +649,22 @@ pub fn pm_replace_buf() -> PatternMatcher {
 pub fn transform_to_call(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Vec<(UopId, UopId)>) {
     // bases: real (non-virtual, non-buffer-identity) bases of sink srcs
     let mut actx = AllocCtx::default();
+    // Fallback device for virtual allocations: the sink-side device. Scanning
+    // backwards finds the result/COPY device before the host creation leaf
+    // (`PYTHON`/`NPY`), so a CUDA graph never falls back to the process default.
+    for u in ctx.toposort(&big_sink).iter().rev() {
+        if let Some(crate::uop::arg::DeviceSpec::Single(s)) =
+            crate::schedule::indexing::device_of(ctx, u.clone())
+        {
+            let host_side = matches!(s.as_str(), "PYTHON" | "NPY" | "DISK" | "TINYFS");
+            if !host_side || actx.device.is_none() {
+                actx.device = Some(s);
+            }
+            if !host_side {
+                break;
+            }
+        }
+    }
     let sink_srcs = ctx.srcs(&big_sink).to_vec();
     for x in sink_srcs {
         let base = ctx.base(&x);
