@@ -35,12 +35,21 @@ fn pair(prefix: &str, p: &(Tensor, Tensor)) -> Vec<(String, Tensor)> {
     ]
 }
 
-/// `FA=1` env switch: route attention through the FlashAttention port instead of
-/// `scaled_dot_product_attention` (read once, like `JIT`/`TRAINING`).
+/// `FA=1` env switch: route the model's attention through the op-level
+/// FlashAttention port instead of `scaled_dot_product_attention` (read once,
+/// like `JIT`/`TRAINING`).
+///
+/// This is the graph-level algorithm reference, *not* the fast path: the fast
+/// fused kernels are reached through `Tensor::attention_with` (or
+/// `scaled_dot_product_attention_sess`) with a session. It is therefore
+/// independent of `Settings::attention`, which selects the tensor-level
+/// implementation.
 fn flash_enabled() -> bool {
     static FA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FA.get_or_init(|| {
-        crate::settings::global().attention != crate::models::flash_attention::AttentionKind::Sdpa
+        crate::helpers::env::get("FA")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
     })
 }
 
