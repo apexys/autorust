@@ -3005,3 +3005,37 @@ rule):
 
 Gates: full `cargo test --release` (78 binaries, including the grad/optim
 goldens), clippy, rustdoc, `--no-default-features`.
+
+### 9.22 Why the remaining backward GEMMs miss the library path (2026-11) — ANALYSIS
+
+After §9.21 the ViT training profile is dominated by three generated GEMM
+families (~102 of 180 ms/step). `AUTORUST_MM_DEBUG=1` now prints the reason
+`host_gemm::extract` declines each one (`[hg] reject: ...`):
+
+| reject | count/step | kernel | cost |
+|---|---|---|---|
+| `A operand is Mul` | 12 | FFN `dX` with the GELU-derivative prologue (`r_197_3_64_4_768_4`) | ~43 ms |
+| `B operand is Where` | 24 | ff2 `dX` with the dropout mask on `dY` (`r_197_12_64_4_192_4`) | ~32 ms |
+| `A operand is Exp2` | 12 | softmax backward (`r_197_3_64_4_12_16_4`) | ~27 ms |
+
+All three are true contractions with a *pointwise prologue* on one operand.
+`HostGemm` can only describe affine buffer operands, so the generated kernel
+recomputes the prologue inside the K loop (the GELU case spends ~10 extra FLOPs
+per MAC).
+
+Materializing the prologue once was attempted at the scheduler level and did
+not land: `pm_generate_realize_map` records the prologue, but
+`convert_reduce_to_ranges` lowers the reduce body atomically, and by then the
+body is a `Permute`/`Shrink` of the `MUL` (movement folding), so the generic
+`create_bufferize_and_index_srcs` never visits the operand. A dedicated
+"bufferize a pointwise contraction operand inside a reduce body" pass (the
+reduce-body equivalent of `create_bufferize_and_index_srcs`) is the concrete
+remaining work; it is a rangeify change, not a `host_gemm` matcher change.
+
+Bound: even if all three reached cuBLAS, the affected kernels are ~100 ms of
+the 180 ms step and cuBLAS f32 is at most ~2x the generated kernels at these
+shapes (PERFORMANCE.md: 4.76 vs 3.58 TFLOP/s at 2048³; ~5-6 vs 2-3 here), so
+the training step lands around 130-140 ms, i.e. ~3x torch, not 2x. Closing the
+rest needs f32 tensor cores (TF32 changes the output) or a proper
+im2col/GEMM-backward rewrite. This is why the three inference/MNIST workloads
+are within 2x and training is not.

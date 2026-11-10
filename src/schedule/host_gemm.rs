@@ -723,8 +723,31 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
 
-    let a_idx = operand(ctx, msrcs[0].clone())?;
-    let b_idx = operand(ctx, msrcs[1].clone())?;
+    let dbg = crate::helpers::env::get("AUTORUST_MM_DEBUG").is_some();
+    let a_idx = match operand(ctx, msrcs[0].clone()) {
+        Some(v) => v,
+        None => {
+            if dbg {
+                eprintln!(
+                    "[hg] reject: A operand is {:?}, not a load",
+                    ctx.op_of(&unwrap(ctx, msrcs[0].clone()))
+                );
+            }
+            return None;
+        }
+    };
+    let b_idx = match operand(ctx, msrcs[1].clone()) {
+        Some(v) => v,
+        None => {
+            if dbg {
+                eprintln!(
+                    "[hg] reject: B operand is {:?}, not a load",
+                    ctx.op_of(&unwrap(ctx, msrcs[1].clone()))
+                );
+            }
+            return None;
+        }
+    };
     let (a_off0, a_map) = affine(ctx, &index_offset(ctx, &a_idx))?;
     let (b_off0, b_map) = affine(ctx, &index_offset(ctx, &b_idx))?;
     let (a_slot, a_dt, a_base) = base_of(ctx, &a_idx)?;
