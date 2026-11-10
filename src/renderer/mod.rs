@@ -305,7 +305,11 @@ impl Renderer {
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
             max_buffers: 31,
-            tensor_cores: Vec::new(),
+            tensor_cores: if cfg!(target_arch = "aarch64") {
+                tc::get_metal()
+            } else {
+                Vec::new()
+            },
             code_for_op: cstyle_alu_keys(),
             supported_dtypes: crate::dtype::ALL
                 .iter()

@@ -1598,7 +1598,11 @@ fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
 /// `hand_coded_optimizations` (heuristic.py) — corpus subset.
 pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
     // first try the tensor cores
-    let use_tc: i64 = env_int("USE_TC", 1);
+    let use_tc: i64 = if ctx.settings.tensor_cores {
+        env_int("USE_TC", 1)
+    } else {
+        0
+    };
     let tc_opt: i64 = env_int("TC_OPT", 0);
     let tc_select: i64 = env_int("TC_SELECT", -1);
     let tc_dbg = crate::helpers::env::get("TC_DEBUG").is_some();

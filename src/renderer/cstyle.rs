@@ -1487,7 +1487,32 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             args.join(", "),
             kernel.join("\n")
         );
-        return format!("#include <metal_stdlib>\nusing namespace metal;\n{prg}");
+        // MetalRenderer.render_kernel (cstyle.py:378): one simdgroup helper per
+        // distinct `(name, dtype_in, dtype_out)` WMMA shape.
+        let mut prefix = String::from("#include <metal_stdlib>\nusing namespace metal;\n");
+        let mut seen: Vec<(String, DTypeId, DTypeId)> = Vec::new();
+        for (wmma, _dims, dtype_in, dtype_out, _upcast) in wmma_args(ctx, lst) {
+            if seen
+                .iter()
+                .any(|(n, a, b)| n == &wmma && *a == dtype_in && *b == dtype_out)
+            {
+                continue;
+            }
+            seen.push((wmma.clone(), dtype_in, dtype_out));
+            let in_vec = lang.render_dtype(dtype_in, 2, Some(AddrSpace::Reg), false);
+            let out_vec = lang.render_dtype(dtype_out, 2, Some(AddrSpace::Reg), false);
+            let in_mat = lang.render_dtype(dtype_in, 1, None, false);
+            let out_mat = lang.render_dtype(dtype_out, 1, None, false);
+            prefix.push_str(&format!(
+                "{out_vec} __{wmma}({in_vec} a, {in_vec} b, {out_vec} c) {{\n  \
+                 simdgroup_{in_mat}8x8 mat_a, mat_b; simdgroup_{out_mat}8x8 mat_c;\n  \
+                 mat_a.thread_elements()[0] = a[0]; mat_b.thread_elements()[0] = b[0]; mat_c.thread_elements()[0] = c[0];\n  \
+                 mat_a.thread_elements()[1] = a[1]; mat_b.thread_elements()[1] = b[1]; mat_c.thread_elements()[1] = c[1];\n  \
+                 simdgroup_multiply_accumulate(mat_c, mat_a, mat_b, mat_c);\n  \
+                 return {out_vec}(mat_c.thread_elements()[0], mat_c.thread_elements()[1]);\n}}\n"
+            ));
+        }
+        return format!("{prefix}{prg}");
     }
     let prg = format!(
         "{} {}({}) {{\n{}\n}}",

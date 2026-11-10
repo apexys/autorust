@@ -77,9 +77,9 @@ pub struct Settings {
     /// tensor-core instructions.
     ///
     /// On by default. Only takes effect where the device has the instructions
-    /// (`sm_80+`), so older cards and non-NVIDIA backends keep the scalar
-    /// kernels. `AUTORUST_TENSOR_CORES=0` forces the scalar path everywhere
-    /// (useful for bit-exact comparisons).
+    /// (`sm_80+` on CUDA, Apple7+ on Metal), so older cards and unbounded
+    /// backends keep the scalar kernels. `AUTORUST_TENSOR_CORES=0` forces the
+    /// scalar path everywhere (useful for bit-exact comparisons).
     ///
     /// There is no full-precision f32 tensor core: the f32-storage format is
     /// TF32 (10-bit mantissa), so this is independent of

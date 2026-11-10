@@ -3,8 +3,8 @@
 //! `Ops.WMMA`, and the CUDA renderer consumes the per-op shapes to emit the
 //! `mma.sync.aligned` asm.
 //!
-//! Ported: the CUDA family (`cuda_sm80` + `cuda_sm89` with fp8). AMD/Metal are
-//! not needed (no such backend).
+//! Ported: the CUDA family (`cuda_sm80` + `cuda_sm89` with fp8) and the Apple
+//! Metal `simdgroup` family (arm64/Apple7+). AMD is not ported.
 
 use std::collections::HashMap;
 
@@ -258,6 +258,42 @@ fn cuda_sm89() -> Vec<TensorCore> {
     let mut v = cuda_sm80();
     v.extend(cuda_81632_f8());
     v
+}
+
+/// `tc.metal` (codegen/opt/tc.py) — Apple `simdgroup_matrix` 8x8x8.
+///
+/// `MetalRenderer` enables this only on Apple7+ (arm64); `Renderer::metal()`
+/// applies the same gate.
+pub fn get_metal() -> Vec<TensorCore> {
+    [
+        (D_FLOAT, D_FLOAT),
+        (D_HALF, D_FLOAT),
+        (D_HALF, D_HALF),
+        (D_BF16, D_FLOAT),
+        (D_BF16, D_BF16),
+    ]
+    .into_iter()
+    .map(|(di, do_)| TensorCore {
+        dims: (8, 8, 8),
+        threads: 32,
+        elements_per_thread: (2, 2, 2),
+        dtype_in: di,
+        dtype_out: do_,
+        opts: vec!["u0", "l0", "l1", "l1", "l0", "l1"],
+        swizzle: [
+            vec![
+                vec!["r1", "l1", "l2", "r2", "l4"],
+                vec!["r0"],
+                vec!["u0", "l0", "l3"],
+            ],
+            vec![
+                vec!["l0", "r0", "r1", "l3", "r2"],
+                vec!["u0"],
+                vec!["l1", "l2", "l4"],
+            ],
+        ],
+    })
+    .collect()
 }
 
 /// `get_cuda(arch)` — `sm_89`/`sm_80`/`sm_75` else empty.

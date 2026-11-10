@@ -243,8 +243,8 @@ first tensor/realize.
   `get_transcendental_patterns`), parameter renumbering (`pm_number_params`),
   and the image path. Multi-device/sharding is out of scope.
 - **Backends**: CUDA tensor cores target `sm_86`; OpenCL has no offset views and
-  no native bf16; Metal has no `double` and its tensor-core (simdgroup WMMA)
-  path is not ported yet. There is no AMD/WebGPU backend. The `RUST` CPU backend
+  no native bf16; Metal has native simdgroup 8x8 tensor cores (f32/f16/bf16) but
+  no `double`. There is no AMD/WebGPU backend. The `RUST` CPU backend
   is x86-64-first (other architectures fall back to libm for math).
 - **OpenCL loading**: `backend_cl` loads `libOpenCL` dynamically (`cl_sys`);
   a binary built with it starts on machines without OpenCL and `CL` is simply
@@ -253,10 +253,11 @@ first tensor/realize.
   Objective-C runtime and Metal framework; shaders are compiled at runtime with
   `newLibraryWithSource:`, so no Xcode/Metal toolchain is needed. Buffers use
   shared storage (host upload/download is a CPU copy), and the allocator
-  supports real offset views. A MetalPerformanceShaders host-GEMM path exists
-  (f32/f32, f16/f16, f16 inputs with f32 accumulation); it is opt-in via
-  `AUTORUST_MPS=all`, because on the measured M2 it is within noise of the
-  generated kernel. Shaders compile with precise math by default
+  supports real offset views. Native `simdgroup` 8x8 tensor cores cover
+  f32/f16/bf16 matmuls (≈1.3-1.7x over the FFMA path on an M2). A
+  MetalPerformanceShaders host-GEMM path also exists (f32/f32, f16/f16, f16
+  inputs with f32 accumulation); it is opt-in via `AUTORUST_MPS=all`, because
+  simdgroup TCs are faster on the measured M2. Shaders compile with precise math by default
   (`METAL_FAST_MATH=1` opts into fast math — `x + -inf` otherwise folds to `x`
   and drops masks). Apple GPUs allow at most 31 buffer arguments per kernel;
   `Renderer::max_buffers` turns that into a scheduler fusion budget, so large

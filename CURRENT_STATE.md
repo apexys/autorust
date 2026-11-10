@@ -286,7 +286,7 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   step (the 38-buffer fused ViT kernel is split by the budget). `tests/bf16.rs`,
   `tests/rand.rs`, `tests/nn_attention.rs`, and `tests/nn_models.rs` pass with
   METAL as the default. Full suite with `AUTORUST_CL_LIB=/nonexistent` (to
-  bypass Apple's broken OpenCL driver): **234 passed, 0 failed, 11 ignored**.
+  bypass Apple's broken OpenCL driver): **236 passed, 0 failed, 11 ignored**.
 - **MPS host GEMM (opt-in).** `MetalAllocator`/`MetalProgram` now also expose the
   `HostGemm` seam through MetalPerformanceShaders (`MPSMatrixMultiplication`).
   The scheduler recognizes a plain affine contraction on METAL and attaches a
@@ -298,7 +298,9 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   kernel). The path is **opt-in** (`AUTORUST_MPS=all`, or `LibraryGemm::Always`)
   because on an M2 it measured at parity with/slightly slower than the generated
   kernel (f32 512³ 1.76 vs 1.61 ms, 2048³ 24.0 vs 23.6 ms; f16/f16 2048³ 16.9 vs
-  17.3 ms), and the generated path is deterministic. Fused bias/scale/residual
+  17.3 ms), and the generated path is deterministic. With simdgroup TCs enabled
+  the generated f32/f16 path is now clearly faster than MPS (f32 2048³ 15.8 ms
+  vs 24.0 ms), so MPS stays opt-in for future Apple GPUs. Fused bias/scale/residual
   epilogues and non-row-major `C` stay on the generated path. Gate:
   `tests/mps_gemm.rs` (MPS used, f32/f16 numerics match generated, batched).
 - **Buffer-limit fusion budget (general, not Metal-only).** `Renderer` gained
@@ -316,8 +318,18 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   message for the one case the budget cannot fix: a single op directly reading
   more buffers than the limit. The tiny ViT golden (previously 38 buffers) now
   runs on METAL.
-- **Known gaps.** No simdgroup/WMMA tensor cores (`tensor_cores` is empty, so the
-  scheduler emits regular kernels); no `double` (Apple GPUs do not implement
+- **Simdgroup tensor cores (DONE).** `tc::get_metal()` is the exact v0.14.0
+  `tc.metal` table (8x8x8, f32/f32, f16/f32, f16/f16, bf16/f32, bf16/bf16),
+  wired into `Renderer::metal()` on arm64; `render_metal` emits the
+  `simdgroup_*8x8` + `simdgroup_multiply_accumulate` helper per WMMA shape.
+  `Settings::tensor_cores` now actually gates the heuristic TC path (it only
+  gated CUDA TF32 before). Measured on the M2 (`gemm_bench`, f16→f32):
+  512³ 1.72 vs 2.39 ms, 1024³ 6.93 vs 7.98 ms, 2048³ 16.98 vs 21.72 ms; f32:
+  1024³ 5.94 vs 9.60 ms, 2048³ 15.78 vs 27.35 ms. Gate: `tests/metal_tc.rs`.
+  The earlier failed attempt used a newer tinygrad Metal table whose
+  integer swizzle is incompatible with the port's v0.14.0 `apply_tc_opt`; the
+  v0.14.0 `tc.py` string table is the correct source.
+- **Known gaps.** No `double` (Apple GPUs do not implement
   64-bit floats, so the harness skips f64 programs and the two ONNX tests with
   f64 intermediates pin themselves to INTERP); no Metal graph-capture path; fused
   `Tensor.custom_kernel` remains the M7 stretch. The fusion budget is a
@@ -438,7 +450,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **234 passed, 11 ignored, 0 failed** with
+- `cargo test` → **236 passed, 11 ignored, 0 failed** with
   `AUTORUST_CL_LIB=/nonexistent` (2026-11; the OpenCL backend is skipped so the
   suite does not hit Apple's pre-existing OpenCL driver failure — see below).
   This run includes the Metal backend on an Apple M2. The ignored = 1
