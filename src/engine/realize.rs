@@ -942,6 +942,10 @@ fn exec_kernel(
         })
         .collect();
     let t2 = prof.then(std::time::Instant::now);
+    // Per-kernel timing for host-executed backends (the CUDA path has its own
+    // stream-synchronised profiler).
+    let kprof = crate::engine::prof::kprof()
+        && matches!(dev_name.as_str(), "RUST" | "CC" | "RAYON" | "INTERP" | "CPU");
     if let Some(host) = &cp.host {
         let exec = dev.host_exec.borrow();
         let f = exec.as_ref().unwrap_or_else(|| {
@@ -950,7 +954,11 @@ fn exec_kernel(
                 dev_name, host.tag
             )
         });
+        let tk = kprof.then(std::time::Instant::now);
         f(&bufs, host);
+        if let Some(tk) = tk {
+            eprintln!("KPROF\t{}\t{:.6}", host.tag, tk.elapsed().as_secs_f64());
+        }
         if let Some(a) = t0 {
             use crate::engine::prof::add;
             add("kx.host", a.elapsed().as_secs_f64());
@@ -960,8 +968,16 @@ fn exec_kernel(
     let rt = dev.runtime_keyed(cp.elf_key, &cp.elf);
     let t3 = prof.then(std::time::Instant::now);
     let (gs, ls) = cp.pi.launch_dims(var_vals);
+    let tk = kprof.then(std::time::Instant::now);
     rt.borrow_mut()
         .call(&bufs, gs, ls, &cp.pi.vals(var_vals), false);
+    if let Some(tk) = tk {
+        eprintln!(
+            "KPROF\t{}\t{:.6}",
+            crate::renderer::cstyle::to_function_name_pub(&cp.pi.name),
+            tk.elapsed().as_secs_f64()
+        );
+    }
     if let (Some(a), Some(b), Some(c), Some(d)) = (t0, t1, t2, t3) {
         use crate::engine::prof::add;
         add("kx.resolve_dev", b.duration_since(a).as_secs_f64());

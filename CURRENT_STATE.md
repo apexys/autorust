@@ -3109,3 +3109,44 @@ codegen/vectorization project, not a host-GEMM one. Added a unit test for the
 `[n,k]` weight layout with bias/alpha/residual epilogue.
 
 Gates: full `cargo test --release` (78 binaries), clippy, rustdoc.
+
+### 9.25 CPU per-kernel profile + measured ceiling; epilogue split blocked (2026-11)
+
+`AUTORUST_KPROF=1` now works for host backends too: `exec_kernel` prints a
+`KPROF <name> <secs>` line per generated kernel and per `HostGemm` call (CUDA
+keeps its own stream-synchronised profiler). RUST ViT-B/16 inference bs1
+(3-step trace, per-step column):
+
+| kernel | /step | what |
+|---|---:|---|
+| `r_384_197_8_192_4` | **271 ms** | FFN expansion (`linear` + GELU fused) |
+| `HostGemm` (177 calls) | 80 ms | the library GEMMs that do match |
+| `r_96_197_8_12_16_4` | 32 ms | attention/output projection fragment |
+| `r_197_8_12_8_197` | 30 ms | attention P·V / softmax |
+| elementwise (`E_*`) | ~40 ms | layernorm, GELU, adds, masks |
+
+So ~91% of the 420 ms inference step is one generated FFN-expansion kernel:
+the GELU epilogue blocks the host GEMM, and the generated matmul runs at
+~30 GFLOP/s vs 296 GFLOP/s for the packed GEMM on that exact shape.
+
+Two ways to materialize the expansion were tried and **blocked**:
+
+1. Model-level (`forward_mask_with` realizing the expansion and activation on
+   CPU): the session-aware CPU path re-schedules the prefix per realize; ViT
+   inference went 425 -> 1539 ms (bs8 1502 -> 15087 ms). Reverted.
+2. Scheduler-level (mark the contraction for realization in the realize map /
+   consumer-driven pass): the kernel splitter's END contract
+   (`sched.rs:110 TGERR: END src[0] should be KERNEL`) rejects a realized
+   reduce that is not a kernel root. A consumer map guard (skip contractions
+   feeding store/end) did not change it. Not shipped.
+
+The fix is a scheduler feature: split a non-affine epilogue into a second
+kernel (a GEMM + elementwise pair). With it the FFN expansion would drop from
+~271 ms to ~27 ms and CPU ViT inference to roughly ~150 ms (~0.9x torch);
+without it the CPU row stays at 2.6-2.9x.
+
+Training ceiling re-measured: Auto 96.9-97.4 ms, `GEMM=all`+TF32 93.4 ms
+(2.13x), tensor cores off 94.4 ms. The generated f32 tensor-core path is
+shape-gated on divisibility and declares the prime 197 shapes ineligible
+(masked vector stores are not lane-wise), so it cannot bound the f32 ceiling
+without a numerics change.

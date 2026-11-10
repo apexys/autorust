@@ -42,6 +42,14 @@ pub fn enabled() -> bool {
     })
 }
 
+/// Per-kernel profiling (`AUTORUST_KPROF=1`): the realize loop prints one
+/// `KPROF <name> <secs>` line per launch for host-executed backends. CUDA has
+/// its own per-launch profiler in `runtime::ops_cuda` (it syncs the stream).
+pub fn kprof() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| crate::helpers::env::get("AUTORUST_KPROF").is_some())
+}
+
 /// Accumulate `secs` under `name`.
 pub fn add(name: &'static str, secs: f64) {
     if !enabled() {

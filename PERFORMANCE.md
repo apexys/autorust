@@ -148,9 +148,13 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   | 1576x768x768 | 156 | 313 | **375** | 609 |
 
   MKL still wins the larger shapes by ~1.3-1.6x, but the host GEMM is only
-  ~100 ms of a ~420 ms ViT inference step; the rest is generated elementwise
-  and attention kernels. A MKL-speed microkernel would take CPU ViT inference
-  from ~2.6x to at best ~2.4x of torch (see CURRENT_STATE §9.24).
+  ~80-100 ms of a ~420 ms ViT inference step. The measured per-kernel profile
+  (`AUTORUST_KPROF=1`, see CURRENT_STATE §9.25) puts ~271 ms in one generated
+  FFN-expansion kernel (`linear` + GELU fused, ~30 GFLOP/s): the GELU epilogue
+  blocks the host GEMM, which would run that shape at ~296 GFLOP/s. Splitting
+  the epilogue into a GEMM + elementwise pair is the CPU unlock; the two
+  attempts (model-level realize, realize-map) are blocked by prefix
+  re-scheduling and the kernel splitter's END contract respectively.
 - **Metal → MPS** (`MPSMatrixMultiplication`, f32/f16). Opt-in
   (`AUTORUST_MPS=all`) because simdgroup tensor cores measured faster on an M2.
 
