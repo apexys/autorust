@@ -3150,3 +3150,41 @@ Training ceiling re-measured: Auto 96.9-97.4 ms, `GEMM=all`+TF32 93.4 ms
 shape-gated on divisibility and declares the prime 197 shapes ineligible
 (masked vector stores are not lane-wise), so it cannot bound the f32 ceiling
 without a numerics change.
+
+### 9.26 Epilogue split: reproduce the END contract failure; TC measurements (2026-11)
+
+Attempting the CPU epilogue split (mark a contraction for realization so the
+host GEMM takes the matmul and GELU becomes a separate kernel) reproduces a
+scheduler contract failure, precisely located:
+
+```
+[bad-end] u567593 src0=u567592 Store srcs=[Index, Mul]
+TGERR: END src[0] should be KERNEL   (schedule/sched.rs create_schedule)
+```
+
+The realized reduce is emitted by `bufferize_to_store` as
+`AFTER(buf, [END(STORE)])`, but the END is created inside the consumer's
+`split_store` rewrite, after the bottom-up `split_kernels` walk has passed that
+position, so it is never converted to `END(CALL)`. Instrumenting the splitter
+also shows the producer END is skipped as "open ranges":
+
+```
+446 End   open
+450 Store open
+```
+
+i.e. the reduce realization's output-axis bookkeeping leaves a non-Device range
+in the END subtree, so even a second `split_kernels` pass would decline it.
+Fixing the epilogue split therefore needs (a) callifying producer END(STORE)
+nodes created by `bufferize_to_store` (fixpoint or explicit producer pass) and
+(b) staging a reduce with only its output axes. Neither is a matcher tweak; the
+measured payoff remains: the FFN expansion kernel is 271 ms/step vs 296 GFLOP/s
+for the packed GEMM on the same shape (~370 ms of CPU ViT inference).
+
+Generated f32 tensor-core path (ruling it out as a ceiling lever): with
+`TC_DEBUG=1` the ViT shapes are declined (`no tensor core available`,
+`output is too asymmetric` for the prime 197 axes), and
+`AUTORUST_TENSOR_CORES=0` measures 89.8-94.4 ms vs the default 94.3-97.4 ms —
+i.e. the TC attempts are a ~5% *cost* on these shapes, not a headroom. The
+generated f32 matmul ceiling stays at the `GEMM=all`+TF32 measurement (93.4 ms
+= 2.13x torch).
