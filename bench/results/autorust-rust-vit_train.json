@@ -8,14 +8,14 @@
   "jit": true,
   "warmup": 1,
   "iters": 2,
-  "ms_cold": 9413.721,
-  "ms_median": 2230.4618,
-  "ms_min": 2199.7954,
-  "ms_iqr": 61.3329,
+  "ms_cold": 4765.6688,
+  "ms_median": 2221.7969,
+  "ms_min": 2206.6715,
+  "ms_iqr": 30.2509,
   "images_per_s": 0.45,
   "name": "autorust-rust-vit_train",
   "variant": "RUST",
-  "commit": "5cf311a",
-  "date": "2026-11-10T18:39:26",
-  "notes": "AUTORUST_ATTN=sdpa"
+  "commit": "1996f6e",
+  "date": "2026-11-10T23:10:28",
+  "notes": "SDPA (CPU)"
 }

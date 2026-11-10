@@ -322,7 +322,7 @@ CUDA. Inputs are synthetic and device-resident, the timed region is one
 training/inference step (no data loading, evaluation or logging), and each run
 is a fresh process with warmup. Raw JSON and the generated per-run tables are in
 [`bench/results/`](bench/results); these medians are from commit `75f9bec`
-(autorust CUDA rows, re-taken after the codegen, fused-inference and
+(autorust rows, re-taken after the codegen, fused-inference and
 contraction-splitting changes in CURRENT_STATE §9.20-§9.21; the CPU rows are
 from `5cf311a`) on the environment above
 (the candle runs were re-taken at `82f6408` with the class-token fix; torch is
@@ -332,13 +332,13 @@ All step times are milliseconds (lower is better).
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **64.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CPU | **64.9 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
 | MNIST CNN train, bs 512 | CUDA | 21.7 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | 438.1 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
+| ViT-B/16 infer, bs 1 | CPU | 427.4 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
 | ViT-B/16 infer, bs 1 | CUDA | 15.9 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1861.9 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
+| ViT-B/16 infer, bs 8 | CPU | 1875.0 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
 | ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 2230.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CPU | 2221.8 ms (RUST) | **243.4 ms** | 616.3 ms | — |
 | ViT-B/16 train, bs 1 | CUDA | 179.4 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
@@ -355,9 +355,9 @@ Reading it:
   than torch. The summed q/k/v input gradient is now split into three
   single-reduce GEMMs (216 -> 179 ms); the rest of the gap is the f32 backward
   against cuBLAS/cuDNN, the cuDNN/tensor-core story below (see §9.20-§9.21).
-- **CPU**: autorust's `RUST` backend is 54x/61x faster than tinygrad/candle on
+- **CPU**: autorust's `RUST` backend is 53x/60x faster than tinygrad/candle on
   MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
-  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 2230.5 ms). tinygrad's
+  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 2221.8 ms). tinygrad's
   `CPU` backend is single-threaded by design. `RAYON` is the typed interpreter
   (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
 
