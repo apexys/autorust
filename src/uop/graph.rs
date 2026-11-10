@@ -10,8 +10,10 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::rc::{Rc, Weak};
+
+use crate::uop::fasthash::{FastMap, FxHasher};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::arg::Arg;
@@ -161,7 +163,11 @@ pub struct Graph {
     /// Externally held roots, classified as outside the weak interner.
     pub roots: Vec<UopId>,
     /// Structural-hash → node weak handle, for interning.
-    interner: HashMap<u64, Weak<Node>>,
+    interner: FastMap<u64, Weak<Node>>,
+    /// Size at which dead weak entries are pruned next. Doubling the threshold
+    /// makes pruning amortized O(1) per insert instead of scanning the table
+    /// every 1024 inserts (which is O(n^2) across a large schedule).
+    prune_at: usize,
 }
 
 impl Clone for Graph {
@@ -170,7 +176,8 @@ impl Clone for Graph {
     fn clone(&self) -> Self {
         Graph {
             roots: self.roots.clone(),
-            interner: HashMap::new(),
+            interner: FastMap::default(),
+            prune_at: 4096,
         }
     }
 }
@@ -182,7 +189,7 @@ impl Graph {
     }
 
     fn key_hash(op: Ops, dtype: DTypeId, srcs: &[UopId], arg: &Arg, tag: &Arg) -> u64 {
-        let mut h = DefaultHasher::new();
+        let mut h = FxHasher::default();
         (op as u16).hash(&mut h);
         dtype.0.hash(&mut h);
         // Hash by child node id (stable, deterministic) rather than by Rc address.
@@ -207,9 +214,12 @@ impl Graph {
         let arg = normalize_arg(arg);
         let tag = normalize_arg(tag);
         // Opportunistic prune of dead weak entries so the table cannot grow
-        // without bound over a long-running program.
-        if self.interner.len() > 4096 && self.interner.len().is_multiple_of(1024) {
+        // without bound over a long-running program. Amortized: prune when the
+        // table reaches the next (doubled) threshold.
+        let threshold = self.prune_at.max(4096);
+        if self.interner.len() >= threshold {
             self.interner.retain(|_, w| w.strong_count() > 0);
+            self.prune_at = self.interner.len().saturating_mul(2).max(4096);
         }
         let k = Self::key_hash(op, dtype, &srcs, &arg, &tag);
         if let Some(w) = self.interner.get(&k)
@@ -244,10 +254,10 @@ impl Graph {
     }
 
     /// Post-order DFS with dedup, mirroring a tinygrad `toposort` (srcs before parents).
-    pub fn toposort_from(
+    pub fn toposort_from<S: std::hash::BuildHasher>(
         root: &UopId,
         out: &mut Vec<UopId>,
-        seen: &mut std::collections::HashSet<u32>,
+        seen: &mut std::collections::HashSet<u32, S>,
     ) {
         // iterative post-order
         enum Step {
@@ -283,7 +293,7 @@ impl Graph {
     /// All nodes reachable from `roots`, in deterministic post-order.
     pub fn toposort(&self) -> Vec<UopId> {
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::uop::fasthash::FastSet::default();
         // roots in reverse so the final order is root-first-stable like a recursive DFS
         for r in self.roots.iter().rev() {
             Self::toposort_from(r, &mut out, &mut seen);
@@ -294,7 +304,7 @@ impl Graph {
     /// `toposort` from an explicit root.
     pub fn toposort_root(&self, root: &UopId) -> Vec<UopId> {
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::uop::fasthash::FastSet::default();
         Self::toposort_from(root, &mut out, &mut seen);
         out
     }
@@ -308,7 +318,7 @@ impl Graph {
         for (i, id) in order.iter().enumerate() {
             pos.insert(id.id(), i as u64);
         }
-        let mut h = DefaultHasher::new();
+        let mut h = FxHasher::default();
         (order.len() as u64).hash(&mut h);
         for id in &order {
             (id.op as u16).hash(&mut h);
@@ -324,7 +334,7 @@ impl Graph {
 
     fn toposort_from_pub(root: &UopId) -> Vec<UopId> {
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::uop::fasthash::FastSet::default();
         Self::toposort_from(root, &mut out, &mut seen);
         out
     }

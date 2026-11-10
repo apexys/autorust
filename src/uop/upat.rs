@@ -12,7 +12,9 @@
 //!   strict_length).
 //! - `early_reject` = ops of single-op src patterns, precomputed (ops.py:1344-1347).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+use crate::uop::fasthash::{FastMap, FastSet};
 use std::sync::Arc;
 
 use super::arg::Arg;
@@ -1396,9 +1398,9 @@ fn rebuild_dtype(ctx: &mut UOpCtx, n: UopId, new_src: &[UopId]) -> DTypeId {
 struct RewriteCtxt<'a> {
     pm: Option<&'a PatternMatcher>,
     bpm: Option<&'a PatternMatcher>,
-    bpm_cache: HashMap<UopId, Option<UopId>>,
+    bpm_cache: FastMap<UopId, Option<UopId>>,
     ctxval: &'a CtxVal,
-    replace: HashMap<UopId, UopId>,
+    replace: FastMap<UopId, UopId>,
     enter_calls: bool,
 }
 
@@ -1503,14 +1505,15 @@ impl<'a> RewriteCtxt<'a> {
             S2,
         }
         let mut stack: Vec<(UopId, Stage, UopId)> = vec![(root.clone(), Stage::S0, root.clone())];
-        let mut on_stack: HashSet<UopId> = HashSet::from([root.clone()]);
-        let mut waitlist: HashMap<UopId, Vec<(UopId, Stage, UopId)>> = HashMap::new();
+        let mut on_stack: FastSet<UopId> = FastSet::default();
+        on_stack.insert(root.clone());
+        let mut waitlist: FastMap<UopId, Vec<(UopId, Stage, UopId)>> = FastMap::default();
         let mut iters = 0usize;
         // Diagnostic (`TG_RW_VISITS=1`): per-node visit histogram + total.
         // A well-behaved DAG walk visits each node a handful of times; if some
         // node shows hundreds of visits the waitlist retry loop is thrashing.
-        let mut visits: Option<HashMap<UopId, u32>> =
-            crate::helpers::env::get("TG_RW_VISITS").map(|_| HashMap::new());
+        let mut visits: Option<FastMap<UopId, u32>> =
+            crate::helpers::env::get("TG_RW_VISITS").map(|_| FastMap::default());
         while let Some((n, stage, new_n)) = stack.pop() {
             iters += 1;
             if let Some(v) = visits.as_mut() {
@@ -1543,7 +1546,7 @@ impl<'a> RewriteCtxt<'a> {
                     if let Some(_bpm) = self.bpm {
                         // apply rewrite rules until a fixed point is reached
                         let mut test_n: Option<UopId> = Some(new_n.clone());
-                        let mut seen: HashSet<UopId> = HashSet::new();
+                        let mut seen: FastSet<UopId> = FastSet::default();
                         let mut gated: Option<UopId> = None;
                         while let Some(tn) = test_n {
                             if seen.contains(&tn) {
@@ -1699,9 +1702,9 @@ pub fn graph_rewrite(
     let mut rc = RewriteCtxt {
         pm: if bottom_up { None } else { Some(pm) },
         bpm: if bottom_up { Some(pm) } else { bpm },
-        bpm_cache: HashMap::new(),
+        bpm_cache: FastMap::default(),
         ctxval: &ctxval,
-        replace: HashMap::new(),
+        replace: FastMap::default(),
         enter_calls,
     };
     let _ = &mut rc;
@@ -1797,7 +1800,7 @@ pub fn substitute(
     // (rule match + waitlist) made that O(n^2) (17 s of a 20 s schedule).
     let prof = crate::engine::prof::enabled();
     let mut visited = 0usize;
-    let mut memo: HashMap<UopId, UopId> = HashMap::new();
+    let mut memo: FastMap<UopId, UopId> = FastMap::default();
     let mut stack: Vec<(UopId, bool)> = vec![(root.clone(), false)];
     while let Some((u, ready)) = stack.pop() {
         visited += 1;

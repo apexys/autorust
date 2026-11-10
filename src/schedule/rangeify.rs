@@ -2120,7 +2120,6 @@ fn get_kernel_graph_once(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> U
     lap("rng.run_rangeify", t);
 
     // cleanups for speed and runability
-    let t = prof.then(std::time::Instant::now);
     if prof {
         for _ in ctx.toposort(&tsink) {
             crate::engine::prof::count("rng.graph_nodes");

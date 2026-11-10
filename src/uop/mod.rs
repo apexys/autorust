@@ -14,6 +14,7 @@ pub mod alu;
 pub mod arg;
 pub mod ctx;
 pub mod divandmod;
+pub(crate) mod fasthash;
 pub mod flat;
 pub mod graph;
 pub mod ops;
