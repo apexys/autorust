@@ -37,28 +37,18 @@ fn vit_one_step_and_eval() {
     let ctx = Ctx::new();
     let mut sess = Session::new();
     let n = 4;
-    let x = load_images(
-        &mut ctx.raw(),
-        &mut sess,
-        &dir.join("train-images-idx3-ubyte"),
-        n,
-    );
-    let y = load_labels(
-        &mut ctx.raw(),
-        &mut sess,
-        &dir.join("train-labels-idx1-ubyte"),
-        n,
-    );
+    let x = load_images(&ctx, &mut sess, &dir.join("train-images-idx3-ubyte"), n);
+    let y = load_labels(&ctx, &mut sess, &dir.join("train-labels-idx1-ubyte"), n);
 
     Tensor::manual_seed(0);
     let size = 16;
-    let model = ViT::build(&mut ctx.raw(), 1, 16, 2, 3, size, 8, 10).into_params();
+    let model = ViT::build(&ctx, 1, 16, 2, 3, size, 8, 10).into_params();
     let params: Vec<Tensor> = model.params().collect();
     let opt = Adam::new(params.clone(), 1e-3);
     let before = params[0].to_list::<f32>(&mut sess);
 
     sess.training(true);
-    let xp = prep(&x, size, &mut ctx.raw());
+    let xp = prep(&x, size);
     let out = model.forward(&xp);
     assert_eq!(
         out.shape()
@@ -83,7 +73,7 @@ fn vit_one_step_and_eval() {
 
     // eval mode (dropout off) must run
     sess.training(false);
-    let xp = prep(&x, size, &mut ctx.raw());
+    let xp = prep(&x, size);
     let eval_out = model.forward(&xp);
     let acc = eval_out
         .argmax(Some(1), false)

@@ -26,7 +26,6 @@ use autorust::engine::session::Session;
 use autorust::tensor::nn::{self, BatchNorm, Conv2d, Linear, Module};
 use autorust::tensor::optim::{Adam, Optim};
 use autorust::tensor::{Ctx, Ix, Tensor};
-use autorust::uop::ctx::UOpCtx;
 
 /// tinygrad's `Model`: the layer list from `beautiful_mnist.py`.
 pub struct Model {
@@ -132,28 +131,36 @@ pub fn fetch(url: &str, path: &Path) {
 /// *lazy* dataset tensor re-runs that whole-file COPY on every use. `realize`
 /// replaces the tensor's uop with its realized storage form (`_apply_map_to_tensors`),
 /// so the per-step graph reads a buffer.
-pub fn load_images(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
+pub fn load_images(ctx: &Ctx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx images");
-    let x =
-        Tensor::from_slice(ctx, &bytes[0x10..], Some(dtype::UINT8), None).reshape([-1, 1, 28, 28]);
+    // Split the uop construction from the Tensor methods: each `borrow_mut`
+    // temporary is dropped at the end of its statement, so `reshape`/`getitem`
+    // (which re-borrow the same arena) don't alias a live `RefMut`.
+    let x = Tensor::from_slice(
+        &mut ctx.borrow_mut(),
+        &bytes[0x10..],
+        Some(dtype::UINT8),
+        None,
+    );
+    let x = x.reshape([-1, 1, 28, 28]);
     let x = if n < 60_000 {
         x.getitem(&[Ix::slice(Some(0), Some(n), 1)])
     } else {
         x
     };
-    x.realize(sess).clone()
+    x.realize_ctx(&mut ctx.borrow_mut(), sess).clone()
 }
 
 /// `Tensor.from_url(file, gunzip=True)[8:]` (see [`load_images`] on realization).
-pub fn load_labels(ctx: &mut UOpCtx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
+pub fn load_labels(ctx: &Ctx, sess: &mut Session, path: &Path, n: i64) -> Tensor {
     let bytes = std::fs::read(path).expect("read idx labels");
-    let y = Tensor::from_slice(ctx, &bytes[8..], Some(dtype::UINT8), None);
+    let y = Tensor::from_slice(&mut ctx.borrow_mut(), &bytes[8..], Some(dtype::UINT8), None);
     let y = if n < 60_000 {
         y.getitem(&[Ix::slice(Some(0), Some(n), 1)])
     } else {
         y
     };
-    y.realize(sess).clone()
+    y.realize_ctx(&mut ctx.borrow_mut(), sess).clone()
 }
 
 fn main() {
@@ -199,29 +206,19 @@ fn main() {
     let mut sess = Session::new();
 
     let x_train = load_images(
-        &mut ctx.raw(),
+        &ctx,
         &mut sess,
         &dir.join("train-images-idx3-ubyte"),
         train_n,
     );
     let y_train = load_labels(
-        &mut ctx.raw(),
+        &ctx,
         &mut sess,
         &dir.join("train-labels-idx1-ubyte"),
         train_n,
     );
-    let x_test = load_images(
-        &mut ctx.raw(),
-        &mut sess,
-        &dir.join("t10k-images-idx3-ubyte"),
-        test_n,
-    );
-    let y_test = load_labels(
-        &mut ctx.raw(),
-        &mut sess,
-        &dir.join("t10k-labels-idx1-ubyte"),
-        test_n,
-    );
+    let x_test = load_images(&ctx, &mut sess, &dir.join("t10k-images-idx3-ubyte"), test_n);
+    let y_test = load_labels(&ctx, &mut sess, &dir.join("t10k-labels-idx1-ubyte"), test_n);
 
     Tensor::manual_seed(seed);
     let model = Model::new(&ctx).into_params();

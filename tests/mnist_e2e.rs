@@ -37,18 +37,8 @@ fn mnist_one_step_and_eval() {
     let ctx = Ctx::new();
     let mut sess = Session::new();
     let n = 4;
-    let x = load_images(
-        &mut ctx.raw(),
-        &mut sess,
-        &dir.join("train-images-idx3-ubyte"),
-        n,
-    );
-    let y = load_labels(
-        &mut ctx.raw(),
-        &mut sess,
-        &dir.join("train-labels-idx1-ubyte"),
-        n,
-    );
+    let x = load_images(&ctx, &mut sess, &dir.join("train-images-idx3-ubyte"), n);
+    let y = load_labels(&ctx, &mut sess, &dir.join("train-labels-idx1-ubyte"), n);
     assert_eq!(
         x.shape()
             .iter()
