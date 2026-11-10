@@ -2411,11 +2411,15 @@ Gates: `cargo test --features backend_cl` 212 passed; the CL harness 12 passed;
 `cl_reduce`/`cl_offset` pass; `ocl_smoke` works on the NVIDIA ICD.
 
 Default features are now `capi, backend_rayon, backend_rust, backend_clang,
-backend_cl`. CUDA stays opt-in for build weight/test environment, not because of
-a build-time library requirement: `cudarc`'s `dynamic-loading` +
-`fallback-latest` builds without CUDA libraries (it warns and uses the latest
-CUDA API if `nvcc` is absent). `freeze` also stays opt-in. Selection remains
-CUDA → CL → RUST → CC → RAYON → INTERP.
+backend_cl, backend_metal, backend_cuda, freeze` (2026-11: CUDA and `freeze`
+were promoted to defaults for the public release; CUDA costs ~3.5 s of build
+time and one dependency, and `freeze` reuses `rayon`/`backend_rust`). Cargo has
+no per-target default features, so `backend_cuda` is enabled on every platform
+but `cudarc` and all CUDA code are target-gated to Linux/Windows via
+`all(feature = "backend_cuda", any(target_os = "linux", target_os = "windows"))`
+(the same pattern Metal uses). `cudarc`'s `dynamic-loading` + `fallback-latest`
+builds without CUDA libraries (it warns and uses the latest CUDA API if `nvcc`
+is absent). Selection remains CUDA → CL → RUST → CC → RAYON → INTERP.
 
 ### 9.14 Comparative benchmarks (2026-11, RTX 3060 / Ryzen 3900X)
 
@@ -2435,13 +2439,166 @@ CUDA (RTX 3060, same physical GPU; shared ~30% utilization):
 - ViT-B/16 train step (fwd+bwd+Adam, f32, `vit_train_bench`): ~387 ms.
 - 2048³ f32 GEMM kernel-only: 3.6 TFLOP/s generated, 4.8 cuBLAS, 5.8 TF32.
   bf16: 10.7 generated (FFMA) / 9.8 cuBLAS. (Old numbers included the bench's
-  per-iteration D2H copy; see CURRENT_STATUS.)
+  per-iteration D2H copy; see §9.15.)
 - PyTorch 2.14.1+cu126 f32: ~8.5–9.1 ms/iter steady state. The remaining ~3.4x
   gap is cuBLAS/cuDNN + tensor cores; our f32 path is register-tiled FFMA and
   the bf16 TC path cannot tile the prime 197 dimensions without padding.
 - Per-kernel profiler: `AUTORUST_KPROF=1` (syncs per launch; no GPU-counter
   permission needed). Nsight Compute needs
   `NVreg_RestrictProfilingToAdminUsers=0` (or root).
+
+### 9.15 App-level status: clusterfun / DINOv3 (2026-11)
+
+This is the application view (the `clusterfun` DINOv3 clustering port,
+`autorust-backend` branch); the engine-side detail is in §9.10–§9.14 and the
+attention note below. Folded in from the former `CURRENT_STATUS.md`.
+
+Headline, 448 px, 128 frames, `--preprocess none`:
+
+| backend | time | vs candle |
+|---|---|---|
+| CUDA + cuBLAS + fused FA2 | **5.6 s** | candle CUDA 6.35 s |
+| OpenCL + CLBlast + fused FA2 | **8.4 s** | |
+| frozen CPU (AOT plan) | 6.1 s / 16 frames (0.37 s/img) | candle CPU ~0.63 s/img |
+
+With the default preprocessing (260 frames): CUDA 14.1 s, OpenCL 20.1 s,
+candle CUDA 15.4 s. Projected to the real ~10k-image set: ~470 s vs ~590 s.
+All GPU libraries and backends are dynamically loaded; nothing is needed at
+build time. Test counts at the time of writing: `cargo test` default/CL 225,
+`backend_cuda` 253, `backend_clang+freeze` 228.
+
+**GEMM policy.** `LibraryGemm::Auto` on CUDA now always uses cuBLAS for f32
+(1.3x at 2048³, 2.3-3.5x at the flattened batch-8 shapes); 16-bit/CL/CPU keep
+the shape heuristic, and `AUTORUST_GEMM=0` opts out. The kernel-only table and
+the `HostGemm` descriptor are in §9.10b.
+
+**Attention.** Three hand-written CUDA kernels behind the fused path (scalar
+f32, TF32 `mma`, bf16 `mma` with `cp.async` + `ldmatrix`), plus the OpenCL
+kernel and the opt-in `sage` INT8/FP8 variant; see the attention note below.
+The fused launch is a captured step: `Session::capturing` is an ordered
+`Vec<CaptureEntry>` and the JIT replays `JitStep::{Linear, Host}` in order, so
+eager replay reproduces the exact sequence. On CPU the `P·V` product is
+materialised so it becomes a `HostGemm` (12 AV products: ~150 ms → ~7 ms per
+image).
+
+**Settings on `Ctx`.** `src/settings.rs` holds per-context configuration;
+`Settings::from_env()` runs **once per process** via `settings::global()`
+(`OnceLock`), so no lowering path pays a `getenv`. Each `Ctx` clones the
+process defaults at creation and can be reconfigured:
+
+```rust
+let ctx = Ctx::new();
+ctx.borrow_mut().settings.attention = AttentionKind::Sdpa;
+ctx.borrow_mut().settings.library_gemm = LibraryGemm::Never;   // generated only
+let s = Settings::default().with_attention(AttentionKind::Flash).with_beam(4);
+```
+
+Migrated so far: `attention` (`AUTORUST_ATTN`, `FA`), `library_gemm`
+(`AUTORUST_GEMM`/`AUTORUST_CUBLAS`/`AUTORUST_CLBLAST`), `allow_tf32`
+(`AUTORUST_CUBLAS_TF32`, `ALLOW_TF32`), `tensor_cores`
+(`AUTORUST_TENSOR_CORES`), `async_pipeline` (`AUTORUST_ASYNC`), `cpu_gemm_tile`
+(`AUTORUST_CPU_GEMM_*`), `beam` (`BEAM`), `cache` (`CACHELEVEL`), `sdpa_tile`,
+`mm_tile`, `device`. Defaults are "use what is available": `library_gemm` is a
+per-backend `{cuda, cl, cpu}` policy, all `Auto`, downgraded only by an
+explicit opt-out. Precedence: backend-specific env > `AUTORUST_GEMM` > default.
+Presence is separate from policy (`cublas::available()` etc. mean "the library
+loaded"), which is what lets two contexts in one process choose differently.
+`allow_tf32` controls **cuBLAS only** and is **off by default**: TF32 cuBLAS is
+within noise of pedantic f32 at our shapes while changing the model output
+(3.1e-4 vs 1.6e-6 max abs in clusterfun), so it is opt-in. The attention
+kernels use TF32/bf16 `mma` independently of it.
+
+**Process-wide lowering cache.** `to_program` already reused
+arena-independent artifacts from the per-session `ProgCache`; it now also
+checks a capped process-wide cache keyed by `(device, AST content)`. A fresh
+session that rebuilds the same graph hits it instead of re-lowering/rendering/
+compiling: 120/126 hits in the Rayon bench, elementwise 6.2 → 4.5 ms (Rayon)
+and 5.5 → 3.0 ms (RUST). The schedule (`rangeify`/kernel split) still runs per
+realize; a persistent session or the JIT avoids that.
+
+**Device fallback for virtual buffers.** A virtual result carries no device of
+its own. The allocator now uses the **sink-side** device (scanning back through
+the graph and ignoring host creation leaves `PYTHON`/`NPY`/`DISK`), and
+`realize_tensor`/`realize_many` seed the session's `BufTable` device from the
+realized graph. Before, a missing device fell back to `default_device()`: one
+transient CUDA availability-probe failure made the process default CL and
+silently moved a CUDA graph onto the OpenCL/CPU backend (0 GFLOP/s, one core).
+`tests/generated_device.rs` forces `DEFAULT_DEVICE=CPU` and checks that a CUDA
+dot still runs and allocates on CUDA.
+
+**Fresh one-shot reads (`*_fresh`).** `Tensor::to_list_fresh` /
+`realize_fresh` / `to_bytes_fresh` run in a temporary `Session` that inherits
+the tensor's device (`Session::with_device`; `BufTable` uses it for `BUFFER`
+uops that carry no device), so a self-contained graph is scheduled on CUDA/CL
+instead of falling back to the CPU renderer. An already realized tensor only
+copies. A graph whose parameters were realized in **another** session cannot
+reconstruct their data in the temporary one (it would allocate empty
+replacements), so realize with that session first or use the JIT;
+`examples/gemm_bench` realizes in its persistent session.
+`tests/fresh_device.rs` covers both paths.
+
+**Environment variables: one OS read per name.** Every env read in `src/` goes
+through `helpers::env::{get,get_os}`, which caches the raw `OsString` per name
+in a process-wide map; a name is read from the OS **at most once**, whether it
+is a behavioural setting, a toolchain path, or a debug switch, and
+`get`/`get_os` share the entry. Diagnostics/toolchain keep the env interface
+but are cached too: `AUTORUST_{PROF,KPROF,KERNEL_INFO}`, `FROZEN_PROF`,
+`AUTORUST_{CUBLAS,CPU_GEMM,MM,DEVICE,ATTN_DEBUG}`, `TG_DUMP_*`, `TG_DEBUG_*`,
+`TG_{TRACE,RW_TRACE,RW_VISITS}`, `TG_M5_*`, `TG_{CUDA,OCL}_RENDER`,
+`BEAM_DEBUG`, `CACHELEVEL`, `CUDA_PATH`, `RUSTC`, `CC`, `AUTORUST_CACHE_DIR`,
+`XDG_CACHE_HOME`, `HOME`, `AUTORUST_RUST_CPU`, `AUTORUST_CC_ARCH`, the library
+paths and `{CUDA,CL}_COMPILE_CACHE`. `EMULATED_DTYPES` and `RAYON_*` are
+cached the same way; `CLUSTERFUN_{NO_JIT,TIMING}` are app-side. See §9.9.
+
+**RAYON contractions** now use the packed CPU GEMM too: `gemm_device` maps
+`RAYON` to `GemmDevice::Cpu` and `ops_rayon` installs the host dispatcher, so a
+512³ matmul went **118.8 → 5.8 ms (20x)** and matches RUST/CC. Its typed-IR
+schedule is only used for non-contractions (elementwise ~4.5 ms vs RUST
+~3.0 ms). The remaining per-realize cost is the schedule (`sched.rangeify` +
+`kernel_graph` ~1.5 ms), which the JIT avoids.
+
+**Accuracy** (8 images, 448 px, CUDA vs the frozen CPU plan): CPU vs CUDA
+embeddings 1.4e-6 max abs / cosine 0.9999995; CUDA fused attention vs SDPA
+8.0e-7; CL fused attention vs SDPA 7.9e-7; `examples/frozen_check` 5.5e-6.
+Pedantic cuBLAS + TF32 attention is 3.8e-4 / 0.9999971, i.e. the tensor-core
+attention costs about the same as TF32 cuBLAS and is worth it; TF32 cuBLAS is
+not, hence the default.
+
+**Known limitations / next steps.**
+
+1. **SageAttention** is implemented (INT8 on sm_80+, FP8 on sm_89+) but
+   quantizes K per query block, so it loses to TF32 on the 3060 (1.26 vs
+   0.97 ms). Next: a per-head pre-quantization pass (global int8/FP8 K +
+   scales) and SmoothK, then gate on embedding drift over the real ~10k set.
+   The FP8 path needs an Ada/Hopper card to run `tests/sage_int8.rs`.
+   `runtime/sage_flash.rs` (the `dp4a` prototype) is kept only as the measured
+   starting point.
+2. **`freeze` cannot serialise a host-kernel step.** It panics with a clear
+   message; harmless today because the CPU capture never emits one, but a
+   GPU-side AOT plan needs `Step::Host` plus a runtime that can bind raw
+   pointers.
+3. **Attention output buffer** is allocated per layer per batch (~9.7 MB at
+   batch 8). Reusing one scratch buffer should recover some of the gap between
+   the 2.2x kernel win and the observed ~10% end-to-end win.
+4. **GEMM headroom**: the generated f32 kernel now uses TF32 `mma` (5.4 TFLOP/s
+   at 2048³ vs 3.0 FFMA; cuBLAS TF32 5.8), bf16 10.8. The FFMA fallback for
+   tall/wide shapes is still memory-bound (no shared tiling).
+5. Measurement note: the 3900X occasionally carries unrelated load (~11 load
+   average), which inflated one CPU run to 66 s. Re-measure before trusting a
+   single outlier.
+6. The mma fragment layouts are not obvious: for `m16n8k8` the A layout is
+   `(g,2t), (g+8,2t), (g,2t+1), (g+8,2t+1)`, the C layout is the same with
+   registers 1 and 2 swapped; `tests/tc_mma_probe.rs` pins it down.
+
+**Reproduce** (from the `clusterfun` checkout):
+
+```bash
+cargo build --release
+./target/release/clusterfun <images> /tmp/out --device cuda --k 4
+AUTORUST_ATTN=sdpa ./target/release/clusterfun <images> /tmp/out --device cuda --k 4
+FROZEN_PROF=1 ./target/release/clusterfun <images> /tmp/out --device cpu
+AUTORUST_KPROF=1 ./target/release/clusterfun <images> /tmp/out --device cuda
+```
 
 
 ## Attention variants and hardware capability (status note)
