@@ -1,0 +1,22 @@
+{
+  "framework": "tinygrad",
+  "version": "0.14.0",
+  "device": "CUDA",
+  "workload": "vit_infer",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 1587.25,
+  "ms_median": 116.9083,
+  "ms_min": 116.0519,
+  "ms_iqr": 9.4265,
+  "images_per_s": 8.55,
+  "params": 86567656,
+  "name": "tinygrad-cuda-vit_infer-bs1",
+  "variant": "cuda",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:38:20",
+  "notes": ""
+}

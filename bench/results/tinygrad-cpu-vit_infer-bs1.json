@@ -1,0 +1,22 @@
+{
+  "framework": "tinygrad",
+  "version": "0.14.0",
+  "device": "CPU",
+  "workload": "vit_infer",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 0,
+  "iters": 1,
+  "ms_cold": 16041.6649,
+  "ms_median": 14639.3361,
+  "ms_min": 14639.3361,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.07,
+  "params": 86567656,
+  "name": "tinygrad-cpu-vit_infer-bs1",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:38:15",
+  "notes": "single-threaded"
+}

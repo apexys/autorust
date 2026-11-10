@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "vit_infer",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 202.7661,
+  "ms_median": 46.3919,
+  "ms_min": 46.1218,
+  "ms_iqr": 0.4143,
+  "images_per_s": 172.44,
+  "name": "torch-cuda-vit_infer-bs8",
+  "variant": "cuda",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:39:01",
+  "notes": ""
+}

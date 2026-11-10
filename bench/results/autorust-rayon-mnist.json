@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RAYON",
+  "workload": "mnist_train",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 0,
+  "iters": 1,
+  "ms_cold": 744.9045,
+  "ms_median": 347.5793,
+  "ms_min": 347.5793,
+  "ms_iqr": 0.0,
+  "images_per_s": 92.07,
+  "name": "autorust-rayon-mnist",
+  "variant": "RAYON",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:35:51",
+  "notes": "typed interpreter, bs=32 (per-step memory growth)"
+}

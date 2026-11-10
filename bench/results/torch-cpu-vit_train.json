@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "vit_train",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 2,
+  "ms_cold": 987.7677,
+  "ms_median": 616.2968,
+  "ms_min": 591.1709,
+  "ms_iqr": 50.2517,
+  "images_per_s": 1.62,
+  "name": "torch-cpu-vit_train",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:40:32",
+  "notes": ""
+}

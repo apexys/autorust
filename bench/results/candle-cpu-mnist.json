@@ -1,0 +1,21 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CPU",
+  "workload": "mnist_train",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 8,
+  "ms_cold": 4074.204,
+  "ms_median": 3901.9776,
+  "ms_min": 3826.1725,
+  "ms_iqr": 68.0527,
+  "images_per_s": 131.22,
+  "name": "candle-cpu-mnist",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:43:00",
+  "notes": ""
+}

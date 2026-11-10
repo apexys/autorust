@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "mnist_train",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 256.0964,
+  "ms_median": 175.856,
+  "ms_min": 164.6631,
+  "ms_iqr": 16.7473,
+  "images_per_s": 2911.47,
+  "name": "torch-cpu-mnist",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:36:40",
+  "notes": ""
+}

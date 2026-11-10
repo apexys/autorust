@@ -1,0 +1,21 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CPU",
+  "workload": "vit_infer",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 2,
+  "ms_cold": 311.6392,
+  "ms_median": 229.3952,
+  "ms_min": 228.8008,
+  "ms_iqr": 1.1888,
+  "images_per_s": 4.36,
+  "name": "candle-cpu-vit_infer-bs1",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:43:04",
+  "notes": ""
+}

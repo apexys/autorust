@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "vit_infer",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 2,
+  "ms_cold": 579.2312,
+  "ms_median": 701.4502,
+  "ms_min": 585.4038,
+  "ms_iqr": 232.0928,
+  "images_per_s": 11.4,
+  "name": "torch-cpu-vit_infer-bs8",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:38:57",
+  "notes": ""
+}

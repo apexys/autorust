@@ -269,6 +269,55 @@ Accuracy (8 images, 448px, CUDA vs frozen CPU plan): embeddings 1.4e-6 max abs
 tensor-core attention costs about as much as TF32 cuBLAS and is worth it, while
 TF32 cuBLAS is not (hence the default).
 
+## Cross-framework comparison
+
+[`bench/`](bench/README.md) runs the same two models — `beautiful_mnist` CNN
+training and ViT-B/16 — through autorust, candle, torch and tinygrad on CPU and
+CUDA. Inputs are synthetic and device-resident, the timed region is one
+training/inference step (no data loading, evaluation or logging), and each run
+is a fresh process with warmup. Raw JSON and the generated per-run tables are in
+[`bench/results/`](bench/results); these medians are from commit `5cf311a` on
+the environment above (the candle runs were re-taken at `82f6408` with the
+class-token fix; torch is eager, no `torch.compile`; autorust uses `Jit`,
+tinygrad `TinyJit`).
+
+| workload | device | autorust | candle | torch | tinygrad |
+|---|---|---:|---:|---:|---:|
+| MNIST CNN train, bs 512 | CPU | **64.2 ms** (RUST) | 3.90 s | 175.9 ms | 3.46 s |
+| MNIST CNN train, bs 512 | CUDA | 41.0 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| ViT-B/16 infer, bs 1 | CPU | 438 ms (RUST) | 229 ms | **165 ms** | 14.6 s |
+| ViT-B/16 infer, bs 1 | CUDA | 20.5 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
+| ViT-B/16 infer, bs 8 | CPU | 1.86 s (RUST) | 1.40 s | **701 ms** | — |
+| ViT-B/16 infer, bs 8 | CUDA | 207 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
+| ViT-B/16 train, bs 1 | CPU | 2.23 s (RUST) | **243 ms** | 616 ms | — |
+| ViT-B/16 train, bs 1 | CUDA | 300 ms | **19.0 ms** | 43.8 ms | 388 ms |
+
+Reading it:
+
+- **MNIST CUDA**: autorust is 1.4x faster than tinygrad and 3.2x faster than
+  candle; torch (cuDNN + cuBLAS + its fused BN/optimizer path) is 3.1x faster
+  than autorust.
+- **ViT inference CUDA**: torch's cuBLAS/cuDNN path wins by ~2.3x at bs 1 and
+  ~4.5x at bs 8. autorust is ahead of tinygrad at bs 1 (5.7x) but behind it at
+  bs 8; candle's per-op overhead dominates its forward.
+- **ViT training CUDA**: autorust is 1.3x faster than tinygrad, but torch/candle
+  are much faster — cuDNN, tensor cores and library backward kernels are the
+  gap. This is the same f32 FFMA-vs-tensor-core story as the cuDNN note below.
+- **CPU**: autorust's `RUST` backend is 54x/61x faster than tinygrad/candle on
+  MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
+  (ViT train CPU: candle 243 ms, torch 616 ms, autorust 2.23 s). tinygrad's
+  `CPU` backend is single-threaded by design. `RAYON` is the typed interpreter
+  (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
+
+Caveats that matter for the comparison: tinygrad CPU is single-threaded;
+candle-nn's BatchNorm is inference-only, so its MNIST training normalizes with
+batch statistics but does not update running stats; candle's ViT forward
+dominates its step (a manual profile shows ~1.4 ms of autograd against an
+~18 ms forward), so its training and inference medians are nearly equal;
+autorust runs with a warm on-disk kernel cache, while the other frameworks
+compile per process (`ms_cold` is recorded in the JSON but excluded from these
+steady-state medians).
+
 ## Reading the numbers
 
 - This machine occasionally carries unrelated load (load average ~11), which

@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "vit_infer",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 2,
+  "ms_cold": 3770.6177,
+  "ms_median": 1861.8845,
+  "ms_min": 1836.8869,
+  "ms_iqr": 49.9952,
+  "images_per_s": 4.3,
+  "name": "autorust-rust-vit_infer-bs8",
+  "variant": "RUST",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:38:32",
+  "notes": "AUTORUST_ATTN=sdpa"
+}

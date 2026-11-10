@@ -1,0 +1,21 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CUDA",
+  "workload": "vit_infer",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 87.7666,
+  "ms_median": 19.2226,
+  "ms_min": 18.055,
+  "ms_iqr": 0.2803,
+  "images_per_s": 52.02,
+  "name": "candle-cuda-vit_infer-bs1",
+  "variant": "cuda",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:43:05",
+  "notes": ""
+}

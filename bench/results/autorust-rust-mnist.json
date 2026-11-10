@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "mnist_train",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 3,
+  "iters": 10,
+  "ms_cold": 667.579,
+  "ms_median": 64.2222,
+  "ms_min": 61.4811,
+  "ms_iqr": 4.3046,
+  "images_per_s": 7972.32,
+  "name": "autorust-rust-mnist",
+  "variant": "RUST",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:35:48",
+  "notes": ""
+}

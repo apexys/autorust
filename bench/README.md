@@ -64,6 +64,10 @@ Caveats that affect interpretation:
 | tinygrad | v0.14.0 (`6f87158d7`) |
 | candle | 0.11.1 |
 
+The committed results in [`results/`](results) are from commit `5cf311a`
+(2026-11-10); the candle runs were re-taken at `82f6408` after the CUDA
+class-token fix.
+
 ## Running
 
 ```sh

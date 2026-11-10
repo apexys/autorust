@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "vit_infer",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 3125.5847,
+  "ms_median": 20.4827,
+  "ms_min": 19.7633,
+  "ms_iqr": 0.0173,
+  "images_per_s": 48.82,
+  "name": "autorust-cuda-vit_infer-bs1",
+  "variant": "CUDA",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:37:34",
+  "notes": "fused flash"
+}

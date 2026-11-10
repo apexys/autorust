@@ -1,0 +1,22 @@
+{
+  "framework": "tinygrad",
+  "version": "0.14.0",
+  "device": "CPU",
+  "workload": "mnist_train",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 6068.2465,
+  "ms_median": 3464.7751,
+  "ms_min": 3392.306,
+  "ms_iqr": 73.0682,
+  "images_per_s": 147.77,
+  "params": 88044,
+  "name": "tinygrad-cpu-mnist",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:37:16",
+  "notes": "single-threaded"
+}

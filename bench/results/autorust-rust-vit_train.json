@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "vit_train",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 2,
+  "ms_cold": 9413.721,
+  "ms_median": 2230.4618,
+  "ms_min": 2199.7954,
+  "ms_iqr": 61.3329,
+  "images_per_s": 0.45,
+  "name": "autorust-rust-vit_train",
+  "variant": "RUST",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:39:26",
+  "notes": "AUTORUST_ATTN=sdpa"
+}

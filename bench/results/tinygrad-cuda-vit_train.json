@@ -1,0 +1,22 @@
+{
+  "framework": "tinygrad",
+  "version": "0.14.0",
+  "device": "CUDA",
+  "workload": "vit_train",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 15143.4874,
+  "ms_median": 388.4841,
+  "ms_min": 387.0917,
+  "ms_iqr": 8.719,
+  "images_per_s": 2.57,
+  "params": 86567656,
+  "name": "tinygrad-cuda-vit_train",
+  "variant": "cuda",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:41:07",
+  "notes": ""
+}

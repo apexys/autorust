@@ -1,0 +1,21 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CPU",
+  "workload": "vit_train",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 2,
+  "ms_cold": 329.8561,
+  "ms_median": 243.4232,
+  "ms_min": 241.8218,
+  "ms_iqr": 3.2029,
+  "images_per_s": 4.11,
+  "name": "candle-cpu-vit_train",
+  "variant": "cpu",
+  "commit": "5cf311a",
+  "date": "2026-11-10T18:43:15",
+  "notes": ""
+}
