@@ -2003,7 +2003,58 @@ fn build_split_kernels() -> PatternMatcher {
 // ---------- get_kernel_graph (rangeify.py:584) ----------
 
 /// `get_kernel_graph` (rangeify.py:584) — run the full rangeify pipeline and return the kernel SINK.
+/// `get_kernel_graph` with a buffer-limit retry.
+///
+/// The fusion budget in `run_rangeify` is a leaf-buffer heuristic; scheduler-
+/// created stages/outputs can push the final kernel count a little over the
+/// limit. When that happens, rerun with a tighter budget (the graph is not
+/// mutated, only new UOps are interned). A single op that directly reads more
+/// buffers than the limit cannot be split here; after a few attempts the
+/// backend's own assertion reports the actionable error.
 pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> UopId {
+    if max_buffers == usize::MAX {
+        return get_kernel_graph_once(ctx, sink, max_buffers);
+    }
+    let mut budget = max_buffers;
+    let mut out = get_kernel_graph_once(ctx, sink.clone(), budget);
+    for _ in 0..3 {
+        let used = max_kernel_buffers(ctx, &out);
+        if used <= max_buffers || budget <= 2 {
+            break;
+        }
+        let over = used - max_buffers;
+        budget = budget.saturating_sub(over.max(2));
+        out = get_kernel_graph_once(ctx, sink.clone(), budget);
+    }
+    out
+}
+
+/// The largest number of non-ALU `Ops::Param`s in any kernel SINK body.
+fn max_kernel_buffers(ctx: &mut UOpCtx, sink: &UopId) -> usize {
+    let mut max = 0usize;
+    for u in ctx.toposort(sink) {
+        if ctx.op_of(&u) != Ops::Call {
+            continue;
+        }
+        let body = ctx.srcs(&u)[0].clone();
+        if ctx.op_of(&body) != Ops::Sink {
+            continue;
+        }
+        let mut n = 0usize;
+        for v in ctx.toposort(&body) {
+            if ctx.op_of(&v) == Ops::Param
+                && let Arg::Param(p) = ctx.arg_of(&v)
+                && p.addrspace != Some(AddrSpace::Alu)
+            {
+                n += 1;
+            }
+        }
+        max = max.max(n);
+    }
+    max
+}
+
+fn get_kernel_graph_once(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> UopId {
     // (single-device: multi_pm skipped; OPENPILOT_HACKS off)
     let prof = crate::engine::prof::enabled();
     let lap = |name: &'static str, t: Option<std::time::Instant>| {
