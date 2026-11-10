@@ -294,8 +294,10 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   buffers (capped just over the budget) and, when a node would exceed it,
   realizes the largest non-leaf source; the downstream kernel then reads that
   one buffer instead of its whole subtree. `budget = max_buffers * 2/3` leaves
-  headroom for the output/stage temporaries the scheduler adds later. A future
-  OpenGL-compute (or other bounded) backend only has to set this fact.
+  headroom for the output/stage temporaries the scheduler adds later, and
+  `get_kernel_graph` verifies the final kernel Params and retries with a tighter
+  budget if any kernel still exceeds the limit. A future OpenGL-compute (or
+  other bounded) backend only has to set this fact.
   `MetalProgram` still asserts `signature.len() <= 31` with an actionable
   message for the one case the budget cannot fix: a single op directly reading
   more buffers than the limit. The tiny ViT golden (previously 38 buffers) now
@@ -306,7 +308,8 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   f64 intermediates pin themselves to INTERP); no Metal graph-capture path; fused
   `Tensor.custom_kernel` remains the M7 stretch. The fusion budget is a
   conservative heuristic (leaf-buffer union, not the final argument count), so
-  it can over-split a graph; it is a no-op for `usize::MAX`. Port fixes found
+  it can over-split a graph; the post-rangeify retry makes the final bound
+  robust, and the whole pass is a no-op for `usize::MAX`. Port fixes found
   while wiring the examples: `tests/backend_harness.rs` now pins INTERP
   explicitly (`staging_dev(None)` meant "default device", not PYTHON), and the
   MNIST/ViT `load_images`/`load_labels` no longer hold a `RefMut` across Tensor
