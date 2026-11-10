@@ -1058,7 +1058,7 @@ fn remove_bufferize(ctx: &mut UOpCtx, src: UopId, buf: UopId, idx: UopId) -> Opt
             true
         };
         let t = crate::engine::prof::enabled().then(std::time::Instant::now);
-        ctx.toposort_gated(src.clone(), Some(&gate2), true);
+        ctx.visit_gated(src.clone(), &gate2, true);
         if let Some(t) = t {
             crate::engine::prof::add("rb.walk", t.elapsed().as_secs_f64());
         }

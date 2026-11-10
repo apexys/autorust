@@ -2531,6 +2531,39 @@ pub fn arg_from_i128(v: i128) -> Arg {
 impl UOpCtx {
     /// `u.toposort(gate=, enter_calls=)` (ops.py:294) — insertion-ordered list
     /// (python dict semantics), gate returning false prunes the subtree.
+    /// Like [`UOpCtx::toposort_gated`] but only visits nodes; no output list is
+    /// built. `remove_bufferize` walks the whole source subtree just to feed a
+    /// gate and discards the result, so the post-order Vec (thousands of Rc
+    /// clones per call) was pure overhead.
+    pub(crate) fn visit_gated(
+        &self,
+        root: UopId,
+        gate: &dyn Fn(UopId) -> bool,
+        enter_calls: bool,
+    ) {
+        let mut seen: crate::uop::fasthash::FastSet<u32> =
+            crate::uop::fasthash::FastSet::default();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.id()) {
+                continue;
+            }
+            if !gate(id.clone()) {
+                continue;
+            }
+            let skip_body = !enter_calls && matches!(id.op, Ops::Call | Ops::Function);
+            for (i, src) in id.srcs.iter().enumerate().rev() {
+                if skip_body && i == 0 {
+                    continue;
+                }
+                stack.push(src.clone());
+            }
+        }
+    }
+
+    /// `toposort` with a gate: `gate(id)` returning `false` stops descending
+    /// into that node, and the returned list is post-order. With
+    /// `enter_calls = false` the body of `CALL`/`FUNCTION` is not entered.
     pub fn toposort_gated(
         &self,
         root: UopId,

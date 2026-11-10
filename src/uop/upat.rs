@@ -1777,7 +1777,7 @@ pub fn substitute(
     walk: bool,
     enter_calls: bool,
 ) -> UopId {
-    let dvars: HashMap<UopId, UopId> = dvars.into_iter().filter(|(k, v)| k != v).collect();
+    let dvars: FastMap<UopId, UopId> = dvars.into_iter().filter(|(k, v)| k != v).collect();
     if dvars.is_empty() {
         return root;
     }
@@ -1791,7 +1791,7 @@ pub fn substitute(
             None,
             walk,
             enter_calls,
-            CtxVal::Subst(dvars),
+            CtxVal::Subst(dvars.into_iter().collect()),
         )
         .unwrap_or_else(|e| panic!("TGERR: substitute failed: {e}"));
     }
