@@ -1215,11 +1215,17 @@ impl PatternMatcher {
     /// `pm.rewrite(uop, ctx)` — first rule match wins.
     pub fn rewrite(&self, ctx: &mut UOpCtx, uop: UopId, ctxval: &CtxVal) -> Option<UopId> {
         let idxs = self.0.pdict.get(&ctx.op_of(&uop))?;
-        let ler: HashSet<Ops> = ctx.srcs(&uop).iter().map(|s| ctx.op_of(s)).collect();
+        // `early_reject` is rare; building a set for every rule call was a large
+        // share of the scheduler's time (26 us per call on a ViT schedule).
+        let mut ler: Option<Vec<Ops>> = None;
         for &i in idxs {
             let rule = &self.0.rules[i];
-            if !rule.early_reject.iter().all(|o| ler.contains(o)) {
-                continue;
+            if !rule.early_reject.is_empty() {
+                let src_ops = ler
+                    .get_or_insert_with(|| ctx.srcs(&uop).iter().map(|s| ctx.op_of(s)).collect());
+                if !rule.early_reject.iter().all(|o| src_ops.contains(o)) {
+                    continue;
+                }
             }
             let mut stores = Vec::new();
             rule.pat
@@ -1433,7 +1439,7 @@ impl<'a> RewriteCtxt<'a> {
         let mut iters = 0usize;
         while let Some(step) = stack.pop() {
             iters += 1;
-            if iters > 400_000 {
+            if iters > 4_000_000 {
                 return Err("rewrite step limit (walk)".into());
             }
             match step {
@@ -1511,7 +1517,12 @@ impl<'a> RewriteCtxt<'a> {
                 *v.entry(n.clone()).or_default() += 1;
             }
             crate::engine::prof::count("rw.steps");
-            if iters > 400_000 {
+            // Safety guard against a rule pair oscillating. Sized for the
+            // largest real graph (ViT-B training + Adam is ~59k nodes and
+            // needs ~400k steps at ~3 visits/node); `TG_RW_VISITS=1` prints the
+            // per-node histogram, which shows a wide distribution rather than a
+            // hot loop when this fires.
+            if iters > 4_000_000 {
                 return Err("rewrite step limit".into());
             }
             if stack.len() > REWRITE_STACK_LIMIT {

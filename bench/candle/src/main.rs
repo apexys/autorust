@@ -120,11 +120,11 @@ impl Block {
         let h = self.ln1.forward(x)?;
         let qkv = self.qkv.forward(&h)?;
         let shape = (b, n, self.heads, hd);
-        let q = qkv.narrow(2, 0, d)?.reshape(shape)?.transpose(1, 2)?;
-        let k = qkv.narrow(2, d, d)?.reshape(shape)?.transpose(1, 2)?;
-        let v = qkv.narrow(2, 2 * d, d)?.reshape(shape)?.transpose(1, 2)?;
+        let q = qkv.narrow(2, 0, d)?.reshape(shape)?.transpose(1, 2)?.contiguous()?;
+        let k = qkv.narrow(2, d, d)?.reshape(shape)?.transpose(1, 2)?.contiguous()?;
+        let v = qkv.narrow(2, 2 * d, d)?.reshape(shape)?.transpose(1, 2)?.contiguous()?;
         let scores = q
-            .matmul(&k.transpose(2, 3)?)?
+            .matmul(&k.transpose(2, 3)?.contiguous()?)?
             .affine(1.0 / (hd as f64).sqrt(), 0.0)?;
         let p = softmax_last_dim(&scores)?;
         let a = p
@@ -176,7 +176,7 @@ impl Vit {
             .flatten_from(2)?
             .transpose(1, 2)?;
         let cls = self.cls.broadcast_as((b, 1, self.dim))?;
-        let mut x = Tensor::cat(&[&cls, &p], 1)?.add(&self.pos)?;
+        let mut x = Tensor::cat(&[&cls, &p], 1)?.broadcast_add(&self.pos)?;
         for blk in &self.blocks {
             x = blk.forward(&x)?;
         }

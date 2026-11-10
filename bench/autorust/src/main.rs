@@ -277,4 +277,6 @@ fn main() {
         }
         other => panic!("unknown BENCH_WORKLOAD={other} (mnist_train|vit_infer|vit_train)"),
     }
+    autorust::engine::prof::report();
+    println!("compiles: {}", autorust::runtime::device::total_compiles());
 }

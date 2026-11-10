@@ -47,6 +47,10 @@ pub struct UOpCtx {
     /// Per-context configuration (cloned from [`crate::settings::global`] at
     /// creation, so env vars are read once per process).
     pub settings: crate::settings::Settings,
+    /// `_apply_reshape` memo, keyed by the interned input SINK. Identical
+    /// reshape views (the twelve ViT blocks, repeated optimizer kernels) share
+    /// one symbolic rewrite instead of re-running it per occurrence.
+    pub reshape_cache: std::collections::HashMap<UopId, Vec<UopId>>,
 }
 
 impl Default for UOpCtx {
@@ -63,6 +67,7 @@ impl UOpCtx {
             range_idx: 0,
             self_ref: Weak::new(),
             settings: crate::settings::global().clone(),
+            reshape_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -76,6 +81,7 @@ impl UOpCtx {
                 range_idx: 0,
                 self_ref: weak.clone(),
                 settings: crate::settings::global().clone(),
+                reshape_cache: std::collections::HashMap::new(),
             })
         })
     }

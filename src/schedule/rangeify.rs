@@ -2012,6 +2012,21 @@ fn build_split_kernels() -> PatternMatcher {
 /// buffers than the limit cannot be split here; after a few attempts the
 /// backend's own assertion reports the actionable error.
 pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> UopId {
+    if crate::helpers::env::get("AUTORUST_SCHED_PROF").is_some() {
+        let t = std::time::Instant::now();
+        let nodes = ctx.toposort(&sink).len();
+        let out = get_kernel_graph_impl(ctx, sink, max_buffers);
+        eprintln!(
+            "KGPROF in_nodes={nodes} out_nodes={} ms={:.2}",
+            ctx.toposort(&out).len(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        return out;
+    }
+    get_kernel_graph_impl(ctx, sink, max_buffers)
+}
+
+fn get_kernel_graph_impl(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> UopId {
     if max_buffers == usize::MAX {
         return get_kernel_graph_once(ctx, sink, max_buffers);
     }

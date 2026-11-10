@@ -624,12 +624,28 @@ fn apply_reshape(
     }
     axes_out.reverse();
     let sink = crate::tensor::sink(ctx, axes_out);
+    // `indexing.py:152` is `@functools.cache`d; the interned SINK is the key
+    // (identical reshapes across blocks/optimizer steps hit this).
+    if let Some(cached) = ctx.reshape_cache.get(&sink) {
+        return cached.clone();
+    }
     let pm = symbolic()
         .add(&crate::uop::sym::pm_simplify_valid())
         .add(&crate::uop::sym::pm_drop_and_clauses());
-    let out = graph_rewrite(ctx, sink, &pm, false, None, false, false, CtxVal::None)
-        .unwrap_or_else(|e| panic!("TGERR: reshape rewrite: {e}"));
-    ctx.srcs(&out).to_vec()
+    let out = graph_rewrite(
+        ctx,
+        sink.clone(),
+        &pm,
+        false,
+        None,
+        false,
+        false,
+        CtxVal::None,
+    )
+    .unwrap_or_else(|e| panic!("TGERR: reshape rewrite: {e}"));
+    let ret = ctx.srcs(&out).to_vec();
+    ctx.reshape_cache.insert(sink, ret.clone());
+    ret
 }
 
 /// `apply_movement_op` (indexing.py:168) — rngs in, rngs out. Recomputed
