@@ -385,6 +385,12 @@ impl MetalProgram {
     fn new(inner: Rc<MetalInner>, obj: &TinyElf) -> MetalProgram {
         // The compiler seam is the empty identity compiler (like CL): the ELF
         // lib is the rendered Metal source, compiled here at runtime.
+        assert!(
+            !obj.signature
+                .iter()
+                .any(|(_, dt)| *dt == crate::dtype::FLOAT64),
+            "TGERR: Metal has no hardware double; FLOAT64 is lowered to FLOAT32 by the Tensor API (raw f64 UOp graphs are unsupported)"
+        );
         let src = std::str::from_utf8(&obj.lib).expect("TGERR: Metal elf lib not utf8");
         // Apple GPUs expose at most 31 `[[buffer(n)]]` slots. A fused kernel
         // that needs more cannot be compiled; fail with an actionable message
