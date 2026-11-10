@@ -333,8 +333,9 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   Tensor API lowers `FLOAT64` to `FLOAT32` on METAL at creation/`cast`/const/
   rand/readout (`creation::metal_lower_f64`), and `to_list::<f64>` converts the
   realized f32 data on the host. f64 graphs therefore compile and run, with
-  f32 precision; genuine f64 remains available on INTERP/CPU/CL/CUDA. `from_bytes`
-  converts f64 payloads to f32 on the way in. Gate: `tests/metal_f64.rs`.
+  f32 precision; the first fallback in a process prints a one-time warning.
+  Genuine f64 remains available on INTERP/CPU/CL/CUDA. `from_bytes` converts
+  f64 payloads to f32 on the way in. Gate: `tests/metal_f64.rs`.
   Low-level `UOp` graphs that bypass the Tensor API can still reach the Metal
   compiler with a raw f64 param.
 - **Known gaps.** No Metal graph-capture path; fused

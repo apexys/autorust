@@ -31,8 +31,18 @@ pub static UNIQUE_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI
 
 /// Metal has no hardware `double`. The public Tensor API lowers `FLOAT64` to
 /// `FLOAT32` on METAL (f32 precision); use CUDA/CPU/INTERP for true f64.
+///
+/// A one-time warning is printed the first time this fallback is used in a
+/// process, so a f64 model does not silently lose precision.
 pub fn metal_lower_f64(dev: &str, dt: DTypeId) -> DTypeId {
     if dt == dtype::FLOAT64 && crate::runtime::device::canonicalize_device_name(dev) == "METAL" {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "WARNING: METAL has no hardware f64; lowering FLOAT64 to FLOAT32 \
+                 (f32 precision). Use INTERP/CPU/CL/CUDA for true f64."
+            );
+        });
         dtype::FLOAT32
     } else {
         dt
@@ -608,19 +618,19 @@ pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<
         "TGERR: cannot create Tensor from empty bytes"
     );
     let dev = canonicalize_device(device);
-    let (dtype, converted) = if dtype == dtype::FLOAT64
-        && crate::runtime::device::canonicalize_device_name(&dev) == "METAL"
-    {
+    let target = metal_lower_f64(&dev, dtype);
+    let converted = if target != dtype {
         assert_eq!(data.len() % 8, 0, "TGERR: f64 bytes must be 8-byte aligned");
         let mut out = Vec::with_capacity(data.len() / 2);
         for c in data.chunks_exact(8) {
             let v = f64::from_le_bytes(c.try_into().expect("8-byte f64 chunk"));
             out.extend_from_slice(&(v as f32).to_le_bytes());
         }
-        (dtype::FLOAT32, out)
+        out
     } else {
-        (dtype, data.to_vec())
+        data.to_vec()
     };
+    let dtype = target;
     let size = SVal::I((converted.len() / dtype.itemsize()) as i128);
     let _ = &size;
     let ret = new_buffer(ctx, "PYTHON", size, dtype, None);

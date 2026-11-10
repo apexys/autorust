@@ -254,8 +254,11 @@ first tensor/realize.
   Objective-C runtime and Metal framework; shaders are compiled at runtime with
   `newLibraryWithSource:`, so no Xcode/Metal toolchain is needed. Buffers use
   shared storage (host upload/download is a CPU copy), and the allocator
-  supports real offset views. f64 is lowered to f32 on METAL (f32 precision);
-  use INTERP/CPU/CL/CUDA for true f64. Native `simdgroup` 8x8 tensor cores cover
+  supports real offset views. **f64 is lowered to f32 on METAL** (no hardware
+  `double`): the first use prints a one-time warning, and `to_list::<f64>`
+  converts the realized f32 data on the host. This is f32 precision; use
+  `INTERP`/`CPU`/`CL`/`CUDA` when true f64 is required. Native `simdgroup` 8x8
+  tensor cores cover
   f32/f16/bf16 matmuls (≈1.3-1.7x over the FFMA path on an M2). A
   MetalPerformanceShaders host-GEMM path also exists (f32/f32, f16/f16, f16
   inputs with f32 accumulation); it is opt-in via `AUTORUST_MPS=all`, because
