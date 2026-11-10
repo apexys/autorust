@@ -181,7 +181,10 @@ impl Vit {
             x = blk.forward(&x)?;
         }
         let x = self.norm.forward(&x)?;
-        self.head.forward(&x.narrow(1, 0, 1)?.squeeze(1)?)
+        // CUDA matmul requires contiguous inputs; the class-token slice is a
+        // strided view for batch > 1.
+        self.head
+            .forward(&x.narrow(1, 0, 1)?.squeeze(1)?.contiguous()?)
     }
 }
 
