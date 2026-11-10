@@ -81,7 +81,7 @@ See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.
 | ViT-B/16 infer, bs 8 | CPU | 1861.9 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
 | ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
 | ViT-B/16 train, bs 1 | CPU | 2230.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 216.4 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| ViT-B/16 train, bs 1 | CUDA | 179.4 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 
 ## Scope and limitations

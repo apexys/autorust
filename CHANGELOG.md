@@ -24,4 +24,7 @@ Initial release.
 - Persistent rendered kernels: a warm process skips the codegen pipeline.
 - `ViT::forward_with` / `TransformerBlock::forward_with`: eval-mode inference
   dispatches to the fused attention kernels.
+- Summed gradient contractions (e.g. `dQ@Wq + dK@Wk + dV@Wv`) are materialized
+  per contraction so each reaches the matmul tiler instead of one scalar
+  multi-reduce kernel.
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.

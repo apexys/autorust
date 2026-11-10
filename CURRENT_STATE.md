@@ -2976,3 +2976,32 @@ MKL), train 2230 vs 616 (3.6x).
 Gates: `cargo test --release` (78 binaries), `cargo clippy --all-targets`,
 `cargo rustdoc --lib -- -W missing_docs`, `cargo build --no-default-features`;
 the conv and ViT-path differentials pass from a warm render cache.
+
+### 9.21 Split summed contractions before kernel splitting (2026-11) — DONE
+
+The largest remaining ViT training kernel was the attention input gradient
+`dQ@Wq + dK@Wk + dV@Wv`: three contractions summed into one store. The
+scheduler fused them into a single kernel with three reductions; `matmul_ranges`
+declines multi-reduce kernels, so the generic heuristic emitted three scalar
+loops (5.7 ms/layer, 30% of the step). Extending `matmul_ranges` to multi-reduce
+sums was tried and **regressed** (216 -> 459 ms: the shared-output tile made the
+single-reduce kernels it also accepted much worse), so that approach was
+dropped.
+
+Instead `pm_generate_realize_map` now marks both operands of an
+`ADD(contraction, contraction)` for realization. Each contraction gets its own
+STAGE, becomes a single-reduce store that the matmul tiler / host GEMM claims,
+and the sum is an elementwise kernel. `contraction_root` unwraps casts,
+movement ops and the reduce body's view down to the `MUL`; the rule stays
+narrow on purpose (a version that also descended through ADD trees measured
+181.2 ms, and through all ops 209.6 ms, both worse than the direct-operand
+rule):
+
+- ViT-B/16 training CUDA: **216.4 -> 179.4 ms** (torch 43.8, tinygrad 388.5).
+- ViT-B/16 training CPU `RUST`: 2230 -> 2067 ms.
+- Warm cold start still improved (6013 -> **2541 ms**) because three plain GEMM
+  kernels render cheaper than the fused multi-reduce one.
+- Inference/MNIST unchanged (the rule only fires on summed contractions).
+
+Gates: full `cargo test --release` (78 binaries, including the grad/optim
+goldens), clippy, rustdoc, `--no-default-features`.

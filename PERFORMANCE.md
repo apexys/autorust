@@ -72,6 +72,11 @@ heuristic:
 - **Tensor cores** (CUDA, `sm_80+`): f32 uses the TF32 `mma` layout and bf16 the
   bf16 layout, gated on `Settings.tensor_cores`. An output-aspect gate
   (max/min ≤ 2) keeps the FFMA tiling for tall/wide shapes, where WMMA loses.
+- **Sums of contractions** are materialized per contraction before kernel
+  splitting (`pm_generate_realize_map`), so each becomes a single-reduce GEMM.
+  The ViT attention input gradient (`dQ@Wq + dK@Wk + dV@Wv`) used to be one
+  scalar three-reduction kernel (5.7 ms/layer); the split took the training
+  step from 216 to 179 ms.
 
 The generated f32 kernel is memory-bound at large K (no shared-memory tiling;
 every block re-reads A/B from global). Kernel-only (2026-11, `SYNC=1`,
@@ -300,10 +305,10 @@ Warm-cache cold start (`ms_cold`, same process protocol as the table):
 
 | workload | before | now |
 |---|---|---|
-| MNIST CNN train, bs512 | 505 ms | **205 ms** |
-| ViT-B/16 infer, bs1 | 697 ms | **456 ms** |
-| ViT-B/16 infer, bs8 | 1279 ms | **721 ms** |
-| ViT-B/16 train, bs1 | 6013 ms | **2602 ms** |
+| MNIST CNN train, bs512 | 505 ms | **214 ms** |
+| ViT-B/16 infer, bs1 | 697 ms | **448 ms** |
+| ViT-B/16 infer, bs8 | 1279 ms | **780 ms** |
+| ViT-B/16 train, bs1 | 6013 ms | **2541 ms** |
 
 `bench/run.py` warms the on-disk caches with a discarded `ITERS=0` process
 before the measured one, matching the warm-cache protocol used for the other
@@ -316,9 +321,10 @@ training and ViT-B/16 — through autorust, candle, torch and tinygrad on CPU an
 CUDA. Inputs are synthetic and device-resident, the timed region is one
 training/inference step (no data loading, evaluation or logging), and each run
 is a fresh process with warmup. Raw JSON and the generated per-run tables are in
-[`bench/results/`](bench/results); these medians are from commit `d6050aa`
-(autorust CUDA rows, re-taken after the codegen and fused-inference changes in
-CURRENT_STATE §9.20; the CPU rows are from `5cf311a`) on the environment above
+[`bench/results/`](bench/results); these medians are from commit `75f9bec`
+(autorust CUDA rows, re-taken after the codegen, fused-inference and
+contraction-splitting changes in CURRENT_STATE §9.20-§9.21; the CPU rows are
+from `5cf311a`) on the environment above
 (the candle runs were re-taken at `82f6408` with the class-token fix; torch is
 eager, no `torch.compile`; autorust uses `Jit`, tinygrad `TinyJit`).
 
@@ -333,7 +339,7 @@ All step times are milliseconds (lower is better).
 | ViT-B/16 infer, bs 8 | CPU | 1861.9 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
 | ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
 | ViT-B/16 train, bs 1 | CPU | 2230.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 216.4 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| ViT-B/16 train, bs 1 | CUDA | 179.4 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
@@ -345,11 +351,10 @@ Reading it:
   `ViT::forward_with`, so torch's cuBLAS/cuDNN path is only ~1.5x ahead at
   both batches. autorust is 7.3x/2.0x faster than tinygrad and ~1.7x faster
   than candle at bs 8.
-- **ViT training CUDA**: autorust is 1.8x faster than tinygrad and 4.9x slower
-  than torch. The remaining gap is the f32 backward: the q/k/v weight
-  gradients are fused into a multi-reduce kernel the matmul tiler declines,
-  and torch uses cuBLAS/cuDNN throughout. This is the cuDNN/tensor-core story
-  below, not a scheduling cost (see §9.20).
+- **ViT training CUDA**: autorust is 2.2x faster than tinygrad and 4.1x slower
+  than torch. The summed q/k/v input gradient is now split into three
+  single-reduce GEMMs (216 -> 179 ms); the rest of the gap is the f32 backward
+  against cuBLAS/cuDNN, the cuDNN/tensor-core story below (see §9.20-§9.21).
 - **CPU**: autorust's `RUST` backend is 54x/61x faster than tinygrad/candle on
   MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
   (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 2230.5 ms). tinygrad's
