@@ -1077,30 +1077,29 @@ fn remove_bufferize(ctx: &mut UOpCtx, src: UopId, buf: UopId, idx: UopId) -> Opt
         return None;
     }
     // if any reduces access a buffer, don't remove this buffer
-    let mut buffer_in_reduce = false;
+    // Any PARAM/STAGE/AFTER reachable from the reduces blocks removal. Stop at
+    // the first hit instead of materializing the full post-order list.
+    let hit = std::cell::Cell::new(false);
     {
         let reduce_srcs: Vec<UopId> = reduces.iter().map(|r| ctx.srcs(r)[0].clone()).collect();
         let sink = crate::tensor::sink(ctx, reduce_srcs);
-        let buf_gate = |_x: UopId| -> bool {
-            if buffer_in_reduce {
+        let buf_gate = |x: UopId| -> bool {
+            if hit.get() {
+                return false;
+            }
+            if matches!(ctx.op_of(&x), Ops::Param | Ops::Stage | Ops::After) {
+                hit.set(true);
                 return false;
             }
             true
         };
-        // visit and set flag: any PARAM/STAGE/AFTER inside => buffer_in_reduce
         let t = crate::engine::prof::enabled().then(std::time::Instant::now);
-        let ts = ctx.toposort_gated(sink, Some(&buf_gate), true);
+        ctx.visit_gated(sink, &buf_gate, true);
         if let Some(t) = t {
             crate::engine::prof::add("rb.reduce_walk", t.elapsed().as_secs_f64());
         }
-        for x in ts {
-            if matches!(ctx.op_of(&x), Ops::Param | Ops::Stage | Ops::After) {
-                buffer_in_reduce = true;
-                break;
-            }
-        }
     }
-    if buffer_in_reduce {
+    if hit.get() {
         return None; // PCONTIG=0
     }
     // if it makes it here, the bufferize is removed
