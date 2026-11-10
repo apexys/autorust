@@ -303,12 +303,38 @@ fn build_pm_generate_realize_map() -> PatternMatcher {
                 None
             }),
         ),
+        // A contraction with a pointwise prologue on one operand
+        // (`where(mask, dY, 0) @ W`, `(dY ∘ gelu'(x)) @ W`) cannot use the
+        // library GEMM: the operand is not an affine buffer and the generated
+        // kernel recomputes the prologue per output column. Record it here and
+        // `convert_reduce_to_ranges` stages it once.
+        (
+            UPat::op_var(vec![Ops::Reduce]).with_src_any_len(true).named("r"),
+            r_idx(|ictx, ctx, st| {
+                let r = crate::uop::sym::sget(st, "r");
+                let (x, y) = contraction_operands(ctx, r.clone())?;
+                let (sx, sy) = (is_simple_load(ctx, x.clone()), is_simple_load(ctx, y.clone()));
+                if sx == sy {
+                    return None;
+                }
+                let p = if sx { y } else { x };
+                // Skip operands that are already materialized (a boundary from
+                // another rule): re-staging them would put two stores in the
+                // producer kernel.
+                if matches!(
+                    ctx.op_of(&p),
+                    Ops::Param | Ops::Buffer | Ops::After | Ops::Stage | Ops::Store | Ops::Index
+                ) {
+                    return None;
+                }
+                ictx.realize_map.insert(p, None);
+                None
+            }),
+        ),
     ];
     PatternMatcher::new(rules)
 }
 
-/// The `REDUCE(ADD, MUL(a, b))` node of a contraction, looking through casts and
-/// movement ops. `None` for anything else (so residual adds are not split).
 /// The `REDUCE(ADD, MUL(a, b))` node of a contraction, looking through casts,
 /// movement ops and the reduce body's view. `None` for anything else (so
 /// residual adds and other reductions are not split).
@@ -343,6 +369,51 @@ fn contraction_root(ctx: &UOpCtx, u: UopId) -> Option<UopId> {
         }
     }
     None
+}
+
+/// The `(a, b)` operands of a `REDUCE(ADD, view(MUL(a, b)))`.
+fn contraction_operands(ctx: &UOpCtx, r: UopId) -> Option<(UopId, UopId)> {
+    if ctx.op_of(&r) != Ops::Reduce {
+        return None;
+    }
+    let mut mul = ctx.srcs(&r)[0].clone();
+    for _ in 0..8 {
+        match ctx.op_of(&mul) {
+            Ops::Cast
+            | Ops::Contiguous
+            | Ops::Reshape
+            | Ops::Permute
+            | Ops::Pad
+            | Ops::Expand
+            | Ops::Shrink
+            | Ops::Flip
+            | Ops::Bitcast
+            | Ops::Mselect => mul = ctx.srcs(&mul)[0].clone(),
+            _ => break,
+        }
+    }
+    if ctx.op_of(&mul) == Ops::Mul && ctx.srcs(&mul).len() == 2 {
+        let srcs = ctx.srcs(&mul).to_vec();
+        Some((srcs[0].clone(), srcs[1].clone()))
+    } else {
+        None
+    }
+}
+
+/// A buffer/param view the library GEMM can read directly (no ALU).
+fn is_simple_load(ctx: &UOpCtx, u: UopId) -> bool {
+    let mut cur = u;
+    for _ in 0..8 {
+        match ctx.op_of(&cur) {
+            Ops::Cast | Ops::Contiguous | Ops::Reshape | Ops::Permute | Ops::Pad | Ops::Expand
+            | Ops::Shrink | Ops::Flip | Ops::Bitcast | Ops::Mselect => {
+                cur = ctx.srcs(&cur)[0].clone();
+            }
+            Ops::Param | Ops::Buffer | Ops::After => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 // ---------- pm_apply_rangeify rules ----------
@@ -488,6 +559,161 @@ fn convert_pad_to_where(ictx: &mut IndexingContext, ctx: &mut UOpCtx, x: UopId) 
     Some(w)
 }
 
+/// Stage the pointwise prologue recorded by `pm_generate_realize_map` inside a
+/// reduce body: the reduce-body equivalent of
+/// `create_bufferize_and_index_srcs`, run before the body is movement-folded.
+fn stage_reduce_prologue(ictx: &mut IndexingContext, ctx: &mut UOpCtx, x: UopId) -> UopId {
+    if ctx.op_of(&x) != Ops::Reduce {
+        return x;
+    }
+    let body = ctx.srcs(&x)[0].clone();
+    let nb = stage_prologue_in_body(ictx, ctx, body.clone());
+    if nb == body {
+        return x;
+    }
+    let (op, dt, mut srcs, arg, tag) = ctx.snapshot(&x);
+    srcs[0] = nb.clone();
+    let nx = ctx.uop_tag(op, Some(dt), srcs, arg, tag);
+    if let Some(rm) = ictx.range_map.get(&x).cloned() {
+        ictx.range_map.insert(nx.clone(), rm);
+    }
+    if let Some(rm) = ictx.range_map.get(&body).cloned() {
+        ictx.range_map.insert(nb, rm);
+    }
+    nx
+}
+
+/// Descend the body's casts/movement chain to the `MUL` and replace a recorded
+/// pointwise operand with `INDEX(STAGE(operand))` (all of its axes realized).
+fn stage_prologue_in_body(ictx: &mut IndexingContext, ctx: &mut UOpCtx, u: UopId) -> UopId {
+    let op = ctx.op_of(&u);
+    if op != Ops::Mul {
+        let is_wrapper = matches!(
+            op,
+            Ops::Cast
+                | Ops::Contiguous
+                | Ops::Reshape
+                | Ops::Permute
+                | Ops::Pad
+                | Ops::Expand
+                | Ops::Shrink
+                | Ops::Flip
+                | Ops::Bitcast
+                | Ops::Mselect
+        );
+        if !is_wrapper || ctx.srcs(&u).is_empty() {
+            return u;
+        }
+        let inner = ctx.srcs(&u)[0].clone();
+        let ni = stage_prologue_in_body(ictx, ctx, inner.clone());
+        if ni == inner {
+            return u;
+        }
+        let (op, dt, mut srcs, arg, tag) = ctx.snapshot(&u);
+        srcs[0] = ni.clone();
+        let nu = ctx.uop_tag(op, Some(dt), srcs, arg, tag);
+        if let Some(rm) = ictx.range_map.get(&u).cloned() {
+            ictx.range_map.insert(nu.clone(), rm);
+        }
+        if let Some(rm) = ictx.range_map.get(&inner).cloned() {
+            ictx.range_map.insert(ni, rm);
+        }
+        return nu;
+    }
+    let srcs = ctx.srcs(&u).to_vec();
+    let Some(pos) = srcs.iter().position(|s| {
+        ictx.realize_map.contains_key(s)
+            && ictx.range_map.contains_key(s)
+            && !matches!(
+                ctx.op_of(s),
+                Ops::Param | Ops::Buffer | Ops::After | Ops::Stage | Ops::Store | Ops::Index
+            )
+    }) else {
+        return u;
+    };
+    let p = srcs[pos].clone();
+    // Only a real contraction: `A[m,k] * B[k,n]` has differently-shaped
+    // operands, while `sum(x * mask)` (same shape) does not. Ranges are not
+    // attached yet at this stage, so shapes are the available discriminator.
+    // Only a real contraction: `A[m,k] * B[k,n]` has differently-shaped
+    // operands, while `x*x` (LRN/Lp) and masked sums do not.
+    let other_pos = 1 - pos;
+    let other = srcs[other_pos].clone();
+    // A movement-view operand is only worth staging while training: the
+    // backward re-reads it, while an eval forward would just pay the copy.
+    let is_view = matches!(
+        ctx.op_of(&p),
+        Ops::Permute
+            | Ops::Reshape
+            | Ops::Shrink
+            | Ops::Pad
+            | Ops::Expand
+            | Ops::Flip
+            | Ops::Mselect
+            | Ops::Contiguous
+    );
+    let (sp, so) = (
+        ctx.shape(&p).ok().flatten().map(|x| x.to_vec()),
+        ctx.shape(&other).ok().flatten().map(|x| x.to_vec()),
+    );
+    if sp.is_none() || sp == so {
+        return u;
+    }
+    // A movement-view operand is only worth staging while training (the
+    // backward re-reads it; an eval forward would just pay the copy), and only
+    // for small tensors: staging large conv/pool views increases peak memory
+    // enough to OOM MNIST at bs512.
+    if is_view {
+        let numel = sp
+            .as_ref()
+            .map(|s| s.iter().map(|d| d.clone().as_i128_or_panic()).product::<i128>())
+            .unwrap_or(0);
+        if !crate::helpers::context::training() || numel > 4_000_000 {
+            return u;
+        }
+    }
+    let (Some((body_in, _)), Some((_, p_out))) = (
+        ictx.range_map.get(&u).cloned(),
+        ictx.range_map.get(&p).cloned(),
+    ) else {
+        return u;
+    };
+    let src_rngs = broadcast_rngs(ctx, u.clone(), p.clone(), &body_in);
+    if p_out.is_empty() || src_rngs.is_empty() {
+        return u;
+    }
+    let realized: Vec<i64> = (0..p_out.len() as i64).collect();
+    ictx.realize_map.insert(p.clone(), Some(realized.clone()));
+    ictx.non_removable.insert(p.clone());
+    let opts = bufferize_opts(
+        dev_to_arg(device_of(ctx, p.clone())),
+        Some(crate::dtype::AddrSpace::Global),
+        false,
+    );
+    let mut stage_srcs = vec![p.clone()];
+    stage_srcs.extend(p_out.iter().cloned());
+    let stage = ctx.uop(
+        Ops::Stage,
+        Some(ctx.dt_of(&p)),
+        stage_srcs,
+        Arg::Data(opts_data(&opts)),
+    );
+    let idx_rngs: Vec<UopId> = src_rngs
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| realized.contains(&(*j as i64)))
+        .map(|(_, r)| r.clone())
+        .collect();
+    let new_p = ctx.index(stage, idx_rngs);
+    let (op, dt, mut new_srcs, arg, tag) = ctx.snapshot(&u);
+    new_srcs[pos] = new_p;
+    let nu = ctx.uop_tag(op, Some(dt), new_srcs, arg, tag);
+    if let Some(rm) = ictx.range_map.get(&u).cloned() {
+        ictx.range_map.insert(nu.clone(), rm);
+    }
+    nu
+}
+
 /// `convert_reduce_to_reduce_with_ranges` (indexing.py:113).
 fn convert_reduce_to_ranges(
     ictx: &mut IndexingContext,
@@ -509,6 +735,10 @@ fn convert_reduce_to_ranges(
     if !ictx.range_map.contains_key(&x) {
         panic!("TGERR: REDUCE has no ranges in rangeify, UOp verification failed");
     }
+    // Stage a recorded pointwise prologue before the body is folded into
+    // movement ops by `create_bufferize_and_index_based_on_ranges`; after that
+    // the generic realize pass can no longer see the operand.
+    let x = stage_reduce_prologue(ictx, ctx, x);
     let bx = create_bufferize_and_index_based_on_ranges(ictx, ctx, x.clone())?;
     let (in_rngs, _) = ictx.range_map[&x].clone();
     let new_ranges: Vec<UopId> = in_rngs[..n_axes as usize].to_vec();
