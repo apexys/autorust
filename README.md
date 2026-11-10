@@ -1,12 +1,91 @@
 # autorust
 
-A faithful Rust port of [tinygrad](https://github.com/tinygrad/tinygrad) v0.14:
-an interned UOp graph, a rangeify scheduler, a codegen pipeline, and native
-CPU/OpenCL/CUDA/Metal backends. The Python tree is the reference oracle; Rust
-never imports Python at runtime.
+A multi-backend GPU-compute / ML framework!
+Train and infer on CUDA, OpenCL, Metal or CPU!
+Inspired and based on tinygrad!
 
-This README is a working draft. The maintainer will rewrite it; the technical
-statements below are the ones that matter.
+It includes:
+- A `Tensor` type for dynamic multi-dimension, multi-datatype arrays
+- A `nn` library of common ML layers (Linear, Conv, LSTM, ...) and Optimizers (Adam, SGD, LARS, ...)
+- A dynamic graph compiler/scheduler (adapted from tinygrad's) with codegen
+- GPU backends for CUDA, OpenCL and Metal
+- "Just-in-time" CPU backends for Rust and C-compilers and an interpreted RAYON backend
+- AOT CPU compilation (embed ML models as Rust code with a build script)
+- Support for accelerated GEMM and two types of FlashAttention
+
+This started as a somewhat faithful automated ("vibe-coded") Rust port of [tinygrad](https://github.com/tinygrad/tinygrad) v0.14 and now has gained a few more features. This README's introduction is the only thing I really wrote by hand, the rest was mostly done using Qwen 3.8 27b and DeepSeek v4.1 Flash, both hosted locally (no Claude or OpenAI). I have tested this extensively and am using this in production, but there might be rough edges.
+
+## Quick start
+
+
+```rust
+use autorust::engine::session::Session;
+use autorust::tensor::{Ctx, Tensor};
+
+let ctx = Ctx::new(); // Contexts hold your compute graph
+let mut sess = Session::new(); // Sessions hold buffers
+let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None); //Create tensor on default device
+let b = Tensor::from_slice(&ctx, &[10.0f32, 20.0, 30.0], None, None);
+let c = &a + &b; // or a.add(&b)
+assert_eq!(c.to_list::<f32>(&mut sess), vec![11.0, 22.0, 33.0]); //to_list allocates a new buffer (or reuses one from your session), then triggers the computation
+```
+
+Also look at our examples, especially:
+- `xor.rs` Train a dense NN to learn the XOR function
+- `frozen_vit` Include a ViT-B/16 as precompiled Rust-code in your application
+
+## Dependencies
+
+I've held this crate light on dependencies on purpose.
+At minimum, we use `nanoserde` for graph serialization.
+With other backends than just `INTERP`, we also use `bytemuck` and `rayon`.
+OpenCL pulls in `libloading` and cuda depends on `cudarc` (but dynamically loaded, so no cuda needed on the compiling machine). `METAL` is based on several of the `objc2`-crates.
+
+If you want to use the `RUST` backend, you need `rustc` installed, same with a c compiler for the `CC` backend. Both fall back to the multithreaded `RAYON` backend if not available.
+
+## Status
+
+Basic inference and training work. I am using this as a compute layer for several applications at the GEOMAR Helmholtz Centre for Ocean Research right now.
+The ergonomics are fine, but I am still looking at a few places where they could be improved.
+Graph compilation is single threaded for now and could be faster.
+There's also a lot of optimization potential in the backends (and I'd like to add a Vulkan one).
+ONNX is relatively incomplete and I'd like to add an exporter as well.
+
+## Performance
+
+`autorust` is pretty okay right now (fast enough to be usable).
+We integrate with native GEMM libraries, if available (cuBLAS, clBLAS, ...) and have fast paths for attention and to a lesser extent convolutions.
+
+Here's a benchmark (see `bench`) comparing the performance across workloads and frameworks:
+
+(CPU: Ryzen 9 3900X, 64GB of DDR4 RAM, RTX 3060 12GB, Ubuntu 26.04)
+
+
+
+## Further Reading
+
+(all of these documents are LLM-written)
+
+Look at CONFIGURATION.md for environment variables and other configuration options.
+
+PERFORMANCE.md documents how fast we are and how we get there.
+
+FREEZE.md shows how to include a "precompiled" model into your application
+
+ONNX-Compat is about the compatibility with ONNX
+
+INDEXING is about how tensor indexing works (especially with Rust types)
+
+CURRENT_STATE is updated by the LLM as it works on the code
+
+AGENTS.md is for the LLM to tell it how to work on the code
+
+## License
+
+MIT. This is a derivative work of tinygrad (MIT); see [`LICENSE`](LICENSE).
+
+
+# OLD CONTENT
 
 ## Status
 
@@ -37,17 +116,6 @@ for the full status and known gaps.
 cargo run --release --example xor
 ```
 
-```rust
-use autorust::engine::session::Session;
-use autorust::tensor::{Ctx, Tensor};
-
-let ctx = Ctx::new();
-let mut sess = Session::new();
-let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);
-let b = Tensor::from_slice(&ctx, &[10.0f32, 20.0, 30.0], None, None);
-let c = &a + &b; // or a.add(&b)
-assert_eq!(c.to_list::<f32>(&mut sess), vec![11.0, 22.0, 33.0]);
-```
 
 Weights can be streamed from safetensors without loading the whole checkpoint:
 
@@ -72,7 +140,7 @@ let out = model.run(&[("image", image)])?;
 let depth = out["depth"].to_list::<f32>(model.session_mut());
 ```
 
-See [`ONNX-Compat.md`](https://github.com/apexys/autorust/blob/main/ONNX-Compat.md) for the supported operator matrix and
+See [`ONNX-Compat.md`](ONNX-Compat.md) for the supported operator matrix and
 known gaps (no `Scatter*`/`NonZero`, quantized/training ops are T2).
 
 Runnable demos: `examples/xor.rs`, `examples/mnist.rs`,
@@ -214,13 +282,14 @@ compiles the emitted crate and diffs it against eager).
 
 | Feature | Default | What it enables |
 |---|---|---|
+| `capi` | yes | Small C ABI used by the development-only Python bridge. |
 | `backend_rayon` | yes | Multithreaded CPU backend (`RAYON`), via `rayon`/`bytemuck`. |
 | `backend_rust` | yes | Native CPU backend (`RUST`): Rust kernel source → `rustc` cdylib → `libloading`. |
 | `backend_clang` | yes | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |
 | `backend_cl` | yes | OpenCL backend (`CL`), dynamically loaded at run time. |
 | `backend_metal` | yes | Metal backend (`METAL`), macOS only; links the OS frameworks, no Xcode needed. |
-| `backend_cuda` | yes (Linux/Windows) | CUDA backend (`CUDA`), via `cudarc`; dynamically loaded, no build-time CUDA libs. Gated off on other targets. |
-| `freeze` | yes | Capture/emit frozen CPU plans (`autorust::freeze`); enables `backend_rust`. |
+| `backend_cuda` | no | CUDA backend (`CUDA`), via `cudarc`; dynamically loaded, no build-time CUDA libs. |
+| `freeze` | no | Capture/emit frozen CPU plans (`autorust::freeze`); enables `backend_rust`. |
 | `trace` | no | Rule-firing trace (`TG_TRACE`). |
 | `dump` | no | Debug dumps and pipeline truncation (`TG_*` knobs). |
 
@@ -326,9 +395,9 @@ first tensor/realize.
   — canonical status, design decisions, and milestone history.
 - [`INDEXING.md`](https://github.com/apexys/autorust/blob/main/INDEXING.md) — the
   `getitem` index DSL.
-- [`ONNX-Compat.md`](https://github.com/apexys/autorust/blob/main/ONNX-Compat.md) — the ONNX T0/T1/T2 operator and feature
+- [`ONNX-Compat.md`](ONNX-Compat.md) — the ONNX T0/T1/T2 operator and feature
   matrix, runner API, validation results, and known gaps.
 
 ## License
 
-MIT. This is a derivative work of tinygrad (MIT); see [`LICENSE`](https://github.com/apexys/autorust/blob/main/LICENSE).
+MIT. This is a derivative work of tinygrad (MIT); see [`LICENSE`](LICENSE).
