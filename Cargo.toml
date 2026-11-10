@@ -118,7 +118,7 @@ rayon = { version = "1.12", optional = true }
 bytemuck = { version = "1", optional = true }
 # Runtime loading of the `rustc`-built kernel cdylibs (`backend_rust`),
 # portable C shared libraries (`backend_clang`), and `libOpenCL` (`backend_cl`).
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 
 # CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
 # needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.
