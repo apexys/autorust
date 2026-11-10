@@ -2130,12 +2130,9 @@ fn get_kernel_graph_once(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> U
     // Cleanups for speed and runability, before `pm_add_buffers` creates the
     // kernel outputs (`remove_bufferize` must not run after that).
     let t = prof.then(std::time::Instant::now);
-    let pm = symbolic()
-        .add(&crate::codegen::simplify::pm_reduce_simplify())
-        .add(&pm_const_buffer_folding())
-        .add(&pm_remove_bufferize());
+    let pm = symbolic().add(&pm_remove_bufferize());
     let tsink = graph_rewrite(ctx, tsink, &pm, false, None, false, false, CtxVal::None)
-        .unwrap_or_else(|e| panic!("TGERR: symbolic+reduce_collapse+debuf: {e}"));
+        .unwrap_or_else(|e| panic!("TGERR: symbolic+debuf: {e}"));
     lap("rng.cleanup", t);
 
     // limit buffers (NV: MAX_KERNEL_BUFFERS=0 and DEVICE_MAX_BUFS has no NV entry — no-op)
@@ -2181,6 +2178,15 @@ fn get_kernel_graph_once(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> U
     )
     .unwrap_or_else(|e| panic!("TGERR: split kernels: {e}"));
     lap("rng.split_kernels", t);
+
+    // Reduce/const simplification per kernel body (the symbolic ranges were
+    // already simplified before bufferize; these rules are pure and only need
+    // the kernel's slice).
+    let t = prof.then(std::time::Instant::now);
+    let pm = crate::codegen::simplify::pm_reduce_simplify().add(&pm_const_buffer_folding());
+    let tsink = graph_rewrite(ctx, tsink, &pm, false, None, false, true, CtxVal::None)
+        .unwrap_or_else(|e| panic!("TGERR: reduce_collapse: {e}"));
+    lap("rng.cleanup.post", t);
 
     // remove indexing from call args
     let t = prof.then(std::time::Instant::now);
