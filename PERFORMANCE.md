@@ -154,7 +154,11 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   blocks the host GEMM, which would run that shape at ~296 GFLOP/s. Splitting
   the epilogue into a GEMM + elementwise pair is the CPU unlock; the two
   attempts (model-level realize, realize-map) are blocked by prefix
-  re-scheduling and the kernel splitter's END contract respectively.
+  re-scheduling and the kernel splitter's END contract respectively (a realized
+  non-root reduce becomes an `END(STORE)` that is never callified, and its
+  ranges stay open — see CURRENT_STATE §9.26). Generated f32 tensor cores are
+  not the lever either: the prime 197 axes are declined and disabling them is
+  ~5% faster on these shapes.
 - **Metal → MPS** (`MPSMatrixMultiplication`, f32/f16). Opt-in
   (`AUTORUST_MPS=all`) because simdgroup tensor cores measured faster on an M2.
 
