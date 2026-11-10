@@ -75,8 +75,14 @@ heuristic:
 - **Sums of contractions** are materialized per contraction before kernel
   splitting (`pm_generate_realize_map`), so each becomes a single-reduce GEMM.
   The ViT attention input gradient (`dQ@Wq + dK@Wk + dV@Wv`) used to be one
-  scalar three-reduction kernel (5.7 ms/layer); the split took the training
-  step from 216 to 179 ms.
+  scalar three-reduction kernel (5.7 ms/layer).
+- **Pointwise contraction operands** (the GELU derivative, the dropout mask,
+  the softmax backward, movement views in training) are staged exactly once
+  inside the reduce body (`convert_reduce_to_ranges::stage_reduce_prologue`),
+  which the generic realize pass cannot reach after movement folding. Besides
+  making those contractions affine enough for cuBLAS, it avoids recomputing
+  the prologue per output column. Training 179 -> 94 ms; the split + staging
+  together took it from 332 to 94 ms.
 
 The generated f32 kernel is memory-bound at large K (no shared-memory tiling;
 every block re-reads A/B from global). Kernel-only (2026-11, `SYNC=1`,
@@ -305,10 +311,10 @@ Warm-cache cold start (`ms_cold`, same process protocol as the table):
 
 | workload | before | now |
 |---|---|---|
-| MNIST CNN train, bs512 | 505 ms | **214 ms** |
-| ViT-B/16 infer, bs1 | 697 ms | **448 ms** |
-| ViT-B/16 infer, bs8 | 1279 ms | **780 ms** |
-| ViT-B/16 train, bs1 | 6013 ms | **2541 ms** |
+| MNIST CNN train, bs512 | 505 ms | **216 ms** |
+| ViT-B/16 infer, bs1 | 697 ms | **474 ms** |
+| ViT-B/16 infer, bs8 | 1279 ms | **760 ms** |
+| ViT-B/16 train, bs1 | 6013 ms | **2498 ms** |
 
 `bench/run.py` warms the on-disk caches with a discarded `ITERS=0` process
 before the measured one, matching the warm-cache protocol used for the other
@@ -332,14 +338,14 @@ All step times are milliseconds (lower is better).
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **64.9 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CPU | **62.6 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
 | MNIST CNN train, bs 512 | CUDA | 21.7 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | 427.4 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
+| ViT-B/16 infer, bs 1 | CPU | 528.3 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
 | ViT-B/16 infer, bs 1 | CUDA | 15.9 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1875.0 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
+| ViT-B/16 infer, bs 8 | CPU | 1965.1 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
 | ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 2221.8 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 179.4 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| ViT-B/16 train, bs 1 | CPU | 1754.9 ms (RUST) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CUDA | 94.2 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
@@ -349,15 +355,16 @@ Reading it:
   remains.
 - **ViT inference CUDA**: eval mode uses the hand-written FA2 kernels through
   `ViT::forward_with`, so torch's cuBLAS/cuDNN path is only ~1.5x ahead at
-  both batches. autorust is 7.3x/2.0x faster than tinygrad and ~1.7x faster
+  both batches. autorust is 8.6x/1.9x faster than tinygrad and ~1.6x faster
   than candle at bs 8.
-- **ViT training CUDA**: autorust is 2.2x faster than tinygrad and 4.1x slower
-  than torch. The summed q/k/v input gradient is now split into three
-  single-reduce GEMMs (216 -> 179 ms); the rest of the gap is the f32 backward
-  against cuBLAS/cuDNN, the cuDNN/tensor-core story below (see §9.20-§9.21).
-- **CPU**: autorust's `RUST` backend is 53x/60x faster than tinygrad/candle on
+- **ViT training CUDA**: autorust is 4.1x faster than tinygrad and 2.15x slower
+  than torch. Splitting the summed q/k/v input gradient and staging the
+  pointwise contraction operands (GELU derivative, dropout mask, softmax
+  backward) took the step from 332 to 94 ms; the remaining gap is the f32
+  backward against cuBLAS/cuDNN (see §9.20-§9.23).
+- **CPU**: autorust's `RUST` backend is 55x/62x faster than tinygrad/candle on
   MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
-  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 2221.8 ms). tinygrad's
+  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 1754.9 ms). tinygrad's
   `CPU` backend is single-threaded by design. `RAYON` is the typed interpreter
   (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
 

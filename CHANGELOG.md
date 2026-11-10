@@ -27,4 +27,7 @@ Initial release.
 - Summed gradient contractions (e.g. `dQ@Wq + dK@Wk + dV@Wv`) are materialized
   per contraction so each reaches the matmul tiler instead of one scalar
   multi-reduce kernel.
+- Pointwise contraction operands inside reduce bodies (GELU derivative,
+  dropout mask, softmax backward) are staged once, so those backward GEMMs
+  become affine and can use the matmul tiler/library GEMM.
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.

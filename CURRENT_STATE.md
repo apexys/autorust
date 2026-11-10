@@ -3039,3 +3039,43 @@ the training step lands around 130-140 ms, i.e. ~3x torch, not 2x. Closing the
 rest needs f32 tensor cores (TF32 changes the output) or a proper
 im2col/GEMM-backward rewrite. This is why the three inference/MNIST workloads
 are within 2x and training is not.
+
+### 9.23 Stage pointwise contraction operands inside reduce bodies (2026-11) — DONE
+
+§9.22 identified the remaining ~100 ms/step as contractions whose operand is a
+pointwise prologue (`A operand is Mul` = GELU-derivative FFN dX, `B operand is
+Where` = dropout-masked dY, `A operand is Exp2` = softmax backward). The
+realize-map route could not stage them: `convert_reduce_to_ranges` lowers the
+reduce body atomically, and after movement folding the body is a `Permute`/
+`Shrink` of the `MUL`, so the generic `create_bufferize_and_index_srcs` never
+sees the operand.
+
+`stage_reduce_prologue` / `stage_prologue_in_body` now run at the start of
+`convert_reduce_to_ranges`, before `create_bufferize_and_index_based_on_ranges`.
+They descend the body's cast/movement chain to the `MUL`, replace the recorded
+non-affine operand with `INDEX(STAGE(operand))` over its own axes (all axes
+realized), and copy the `range_map` entry to the rebuilt reduce. Guards found
+by the differential suite:
+
+- already-materialized operands (`Param`/`Buffer`/`After`/`Stage`/`Store`/
+  `Index`) are skipped — re-staging them put two stores in one kernel and
+  tripped `coalesce` ("attempting multiple stores");
+- the staged operand must have a *different shape* than its affine partner:
+  `sum(x * mask)` and LRN/Lp `x*x` are not contractions, and staging them broke
+  the cross-entropy / Lp goldens;
+- movement-view operands are staged only while `TRAINING` and below 4M
+  elements: the backward re-reads them, but an eval forward would just pay the
+  copy (ViT inference 69 -> 122 ms without the gate), and staging MNIST's
+  9.4M-element conv/pool views OOMs bs512.
+
+Results (medians, `bench/results` at `43fe9d8`): ViT-B/16 training CUDA
+**179.4 -> 94.2 ms** (torch 43.8 = 2.15x, tinygrad 388.5 = 4.1x faster), CPU
+RUST 2221.8 -> **1754.9 ms**. MNIST 21.7 ms (1.66x), ViT inference 13.6/72.3 ms
+(1.56x/1.56x) unchanged. Warm cold start: 216 / 474 / 760 ms, training 2498 ms
+(from 505 / 697 / 1279 / 6013).
+
+Remaining gap: training is still 2.15x torch. The profile no longer shows a
+single dominant prologue kernel; the rest is the f32 backward (generated GEMMs
+~2-3 TFLOP/s vs cuBLAS ~5-6) plus elementwise work. Closing to 2x needs f32
+tensor cores (TF32 changes output) or a GEMM-backward rewrite, not another
+scheduler cut.
