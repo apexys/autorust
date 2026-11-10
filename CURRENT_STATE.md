@@ -286,7 +286,7 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   step (the 38-buffer fused ViT kernel is split by the budget). `tests/bf16.rs`,
   `tests/rand.rs`, `tests/nn_attention.rs`, and `tests/nn_models.rs` pass with
   METAL as the default. Full suite with `AUTORUST_CL_LIB=/nonexistent` (to
-  bypass Apple's broken OpenCL driver): **237 passed, 0 failed, 11 ignored**.
+  bypass Apple's broken OpenCL driver): **240 passed, 0 failed, 11 ignored**.
 - **MPS host GEMM (opt-in).** `MetalAllocator`/`MetalProgram` now also expose the
   `HostGemm` seam through MetalPerformanceShaders (`MPSMatrixMultiplication`).
   The scheduler recognizes a plain affine contraction on METAL and attaches a
@@ -329,6 +329,19 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   The earlier failed attempt used a newer tinygrad Metal table whose
   integer swizzle is incompatible with the port's v0.14.0 `apply_tc_opt`; the
   v0.14.0 `tc.py` string table is the correct source.
+- **Fused FlashAttention (DONE).** `runtime/metal_flash.rs` ports the same FA2
+  schedule as `cl_flash`: one threadgroup per `(batch*head, 64-query tile)`,
+  16-key streaming steps with the online softmax, Q in threadgroup memory and
+  separate K/V tiles. Supports `d=64`, causal masking, an additive f32 `[n,n]`
+  mask, and GQA. `fused_attention_ex` selects it for METAL, so
+  `Tensor::flash_attention_with`/`attention_with` run the fused kernel. Measured
+  on an M2 (`n=789, h=6, d=64`): **13.0 ms vs 33.1 ms** for generated-kernel
+  SDPA (2.5x), maxabs ~1e-8 vs a f32 reference. Gate:
+  `tests/flash_metal.rs` (causal/mask/GQA/odd-n/batched dispatcher).
+  This exposed and fixed a real Metal runtime bug: `MetalProgram::call` built
+  `setBytes` pointers to temporaries that were dropped at the end of the
+  `match` statement, so hand-written kernels read garbage scalar args. The
+  value is now staged in a local byte buffer for the duration of the call.
 - **f64 fallback (DONE).** Apple GPUs have no hardware `double`. The public
   Tensor API lowers `FLOAT64` to `FLOAT32` on METAL at creation/`cast`/const/
   rand/readout (`creation::metal_lower_f64`), and `to_list::<f64>` converts the
@@ -457,7 +470,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **237 passed, 11 ignored, 0 failed** with
+- `cargo test` → **240 passed, 11 ignored, 0 failed** with
   `AUTORUST_CL_LIB=/nonexistent` (2026-11; the OpenCL backend is skipped so the
   suite does not hit Apple's pre-existing OpenCL driver failure — see below).
   This run includes the Metal backend on an Apple M2. The ignored = 1

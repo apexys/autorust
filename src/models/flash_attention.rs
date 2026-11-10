@@ -415,7 +415,13 @@ pub fn fused_attention_ex(
         dev.starts_with("CL") && dt == dtype::FLOAT32 && crate::runtime::cl_flash::supports(n, d);
     #[cfg(not(feature = "backend_cl"))]
     let cl = false;
-    if !sage && !bf16 && !tc && !cuda && !cl {
+    #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+    let metal = dev.starts_with("METAL")
+        && dt == dtype::FLOAT32
+        && crate::runtime::metal_flash::supports(n, d);
+    #[cfg(not(all(feature = "backend_metal", target_os = "macos")))]
+    let metal = false;
+    if !sage && !bf16 && !tc && !cuda && !cl && !metal {
         return None;
     }
     if sage {
@@ -559,6 +565,25 @@ pub fn fused_attention_ex(
             )
         }
         #[cfg(not(feature = "backend_cuda"))]
+        {
+            return None;
+        }
+    } else if metal {
+        #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+        {
+            crate::runtime::metal_flash::host_call(
+                bufs,
+                b,
+                h,
+                n,
+                crate::runtime::metal_flash::Options {
+                    causal: is_causal,
+                    has_mask,
+                    h_kv: hk,
+                },
+            )
+        }
+        #[cfg(not(all(feature = "backend_metal", target_os = "macos")))]
         {
             return None;
         }

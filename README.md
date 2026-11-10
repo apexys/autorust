@@ -257,8 +257,10 @@ first tensor/realize.
   supports real offset views. **f64 is lowered to f32 on METAL** (no hardware
   `double`): the first use prints a one-time warning, and `to_list::<f64>`
   converts the realized f32 data on the host. This is f32 precision; use
-  `INTERP`/`CPU`/`CL`/`CUDA` when true f64 is required. Native `simdgroup` 8x8
-  tensor cores cover
+  `INTERP`/`CPU`/`CL`/`CUDA` when true f64 is required. A fused FA2
+  FlashAttention kernel (64-query tiles, 16-key online-softmax streaming,
+  causal/additive-mask/GQA) is used by `attention_with`/`flash_attention_with`
+  on METAL. Native `simdgroup` 8x8 tensor cores cover
   f32/f16/bf16 matmuls (≈1.3-1.7x over the FFMA path on an M2). A
   MetalPerformanceShaders host-GEMM path also exists (f32/f32, f16/f16, f16
   inputs with f32 accumulation); it is opt-in via `AUTORUST_MPS=all`, because

@@ -472,22 +472,34 @@ impl Prog for MetalProgram {
             .computeCommandEncoder()
             .expect("TGERR: Metal computeCommandEncoder");
         enc.setComputePipelineState(&self.pipeline);
-        // Kernel argument order is the ELF signature order (non-ALU PARAMs in
-        // linear order); `bufs` itself is slot-indexed.
-        for (i, (slot, _dt)) in self.signature.iter().enumerate() {
-            let o = bufs
-                .get(*slot as usize)
-                .unwrap_or_else(|| panic!("TGERR: Metal missing buffer slot {slot}"));
-            let m = metal_of(&**o);
-            unsafe { enc.setBuffer_offset_atIndex(Some(&m.buf), m.offset, i) };
-        }
-        // Scalar `int` params are rendered as `constant int&` and set with
-        // `setBytes` after the buffers (tinygrad MetalProgram.__call__).
-        let base = self.signature.len();
-        for (j, v) in vals.iter().enumerate() {
-            let v32 = *v as i32;
-            let ptr = NonNull::from(&v32).cast::<c_void>();
-            unsafe { enc.setBytes_length_atIndex(ptr, 4, base + j) };
+        // Kernel argument order is the ELF signature order. A slot below
+        // `bufs.len()` is a buffer; beyond it the value comes from `vals` at
+        // `slot - bufs.len()` (the same contract as CL/CUDA). Hand-written
+        // kernels include their scalar arguments in the signature.
+        for (i, (slot, dt)) in self.signature.iter().enumerate() {
+            if (*slot as usize) < bufs.len() {
+                let o = &bufs[*slot as usize];
+                let m = metal_of(&**o);
+                unsafe { enc.setBuffer_offset_atIndex(Some(&m.buf), m.offset, i) };
+            } else {
+                let v = vals
+                    .get((*slot as usize) - bufs.len())
+                    .unwrap_or_else(|| panic!("TGERR: Metal missing value slot {slot}"));
+                let bits = dt.bitsize();
+                let bytes = (bits / 8) as usize;
+                // Keep the value in a local that outlives the `setBytes` call;
+                // taking a reference to a temporary here would dangle.
+                let mut raw = [0u8; 8];
+                match bits {
+                    8 => raw[0] = *v as u8,
+                    16 => raw[..2].copy_from_slice(&(*v as u16).to_ne_bytes()),
+                    32 => raw[..4].copy_from_slice(&(*v as i32).to_ne_bytes()),
+                    64 => raw.copy_from_slice(&v.to_ne_bytes()),
+                    b => panic!("TGERR: Metal val arg bitsize {b}"),
+                }
+                let ptr = NonNull::from(&raw).cast::<c_void>();
+                unsafe { enc.setBytes_length_atIndex(ptr, bytes, i) };
+            }
         }
         let gs = MTLSize {
             width: global_size[0],
