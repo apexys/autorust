@@ -117,8 +117,8 @@ bytes, and `report_profile()` prints the per-kernel table when `FROZEN_PROF=1`.
 
 ## Choosing eager vs frozen
 
-`Engine::new(model, frozen)` picks `Engine::Eager` when a CUDA or OpenCL device
-is available and `Engine::Frozen` otherwise (the frozen plan is the CPU
+`Engine::new(model, frozen)` picks `Engine::Eager` when a CUDA, Metal or OpenCL
+device is available and `Engine::Frozen` otherwise (the frozen plan is the CPU
 fallback). `engine.is_eager()` reports the choice; `engine.forward(x)` runs the
 selected path. Both paths take and return `Tensor`, via `ModuleForward`:
 

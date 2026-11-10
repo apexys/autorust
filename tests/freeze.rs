@@ -61,6 +61,10 @@ fn engine_selects_eager_or_frozen() {
     {
         gpu |= autorust::runtime::ops_cuda::available();
     }
+    #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+    {
+        gpu |= autorust::runtime::ops_metal::available();
+    }
     #[cfg(feature = "backend_cl")]
     {
         gpu |= autorust::runtime::ops_cl::available();

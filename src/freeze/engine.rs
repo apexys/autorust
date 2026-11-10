@@ -121,6 +121,10 @@ fn gpu_available() -> bool {
     if crate::runtime::ops_cuda::available() {
         return true;
     }
+    #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+    if crate::runtime::ops_metal::available() {
+        return true;
+    }
     #[cfg(feature = "backend_cl")]
     if crate::runtime::ops_cl::available() {
         return true;

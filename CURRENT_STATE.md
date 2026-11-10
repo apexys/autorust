@@ -2354,10 +2354,12 @@ compiled LINEARS. `autorust::freeze` (feature `freeze`, which enables
   (duplicate names are safe, `no_mangle` stripped), a `KERNELS` table, and a
   `plan()` constructor. `CompiledProg` now stores its rendered `source` because
   a `ProgCache` hit re-interns PROGRAM without its SOURCE child.
-- `Engine` selects `Eager(model)` when CUDA/CL is available and
-  `Frozen(Frozen<M>)` otherwise; `ModuleForward` is the minimal model trait
-  (`Input`/`Output` associated types). `Frozen` supports one `Tensor` input and
-  one `Tensor` output today (tuple/multi-output wrappers are follow-ups).
+- `Engine` selects `Eager(model)` when CUDA, Metal or CL is available and
+  `Frozen(Frozen<M>)` otherwise (Metal was added once the backend landed — the
+  check originally only saw CUDA/CL, so a Metal-only Mac took the frozen CPU
+  path); `ModuleForward` is the minimal model trait (`Input`/`Output` associated
+  types). `Frozen` supports one `Tensor` input and one `Tensor` output today
+  (tuple/multi-output wrappers are follow-ups).
 
 Gates: `tests/freeze.rs` (plan vs eager, multi-output/corealize, Engine
 selection), `tests/freeze_emit.rs` (emits a standalone crate, compiles it with
