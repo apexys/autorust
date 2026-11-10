@@ -25,7 +25,8 @@ use crate::runtime::cl_sys::{
     CommandQueue, Context, Device, Kernel, Mem, Program, cl_device_id, cl_mem, get_all_devices,
 };
 use crate::runtime::device::{
-    BackendAllocator, Comp, Compiled, LruAllocator, Prog, TinyElf, register_device,
+    BackendAllocator, Comp, Compiled, DeviceFactory, LruAllocator, Prog, TinyElf, register_device,
+    register_device_family,
 };
 use crate::uop::UopId;
 use crate::uop::ctx::UOpCtx;
@@ -86,13 +87,20 @@ struct ClInner {
 }
 
 impl ClInner {
-    /// python `CLDevice.__init__`: GPU else DEFAULT device.
-    fn open() -> ClInner {
-        let ids: Vec<cl_device_id> = match get_all_devices(CL_DEVICE_TYPE_GPU) {
-            Ok(ids) if !ids.is_empty() => ids,
-            _ => get_all_devices(CL_DEVICE_TYPE_DEFAULT).expect("TGERR: no OpenCL devices"),
-        };
-        let dev = Device::new(*ids.first().expect("TGERR: no OpenCL devices"));
+    /// python `CLDevice.__init__`: GPU else DEFAULT device. `CL` is index 0;
+    /// `CL:N` selects the N-th enumerated device.
+    fn open(device: &str) -> ClInner {
+        let ids = device_ids();
+        let index = device
+            .split_once(':')
+            .and_then(|(_, i)| i.parse::<usize>().ok())
+            .unwrap_or(0);
+        let dev = Device::new(*ids.get(index).unwrap_or_else(|| {
+            panic!(
+                "TGERR: {device}: only {} OpenCL device(s) available",
+                ids.len()
+            )
+        }));
         let device_name = check(dev.name(), "CL device name");
         let driver_version = check(dev.driver_version(), "CL driver version");
         let exts = check(dev.extensions(), "CL extensions");
@@ -550,30 +558,79 @@ impl UopRenderer for OclUopRenderer {
 
 // ---------------- device + registration ----------------
 
-/// Whether an OpenCL device is present, without opening a context/queue and
-/// without panicking (the default-device probe). The ICD loader is loaded
-/// dynamically; a missing library simply returns `false`.
+/// Whether an OpenCL device is present **and can build a kernel**, without
+/// panicking (the default-device probe). The ICD loader is loaded dynamically;
+/// a missing library simply returns `false`.
+///
+/// Enumerating a device is not enough on the deprecated Apple
+/// OpenCL-over-Metal stack, which can be present while pipeline creation fails
+/// for every kernel. The first probe builds and creates one trivial kernel
+/// (cached for the process); that catches a backend that can execute nothing.
+/// A failure for one specific kernel still surfaces at that kernel.
 pub fn available() -> bool {
     if crate::runtime::cl_sys::ClLib::get().is_none() {
         return false;
     }
+    (0..device_count()).any(device_usable)
+}
+
+/// Whether the `index`-th enumerated device can build a kernel (per-device,
+/// cached). Autotune uses this so one unusable GPU does not hide another.
+pub fn device_usable(index: usize) -> bool {
+    device_ids().get(index).copied().is_some_and(kernels_build)
+}
+
+/// The enumerated devices: GPUs when present, else the platform default.
+fn device_ids() -> Vec<cl_device_id> {
     match get_all_devices(CL_DEVICE_TYPE_GPU) {
-        Ok(ids) if !ids.is_empty() => true,
-        _ => get_all_devices(CL_DEVICE_TYPE_DEFAULT)
-            .map(|ids| !ids.is_empty())
-            .unwrap_or(false),
+        Ok(ids) if !ids.is_empty() => ids,
+        _ => get_all_devices(CL_DEVICE_TYPE_DEFAULT).unwrap_or_default(),
     }
 }
 
-/// The `CLDevice` composition + `Device._DeviceMap["CL"]` assignment.
-pub fn register() {
-    // A binary built with `backend_cl` must start on machines without OpenCL;
-    // only register the device when the loader and a device are actually there.
-    if !available() {
-        return;
+/// Number of physical OpenCL devices (GPUs, else the platform default).
+pub fn device_count() -> usize {
+    device_ids().len()
+}
+
+thread_local! {
+    /// Trivial-kernel build results, keyed by the raw device handle.
+    static PROBED: RefCell<HashMap<usize, bool>> = RefCell::new(HashMap::new());
+}
+
+/// Compile and create one trivial kernel on `id`, cached per device.
+///
+/// Apple's OpenCL-over-Metal reports `createKernel: newComputePipelineState
+/// failed` at `clCreateKernel` when its translator cannot handle a kernel, so
+/// this drives the same path (build + create) rather than only enumerating.
+fn kernels_build(id: cl_device_id) -> bool {
+    let key = id as usize;
+    if let Some(ok) = PROBED.with(|p| p.borrow().get(&key).copied()) {
+        return ok;
     }
-    let factory: crate::runtime::device::DeviceFactory = Rc::new(|| {
-        let inner = Rc::new(ClInner::open());
+    let ok = (|| -> bool {
+        let dev = Device::new(id);
+        let Ok(context) = Context::from_device(&dev) else {
+            return false;
+        };
+        let src = "__kernel void autorust_probe(__global float* out, const float v) { \
+                   out[get_global_id(0)] = v; }";
+        let Ok(program) = Program::create_from_source(&context, src) else {
+            return false;
+        };
+        if program.build(&[id], "").is_err() {
+            return false;
+        }
+        Kernel::create(&program, "autorust_probe").is_ok()
+    })();
+    PROBED.with(|p| p.borrow_mut().insert(key, ok));
+    ok
+}
+
+/// A factory for the device named `name` (`CL` or `CL:N`).
+fn factory(name: String) -> DeviceFactory {
+    Rc::new(move || {
+        let inner = Rc::new(ClInner::open(&name));
         let facts = {
             // python: arch = ",".join(device_exts) — half/double gated on the
             // real device's cl_khr_* extensions (cstyle.py:339).
@@ -599,13 +656,24 @@ pub fn register() {
                 )))
             })
         };
-        let dev = Compiled::new("CL", renderer, allocator, compiler, ctor);
+        let dev = Compiled::new(&name, renderer, allocator, compiler, ctor);
         if crate::runtime::clblast::library_present() {
             let inner2 = inner.clone();
             *dev.host_exec.borrow_mut() =
                 Some(Box::new(move |bufs, desc| inner2.host_gemm(bufs, desc)));
         }
         dev
-    });
-    register_device("CL", factory);
+    })
+}
+
+/// The `CLDevice` composition + `Device._DeviceMap["CL"]` assignment.
+pub fn register() {
+    // A binary built with `backend_cl` must start on machines without OpenCL;
+    // only register the device when the loader and a device are actually there.
+    if !available() {
+        return;
+    }
+    register_device("CL", factory("CL".into()));
+    // Multi-GPU: `CL:1`, `CL:2`, ... through the same composition.
+    register_device_family("CL", Rc::new(|name| factory(name.to_string())));
 }

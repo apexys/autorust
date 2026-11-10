@@ -377,18 +377,13 @@ impl Compiled {
 // ---------------- Device registry ----------------
 
 /// `Device._canonicalize` (device.py:19): upper-case the prefix, strip a
-/// trailing `:0` index.
+/// trailing `:0` index (`cuda:1` stays `CUDA:1`).
 pub fn canonicalize_device_name(device: &str) -> String {
-    match device.split_once(':') {
-        Some((prefix, rest)) => {
-            let joined = format!("{}{rest}", prefix.to_uppercase());
-            joined
-                .strip_suffix(":0")
-                .map(str::to_string)
-                .unwrap_or(joined)
-        }
+    let name = match device.split_once(':') {
+        Some((prefix, rest)) => format!("{}:{}", prefix.to_uppercase(), rest),
         None => device.to_uppercase(),
-    }
+    };
+    name.strip_suffix(":0").map(str::to_string).unwrap_or(name)
 }
 
 /// Whether the named device executes on the `f64`-lane scalar interpreter
@@ -410,6 +405,10 @@ pub fn is_interp_engine(device: &str) -> bool {
 /// Lazily builds a `Compiled` device for the registry.
 pub type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
 
+/// Builds a [`DeviceFactory`] for an indexed device name (`"CL:1"`) from the
+/// backend family registered under its base name (`"CL"`).
+pub type DeviceFamily = Rc<dyn Fn(&str) -> DeviceFactory>;
+
 /// A registered backend and its lazily-constructed device.
 struct DeviceEntry {
     factory: DeviceFactory,
@@ -421,6 +420,7 @@ struct DeviceEntry {
 
 thread_local! {
     static REGISTRY: RefCell<HashMap<String, DeviceEntry>> = RefCell::new(HashMap::new());
+    static FAMILIES: RefCell<HashMap<String, DeviceFamily>> = RefCell::new(HashMap::new());
     static BUILTINS: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -429,6 +429,13 @@ thread_local! {
 /// fusion budget is unbounded unless the backend registers a renderer limit.
 pub fn register_device(name: &str, factory: DeviceFactory) {
     register_device_with_limit(name, usize::MAX, factory);
+}
+
+/// Register a backend that can open several physical devices under indexed
+/// names (`CL`, `CL:1`, `CL:2`, ...). `device("CL:1")` then constructs the
+/// second device lazily; the bare name is index 0 (tinygrad strips `:0`).
+pub fn register_device_family(base: &str, family: DeviceFamily) {
+    FAMILIES.with(|f| f.borrow_mut().insert(base.to_uppercase(), family));
 }
 
 /// [`register_device`] with the renderer's kernel-buffer limit. Bounded
@@ -512,12 +519,30 @@ pub fn device(name: &str) -> Rc<Compiled> {
     let canon = canonicalize_device_name(name);
     REGISTRY.with(|reg| {
         let mut reg = reg.borrow_mut();
-        let fallback_name = canon.clone();
-        reg.entry(canon.clone()).or_insert_with(|| DeviceEntry {
-            factory: Rc::new(move || super::ops_interp::fallback(&fallback_name)) as DeviceFactory,
-            device: None,
-            max_buffers: usize::MAX,
-        });
+        if reg.contains_key(&canon) {
+            return;
+        }
+        // An indexed name (`CL:1`) uses the base backend's family factory.
+        let family = canon
+            .split_once(':')
+            .and_then(|(base, _)| FAMILIES.with(|f| f.borrow().get(base).cloned()));
+        let entry = match family {
+            Some(make) => DeviceEntry {
+                factory: make(&canon),
+                device: None,
+                max_buffers: usize::MAX,
+            },
+            None => {
+                let fallback_name = canon.clone();
+                DeviceEntry {
+                    factory: Rc::new(move || super::ops_interp::fallback(&fallback_name))
+                        as DeviceFactory,
+                    device: None,
+                    max_buffers: usize::MAX,
+                }
+            }
+        };
+        reg.insert(canon.clone(), entry);
     });
     loop {
         let action = REGISTRY.with(|reg| {

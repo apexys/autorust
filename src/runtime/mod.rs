@@ -3,6 +3,7 @@
 //! public backend traits, and the built-in backends. A user backend is added
 //! by implementing `OpaqueT`, `BackendAllocator`, `Comp`, `Prog` and
 //! `UopRenderer` and calling `register_device` — nothing else.
+pub mod autotune;
 pub mod buffer;
 #[cfg(feature = "backend_cl")]
 pub mod cl_flash;

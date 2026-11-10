@@ -286,7 +286,7 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   step (the 38-buffer fused ViT kernel is split by the budget). `tests/bf16.rs`,
   `tests/rand.rs`, `tests/nn_attention.rs`, and `tests/nn_models.rs` pass with
   METAL as the default. Full suite with `AUTORUST_CL_LIB=/nonexistent` (to
-  bypass Apple's broken OpenCL driver): **240 passed, 0 failed, 11 ignored**.
+  bypass Apple's broken OpenCL driver): **244 passed, 0 failed, 11 ignored**.
 - **MPS host GEMM (opt-in).** `MetalAllocator`/`MetalProgram` now also expose the
   `HostGemm` seam through MetalPerformanceShaders (`MPSMatrixMultiplication`).
   The scheduler recognizes a plain affine contraction on METAL and attaches a
@@ -329,6 +329,48 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   The earlier failed attempt used a newer tinygrad Metal table whose
   integer swizzle is incompatible with the port's v0.14.0 `apply_tc_opt`; the
   v0.14.0 `tc.py` string table is the correct source.
+- **Benchmark-driven device selection (DONE).** `runtime/autotune.rs` adds
+  `select_fastest_device()` (also re-exported at the crate root),
+  `rank_devices()`, `benchmark_device()` and `set_default_device()`. It runs an
+  ML-shaped suite on every available non-interp backend — `relu(A @ W + bias)`
+  (512³ f32), 4-head causal attention at 256 tokens × 64 dims, and a 2048×512
+  row softmax — validates a sample of each result against a host reference, and
+  installs the fastest as the process default. `DEFAULT_DEVICE` is now a
+  `RwLock` (was a `OnceLock`) so the default can be replaced after first use;
+  `DEFAULT_DEVICE=auto` runs the selection lazily, and
+  `AUTORUST_AUTOTUNE_DEVICES=METAL,RAYON` restricts the candidates. `INTERP`/
+  `CPU` are never candidates, and a device whose driver panics is caught and
+  skipped. Measured on the M2: METAL 7.9 ms (linear 1.4, attention 4.4,
+  softmax 2.1), CC 11.0, RUST 11.2, RAYON 260.8 (linear 170.8 — RAYON's typed
+  kernel does not yet cover a fused GEMM epilogue and falls back to the
+  interpreter, a real R2 gap the suite surfaces; the winner will change when
+  coverage lands). Gate: `tests/autotune.rs`.
+- **Multi-GPU device names (DONE for the GPU backends).** `device()` now
+  lazily builds indexed names through a per-backend family
+  (`register_device_family`): `CL`, `CL:1`, ... and `CUDA`, `CUDA:1`, ... each
+  get their own `Compiled` (context/queue/stream, allocator and compile cache),
+  with index 0 as the bare name exactly as v0.14 canonicalizes it
+  (`canonicalize_device_name` also fixed: `cuda:0` → `CUDA`, `cuda:1` stays
+  `CUDA:1`; it previously flattened to `CUDA1`). `autotune::available_devices`
+  enumerates every physical device, so `select_fastest_device()` compares an
+  integrated and a dedicated GPU separately and installs the exact winner;
+  `CUDA_DEVICE`/`CL_DEVICE` apply to the priority-picked default. The fused
+  attention `HostCall` now carries the tensor's exact device name, so a
+  `CL:1`/`CUDA:1` launch does not fall back to index 0. Gates:
+  `tests/device_select.rs` (`canonical_device_names`, `cl_indexed_device_names`).
+  Known limit: `ARCH_SM`/`STREAM` remain thread-locals of the last-opened CUDA
+  device (mixed-arch multi-GPU banks on per-device rendering, not these
+  globals).
+- **CL usability probes (DONE).** `ops_cl::available()` now builds and creates
+  one trivial kernel per enumerated device (cached per device) instead of only
+  enumerating: the deprecated Apple stack can be present while pipeline
+  creation is broken, and one unusable GPU no longer hides a working sibling
+  (`CL:1`); the priority pick falls through to the first usable index.
+  Separately, the fused attention kernel is per-device probed
+  (`cl_flash::device_supports`): Apple's `newComputePipelineState` rejects
+  `ar_flash_f32`, so the dispatcher falls back to SDPA instead of panicking
+  (autotune then ranks CL rather than skipping it). A kernel-specific failure
+  cannot be caught by the generic smoke test — this is the targeted fallback.
 - **Fused FlashAttention (DONE).** `runtime/metal_flash.rs` ports the same FA2
   schedule as `cl_flash`: one threadgroup per `(batch*head, 64-query tile)`,
   16-key streaming steps with the online softmax, Q in threadgroup memory and
@@ -470,7 +512,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **240 passed, 11 ignored, 0 failed** with
+- `cargo test` → **244 passed, 11 ignored, 0 failed** with
   `AUTORUST_CL_LIB=/nonexistent` (2026-11; the OpenCL backend is skipped so the
   suite does not hit Apple's pre-existing OpenCL driver failure — see below).
   This run includes the Metal backend on an Apple M2. The ignored = 1

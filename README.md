@@ -231,7 +231,40 @@ are the only sanctioned non-core dependencies.
 Device selection is `CUDA → METAL → CL → RUST → CC → RAYON → INTERP` for the first
 available backend; `METAL` is only considered on macOS, `RUST` is only selected
 when `rustc` is on `PATH`, and `CC` when `$CC` (or `clang`, else `cc`) works. Set
-`DEFAULT_DEVICE` to override. Runtime knobs (device, dtype,
+`DEFAULT_DEVICE` to override.
+
+That priority assumes the GPU is faster, which is not true on older Apple
+hardware (a slow Intel Iris can lose to the CPU). To pick by measurement
+instead, call
+
+```rust
+let dev = autorust::select_fastest_device();
+// prints e.g. `autotune: METAL 7.9 ms (linear 1.4, attention 4.4, softmax 2.1),
+// RAYON 260.8 ms (...) -> METAL`
+```
+
+once at startup. It runs a small ML-shaped suite — `relu(A @ W + bias)`,
+4-head causal attention at 256 tokens, and a 2048×512 row softmax — validates
+each result, and makes the winner the process default (a global, like
+tinygrad's `Device.DEFAULT`); `autorust::set_default_device("RAYON")` sets it
+explicitly. `DEFAULT_DEVICE=auto` runs the same selection lazily on the first
+tensor creation, and `AUTORUST_AUTOTUNE_DEVICES=METAL,RAYON` restricts the
+candidates. `INTERP`/`CPU` are never benchmarked. The first run of `RUST`/`CC`
+compiles their kernels with `rustc`/`cc`, so allow a few seconds there.
+
+For machines with several GPUs, the GPU backends are indexable: `CL`,
+`CL:1`, ... and `CUDA`, `CUDA:1`, ... each open a distinct physical device
+(index 0 is the bare name, matching tinygrad's canonicalization). OpenCL
+indices count GPU devices across platforms, falling back to the platform
+default. `CUDA_DEVICE=1` / `CL_DEVICE=1` choose the index used by the
+priority-picked default, and `select_fastest_device()` benchmarks **every**
+physical device and installs the exact winner — so a workstation with an
+integrated and a dedicated GPU is compared per device, not per backend. A
+hand-written kernel the driver cannot build (Apple's OpenCL-over-Metal
+translator rejects the fused attention kernel) makes the attention dispatcher
+fall back to SDPA instead of panicking.
+
+Runtime knobs (device, dtype,
 `BEAM`, `JIT`, `FA`, …) are environment variables read once and cached; build-
 time diagnostics/backends are Cargo features. Set runtime env vars before the
 first tensor/realize.

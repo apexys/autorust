@@ -411,8 +411,10 @@ pub fn fused_attention_ex(
     #[cfg(not(feature = "backend_cuda"))]
     let cuda = false;
     #[cfg(feature = "backend_cl")]
-    let cl =
-        dev.starts_with("CL") && dt == dtype::FLOAT32 && crate::runtime::cl_flash::supports(n, d);
+    let cl = dev.starts_with("CL")
+        && dt == dtype::FLOAT32
+        && crate::runtime::cl_flash::supports(n, d)
+        && crate::runtime::cl_flash::device_supports(&crate::runtime::device::device(&dev), n);
     #[cfg(not(feature = "backend_cl"))]
     let cl = false;
     #[cfg(all(feature = "backend_metal", target_os = "macos"))]
@@ -485,7 +487,7 @@ pub fn fused_attention_ex(
         mask_buf,
     ];
     let has_mask = attn_mask.is_some();
-    let call = if sage {
+    let mut call = if sage {
         #[cfg(feature = "backend_cuda")]
         {
             crate::runtime::cuda_flash_sage::host_call(
@@ -607,6 +609,9 @@ pub fn fused_attention_ex(
             return None;
         }
     };
+    // The hand-written kernel descriptors carry their backend's base name;
+    // a tensor on `CL:1`/`CUDA:1` must launch on that exact device.
+    call.device = crate::runtime::device::canonicalize_device_name(&dev);
     // Record the launch for replay *and* run it now: the capture pass executes
     // the graph, so the consumers that follow need the value.
     sess.capture_host(call.clone());

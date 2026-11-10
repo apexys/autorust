@@ -393,7 +393,12 @@ pub fn shape_from(args: impl super::ShapeArg) -> Shape {
 /// compiled by default (`backend_rayon`); `METAL`/`CL`/`CUDA`/`RUST`/`CC` are
 /// opt-in features and, when present and usable, win over `RAYON`. There is no
 /// ported `NV` backend.
-pub static DEFAULT_DEVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+///
+/// Resolved once and cached; [`set_default_device`] replaces it (that is how
+/// [`select_fastest_device`](crate::runtime::autotune::select_fastest_device)
+/// installs a measured winner). `DEFAULT_DEVICE=auto` runs that benchmark
+/// lazily instead of using the fixed priority.
+pub static DEFAULT_DEVICE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// The device-selection priority as a pure function of availability, so it can
 /// be unit-tested without touching the environment or a GPU.
@@ -440,36 +445,114 @@ pub fn pick_device_with_metal(
     }
 }
 
-/// The selected device: `DEFAULT_DEVICE` if set, else the best available backend.
+/// The selected device: the cached default, else `DEFAULT_DEVICE` from the
+/// environment, else the best available backend (or the autotune winner when
+/// the environment asks for `auto`).
 pub fn default_device() -> String {
-    DEFAULT_DEVICE
-        .get_or_init(|| {
-            if let Some(dev) = crate::settings::global().device.clone() {
-                return dev;
-            }
-            #[cfg(feature = "backend_cuda")]
-            let cuda = crate::runtime::ops_cuda::available();
-            #[cfg(not(feature = "backend_cuda"))]
-            let cuda = false;
-            #[cfg(all(feature = "backend_metal", target_os = "macos"))]
-            let metal = crate::runtime::ops_metal::available();
-            #[cfg(not(all(feature = "backend_metal", target_os = "macos")))]
-            let metal = false;
-            #[cfg(feature = "backend_cl")]
-            let cl = crate::runtime::ops_cl::available();
-            #[cfg(not(feature = "backend_cl"))]
-            let cl = false;
-            #[cfg(feature = "backend_rust")]
-            let rust = crate::runtime::ops_rust::available();
-            #[cfg(not(feature = "backend_rust"))]
-            let rust = false;
-            #[cfg(feature = "backend_clang")]
-            let cc = crate::runtime::ops_clang::available();
-            #[cfg(not(feature = "backend_clang"))]
-            let cc = false;
-            pick_device_with_metal(metal, cuda, cl, rust, cc).to_string()
-        })
+    if let Some(dev) = DEFAULT_DEVICE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
+    {
+        return dev;
+    }
+    let picked = resolve_default_device();
+    DEFAULT_DEVICE
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert(picked)
+        .clone()
+}
+
+/// Replace the process-wide default device (`Device.DEFAULT = name`).
+///
+/// Affects later tensor creation that passes no device; existing tensors and
+/// per-[`Ctx`](crate::tensor::Ctx) settings are untouched. Names are
+/// canonicalized (`metal` → `METAL`, `CL:0` → `CL`).
+pub fn set_default_device(device: &str) {
+    let name = crate::runtime::device::canonicalize_device_name(device);
+    *DEFAULT_DEVICE.write().unwrap_or_else(|e| e.into_inner()) = Some(name);
+}
+
+/// The best backend by the fixed priority, without consulting `DEFAULT_DEVICE`.
+pub fn pick_available_device() -> String {
+    #[cfg(feature = "backend_cuda")]
+    let cuda = crate::runtime::ops_cuda::available();
+    #[cfg(not(feature = "backend_cuda"))]
+    let cuda = false;
+    #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+    let metal = crate::runtime::ops_metal::available();
+    #[cfg(not(all(feature = "backend_metal", target_os = "macos")))]
+    let metal = false;
+    #[cfg(feature = "backend_cl")]
+    let cl = crate::runtime::ops_cl::available();
+    #[cfg(not(feature = "backend_cl"))]
+    let cl = false;
+    #[cfg(feature = "backend_rust")]
+    let rust = crate::runtime::ops_rust::available();
+    #[cfg(not(feature = "backend_rust"))]
+    let rust = false;
+    #[cfg(feature = "backend_clang")]
+    let cc = crate::runtime::ops_clang::available();
+    #[cfg(not(feature = "backend_clang"))]
+    let cc = false;
+    let picked = pick_device_with_metal(metal, cuda, cl, rust, cc);
+    // A CL device that cannot build a kernel does not hide a working sibling.
+    #[cfg(feature = "backend_cl")]
+    if picked == "CL"
+        && !crate::runtime::ops_cl::device_usable(0)
+        && let Some(i) = (0..crate::runtime::ops_cl::device_count())
+            .find(|i| crate::runtime::ops_cl::device_usable(*i))
+    {
+        return format!("CL:{i}");
+    }
+    picked.to_string()
+}
+
+fn resolve_default_device() -> String {
+    match crate::settings::global().device.clone() {
+        Some(dev) if dev.eq_ignore_ascii_case("auto") => {
+            // Seed a usable fallback first: the benchmark creates tensors, and
+            // any nested default-device query must not recurse into `auto`.
+            let fallback = prefer_device_index(pick_available_device());
+            set_default_device(&fallback);
+            crate::runtime::autotune::select_fastest_device()
+        }
+        Some(dev) => prefer_device_index(crate::runtime::device::canonicalize_device_name(&dev)),
+        None => prefer_device_index(pick_available_device()),
+    }
+}
+
+/// Apply `CUDA_DEVICE` / `CL_DEVICE` to a bare backend name. Index 0 is the
+/// canonical name, so only `N > 0` appends `:N`; an out-of-range request is
+/// reported and ignored rather than failing at the first kernel.
+fn prefer_device_index(dev: String) -> String {
+    if dev.contains(':') {
+        return dev;
+    }
+    let settings = crate::settings::global();
+    let index = match dev.as_str() {
+        "CUDA" => settings.cuda_device,
+        "CL" => settings.cl_device,
+        _ => return dev,
+    };
+    if index == 0 {
+        return dev;
+    }
+    let count = match dev.as_str() {
+        #[cfg(feature = "backend_cuda")]
+        "CUDA" => crate::runtime::ops_cuda::device_count(),
+        #[cfg(feature = "backend_cl")]
+        "CL" => crate::runtime::ops_cl::device_count(),
+        _ => usize::MAX,
+    };
+    if index >= count {
+        eprintln!(
+            "{dev}_DEVICE={index} requested but only {count} {dev} device(s) exist; using {dev}"
+        );
+        return dev;
+    }
+    format!("{dev}:{index}")
 }
 
 /// `canonicalize_device` (device.py:59) for the single-device case.

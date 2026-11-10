@@ -11,8 +11,11 @@
 //!
 //! [`Compiled::run_host_kernel`]: crate::runtime::device::Compiled::run_host_kernel
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::runtime::buffer::OpaqueView;
-use crate::runtime::device::{Compiled, device};
+use crate::runtime::device::{Compiled, TinyElf, device};
 
 /// Head dimension the kernel is specialized for.
 pub const HEAD_DIM: i64 = 64;
@@ -47,6 +50,44 @@ impl Default for Options {
 /// Whether the kernel can run this shape.
 pub fn supports(n: i64, d: i64) -> bool {
     d == HEAD_DIM && n > 0
+}
+
+thread_local! {
+    /// Per-device "this hand-written kernel builds" results.
+    static BUILDS: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
+
+/// Whether this **device** can build the fused kernel, cached per device name.
+///
+/// Apple's deprecated OpenCL-over-Metal driver enumerates a device and runs
+/// generated kernels, but `clCreateKernel` fails for this hand-written kernel
+/// (`newComputePipelineState failed`). Building it once lets
+/// [`fused_attention_ex`](crate::models::flash_attention) fall back to SDPA
+/// instead of panicking; on success the compiled program is left in the
+/// device's cache for the real launch.
+pub fn device_supports(dev: &std::rc::Rc<Compiled>, n: i64) -> bool {
+    let name = dev.device.clone();
+    if let Some(ok) = BUILDS.with(|b| b.borrow().get(&name).copied()) {
+        return ok;
+    }
+    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let lib = dev.compiler.compile_cached(&src(n));
+        let elf = TinyElf {
+            lib,
+            name: NAME.to_string(),
+            signature: signature(),
+        };
+        let _ = dev.runtime(elf);
+    }))
+    .is_ok();
+    if !ok {
+        eprintln!(
+            "cl_flash: {} cannot build the fused attention kernel; using SDPA",
+            dev.device
+        );
+    }
+    BUILDS.with(|b| b.borrow_mut().insert(name, ok));
+    ok
 }
 
 /// The OpenCL source for a sequence length `n`.

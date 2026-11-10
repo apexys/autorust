@@ -33,6 +33,38 @@ fn pick_device_priority() {
 }
 
 #[test]
+fn canonical_device_names() {
+    use autorust::runtime::device::canonicalize_device_name;
+    // v0.14 `Device._canonicalize`: uppercase the prefix, drop a trailing `:0`,
+    // keep other indices as part of the name.
+    assert_eq!(canonicalize_device_name("cuda"), "CUDA");
+    assert_eq!(canonicalize_device_name("cuda:0"), "CUDA");
+    assert_eq!(canonicalize_device_name("cuda:1"), "CUDA:1");
+    assert_eq!(canonicalize_device_name("cl:0"), "CL");
+    assert_eq!(canonicalize_device_name("CL:01"), "CL:01");
+}
+
+/// Indexed GPU names resolve to the same composition as the base device;
+/// an out-of-range index fails with a clear message instead of silently
+/// running the interpreter.
+#[cfg(feature = "backend_cl")]
+#[test]
+fn cl_indexed_device_names() {
+    use autorust::runtime::device::device;
+    if !autorust::runtime::ops_cl::available() {
+        return;
+    }
+    let count = autorust::runtime::ops_cl::device_count();
+    assert!(count >= 1, "{count}");
+    assert_eq!(device("CL:0").device, "CL");
+    if count == 1 {
+        assert!(std::panic::catch_unwind(|| device("CL:1")).is_err());
+    } else {
+        assert_eq!(device("CL:1").device, "CL:1");
+    }
+}
+
+#[test]
 fn rayon_is_registered() {
     let devs = autorust::runtime::device::registered_devices();
     if cfg!(feature = "backend_rayon") {

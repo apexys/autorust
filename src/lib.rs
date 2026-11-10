@@ -83,6 +83,8 @@ pub mod settings;
 pub mod tensor;
 pub mod uop;
 
+pub use runtime::autotune::{select_fastest_device, set_default_device};
+
 /// C ABI for the Python `ctypes` bridge (default feature `capi`).
 #[cfg(feature = "capi")]
 pub mod capi;

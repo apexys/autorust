@@ -96,7 +96,17 @@ pub struct Settings {
     /// `AUTORUST_MM_{M,N,K,LM,LN}` overrides for the generated matmul tile.
     pub mm_tile: Option<(usize, usize, usize, usize, usize)>,
     /// `DEFAULT_DEVICE`: device used by tensor creation when none is given.
+    /// `auto` runs the benchmark-based selection from
+    /// [`crate::runtime::autotune`] on first use.
     pub device: Option<String>,
+    /// `CUDA_DEVICE`: GPU ordinal the priority-picked default uses (default
+    /// `0`). With more than one GPU the default name becomes `CUDA:N`;
+    /// `autorust::select_fastest_device()` benchmarks every ordinal and sets an
+    /// exact name itself.
+    pub cuda_device: usize,
+    /// `CL_DEVICE`: like [`Self::cuda_device`] for the enumerated OpenCL
+    /// devices (GPUs first, then the platform default; index 0 = `"CL"`).
+    pub cl_device: usize,
     /// Double-buffer K/V tiles with `cp.async` in the fused attention kernels.
     ///
     /// On by default (`AUTORUST_ASYNC=0` disables). Used by the bf16 kernel,
@@ -121,6 +131,8 @@ impl Default for Settings {
             sdpa_tile: 0,
             mm_tile: None,
             device: None,
+            cuda_device: 0,
+            cl_device: 0,
             async_pipeline: true,
         }
     }
@@ -208,6 +220,8 @@ impl Settings {
             _ => None,
         };
         let device = env("DEFAULT_DEVICE").filter(|d| !d.is_empty());
+        let cuda_device = env("CUDA_DEVICE").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let cl_device = env("CL_DEVICE").and_then(|v| v.parse().ok()).unwrap_or(0);
         let async_pipeline = !matches!(env("AUTORUST_ASYNC").as_deref(), Some("0") | Some("false"));
         Settings {
             attention,
@@ -220,6 +234,8 @@ impl Settings {
             sdpa_tile,
             mm_tile,
             device,
+            cuda_device,
+            cl_device,
             async_pipeline,
         }
     }

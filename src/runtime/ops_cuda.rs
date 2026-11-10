@@ -128,6 +128,8 @@ struct CudaInner {
 
 impl CudaInner {
     /// python `CUDADevice.__init__`: open `device` ordinal, compute the SM arch.
+    ///
+    /// `CUDA` is ordinal 0; `CUDA:N` selects the N-th GPU.
     fn open(device: &str) -> CudaInner {
         let ordinal = device
             .split(':')
@@ -769,10 +771,18 @@ pub fn available() -> bool {
         && cudarc::driver::CudaContext::new(0).is_ok()
 }
 
-/// The `CUDADevice` composition + `Device._DeviceMap["CUDA"]` assignment.
-pub fn register() {
-    let factory: crate::runtime::device::DeviceFactory = Rc::new(|| {
-        let inner = Rc::new(CudaInner::open("CUDA"));
+/// Number of CUDA devices the driver reports (`0` without a driver).
+pub fn device_count() -> usize {
+    if unsafe { !cudarc::driver::sys::is_culib_present() } {
+        return 0;
+    }
+    CudaContext::device_count().unwrap_or(0).max(0) as usize
+}
+
+/// A factory for the device named `name` (`CUDA` or `CUDA:N`).
+fn factory(name: String) -> crate::runtime::device::DeviceFactory {
+    Rc::new(move || {
+        let inner = Rc::new(CudaInner::open(&name));
         let facts = Renderer::cuda(&inner.arch);
         let renderer: Box<dyn UopRenderer> = Box::new(CudaUopRenderer { facts });
         // `CUDARenderer.compiler` = NVRTCCompiler; the elf lib is the PTX text.
@@ -786,7 +796,7 @@ pub fn register() {
             let inner = inner.clone();
             Rc::new(move |elf| Rc::new(RefCell::new(CudaProgram::new(inner.clone(), elf))))
         };
-        let dev = Compiled::new("CUDA", renderer, allocator, compiler, ctor);
+        let dev = Compiled::new(&name, renderer, allocator, compiler, ctor);
         // Install the dispatcher whenever the library loads: whether a host
         // GEMM is *emitted* is the scheduler's decision (`AUTORUST_CUBLAS`),
         // and an already-open device must still be able to run one.
@@ -796,6 +806,15 @@ pub fn register() {
                 Some(Box::new(move |bufs, desc| inner2.host_gemm(bufs, desc)));
         }
         dev
-    });
-    register_device("CUDA", factory);
+    })
+}
+
+/// The `CUDADevice` composition + `Device._DeviceMap["CUDA"]` assignment.
+pub fn register() {
+    register_device("CUDA", factory("CUDA".into()));
+    // Multi-GPU: `CUDA:1`, `CUDA:2`, ... through the same composition.
+    crate::runtime::device::register_device_family(
+        "CUDA",
+        Rc::new(|name| factory(name.to_string())),
+    );
 }
