@@ -275,8 +275,74 @@ fn build_pm_generate_realize_map() -> PatternMatcher {
                 None
             }),
         ),
+        // A sum of two contractions (`ADD(REDUCE1, REDUCE2)`) is one kernel
+        // with multiple reductions, which `matmul_ranges` declines and the
+        // generic heuristic leaves scalar. The ViT attention input gradient
+        // (`dQ@Wq + dK@Wk + dV@Wv`) is exactly this: 5.7 ms/layer as one fused
+        // kernel. Materialize each contraction first; every one becomes a
+        // single-reduce store that the matmul tiler / host GEMM can claim, and
+        // the sum is a cheap elementwise kernel.
+        (
+            UPat::ops1(Ops::Add).with_src_any_len(true).named("a"),
+            r_idx(|ictx, ctx, st| {
+                let a = crate::uop::sym::sget(st, "a");
+                let srcs = ctx.srcs(&a).to_vec();
+                if srcs.len() != 2 {
+                    return None;
+                }
+                let (r0, r1) = (
+                    contraction_root(ctx, srcs[0].clone()),
+                    contraction_root(ctx, srcs[1].clone()),
+                );
+                if let (Some(r0), Some(r1)) = (r0, r1)
+                    && r0 != r1
+                {
+                    ictx.realize_map.insert(r0, None);
+                    ictx.realize_map.insert(r1, None);
+                }
+                None
+            }),
+        ),
     ];
     PatternMatcher::new(rules)
+}
+
+/// The `REDUCE(ADD, MUL(a, b))` node of a contraction, looking through casts and
+/// movement ops. `None` for anything else (so residual adds are not split).
+/// The `REDUCE(ADD, MUL(a, b))` node of a contraction, looking through casts,
+/// movement ops and the reduce body's view. `None` for anything else (so
+/// residual adds and other reductions are not split).
+fn contraction_root(ctx: &UOpCtx, u: UopId) -> Option<UopId> {
+    let mut cur = u;
+    for _ in 0..6 {
+        match ctx.op_of(&cur) {
+            Ops::Cast | Ops::Contiguous | Ops::Reshape | Ops::Bitcast => {
+                cur = ctx.srcs(&cur)[0].clone();
+            }
+            Ops::Reduce => {
+                let mut mul = ctx.srcs(&cur)[0].clone();
+                for _ in 0..8 {
+                    match ctx.op_of(&mul) {
+                        Ops::Cast
+                        | Ops::Contiguous
+                        | Ops::Reshape
+                        | Ops::Permute
+                        | Ops::Pad
+                        | Ops::Expand
+                        | Ops::Shrink
+                        | Ops::Flip
+                        | Ops::Bitcast
+                        | Ops::Mselect => mul = ctx.srcs(&mul)[0].clone(),
+                        _ => break,
+                    }
+                }
+                return (ctx.op_of(&mul) == Ops::Mul && ctx.srcs(&mul).len() == 2)
+                    .then_some(cur);
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 // ---------- pm_apply_rangeify rules ----------
