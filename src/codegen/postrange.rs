@@ -1595,6 +1595,83 @@ fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
     true
 }
 
+/// Direct-convolution tiling ("implicit GEMM") for multi-axis reductions.
+///
+/// A conv lowers to `pad -> pool -> expand -> permute -> mul -> sum` over
+/// `(cin, ky, kx)`, with four output axes `(batch, cout, oy, ox)`. It is a
+/// GEMM-shaped contraction (`M = batch*oy*ox`, `N = cout`, `K = cin*ky*kx`),
+/// but without materialising im2col, so `try_matmul_tiling` (two output axes)
+/// and `HostGemm` (affine A) both skip it.
+///
+/// The generic heuristic maps the channel axis to 8 threads and 4 registers;
+/// that wastes three quarters of a warp and makes the four weight loads per
+/// iteration strided. Instead, put the whole output-channel axis on threads
+/// (coalesced weight loads) and upcast the innermost spatial axis into
+/// registers (contiguous x loads), then unroll the two kernel axes.
+fn try_conv_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
+    if !k.ren.has_local {
+        return false;
+    }
+    let reds = k.axes_of(ctx, &[AxisType::Reduce]);
+    let outs = k.axes_of(ctx, &[AxisType::Global]);
+    // Conv-without-groups lowering: 4D output, 3 reduce axes (cin, ky, kx).
+    // Keep this strict so batchnorm (also multi-axis) is not caught: the two
+    // spatial outputs are equal and neither is reduced.
+    if reds.len() != 3 || outs.len() != 4 {
+        return false;
+    }
+    let (cout_ax, ox_ax) = (outs[1], outs[3]);
+    let cout = k.full_shape(ctx)[cout_ax];
+    let ox = k.full_shape(ctx)[ox_ax];
+    if cout < 8 || cout % 8 != 0 || ox < 2 {
+        return false;
+    }
+    // All output channels on threads: weight loads become coalesced across
+    // the warp (the bias/output stores too). 32 is one full warp.
+    let threads = if cout % 32 == 0 {
+        32
+    } else if cout % 16 == 0 {
+        16
+    } else {
+        8
+    };
+    k.apply_opt(ctx, OptOp::Local, Some(cout_ax), Some(threads));
+
+    // The channel axis is now Local; the spatial axes are still Global.
+    let outs = k.axes_of(ctx, &[AxisType::Global]);
+    let Some(&ox_ax) = outs.last() else {
+        return true;
+    };
+    if let Some(pos) = k.upcastable_dims(ctx).iter().position(|&a| a == ox_ax) {
+        let ext = k.full_shape(ctx)[ox_ax];
+        let up = if ext % 4 == 0 {
+            4
+        } else if ext % 2 == 0 {
+            2
+        } else {
+            1
+        };
+        if up > 1 {
+            k.apply_opt(ctx, OptOp::Upcast, Some(pos), Some(up));
+        }
+    }
+
+    // Fully unroll the kernel extents (kx, then ky); leave `cin` as the loop.
+    for _ in 0..2 {
+        let ud = k.unrollable_dims(ctx);
+        let Some(&ax) = ud.last() else {
+            break;
+        };
+        let ext = k.full_shape(ctx)[ax];
+        if ext <= 1 || ext > 32 {
+            break;
+        }
+        let pos = ud.len() - 1;
+        k.apply_opt(ctx, OptOp::Unroll, Some(pos), Some(0));
+    }
+    true
+}
+
 /// `hand_coded_optimizations` (heuristic.py) — corpus subset.
 pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
     // first try the tensor cores
@@ -1678,6 +1755,14 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
             *k = tk;
             return;
         }
+    }
+
+    // Convolutions are GEMM-shaped but have four output axes and three reduce
+    // axes; `try_matmul_tiling` would otherwise claim them with an M/N pair
+    // that leaves half a warp idle. Tile them as a direct convolution
+    // (implicit GEMM) first.
+    if try_conv_tiling(k, ctx) {
+        return;
     }
 
     // A matmul-style contraction gets register tiling regardless of backend;

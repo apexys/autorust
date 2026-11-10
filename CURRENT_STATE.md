@@ -2623,6 +2623,46 @@ AUTORUST_KPROF=1 ./target/release/clusterfun <images> /tmp/out --device cuda
 ```
 
 
+### 9.16 Conv direct tiling (implicit GEMM) — 2026-11 — DONE
+
+A convolution lowers to `pad -> pool -> expand -> permute -> mul -> sum` over
+`(cin, ky, kx)` with four output axes `(batch, cout, oy, ox)`. It is GEMM-shaped
+(`M = batch*oy*ox`, `N = cout`, `K = cin*ky*kx`) but has no materialised
+im2col, so neither `try_matmul_tiling` (two output axes) nor `HostGemm` (affine
+A) matched it. Worse, `try_matmul_tiling` often claimed it anyway with an
+M/N pair that left three quarters of a warp idle: the generated conv kernel
+used 8 threads mapped to output channels, 4 channels per thread, and strided
+weight loads (`KPROF`: the conv reductions were ~150 of ~190 ms on MNIST).
+
+`try_conv_tiling` (runs before `try_matmul_tiling`; needs `has_local`) detects
+`reds.len() == 3 && outs.len() == 4` and tiles it as a direct convolution:
+
+- all output channels on threads (32/16/8, coalesced weight and bias loads);
+- the innermost spatial axis upcast 4 (or 2) into registers (contiguous x
+  loads, weights reused across adjacent outputs);
+- the two kernel axes fully unrolled (`kx`, then `ky`), `cin` stays a loop.
+
+Results (RTX 3060, f32): MNIST CNN training bs=32 **57.8 -> 41.8 ms/step**;
+bs=512 **588.6 -> 258.4 ms/step** (2.28x). The forward conv kernel alone went
+from 86 ms to 21 ms; the generated kernel is now
+`r_32_20_5_32_4_32_5_5` (32 threads, 4 accumulators) instead of
+`r_32_20_20_8_4_32_5_5`. `nn_conv`/`nn_norm`/`ops` pass and a 20-step MNIST run
+still learns (loss 0.506 -> 0.248, 79.7% test accuracy).
+
+**Still open.**
+- BatchNorm's training statistics recompute the conv inside the mean
+  reduction (`r_32_16_2_5_5_32_20_20`, ~65 ms): `x` has three consumers
+  (`mean`, `var`, normalization) but gets fused into each reduction. Forcing a
+  realization in `BatchNorm::forward_ctx` exposed a separate bug (a PYTHON
+  running-stat param and a CUDA value end up in one kernel and trip the
+  mixed-device check), so this needs a scheduler/assign fix, not a local
+  realize.
+- The weight-gradient/BN kernel (`r_32_16_2_5_5_32_20_20`) is unchanged.
+- **B (deferred): im2col + `dot`**, materialised per batch chunk, to reuse
+  cuBLAS/CLBlast and especially the packed CPU GEMM (`RUST`/`CC` convs are still
+  ~1.66 s/step at bs=512). Keep it as a CPU fast path with a memory budget; the
+  current direct tiling is the general fix and also helps CUDA.
+
 ## Attention variants and hardware capability (status note)
 
 One operation, three implementations. `sdpa` and `flash` compute the same

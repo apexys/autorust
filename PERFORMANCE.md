@@ -84,6 +84,18 @@ Old "before" rows in the README (`512³ CUDA 144 → 650-830 GFLOP/s`,
 kernel-only table above supersedes them. bf16 is fast mainly because the
 storage halves the DRAM traffic, not because the generated kernel emits `mma`.
 
+### Convolutions
+
+Conv is not a `HostGemm`: it lowers to `pad -> pool -> expand -> mul -> sum`
+over `(cin, ky, kx)`. `try_conv_tiling` expresses it as an implicit GEMM
+(`M = batch*oy*ox`, `N = cout`, `K = cin*ky*kx`) without materialising im2col:
+output channels on threads (coalesced weights), the innermost spatial axis
+upcast into registers, and the kernel axes unrolled. On MNIST/RTX 3060 this
+took the training step from 588.6 to 258.4 ms at bs=512; see
+`CURRENT_STATE.md` §9.16. BatchNorm training still recomputes the conv inside
+its statistics reduction, and materialised im2col + `dot` (route B, deferred)
+remains the way to use the vendor GEMMs and the packed CPU kernel for conv.
+
 ## Host GEMM (library path)
 
 A pure contraction can bypass generated code entirely. `schedule/host_gemm.rs`
