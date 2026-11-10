@@ -107,6 +107,7 @@ See [`PERFORMANCE.md`](PERFORMANCE.md) for methodology and tuning.
 - [`ONNX-Compat.md`](ONNX-Compat.md) — ONNX operator coverage and runner API.
 - [`INDEXING.md`](INDEXING.md) — tensor indexing, especially with Rust types.
 - [`CURRENT_STATE.md`](CURRENT_STATE.md) — canonical status and known gaps.
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes.
 - [`AGENTS.md`](AGENTS.md) — how the LLM works on this codebase.
 
 ## License

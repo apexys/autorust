@@ -20,12 +20,11 @@ keywords = ["tinygrad", "tensor", "autograd", "gpu", "compiler"]
 categories = ["artificial-intelligence", "science", "hardware-support"]
 authors = ["Valentin Buck"]
 exclude = [
-    # The development-only bridge/oracle crate and the pytest gates.
+    # Development-only harnesses: the Python bridge/oracle + pytest gates and
+    # the standalone comparison benchmarks. The Markdown docs are published so
+    # the links in README.md resolve on crates.io and docs.rs.
     "py/",
     "bench/",
-    "CURRENT_STATE.md",
-    "INDEXING.md",
-    "AGENTS.md",
     ".github/",
 ]
 
