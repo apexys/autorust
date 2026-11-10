@@ -2535,14 +2535,8 @@ impl UOpCtx {
     /// built. `remove_bufferize` walks the whole source subtree just to feed a
     /// gate and discards the result, so the post-order Vec (thousands of Rc
     /// clones per call) was pure overhead.
-    pub(crate) fn visit_gated(
-        &self,
-        root: UopId,
-        gate: &dyn Fn(UopId) -> bool,
-        enter_calls: bool,
-    ) {
-        let mut seen: crate::uop::fasthash::FastSet<u32> =
-            crate::uop::fasthash::FastSet::default();
+    pub(crate) fn visit_gated(&self, root: UopId, gate: &dyn Fn(UopId) -> bool, enter_calls: bool) {
+        let mut seen: crate::uop::fasthash::FastSet<u32> = crate::uop::fasthash::FastSet::default();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if !seen.insert(id.id()) {
