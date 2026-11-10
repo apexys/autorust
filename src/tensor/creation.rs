@@ -476,9 +476,15 @@ pub fn set_default_device(device: &str) {
 
 /// The best backend by the fixed priority, without consulting `DEFAULT_DEVICE`.
 pub fn pick_available_device() -> String {
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     let cuda = crate::runtime::ops_cuda::available();
-    #[cfg(not(feature = "backend_cuda"))]
+    #[cfg(not(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     let cuda = false;
     #[cfg(all(feature = "backend_metal", target_os = "macos"))]
     let metal = crate::runtime::ops_metal::available();
@@ -540,7 +546,10 @@ fn prefer_device_index(dev: String) -> String {
         return dev;
     }
     let count = match dev.as_str() {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         "CUDA" => crate::runtime::ops_cuda::device_count(),
         #[cfg(feature = "backend_cl")]
         "CL" => crate::runtime::ops_cl::device_count(),
@@ -690,7 +699,6 @@ pub fn from_slice<T: SliceElem>(
 
 /// `Tensor(data=bytes, dtype=?, device=?)` -> the bytes arm of `_frompy`:
 /// a 1-D `BUFFER("PYTHON", len(data)/itemsize)` — no reshape, no cast.
-#[allow(clippy::chunks_exact_to_as_chunks)] // MSRV 1.88: keep the stable chunk iterator
 pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<&str>) -> Tensor {
     assert!(
         !dtype::is_weak(dtype),

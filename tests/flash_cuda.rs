@@ -3,7 +3,10 @@
 //! Shapes match the DINOv3 attention (`h=6`, `n=789`, `d=64`), non-causal and
 //! unmasked — the only case the kernel implements.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use std::time::Instant;
 

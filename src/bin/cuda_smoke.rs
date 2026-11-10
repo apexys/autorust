@@ -3,9 +3,21 @@
 //! Confirms cudarc dynamically loads `libcuda`/`libnvrtc`, allocates, compiles a
 //! kernel with NVRTC, and launches it. Mirrors `ocl_smoke` for the CUDA path.
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 use cudarc::nvrtc::compile_ptx;
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn main() {
     let ctx = CudaContext::new(0).expect("CudaContext::new");
     println!("CUDA: {}", ctx.name().expect("name"));
@@ -36,4 +48,12 @@ extern "C" __global__ void add_kernel(float *out, const float *a, const float *b
     println!("out = {host:?}");
     assert_eq!(host, vec![11.0, 22.0, 33.0, 44.0]);
     println!("cuda_smoke: OK");
+}
+
+#[cfg(not(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+)))]
+fn main() {
+    eprintln!("cuda_smoke: the CUDA backend is only available on Linux and Windows");
 }

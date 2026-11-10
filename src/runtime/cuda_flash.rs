@@ -155,19 +155,20 @@ pub fn note_scalar_selected(settings: &crate::settings::Settings) {
     }
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if let Some(sm) = crate::runtime::ops_cuda::arch_sm() {
-            if sm < 80 {
-                eprintln!(
-                    "[attention] tensor-core attention needs sm_80+, device is sm_{sm}: \
-                     using scalar f32 FA2"
-                );
-            }
+        if let Some(sm) = crate::runtime::ops_cuda::arch_sm()
+            && sm < 80
+        {
+            eprintln!(
+                "[attention] tensor-core attention needs sm_80+, device is sm_{sm}: \
+                 using scalar f32 FA2"
+            );
         }
     });
 }
 
 /// Launch with the default options (no mask, no causal, one K/V head per Q
 /// head).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     dev: &std::rc::Rc<Compiled>,
     q: &OpaqueView,

@@ -6,7 +6,10 @@
 //! NVRTC compiles the source, the runtime binds the buffers by slot, the launch
 //! parameters are honoured, and the result lands in the output buffer.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::runtime::device::device;

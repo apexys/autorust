@@ -4,7 +4,10 @@
 //! hardware does), keeps the accumulations in f32, and stores the result in
 //! bf16, so it matches the kernel to within accumulation order.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use std::time::Instant;
 
@@ -61,6 +64,7 @@ fn bf16_ref(q: &[f32], k: &[f32], v: &[f32], b: i64, h: i64, n: i64, d: i64) -> 
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_bf16(
     ctx: &Ctx,
     sess: &mut autorust::engine::session::Session,

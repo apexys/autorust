@@ -11,17 +11,37 @@ pub mod cl_flash;
 pub(crate) mod cl_sys;
 #[cfg(feature = "backend_cl")]
 pub mod clblast;
-#[cfg(feature = "backend_rust")]
+// The packed CPU GEMM serves every host-memory backend, not only `RUST`.
+#[cfg(any(
+    feature = "backend_rust",
+    feature = "backend_clang",
+    feature = "backend_rayon"
+))]
 pub mod cpu_gemm;
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod cublas;
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod cuda_flash;
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod cuda_flash_bf16;
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod cuda_flash_sage;
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod cuda_flash_tc;
 pub mod device;
 pub mod interp;
@@ -31,7 +51,10 @@ pub mod metal_flash;
 pub mod ops_cl;
 #[cfg(feature = "backend_clang")]
 pub mod ops_clang;
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod ops_cuda;
 pub mod ops_interp;
 #[cfg(all(feature = "backend_metal", target_os = "macos"))]
@@ -46,5 +69,8 @@ pub mod ray_kernel;
 pub mod ray_typed;
 #[cfg(feature = "backend_rayon")]
 pub mod ray_value;
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod sage_flash;

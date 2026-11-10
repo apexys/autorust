@@ -14,7 +14,10 @@
 //! The C layout is therefore "two consecutive score tiles" in the A layout, so
 //! `P·V` consumes the softmaxed scores from registers with no cross-lane shuffle.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::runtime::device::device;

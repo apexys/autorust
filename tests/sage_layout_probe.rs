@@ -14,7 +14,10 @@
 //! fragment layout, so this also pins the FP8 kernel (which can only run on
 //! `sm_89+`).
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::runtime::device::device;

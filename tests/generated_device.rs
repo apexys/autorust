@@ -2,7 +2,10 @@
 //! process default (`DEFAULT_DEVICE`). This is the transient-CUDA-probe case:
 //! the default resolved to CL/CPU while the graph itself was on CUDA.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::engine::session::Session;
 use autorust::tensor::{Ctx, Tensor};

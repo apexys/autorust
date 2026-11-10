@@ -72,7 +72,7 @@ let out = model.run(&[("image", image)])?;
 let depth = out["depth"].to_list::<f32>(model.session_mut());
 ```
 
-See [`ONNX-Compat.md`](ONNX-Compat.md) for the supported operator matrix and
+See [`ONNX-Compat.md`](https://github.com/apexys/autorust/blob/main/ONNX-Compat.md) for the supported operator matrix and
 known gaps (no `Scatter*`/`NonZero`, quantized/training ops are T2).
 
 Runnable demos: `examples/xor.rs`, `examples/mnist.rs`,
@@ -220,8 +220,8 @@ compiles the emitted crate and diffs it against eager).
 | `backend_clang` | yes | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |
 | `backend_cl` | yes | OpenCL backend (`CL`), dynamically loaded at run time. |
 | `backend_metal` | yes | Metal backend (`METAL`), macOS only; links the OS frameworks, no Xcode needed. |
-| `backend_cuda` | no | CUDA backend (`CUDA`), via `cudarc`; dynamically loaded, no build-time CUDA libs. |
-| `freeze` | no | Capture/emit frozen CPU plans (`autorust::freeze`); enables `backend_rust`. |
+| `backend_cuda` | yes (Linux/Windows) | CUDA backend (`CUDA`), via `cudarc`; dynamically loaded, no build-time CUDA libs. Gated off on other targets. |
+| `freeze` | yes | Capture/emit frozen CPU plans (`autorust::freeze`); enables `backend_rust`. |
 | `trace` | no | Rule-firing trace (`TG_TRACE`). |
 | `dump` | no | Debug dumps and pipeline truncation (`TG_*` knobs). |
 
@@ -327,9 +327,9 @@ first tensor/realize.
   — canonical status, design decisions, and milestone history.
 - [`INDEXING.md`](https://github.com/apexys/autorust/blob/main/INDEXING.md) — the
   `getitem` index DSL.
-- [`ONNX-Compat.md`](ONNX-Compat.md) — the ONNX T0/T1/T2 operator and feature
+- [`ONNX-Compat.md`](https://github.com/apexys/autorust/blob/main/ONNX-Compat.md) — the ONNX T0/T1/T2 operator and feature
   matrix, runner API, validation results, and known gaps.
 
 ## License
 
-MIT. This is a derivative work of tinygrad (MIT); see [`LICENSE`](LICENSE).
+MIT. This is a derivative work of tinygrad (MIT); see [`LICENSE`](https://github.com/apexys/autorust/blob/main/LICENSE).

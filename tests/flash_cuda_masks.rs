@@ -3,7 +3,10 @@
 //! Each case is compared against a straightforward f32 reference (optionally
 //! with bf16 operand/probability rounding, which is what the bf16 kernel does).
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::runtime::device::device;

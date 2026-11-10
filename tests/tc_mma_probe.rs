@@ -16,7 +16,10 @@
 //! | a2 = A[g][2t+1]   |                   | c2 = C[g+8][2t]   |
 //! | a3 = A[g+8][2t+1] |                   | c3 = C[g+8][2t+1] |
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::runtime::device::device;

@@ -93,8 +93,13 @@ pub fn is_available(device: &str) -> bool {
         Some((base, idx)) => (base, idx.parse::<usize>().ok()),
         None => (name.as_str(), Some(0)),
     };
+    // Read by the feature-gated arms below; unused in a CPU-only build.
+    let _ = index;
     match base {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         "CUDA" => {
             index.is_some_and(|i| i < crate::runtime::ops_cuda::device_count())
                 && crate::runtime::ops_cuda::available()
@@ -117,8 +122,12 @@ pub fn is_available(device: &str) -> bool {
 /// order: `CUDA`, `CUDA:1`, ..., `METAL`, `CL`, `CL:1`, ..., `RUST`, `CC`,
 /// `RAYON`. `INTERP`/`CPU` are omitted.
 pub fn available_devices() -> Vec<String> {
+    #[allow(unused_mut)]
     let mut out = Vec::new();
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     if crate::runtime::ops_cuda::available() {
         out.extend(indexed("CUDA", crate::runtime::ops_cuda::device_count()));
     }
@@ -148,12 +157,22 @@ pub fn available_devices() -> Vec<String> {
 }
 
 /// `BASE`, `BASE:1`, ..., `BASE:(count-1)` (index 0 is tinygrad's bare name).
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn indexed(base: &str, count: usize) -> Vec<String> {
     (0..count).map(|i| indexed_name(base, i)).collect()
 }
 
 /// `BASE` for index 0 (tinygrad canonicalizes `:0` away), else `BASE:N`.
+#[cfg(any(
+    all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ),
+    feature = "backend_cl"
+))]
 fn indexed_name(base: &str, index: usize) -> String {
     if index == 0 {
         base.to_string()

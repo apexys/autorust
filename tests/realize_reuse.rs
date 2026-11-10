@@ -15,7 +15,10 @@ const W: usize = 3 * 16 * 16;
 /// Run on CUDA when it is compiled in and present (the bug surfaced there);
 /// otherwise use the default backend.
 fn gpu() -> Option<&'static str> {
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     if autorust::runtime::ops_cuda::available() {
         unsafe { std::env::set_var("DEFAULT_DEVICE", "CUDA") };
         return Some("CUDA");
@@ -51,7 +54,7 @@ fn patch_embed(ctx: &Ctx) -> (Tensor, Tensor) {
         .add(&pb);
     let cls = Tensor::from_slice(ctx, &[0.5f32; 8], None, gpu()).reshape([1, 1, 8]);
     // Returning the cat too makes the test exercise the "token 0 matches" part.
-    (cls.cat(&[patches.clone()], 1), patches)
+    (cls.cat(std::slice::from_ref(&patches), 1), patches)
 }
 
 #[test]

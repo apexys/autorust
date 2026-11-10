@@ -81,10 +81,13 @@ Run from this directory (`autorust/`):
   also run as plain scripts. Regenerate goldens with
   `../tinygrad/.venv/bin/python py/dump_golden.py` after editing either side.
 
-Feature flags: `backend_cl` (OpenCL), `backend_metal` (Apple Metal, macOS-only),
-`backend_cuda` (CUDA), `backend_rayon`/`backend_rust`/`backend_clang` (CPU),
-`capi` (default; the C ABI loaded by the Python bridge), `trace`/`dump`
-(debug-only, off by default).
+Feature flags: all backends and `freeze` are **default** — `backend_cl`
+(OpenCL), `backend_metal` (Apple Metal, macOS-only), `backend_cuda` (CUDA,
+Linux/Windows only; its dependency and code are target-gated), `freeze` (AOT
+plans), `backend_rayon`/`backend_rust`/`backend_clang` (CPU), and `capi` (the C
+ABI loaded by the Python bridge). `trace`/`dump` are debug-only, off by default.
+`--no-default-features` must keep compiling and staying std-only (plus
+`nanoserde`) — that is a gate, not an aspiration.
 
 ## Conventions
 

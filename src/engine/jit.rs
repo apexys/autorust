@@ -37,9 +37,6 @@ use crate::runtime::buffer::{Buffer, buffer_of};
 use crate::tensor::{Ctx, Tensor};
 use crate::uop::ctx::UOpCtx;
 
-/// `_TinyJit` (jit.py:220) — captures the compiled LINEARS of one `call` and
-/// replays them. Owns the captured result tensor and keeps every captured buffer
-/// alive (so the session's `prune` cannot reclaim a replay's intermediates).
 /// One replayed step: a compiled linear schedule or a hand-written launch.
 pub enum JitStep {
     /// A compiled generated linear.
@@ -48,6 +45,9 @@ pub enum JitStep {
     Host(Box<crate::engine::session::HostCall>),
 }
 
+/// `_TinyJit` (jit.py:220) — captures the compiled LINEARS of one `call` and
+/// replays them. Owns the captured result tensor and keeps every captured buffer
+/// alive (so the session's `prune` cannot reclaim a replay's intermediates).
 pub struct Jit {
     steps: Vec<JitStep>,
     rets: Vec<Tensor>,

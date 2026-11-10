@@ -54,7 +54,10 @@ fn engine_selects_eager_or_frozen() {
     assert_eq!(frozen.forward(x.clone()).to_list::<f32>(&mut sess), want);
 
     let mut gpu = false;
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     {
         gpu |= autorust::runtime::ops_cuda::available();
     }

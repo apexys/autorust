@@ -209,6 +209,7 @@ fn vals(opts: Options, h: i64) -> Vec<i64> {
 
 /// Launch with the default options (no mask, no causal, one K/V head per Q
 /// head).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     dev: &std::rc::Rc<Compiled>,
     q: &OpaqueView,

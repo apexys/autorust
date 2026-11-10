@@ -281,10 +281,10 @@ fn block_bounds(n: i64, b: i64) -> Vec<(i64, i64)> {
 /// `None`, and the caller falls back to SDPA.
 ///
 /// Kernel choice on `sm_80+` with tensor cores enabled: bf16 tensors use
-/// [`cuda_flash_bf16`](crate::runtime::cuda_flash_bf16), f32 tensors the TF32
-/// kernel [`cuda_flash_tc`](crate::runtime::cuda_flash_tc); otherwise the
-/// scalar f32 kernel [`cuda_flash`](crate::runtime::cuda_flash) runs. All
-/// compute the same math.
+/// `runtime::cuda_flash_bf16`, f32 tensors the TF32 kernel
+/// `runtime::cuda_flash_tc`; otherwise the scalar f32 kernel
+/// `runtime::cuda_flash` runs. All compute the same math. (The CUDA modules
+/// are feature- and target-gated, so these are code spans rather than links.)
 ///
 /// The launch is captured by the session in its exact position between the q/k/v
 /// projections and the output projection, so a JIT replay reproduces the same
@@ -332,6 +332,19 @@ fn note_sage_unsupported() {
 
 /// [`fused_attention`] with the full option set.
 #[allow(clippy::too_many_arguments)]
+// With no fused backend compiled in every branch returns `None` before the
+// launch is built, so the arguments and the trailing statement go unused.
+#[cfg_attr(
+    not(any(
+        all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ),
+        feature = "backend_cl",
+        all(feature = "backend_metal", target_os = "macos")
+    )),
+    allow(unused_variables, unused_mut, unreachable_code)
+)]
 pub fn fused_attention_ex(
     q: &Tensor,
     k: &Tensor,
@@ -382,33 +395,64 @@ pub fn fused_attention_ex(
         }
     }
     let settings = q.ctx().borrow().settings.clone();
+    // Only the CUDA fused kernels read `Settings`; without them (macOS, or a
+    // CPU-only build) the clone is intentionally unused.
+    #[cfg(not(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    )))]
+    let _ = &settings;
     let dev = q.device().unwrap_or_default();
     let cuda_dev = dev.starts_with("CUDA");
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     let sage = quantized
         && cuda_dev
         && dt == dtype::FLOAT32
         && crate::runtime::cuda_flash_sage::supported(n, d, &settings);
-    #[cfg(not(feature = "backend_cuda"))]
+    #[cfg(not(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     let sage = false;
     if quantized && !sage {
         note_sage_unsupported();
     }
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     let bf16 = cuda_dev
         && dt == dtype::BFLOAT16
         && crate::runtime::cuda_flash_bf16::supported(n, d, &settings);
-    #[cfg(not(feature = "backend_cuda"))]
+    #[cfg(not(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     let bf16 = false;
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     let tc = cuda_dev
         && dt == dtype::FLOAT32
         && crate::runtime::cuda_flash_tc::supported(n, d, &settings);
-    #[cfg(not(feature = "backend_cuda"))]
+    #[cfg(not(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     let tc = false;
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     let cuda = cuda_dev && dt == dtype::FLOAT32 && crate::runtime::cuda_flash::supports(n, d);
-    #[cfg(not(feature = "backend_cuda"))]
+    #[cfg(not(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     let cuda = false;
     #[cfg(feature = "backend_cl")]
     let cl = dev.starts_with("CL")
@@ -427,16 +471,28 @@ pub fn fused_attention_ex(
         return None;
     }
     if sage {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         crate::runtime::cuda_flash_sage::note_selected();
     } else if bf16 {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         crate::runtime::cuda_flash_bf16::note_selected();
     } else if tc {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         crate::runtime::cuda_flash_tc::note_selected();
     } else if cuda_dev {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         crate::runtime::cuda_flash::note_scalar_selected(&settings);
     }
 
@@ -487,8 +543,11 @@ pub fn fused_attention_ex(
         mask_buf,
     ];
     let has_mask = attn_mask.is_some();
-    let mut call = if sage {
-        #[cfg(feature = "backend_cuda")]
+    let mut call: crate::engine::session::HostCall = if sage {
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         {
             crate::runtime::cuda_flash_sage::host_call(
                 bufs,
@@ -503,12 +562,18 @@ pub fn fused_attention_ex(
                 },
             )
         }
-        #[cfg(not(feature = "backend_cuda"))]
+        #[cfg(not(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        )))]
         {
             return None;
         }
     } else if bf16 {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         {
             crate::runtime::cuda_flash_bf16::host_call(
                 bufs,
@@ -523,12 +588,18 @@ pub fn fused_attention_ex(
                 },
             )
         }
-        #[cfg(not(feature = "backend_cuda"))]
+        #[cfg(not(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        )))]
         {
             return None;
         }
     } else if tc {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         {
             crate::runtime::cuda_flash_tc::host_call(
                 bufs,
@@ -547,12 +618,18 @@ pub fn fused_attention_ex(
                 },
             )
         }
-        #[cfg(not(feature = "backend_cuda"))]
+        #[cfg(not(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        )))]
         {
             return None;
         }
     } else if cuda {
-        #[cfg(feature = "backend_cuda")]
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         {
             crate::runtime::cuda_flash::host_call(
                 bufs,
@@ -566,7 +643,10 @@ pub fn fused_attention_ex(
                 },
             )
         }
-        #[cfg(not(feature = "backend_cuda"))]
+        #[cfg(not(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        )))]
         {
             return None;
         }

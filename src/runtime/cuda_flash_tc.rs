@@ -413,6 +413,7 @@ pub fn selections() -> u64 {
 
 /// Launch with the default options (no mask, no causal, one K/V head per Q
 /// head, async pipeline on).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     dev: &std::rc::Rc<crate::runtime::device::Compiled>,
     q: &OpaqueView,

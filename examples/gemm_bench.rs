@@ -133,11 +133,17 @@ fn main() {
                 "iter {it}: buffer device={:?} (cuda available={})",
                 y.realized_buffer().map(|b| b.device().to_string()),
                 {
-                    #[cfg(feature = "backend_cuda")]
+                    #[cfg(all(
+                        feature = "backend_cuda",
+                        any(target_os = "linux", target_os = "windows")
+                    ))]
                     {
                         autorust::runtime::ops_cuda::available()
                     }
-                    #[cfg(not(feature = "backend_cuda"))]
+                    #[cfg(not(all(
+                        feature = "backend_cuda",
+                        any(target_os = "linux", target_os = "windows")
+                    )))]
                     {
                         false
                     }
@@ -149,7 +155,10 @@ fn main() {
             let t3 = Instant::now();
             y.realize_device_ctx(&mut ctx.borrow_mut(), &mut sess);
             let t4 = Instant::now();
-            #[cfg(feature = "backend_cuda")]
+            #[cfg(all(
+                feature = "backend_cuda",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             autorust::runtime::ops_cuda::synchronize();
             let t5 = Instant::now();
             if prof {

@@ -1,7 +1,10 @@
 //! `*_fresh` reads must use the tensor's device, and an already realized tensor
 //! must only copy (never re-schedule and lose the params' data).
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::engine::session::Session;
 use autorust::tensor::{Ctx, Tensor};

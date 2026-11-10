@@ -18,13 +18,21 @@ exclude = [
     "INDEXING.md",
     "AGENTS.md",
     ".github/",
+    # Development-only harness binaries: the Python bridge drives them and they
+    # expect `py/` (excluded) plus a checkout of the tinygrad oracle.
+    "src/bin/oracle_*",
+    "src/bin/pm_inventory.rs",
+    "src/bin/dbg_parse.rs",
+    "src/bin/dump_rules.rs",
+    "src/bin/probe_2d.rs",
 ]
 
 [package.metadata.docs.rs]
-# The default feature set (capi + backend_rayon) is the portable docs build;
-# CL/CUDA need runtime driver libraries and are not built on docs.rs.
-features = ["capi", "backend_rayon"]
-rustdoc-args = ["--cfg", "docsrs"]
+# docs.rs builds on x86_64-unknown-linux-gnu, where CUDA and `freeze` are
+# default features. List them explicitly so the published docs keep the whole
+# backend surface if the default set ever shrinks. No `--cfg docsrs`: the crate
+# does not emit `doc(cfg)` badges, so that flag would be dead.
+features = ["backend_cuda", "freeze"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -44,10 +52,21 @@ required-features = ["backend_metal"]
 [features]
 # `ops_interp` is always compiled (the faithful reference interpreter). The
 # default set adds the multithreaded CPU backend (`RAYON`), the dynamically
-# loaded native CPU backends (`RUST`/`CC`), and OpenCL (`CL`). CUDA stays opt-in
-# (build weight/test environment; it is dynamically loaded and needs no CUDA
-# libraries at build time).
-default = ["capi", "backend_rayon", "backend_rust", "backend_cl", "backend_clang", "backend_metal"]
+# loaded native CPU backends (`RUST`/`CC`), OpenCL (`CL`), Metal (macOS), CUDA
+# (Linux/Windows; dynamically loaded, no CUDA libraries at build time), and the
+# frozen-plan AOT API (`freeze`). Cargo cannot express per-target defaults, so
+# `backend_cuda` is enabled everywhere but its dependency and code are gated on
+# `any(target_os = "linux", target_os = "windows")`.
+default = [
+    "capi",
+    "backend_rayon",
+    "backend_rust",
+    "backend_clang",
+    "backend_cl",
+    "backend_metal",
+    "backend_cuda",
+    "freeze",
+]
 # C ABI loaded by the Python ctypes bridge (py/bridge.py).
 capi = []
 # Multithreaded CPU backend (device "RAYON"), parallelized with `rayon`.
@@ -64,7 +83,10 @@ backend_metal = [
     "dep:objc2-metal-performance-shaders",
 ]
 # CUDA backend (operations/codegen on the CUDA driver API via `cudarc`),
-# dynamically loaded; no CUDA libraries are required at build time.
+# dynamically loaded; no CUDA libraries are required at build time. In the
+# default set, but only on the platforms CUDA exists (Linux/Windows): the
+# `cudarc` dependency is target-gated and the code uses
+# `all(feature = "backend_cuda", any(target_os = "linux", target_os = "windows"))`.
 backend_cuda = ["dep:cudarc", "dep:libloading"]
 # Native CPU backend: render Rust kernels, compile them with `rustc` to a
 # cdylib, and load them with `libloading`. Parallel launches use `rayon`.
@@ -102,8 +124,13 @@ bytemuck = { version = "1", optional = true }
 # Runtime loading of the `rustc`-built kernel cdylibs (`backend_rust`),
 # portable C shared libraries (`backend_clang`), and `libOpenCL` (`backend_cl`).
 libloading = { version = "0.8", optional = true }
+
 # CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
 # needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.
+# Target-gated: `backend_cuda` is a default feature, but CUDA only exists on
+# Linux/Windows, so macOS builds never pull `cudarc` (the code is gated by the
+# same `all(feature, target_os)` condition).
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 cudarc = { version = "0.19", optional = true, default-features = false, features = [
     "std",
     "driver",

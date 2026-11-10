@@ -56,7 +56,7 @@ pub trait Module {
 ///
 /// The associated types let the same trait cover one-tensor layers, tuple
 /// inputs (e.g. `LSTMCell`), and multi-output models. The frozen-plan
-/// [`Engine`](crate::freeze::Engine) currently specializes to
+/// `autorust::freeze::Engine` (feature `freeze`) currently specializes to
 /// `Input = Tensor, Output = Tensor`.
 pub trait ModuleForward {
     /// Input value (usually a `Tensor` or a tuple of tensors).

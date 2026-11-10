@@ -480,7 +480,10 @@ fn ensure_builtins() {
             super::ops_metal::register();
             #[cfg(feature = "backend_clang")]
             super::ops_clang::register();
-            #[cfg(feature = "backend_cuda")]
+            #[cfg(all(
+                feature = "backend_cuda",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             super::ops_cuda::register();
             #[cfg(feature = "backend_rust")]
             super::ops_rust::register();

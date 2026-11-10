@@ -4,7 +4,10 @@
 //! FFMA path (`tensor_cores = false`). f32 uses TF32 (10-bit mantissa), so the
 //! tolerance is relative to the output magnitude; bf16 is looser.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::tensor::{Ctx, Tensor};

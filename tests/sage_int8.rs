@@ -1,7 +1,10 @@
 //! INT8 SageAttention-style QKᵀ vs a reference that performs the same
 //! per-row/per-key quantization (testable on sm_80..88, including the 3060).
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use std::time::Instant;
 
@@ -71,6 +74,7 @@ fn sage_ref(q: &[f32], k: &[f32], v: &[f32], b: i64, h: i64, n: i64, d: i64) -> 
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_sage(
     ctx: &Ctx,
     sess: &mut autorust::engine::session::Session,

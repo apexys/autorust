@@ -19,10 +19,6 @@ fn have_cl() -> bool {
     true
 }
 
-fn set_lib(on: bool) {
-    unsafe { std::env::set_var("AUTORUST_GEMM", if on { "all" } else { "0" }) };
-}
-
 fn values(seed: usize, len: usize) -> Vec<f32> {
     (0..len)
         .map(|i| (((i + seed) % 23) as f32) * 0.01 - 0.11)
@@ -147,7 +143,7 @@ fn clblast_matches_scale_and_residual_epilogue() {
                     bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CL"))),
                 };
                 let scale = Tensor::from_slice(ctx, &sd, None, Some("CL"));
-                vec![x.add(&lin.forward(&h).mul(&scale))]
+                vec![x.add(lin.forward(&h).mul(&scale))]
             },
         )
     };

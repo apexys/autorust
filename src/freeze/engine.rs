@@ -114,7 +114,10 @@ where
 }
 
 fn gpu_available() -> bool {
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     if crate::runtime::ops_cuda::available() {
         return true;
     }

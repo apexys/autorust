@@ -6,7 +6,10 @@
 //! tensors, covering the layouts ViT/DINOv3 produce: prime M, transposed weight
 //! views, a fused bias, and strided batches.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::tensor::nn::Linear;
@@ -22,10 +25,6 @@ fn have_cuda_and_cublas() -> bool {
 
 /// The library toggle is a process-global env var; serialize the cases.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn set_lib(on: bool) {
-    unsafe { std::env::set_var("AUTORUST_CUBLAS", if on { "all" } else { "0" }) };
-}
 
 fn values(seed: usize, len: usize) -> Vec<f32> {
     (0..len)
@@ -215,7 +214,7 @@ fn cublas_matches_scale_and_residual_epilogue() {
                     bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CUDA"))),
                 };
                 let scale = Tensor::from_slice(ctx, &sd, None, Some("CUDA"));
-                vec![x.add(&lin.forward(&h).mul(&scale))]
+                vec![x.add(lin.forward(&h).mul(&scale))]
             },
         )
     };

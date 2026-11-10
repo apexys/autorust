@@ -38,10 +38,10 @@
 //!
 //! | A | B | C/D |
 //! |---|---|---|
-//! | a0 = A[g][2t:2t+2]      | b0 = B[2t:2t+2][g]    | c0 = C[g][2t]     |
-//! | a1 = A[g+8][2t:2t+2]    | b1 = B[2t+8:2t+10][g] | c1 = C[g][2t+1]   |
-//! | a2 = A[g][2t+8:2t+10]   |                       | c2 = C[g+8][2t]   |
-//! | a3 = A[g+8][2t+8:2t+10] |                       | c3 = C[g+8][2t+1] |
+//! | a0 = `A[g][2t:2t+2]`      | b0 = `B[2t:2t+2][g]`    | c0 = `C[g][2t]`     |
+//! | a1 = `A[g+8][2t:2t+2]`    | b1 = `B[2t+8:2t+10][g]` | c1 = `C[g][2t+1]`   |
+//! | a2 = `A[g][2t+8:2t+10]`   |                         | c2 = `C[g+8][2t]`   |
+//! | a3 = `A[g+8][2t+8:2t+10]` |                         | c3 = `C[g+8][2t+1]` |
 //!
 //! Two score tiles (16 keys) pack into one A fragment for `P·V` with no
 //! cross-lane exchange, so the probabilities again stay in registers.
@@ -462,6 +462,7 @@ pub fn selections() -> u64 {
 
 /// Launch with the default options (no mask, no causal, one K/V head per Q
 /// head, async pipeline on).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     dev: &std::rc::Rc<crate::runtime::device::Compiled>,
     q: &OpaqueView,

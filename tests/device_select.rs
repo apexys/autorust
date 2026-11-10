@@ -83,7 +83,10 @@ fn rayon_is_registered() {
 /// The default-device probe must be safe on a machine where the CUDA backend
 /// was compiled in but the driver library is not installed: cudarc's loader
 /// panics on a missing `libcuda`, so `available()` has to return `false`.
-#[cfg(feature = "backend_cuda")]
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 #[test]
 fn cuda_availability_probe_does_not_panic() {
     let _ = autorust::runtime::ops_cuda::available();

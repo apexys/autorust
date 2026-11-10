@@ -10,7 +10,7 @@
 //! This module implements the same descriptor as a packed blocked GEMM:
 //! `rayon` over disjoint `(m, n)` tiles, both operands packed into panels that
 //! match the microkernel, and a 6x16 AVX2/FMA microkernel (12 YMM accumulators
-//! + 2 operand vectors, no spills). The fringe rows/columns go through a scalar
+//! plus 2 operand vectors, no spills). The fringe rows/columns go through a scalar
 //! microkernel, so prime extents need no padding and no masks.
 //!
 //! The epilogue (`alpha`, bias, per-column scale, residual) is applied in a
@@ -35,12 +35,6 @@ pub static DISPATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 thread_local! {
     /// Per-thread pack buffer: `MC*KC` floats of `A`, then `KC*NC` of `B`.
     static SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    crate::helpers::env::get(name)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
 }
 
 /// Whether the CPU host GEMM should be used.
@@ -109,7 +103,7 @@ fn tile() -> Tile {
         None => Tile {
             mc: 48.max(MR),
             nc: 96.max(NR),
-            kc: 256.max(1),
+            kc: 256,
         },
     }
 }
@@ -149,6 +143,10 @@ unsafe fn micro_6x16(
 
 /// Portable microkernel for fringe tiles (`mr <= MR`, `nr <= NR`).
 #[inline]
+// The loops are written in matrix-index order on purpose: this is the scalar
+// reference for the AVX2 microkernel, and the argument list is its microkernel
+// ABI.
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 unsafe fn micro_gen(
     mr: usize,
     nr: usize,
@@ -202,6 +200,9 @@ fn have_avx2() -> bool {
 /// # Safety
 /// Every `ptrs` entry referenced by the descriptor must be a valid allocation
 /// large enough for the offsets and strides it describes.
+// The packing loops offset by the descriptor's element strides, which are
+// non-negative `usize`s by construction.
+#[allow(clippy::ptr_offset_with_cast)]
 pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
     if g.dtype != dtype::FLOAT32 {
         return Err("cpu_gemm: only f32 is supported".into());
@@ -436,12 +437,12 @@ mod tests {
             .collect();
         let mut c = vec![0.0f32; m * n];
         let g = desc(m as i64, n as i64, k as i64);
-        let mut ptrs = [
+        let ptrs = [
             a.as_ptr() as *mut u8,
             b.as_ptr() as *mut u8,
             c.as_mut_ptr() as *mut u8,
         ];
-        unsafe { run_raw(&g, &mut ptrs).unwrap() };
+        unsafe { run_raw(&g, &ptrs).unwrap() };
         for i in 0..m {
             for j in 0..n {
                 let mut s = 0.0f32;

@@ -13,7 +13,10 @@
 //! `B[key][d]`, so it uses the transposed form. Getting this backwards is easy
 //! (and the sawtooth test data hides it), hence the explicit check.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use autorust::dtype;
 use autorust::runtime::device::device;
@@ -63,10 +66,8 @@ fn ldmatrix_x2_orientation() {
     let val = |k: usize, n: usize| bf16_bits((k * 8 + n + 1) as u32);
     let b: Vec<f32> = (0..128).map(|i| (i + 1) as f32).collect();
     let tb = Tensor::from_slice(&ctx, &b, None, Some("CUDA")).cast(dtype::BFLOAT16);
-    let r0 =
-        Tensor::from_slice(&ctx, &vec![0u32; 32], Some(dtype::UINT32), Some("CUDA")).to_param();
-    let r1 =
-        Tensor::from_slice(&ctx, &vec![0u32; 32], Some(dtype::UINT32), Some("CUDA")).to_param();
+    let r0 = Tensor::from_slice(&ctx, &[0u32; 32], Some(dtype::UINT32), Some("CUDA")).to_param();
+    let r1 = Tensor::from_slice(&ctx, &[0u32; 32], Some(dtype::UINT32), Some("CUDA")).to_param();
     {
         let mut c = ctx.borrow_mut();
         for t in [&tb, &r0, &r1] {

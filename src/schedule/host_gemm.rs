@@ -425,21 +425,35 @@ fn library_ready(ctx: &UOpCtx, kind: GemmDevice) -> bool {
     }
     match kind {
         GemmDevice::Cpu => {
-            #[cfg(feature = "backend_rust")]
+            #[cfg(any(
+                feature = "backend_rust",
+                feature = "backend_clang",
+                feature = "backend_rayon"
+            ))]
             {
                 crate::runtime::cpu_gemm::available()
             }
-            #[cfg(not(feature = "backend_rust"))]
+            #[cfg(not(any(
+                feature = "backend_rust",
+                feature = "backend_clang",
+                feature = "backend_rayon"
+            )))]
             {
                 false
             }
         }
         GemmDevice::Cuda => {
-            #[cfg(feature = "backend_cuda")]
+            #[cfg(all(
+                feature = "backend_cuda",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             {
                 crate::runtime::cublas::available()
             }
-            #[cfg(not(feature = "backend_cuda"))]
+            #[cfg(not(all(
+                feature = "backend_cuda",
+                any(target_os = "linux", target_os = "windows")
+            )))]
             {
                 false
             }
@@ -475,11 +489,18 @@ pub fn library_available(settings: &crate::settings::Settings) -> bool {
     if !settings.any_library_gemm() {
         return false;
     }
-    #[cfg(feature = "backend_rust")]
+    #[cfg(any(
+        feature = "backend_rust",
+        feature = "backend_clang",
+        feature = "backend_rayon"
+    ))]
     if crate::runtime::cpu_gemm::available() {
         return true;
     }
-    #[cfg(feature = "backend_cuda")]
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     if crate::runtime::cublas::available() {
         return true;
     }
@@ -898,7 +919,23 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // generated kernel's 1-row tile loses its `B` reuse. Do not apply the
     // divisibility heuristic there; require a minimum amount of work instead.
     if kind == GemmDevice::Cpu {
-        if !force && !crate::runtime::cpu_gemm::worth_dispatching(m, n, k) {
+        #[cfg(any(
+            feature = "backend_rust",
+            feature = "backend_clang",
+            feature = "backend_rayon"
+        ))]
+        {
+            if !force && !crate::runtime::cpu_gemm::worth_dispatching(m, n, k) {
+                return None;
+            }
+        }
+        // No host-memory backend is compiled in, so nothing can execute it.
+        #[cfg(not(any(
+            feature = "backend_rust",
+            feature = "backend_clang",
+            feature = "backend_rayon"
+        )))]
+        {
             return None;
         }
     } else if !force && !cuda_f32 && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {

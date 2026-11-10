@@ -172,7 +172,8 @@ impl FrozenRunner {
                     // SAFETY: every view is bound and large enough for the
                     // descriptor's offsets/strides (checked when the plan was
                     // built from the live tensors).
-                    if let Err(e) = unsafe { crate::runtime::cpu_gemm::run_raw(gemm, &ptrs) } {
+                    let g: &crate::schedule::host_gemm::HostGemm = gemm;
+                    if let Err(e) = unsafe { crate::runtime::cpu_gemm::run_raw(g, &ptrs) } {
                         panic!("TGERR: frozen cpu gemm: {e}");
                     }
                     if let Some(t) = timer {

@@ -4,7 +4,10 @@
 //! `d=64`) plus small and non-multiple-of-tile lengths, checks the setting
 //! gate, and reports the kernel time next to the scalar f32 kernel.
 
-#![cfg(feature = "backend_cuda")]
+#![cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 
 use std::time::Instant;
 
@@ -55,6 +58,7 @@ fn sdpa_ref(q: &[f32], k: &[f32], v: &[f32], b: i64, h: i64, n: i64, d: i64) -> 
 }
 
 /// Run the tensor-core kernel on `q/k/v` and read the output back.
+#[allow(clippy::too_many_arguments)]
 fn run_tc(
     ctx: &Ctx,
     sess: &mut autorust::engine::session::Session,
@@ -84,6 +88,7 @@ fn run_tc(
 }
 
 /// Run the scalar f32 kernel on `q/k/v` and read the output back.
+#[allow(clippy::too_many_arguments)]
 fn run_scalar(
     ctx: &Ctx,
     sess: &mut autorust::engine::session::Session,
