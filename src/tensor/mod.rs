@@ -338,6 +338,9 @@ impl Tensor {
 
     /// `Tensor.const`: `Tensor(UOp.const(b, dtype))`.
     pub fn const_(ctx: impl AsCtx, b: ConstVal, dtype: Option<DTypeId>) -> Tensor {
+        let dtype = dtype.map(|d| {
+            crate::tensor::creation::metal_lower_f64(&crate::tensor::creation::default_device(), d)
+        });
         ctx.with_ctx(|ctx| {
             let u = ctx.const_py(b, dtype);
             Tensor::from_uop(ctx, u)
@@ -394,6 +397,10 @@ impl Tensor {
     }
     #[doc(hidden)]
     pub fn cast_ctx(&self, ctx: &mut UOpCtx, dtype: DTypeId) -> Tensor {
+        let dtype = self
+            .device_ctx(ctx)
+            .map(|d| crate::tensor::creation::metal_lower_f64(&d, dtype))
+            .unwrap_or(dtype);
         {
             let __u = ctx.cast(self.uop().clone(), dtype);
             Tensor::from_uop(ctx, __u)
@@ -687,6 +694,21 @@ impl Tensor {
     }
     #[doc(hidden)]
     pub fn to_list_ctx<T: ReadDtype>(&self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<T> {
+        // Metal lowers f64 tensors to f32; a f64 read converts on the host
+        // instead of inserting an unsupported f64 graph cast.
+        if <T as ReadDtype>::DTYPE == crate::dtype::FLOAT64
+            && self.dtype_ctx(ctx) == crate::dtype::FLOAT32
+            && self
+                .device_ctx(ctx)
+                .map(|d| crate::runtime::device::canonicalize_device_name(&d) == "METAL")
+                .unwrap_or(false)
+        {
+            let vals = self.to_list_ctx::<f32>(ctx, sess);
+            return vals
+                .into_iter()
+                .map(|v| T::from_f32(v).expect("f64 read from Metal f32 storage"))
+                .collect();
+        }
         if <T as ReadDtype>::DTYPE == self.dtype_ctx(ctx) {
             return Self::decode::<T>(self.to_bytes_ctx(ctx, sess));
         }
@@ -1283,6 +1305,10 @@ impl Tensor {
     pub fn const_like_ctx(&self, ctx: &mut UOpCtx, b: ConstVal, dtype: Option<DTypeId>) -> Tensor {
         let shape = self.shape_ctx(ctx).into_vec();
         let dt = dtype.unwrap_or_else(|| self.dtype_ctx(ctx));
+        let dt = self
+            .device_ctx(ctx)
+            .map(|d| crate::tensor::creation::metal_lower_f64(&d, dt))
+            .unwrap_or(dt);
         Tensor::full_const(&mut *ctx, shape, b, Some(dt))
     }
 

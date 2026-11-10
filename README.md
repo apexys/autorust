@@ -244,7 +244,8 @@ first tensor/realize.
   and the image path. Multi-device/sharding is out of scope.
 - **Backends**: CUDA tensor cores target `sm_86`; OpenCL has no offset views and
   no native bf16; Metal has native simdgroup 8x8 tensor cores (f32/f16/bf16) but
-  no `double`. There is no AMD/WebGPU backend. The `RUST` CPU backend
+  no hardware `double` — the public Tensor API lowers f64 to f32 on METAL.
+  There is no AMD/WebGPU backend. The `RUST` CPU backend
   is x86-64-first (other architectures fall back to libm for math).
 - **OpenCL loading**: `backend_cl` loads `libOpenCL` dynamically (`cl_sys`);
   a binary built with it starts on machines without OpenCL and `CL` is simply
@@ -253,7 +254,8 @@ first tensor/realize.
   Objective-C runtime and Metal framework; shaders are compiled at runtime with
   `newLibraryWithSource:`, so no Xcode/Metal toolchain is needed. Buffers use
   shared storage (host upload/download is a CPU copy), and the allocator
-  supports real offset views. Native `simdgroup` 8x8 tensor cores cover
+  supports real offset views. f64 is lowered to f32 on METAL (f32 precision);
+  use INTERP/CPU/CL/CUDA for true f64. Native `simdgroup` 8x8 tensor cores cover
   f32/f16/bf16 matmuls (≈1.3-1.7x over the FFMA path on an M2). A
   MetalPerformanceShaders host-GEMM path also exists (f32/f32, f16/f16, f16
   inputs with f32 accumulation); it is opt-in via `AUTORUST_MPS=all`, because

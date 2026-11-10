@@ -286,7 +286,7 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   step (the 38-buffer fused ViT kernel is split by the budget). `tests/bf16.rs`,
   `tests/rand.rs`, `tests/nn_attention.rs`, and `tests/nn_models.rs` pass with
   METAL as the default. Full suite with `AUTORUST_CL_LIB=/nonexistent` (to
-  bypass Apple's broken OpenCL driver): **236 passed, 0 failed, 11 ignored**.
+  bypass Apple's broken OpenCL driver): **237 passed, 0 failed, 11 ignored**.
 - **MPS host GEMM (opt-in).** `MetalAllocator`/`MetalProgram` now also expose the
   `HostGemm` seam through MetalPerformanceShaders (`MPSMatrixMultiplication`).
   The scheduler recognizes a plain affine contraction on METAL and attaches a
@@ -329,9 +329,15 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   The earlier failed attempt used a newer tinygrad Metal table whose
   integer swizzle is incompatible with the port's v0.14.0 `apply_tc_opt`; the
   v0.14.0 `tc.py` string table is the correct source.
-- **Known gaps.** No `double` (Apple GPUs do not implement
-  64-bit floats, so the harness skips f64 programs and the two ONNX tests with
-  f64 intermediates pin themselves to INTERP); no Metal graph-capture path; fused
+- **f64 fallback (DONE).** Apple GPUs have no hardware `double`. The public
+  Tensor API lowers `FLOAT64` to `FLOAT32` on METAL at creation/`cast`/const/
+  rand/readout (`creation::metal_lower_f64`), and `to_list::<f64>` converts the
+  realized f32 data on the host. f64 graphs therefore compile and run, with
+  f32 precision; genuine f64 remains available on INTERP/CPU/CL/CUDA. `from_bytes`
+  converts f64 payloads to f32 on the way in. Gate: `tests/metal_f64.rs`.
+  Low-level `UOp` graphs that bypass the Tensor API can still reach the Metal
+  compiler with a raw f64 param.
+- **Known gaps.** No Metal graph-capture path; fused
   `Tensor.custom_kernel` remains the M7 stretch. The fusion budget is a
   conservative heuristic (leaf-buffer union, not the final argument count), so
   it can over-split a graph; the post-rangeify retry makes the final bound
@@ -450,7 +456,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **236 passed, 11 ignored, 0 failed** with
+- `cargo test` → **237 passed, 11 ignored, 0 failed** with
   `AUTORUST_CL_LIB=/nonexistent` (2026-11; the OpenCL backend is skipped so the
   suite does not hit Apple's pre-existing OpenCL driver failure — see below).
   This run includes the Metal backend on an Apple M2. The ignored = 1

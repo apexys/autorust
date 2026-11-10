@@ -459,6 +459,7 @@ pub fn rand(
     device: Option<&str>,
 ) -> Tensor {
     let dev = creation::canonicalize_device(device);
+    let dtype_opt = dtype_opt.map(|d| creation::metal_lower_f64(&dev, d));
     if crate::runtime::device::is_interp_engine(&dev) {
         rand_host(ctx, shape, dtype_opt, Some(&dev))
     } else {
@@ -476,8 +477,8 @@ pub fn uniform(
     dtype_opt: Option<DTypeId>,
     device: Option<&str>,
 ) -> Tensor {
-    let dt = dtype_opt.unwrap_or_else(dtype::default_float);
     let dev = creation::canonicalize_device(device);
+    let dt = creation::metal_lower_f64(&dev, dtype_opt.unwrap_or_else(dtype::default_float));
     // `uniform` draws its bits in the *default float* dtype, scales, casts to
     // `dt`, then shifts by `low` (rand.py:158).
     let r = rand(ctx, shape, None, Some(&dev));
@@ -570,6 +571,7 @@ pub fn randn(
     device: Option<&str>,
 ) -> Tensor {
     let dev = creation::canonicalize_device(device);
+    let dtype_opt = dtype_opt.map(|d| creation::metal_lower_f64(&dev, d));
     if crate::runtime::device::is_interp_engine(&dev) {
         randn_host(ctx, shape, dtype_opt, Some(&dev))
     } else {
@@ -593,7 +595,8 @@ pub fn randint(
         low < high,
         "TGERR: Tensor.randint requires low < high, got low={low}, high={high}"
     );
-    let dt = dtype_opt.unwrap_or(dtype::INT32);
+    let dev = creation::canonicalize_device(device);
+    let dt = creation::metal_lower_f64(&dev, dtype_opt.unwrap_or(dtype::INT32));
     // `randint` is `uniform(low, high, dtype)` (rand.py:122) =
     // `((high-low) * rand()).cast(dtype) + low`, so it follows `rand`'s
     // per-device route and is a pure graph (JIT-capturable) on hardware.

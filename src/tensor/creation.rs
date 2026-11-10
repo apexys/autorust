@@ -29,6 +29,16 @@ pub(crate) fn register_initial(ctx: &mut UOpCtx, mut u: UopId, bytes: Vec<u8>) {
 /// `UOp.unique_num` — the global BUFFER slot counter (ops.py:814).
 pub static UNIQUE_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
+/// Metal has no hardware `double`. The public Tensor API lowers `FLOAT64` to
+/// `FLOAT32` on METAL (f32 precision); use CUDA/CPU/INTERP for true f64.
+pub fn metal_lower_f64(dev: &str, dt: DTypeId) -> DTypeId {
+    if dt == dtype::FLOAT64 && crate::runtime::device::canonicalize_device_name(dev) == "METAL" {
+        dtype::FLOAT32
+    } else {
+        dt
+    }
+}
+
 /// `UOp.new_buffer(device, size, dtype, num=None)` (ops.py:815-820).
 /// `device` here is the Python-side canonical string (e.g. "PYTHON" — tinygrad's DEFAULT staging name —, "CL").
 pub fn new_buffer(
@@ -38,6 +48,7 @@ pub fn new_buffer(
     dt: DTypeId,
     num: Option<i64>,
 ) -> UopId {
+    let dt = metal_lower_f64(device, dt);
     assert!(
         !dtype::is_weak(dt),
         "TGERR: cannot create storage for weak dtype {dt:?}"
@@ -60,6 +71,7 @@ pub fn new_buffer(
 
 /// `UOp.empty(shape, dtype, device)` (ops.py:846-850) — `new_buffer(...).reshape(max_shape).shrink_to(shape)`.
 pub fn empty(ctx: &mut UOpCtx, shape: &[SVal], dt: DTypeId, device: &str) -> UopId {
+    let dt = metal_lower_f64(device, dt);
     let max_shape = to_max_shape(shape);
     let numel = super::movement::prod_sval(ctx, &max_shape);
     let buf = new_buffer(ctx, device, numel, dt, None);
@@ -84,12 +96,16 @@ pub fn full(
     buffer: bool,
 ) -> Tensor {
     let new_shape = shape.to_vec();
-    let dt = dtype.unwrap_or(match &fill_value {
-        ConstVal::Bool(_) => dtype::BOOL,
-        ConstVal::Int(_) | ConstVal::Big(_) => dtype::WEAKINT,
-        ConstVal::Float(_) => dtype::WEAKFLOAT,
-        ConstVal::Invalid => dtype::WEAKINT,
-    });
+    let dev = canonicalize_device(device);
+    let dt = metal_lower_f64(
+        &dev,
+        dtype.unwrap_or(match &fill_value {
+            ConstVal::Bool(_) => dtype::BOOL,
+            ConstVal::Int(_) | ConstVal::Big(_) => dtype::WEAKINT,
+            ConstVal::Float(_) => dtype::WEAKFLOAT,
+            ConstVal::Invalid => dtype::WEAKINT,
+        }),
+    );
     let val = Tensor::const_(&mut *ctx, fill_value, Some(dt));
     let ones_shape: Vec<SVal> = vec![SVal::I(1); new_shape.len()];
     let val = {
@@ -102,7 +118,6 @@ pub fn full(
     }
     // `val.empty_like(None, device)`: device = canonicalize(device or val.device
     // (None)) -> the default device; dtype = strong_dtype(val.dtype)
-    let dev = canonicalize_device(device);
     let ret = empty(ctx, &new_shape, dtype::strong_dtype(dt), &dev);
     let store = super::store(ctx, ret.clone(), val.uop(), None);
     {
@@ -194,6 +209,7 @@ pub fn arange(
             }
         }
     };
+    let dt = metal_lower_f64(&default_device(), dt);
     // overflow check against the chosen dtype (ints only; float ranges always fit)
     if !dtype::is_float(dt) {
         let (min, max) = (dtype::dtype_min(dt).as_f64(), dtype::dtype_max(dt).as_f64());
@@ -232,7 +248,10 @@ pub fn arange(
 pub fn eye(ctx: &mut UOpCtx, n: i64, m: Option<i64>, dtype: Option<DTypeId>) -> Tensor {
     let m_ = m.unwrap_or(n);
     assert!(n >= 0 && m_ >= 0, "TGERR: cannot have negative n, m");
-    let out_dtype = dtype.unwrap_or_else(dtype::default_float);
+    let out_dtype = metal_lower_f64(
+        &default_device(),
+        dtype.unwrap_or_else(dtype::default_float),
+    );
     let a = arange(ctx, n as f64, None, 1.0, None).unsqueeze_ctx(ctx, -1);
     let b = arange(ctx, m_ as f64, None, 1.0, None);
     let eq = super::elementwise::eq(ctx, a.uop(), b.uop());
@@ -267,7 +286,10 @@ pub fn linspace(
     dtype: Option<DTypeId>,
 ) -> Tensor {
     assert!(steps >= 0, "TGERR: number of steps must be non-negative");
-    let dt = dtype.unwrap_or_else(dtype::default_float);
+    let dt = metal_lower_f64(
+        &default_device(),
+        dtype.unwrap_or_else(dtype::default_float),
+    );
     assert!(
         !dtype::is_bool(dt),
         "TGERR: linspace with bool dtype is not supported"
@@ -517,7 +539,8 @@ pub fn from_slice<T: SliceElem>(
     dtype: Option<DTypeId>,
     device: Option<&str>,
 ) -> Tensor {
-    let target = dtype.unwrap_or_else(T::default_dtype);
+    let dev = canonicalize_device(device);
+    let target = metal_lower_f64(&dev, dtype.unwrap_or_else(T::default_dtype));
     assert!(
         !dtype::is_weak(target),
         "TGERR: cannot create storage for weak dtype {target:?}"
@@ -561,7 +584,6 @@ pub fn from_slice<T: SliceElem>(
     } else {
         ret
     };
-    let dev = canonicalize_device(device);
     let ret = if dev == "PYTHON" {
         ret
     } else {
@@ -575,6 +597,7 @@ pub fn from_slice<T: SliceElem>(
 
 /// `Tensor(data=bytes, dtype=?, device=?)` -> the bytes arm of `_frompy`:
 /// a 1-D `BUFFER("PYTHON", len(data)/itemsize)` — no reshape, no cast.
+#[allow(clippy::chunks_exact_to_as_chunks)] // MSRV 1.88: keep the stable chunk iterator
 pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<&str>) -> Tensor {
     assert!(
         !dtype::is_weak(dtype),
@@ -584,10 +607,24 @@ pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<
         !data.is_empty(),
         "TGERR: cannot create Tensor from empty bytes"
     );
-    let size = SVal::I((data.len() / dtype.itemsize()) as i128);
+    let dev = canonicalize_device(device);
+    let (dtype, converted) = if dtype == dtype::FLOAT64
+        && crate::runtime::device::canonicalize_device_name(&dev) == "METAL"
+    {
+        assert_eq!(data.len() % 8, 0, "TGERR: f64 bytes must be 8-byte aligned");
+        let mut out = Vec::with_capacity(data.len() / 2);
+        for c in data.chunks_exact(8) {
+            let v = f64::from_le_bytes(c.try_into().expect("8-byte f64 chunk"));
+            out.extend_from_slice(&(v as f32).to_le_bytes());
+        }
+        (dtype::FLOAT32, out)
+    } else {
+        (dtype, data.to_vec())
+    };
+    let size = SVal::I((converted.len() / dtype.itemsize()) as i128);
     let _ = &size;
     let ret = new_buffer(ctx, "PYTHON", size, dtype, None);
-    register_initial(ctx, ret.clone(), data.to_vec());
+    register_initial(ctx, ret.clone(), converted);
     let dev = canonicalize_device(device);
     let ret = if dev == "PYTHON" {
         ret

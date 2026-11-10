@@ -320,6 +320,11 @@ pub trait ReadDtype: Sized + Clone + PartialEq + core::fmt::Debug {
     const DTYPE: DTypeId;
     /// Read one little-endian element of `DTYPE.itemsize()` bytes.
     fn from_bytes_le(bytes: &[u8]) -> Self;
+    /// Convert a host `f32` when a Metal f64 request was lowered to f32.
+    /// `None` for types that cannot be produced this way.
+    fn from_f32(_v: f32) -> Option<Self> {
+        None
+    }
 }
 
 macro_rules! impl_read_dtype {
@@ -330,6 +335,9 @@ macro_rules! impl_read_dtype {
                 let mut a = [0u8; $n];
                 a.copy_from_slice(&bytes[..$n]);
                 <$t>::from_le_bytes(a)
+            }
+            fn from_f32(v: f32) -> Option<Self> {
+                Some(v as $t)
             }
         }
     )*};
@@ -343,6 +351,9 @@ impl ReadDtype for bool {
     const DTYPE: DTypeId = BOOL;
     fn from_bytes_le(bytes: &[u8]) -> Self {
         bytes[0] != 0
+    }
+    fn from_f32(v: f32) -> Option<Self> {
+        Some(v != 0.0)
     }
 }
 

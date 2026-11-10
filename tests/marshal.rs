@@ -7,12 +7,15 @@ use autorust::tensor::{Ctx, Tensor};
 #[test]
 fn from_slice_infers_dtype_from_generic() {
     let ctx = Ctx::new();
-    let t16 = Tensor::from_slice(&ctx, &[1i16, 2, 3], None, None);
-    let t32 = Tensor::from_slice(&ctx, &[1i32, 2, 3], None, None);
-    let tu8 = Tensor::from_slice(&ctx, &[1u8, 2, 3], None, None);
-    let tf32 = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, None);
-    let tf64 = Tensor::from_slice(&ctx, &[1.0f64, 2.0, 3.0], None, None);
-    let tb = Tensor::from_slice(&ctx, &[true, false, true], None, None);
+    // Infer the dtype on the reference interpreter: a METAL default lowers
+    // FLOAT64 to FLOAT32 (no hardware double), which is a backend policy, not
+    // a generic-inference rule.
+    let t16 = Tensor::from_slice(&ctx, &[1i16, 2, 3], None, Some("INTERP"));
+    let t32 = Tensor::from_slice(&ctx, &[1i32, 2, 3], None, Some("INTERP"));
+    let tu8 = Tensor::from_slice(&ctx, &[1u8, 2, 3], None, Some("INTERP"));
+    let tf32 = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0], None, Some("INTERP"));
+    let tf64 = Tensor::from_slice(&ctx, &[1.0f64, 2.0, 3.0], None, Some("INTERP"));
+    let tb = Tensor::from_slice(&ctx, &[true, false, true], None, Some("INTERP"));
     assert_eq!(t16.dtype(), dtype::INT16);
     assert_eq!(t32.dtype(), dtype::INT32);
     assert_eq!(tu8.dtype(), dtype::UINT8);
