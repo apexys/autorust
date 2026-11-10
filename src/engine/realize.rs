@@ -389,6 +389,159 @@ enum Prepared {
     Compile(Box<PreparedProgram>),
 }
 
+/// Everything a warm process needs to rebuild a compiled kernel without running
+/// the codegen pipeline (see `program_from_rendered`).
+#[derive(nanoserde::SerJson, nanoserde::DeJson)]
+struct RenderedEntry {
+    name: String,
+    global_size: Vec<i64>,
+    local_size: Option<Vec<i64>>,
+    vars: Vec<i64>,
+    globals: Vec<i64>,
+    outs: Vec<i64>,
+    ins: Vec<i64>,
+    sig_slots: Vec<i64>,
+    sig_dtypes: Vec<i64>,
+    source: String,
+}
+
+impl RenderedEntry {
+    fn new(
+        pi: &ProgramInfo,
+        source: &str,
+        signature: &[(i64, crate::dtype::DTypeId)],
+    ) -> RenderedEntry {
+        RenderedEntry {
+            name: pi.name.clone(),
+            global_size: pi.global_size.clone(),
+            local_size: pi.local_size.clone(),
+            vars: pi.vars.clone(),
+            globals: pi.globals.clone(),
+            outs: pi.outs.clone(),
+            ins: pi.ins.clone(),
+            sig_slots: signature.iter().map(|(s, _)| *s).collect(),
+            sig_dtypes: signature.iter().map(|(_, d)| d.0 as i64).collect(),
+            source: source.to_string(),
+        }
+    }
+    fn pi(&self) -> ProgramInfo {
+        ProgramInfo {
+            name: self.name.clone(),
+            global_size: self.global_size.clone(),
+            local_size: self.local_size.clone(),
+            vars: self.vars.clone(),
+            globals: self.globals.clone(),
+            outs: self.outs.clone(),
+            ins: self.ins.clone(),
+        }
+    }
+    fn signature(&self) -> Vec<(i64, crate::dtype::DTypeId)> {
+        self.sig_slots
+            .iter()
+            .zip(&self.sig_dtypes)
+            .map(|(s, d)| (*s, crate::dtype::DTypeId(*d as u16)))
+            .collect()
+    }
+    fn from_json(text: &str) -> Option<RenderedEntry> {
+        nanoserde::DeJson::deserialize_json(text).ok()
+    }
+    fn to_json(&self) -> String {
+        nanoserde::SerJson::serialize_json(self)
+    }
+}
+
+/// `to_elf` signature: non-ALU PARAMs, in linear order.
+fn signature_from_linear(
+    ctx: &UOpCtx,
+    lst: &[UopId],
+) -> Vec<(i64, crate::dtype::DTypeId)> {
+    let mut signature: Vec<(i64, crate::dtype::DTypeId)> = Vec::new();
+    for u in lst {
+        if ctx.op_of(u) == Ops::Param
+            && let Arg::Param(p) = ctx.arg_of(u)
+            && p.addrspace != Some(crate::dtype::AddrSpace::Alu)
+        {
+            signature.push((p.slot, ctx.dt_of(u)));
+        }
+    }
+    signature
+}
+
+/// Fingerprint of the running binary (crate version + executable mtime/size).
+/// Any rebuild changes it, so a rendered cache entry cannot outlive the codegen
+/// that produced it.
+fn build_fingerprint() -> u64 {
+    use std::hash::{Hash, Hasher};
+    static FP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FP.get_or_init(|| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        env!("CARGO_PKG_VERSION").hash(&mut h);
+        if let Ok(exe) = std::env::current_exe()
+            && let Ok(md) = std::fs::metadata(&exe)
+        {
+            md.len().hash(&mut h);
+            if let Ok(t) = md.modified() {
+                t.hash(&mut h);
+            }
+        }
+        h.finish()
+    })
+}
+
+/// Key for the rendered-source disk cache: AST content + device + all settings
+/// that influence codegen + the running build.
+fn render_cache_key(ctx: &UOpCtx, gkey: u64) -> Option<String> {
+    if !crate::engine::disk_cache::cache_enabled() {
+        return None;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", ctx.settings).hash(&mut h);
+    for k in ["USE_TC", "TC_OPT", "TC_SELECT"] {
+        crate::helpers::env::get(k).hash(&mut h);
+    }
+    build_fingerprint().hash(&mut h);
+    Some(format!("{gkey:016x}:{:016x}", h.finish()))
+}
+
+/// Rebuild a `CompiledProg` from a rendered-cache entry. The PTX itself comes
+/// from the compiler's source-keyed disk cache.
+fn program_from_rendered(
+    ctx: &mut UOpCtx,
+    entry: RenderedEntry,
+    dev: &Rc<crate::runtime::device::Compiled>,
+    cache: &mut ProgCache,
+    key: u64,
+    gkey: u64,
+) -> Rc<CompiledProg> {
+    let pi = entry.pi();
+    let signature = entry.signature();
+    let lib = dev.compiler.compile_cached(&entry.source);
+    let prg = ctx.uop(
+        Ops::Program,
+        Some(crate::dtype::VOID),
+        vec![],
+        pi.to_arg(),
+    );
+    let elf = Rc::new(TinyElf {
+        lib,
+        name: to_function_name_pub(&pi.name),
+        signature,
+    });
+    let elf_key = crate::runtime::device::elf_key(&elf);
+    let cp = Rc::new(CompiledProg {
+        uop: prg,
+        pi,
+        elf,
+        source: entry.source,
+        elf_key,
+        host: None,
+    });
+    cache.insert(key, cp.clone());
+    GLOBAL_PROGS.with(|g| g.borrow_mut().insert(gkey, cp.clone()));
+    cp
+}
+
 /// Render one kernel and return either a ready program or the source to compile.
 fn prepare_program(
     ctx: &mut UOpCtx,
@@ -436,28 +589,61 @@ fn prepare_program(
         GLOBAL_PROGS.with(|g| g.borrow_mut().insert(gkey, cp.clone()));
         return Prepared::Ready(cp);
     }
+    // Rendered-source cache: rendering a kernel is ~30 individual graph
+    // rewrites (~4 s over a ViT train step), while the compiled PTX is already
+    // cached by source text. Store the render result under the AST content key
+    // so a second process can skip straight to compilation. The key includes
+    // the running binary's fingerprint (mtime + size), so a codegen change
+    // invalidates it.
+    let render_key = render_cache_key(ctx, gkey).unwrap_or_default();
+    if !render_key.is_empty()
+        && let Some(entry) = crate::engine::disk_cache::get("render", &render_key)
+            .and_then(|t| RenderedEntry::from_json(&t))
+    {
+        crate::engine::prof::count("codegen.render_cache_hit");
+        let cp = program_from_rendered(ctx, entry, dev, cache, key, gkey);
+        return Prepared::Ready(cp);
+    }
+    crate::engine::prof::count("codegen.misses");
+    let render_t = crate::engine::prof::enabled().then(std::time::Instant::now);
     // 1. full_rewrite_to_sink
     let optimize = matches!(ctx.tag_of(&ast), Arg::None);
+    let t_sink = crate::engine::prof::enabled().then(std::time::Instant::now);
     let sunk = full_rewrite_to_sink_with(ctx, ast, dev.renderer.facts(), optimize);
+    if let Some(t) = t_sink {
+        crate::engine::prof::add("codegen.sink", t.elapsed().as_secs_f64());
+    }
     #[cfg(feature = "dump")]
     if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         crate::codegen::postrange::dump_index_exprs(ctx, sunk.clone(), "SUNK");
     }
     // 2. ProgramInfo.from_sink
+    let t_pi = crate::engine::prof::enabled().then(std::time::Instant::now);
     let pi = program_info_from_sink(ctx, sunk.clone());
+    if let Some(t) = t_pi {
+        crate::engine::prof::add("codegen.pi", t.elapsed().as_secs_f64());
+    }
     // 3. do_linearize: linearize + pm_linearize_cleanups
+    let t_lin = crate::engine::prof::enabled().then(std::time::Instant::now);
     let lst = linearize(ctx, sunk.clone());
     #[cfg(feature = "dump")]
     if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "LINEAR");
     }
     let lst = pm_linearize_cleanups(ctx, lst);
+    if let Some(t) = t_lin {
+        crate::engine::prof::add("codegen.linearize", t.elapsed().as_secs_f64());
+    }
     #[cfg(feature = "dump")]
     if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "CLEAN");
     }
     // 4. do_render: SOURCE through the device's renderer seam
+    let t_src = crate::engine::prof::enabled().then(std::time::Instant::now);
     let src_text = dev.renderer.render(ctx, &lst);
+    if let Some(t) = t_src {
+        crate::engine::prof::add("codegen.source", t.elapsed().as_secs_f64());
+    }
     #[cfg(feature = "dump")]
     if crate::helpers::env::get("TG_DUMP_SRC").is_some() {
         let pname = crate::codegen::postrange::kernel_name(ctx, &lst);
@@ -490,6 +676,13 @@ fn prepare_program(
             );
         }
         eprintln!("LST### END name={}", pname);
+    }
+    if let Some(t) = render_t {
+        crate::engine::prof::add("codegen.render", t.elapsed().as_secs_f64());
+    }
+    if !render_key.is_empty() {
+        let entry = RenderedEntry::new(&pi, &src_text, &signature_from_linear(ctx, &lst));
+        crate::engine::disk_cache::put("render", &render_key, &entry.to_json());
     }
     Prepared::Compile(Box::new(PreparedProgram {
         key,
@@ -542,16 +735,7 @@ fn finish_program(
         vec![sunk, linear_uop, source_uop, binary_uop],
         pi.to_arg(),
     );
-    // to_elf signature: non-ALU PARAMs (linear order)
-    let mut signature: Vec<(i64, crate::dtype::DTypeId)> = Vec::new();
-    for u in &lst {
-        if ctx.op_of(u) == Ops::Param
-            && let Arg::Param(p) = ctx.arg_of(u)
-            && p.addrspace != Some(crate::dtype::AddrSpace::Alu)
-        {
-            signature.push((p.slot, ctx.dt_of(u)));
-        }
-    }
+    let signature = signature_from_linear(ctx, &lst);
     let elf = Rc::new(TinyElf {
         lib,
         name: to_function_name_pub(&pi.name),
@@ -615,7 +799,12 @@ pub fn compile_linear(
             .device()
             .to_string();
         let dev = device(&dev_name);
-        match prepare_program(ctx, ast, &dev, cache) {
+        let gt = crate::engine::prof::enabled().then(std::time::Instant::now);
+        let prepared = prepare_program(ctx, ast, &dev, cache);
+        if let Some(t) = gt {
+            crate::engine::prof::add("codegen.prepare", t.elapsed().as_secs_f64());
+        }
+        match prepared {
             Prepared::Ready(cp) => {
                 ready.insert(c.id(), cp);
             }
@@ -638,7 +827,11 @@ pub fn compile_linear(
                 .iter()
                 .map(|&i| pending[i].1.src_text.clone())
                 .collect();
+            let ct = crate::engine::prof::enabled().then(std::time::Instant::now);
             let compiled = dev.compiler.compile_batch(&srcs);
+            if let Some(t) = ct {
+                crate::engine::prof::add("compile.batch", t.elapsed().as_secs_f64());
+            }
             for (i, lib) in idxs.iter().copied().zip(compiled) {
                 libs[i] = Some(lib);
             }
