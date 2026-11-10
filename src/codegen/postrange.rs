@@ -1526,25 +1526,49 @@ fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
         let want_lm = (dlm as i64).clamp(1, 64);
         let want_ln = (dln as i64).clamp(1, 64);
         let mut local_picks: Vec<(UopId, i64, i64)> = Vec::new();
-        for (rng, want_threads, want_up) in [
-            (m_rng.clone(), want_lm, want_m),
-            (n_rng.clone(), want_ln, want_n),
+        for (rng, want_threads, want_up, is_m) in [
+            (m_rng.clone(), want_lm, want_m, true),
+            (n_rng.clone(), want_ln, want_n, false),
         ] {
             let Some(i) = idx_of(k, ctx, &rng) else {
                 return false;
             };
             let ext = k.full_shape(ctx)[i];
-            let up = [want_up, 4, 2]
+            // Largest register tile (UPCAST) that divides the extent; the block
+            // tile is then the largest thread count that divides the rest.
+            let plan = |up: i64| -> Option<(i64, i64)> {
+                if up < 1 || ext % up != 0 {
+                    return None;
+                }
+                for threads in [want_threads, 8, 4, 2] {
+                    let cand = threads * up;
+                    if cand <= ext && ext % cand == 0 {
+                        return Some((cand, threads));
+                    }
+                }
+                None
+            };
+            let threads_of = |up: i64| plan(up).map(|(_, t)| t).unwrap_or(0);
+            let mut up = [want_up, 4, 2]
                 .into_iter()
                 .find(|s| *s >= 1 && ext % s == 0)
                 .unwrap_or(1);
-            let mut local = 1i64;
-            for threads in [want_threads, 8, 4, 2] {
-                let cand = threads * up;
-                if cand <= ext && ext % cand == 0 {
-                    local = cand;
-                    break;
-                }
+            // A prime row count (e.g. ViT's 1576 = 8*197 at batch 8) leaves the
+            // M axis with a single thread: 16-thread blocks and a 2x slower GEMM.
+            // Step the register tile down when a smaller one buys >= 2 threads.
+            if large
+                && is_m
+                && threads_of(up) < 2
+                && let Some(better) = [want_up, 4, 2]
+                    .into_iter()
+                    .filter(|s| *s < up)
+                    .find(|s| threads_of(*s) >= 2)
+            {
+                up = better;
+            }
+            let local = plan(up).map(|(l, _)| l).unwrap_or(1);
+            if dbg {
+                eprintln!("  gpu pick axis_ext={ext} up={up} local={local}");
             }
             local_picks.push((rng, local, up));
         }
