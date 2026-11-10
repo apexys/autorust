@@ -51,16 +51,20 @@ src/codegen/    to_program pipeline, linearize, simplify, coalesce, interp exec
 src/renderer/   Renderer trait + cstyle (OpenCL under `backend_cl`, Metal under `backend_metal`)
 src/runtime/    Buffer/allocator/compiler/device traits, INTERP + CL
 src/engine/     realize, session (BufTable + ProgCache), jit (TinyJit), disk_cache, ProgramInfo
-src/bin/        oracle_* cargo bins driven by pytest (JSON graph files)
+src/bin/        user-facing smoke probes (ocl/cuda/metal); dev tools live in py/bridge
 examples/       runnable demos (xor.rs, mnist.rs) — mirror tinygrad
 tests/onnx.rs   ONNX parser/op tests; external checkpoint test is #[ignore]d
 tests/          Rust unit/differential/golden/nn tests
 py/             dev-only Python bridge + differential gates (not published)
     bridge.py       uop_to_json / json_to_uop / realize_in_tg
-    bridge/         cdylib shim (C ABI over `autorust::rebuild`) + oracle bins;
+    bridge/         cdylib shim (C ABI over the public uop JSON codec),
+                    rebuild/graph_summary, and the oracle bins;
                     build with `cargo build -p autorust-bridge`
     tests/          test_*_diff.py gates against the tinygrad tree
 CURRENT_STATE.md   the canonical status/plan document
+PERFORMANCE.md     benchmarks, GEMM/attention internals, device selection
+FREEZE.md          AOT frozen CPU plans (build.rs/include! flow)
+CONFIGURATION.md   feature flags, `Ctx` settings, full env-var reference
 INDEXING.md        the getitem index-DSL reference
 ../tinygrad/       the reference oracle (do not modify)
 ```

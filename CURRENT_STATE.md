@@ -2120,6 +2120,10 @@ API shape, and missing user-facing features.
   reports 0 warnings (2026-10), down from 932 at the start of the release pass.
 - `ONNX-Compat.md`: the T1/T2 contract, full 170-op matrix, parser/feature
   matrix, validation plan, and security notes.
+- `PERFORMANCE.md` (benchmarks, GEMM/attention internals, device selection),
+  `FREEZE.md` (AOT frozen plans), and `CONFIGURATION.md` (features, `Ctx`
+  settings, complete env-var reference) split the user-facing detail out of the
+  README.
 - Edition 2024 is current; `rust-version = "1.88"` is the first release with
   the edition-2024 let-chains used in the code. CI is deferred by request.
 - **The Python bridge is its own crate** (`py/bridge`, package
