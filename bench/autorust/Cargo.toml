@@ -1,0 +1,12 @@
+[package]
+name = "autorust-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Cross-framework benchmark driver for autorust (dev-only)"
+
+[dependencies]
+autorust = { path = "../.." }
+
+[features]
+dump = ["autorust/dump"]

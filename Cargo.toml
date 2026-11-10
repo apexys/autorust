@@ -2,7 +2,7 @@
 # from the published package). `default-members` keeps `cargo build`/`test` on
 # the library; use `cargo build -p autorust-bridge` for the Python harness.
 [workspace]
-members = [".", "py/bridge"]
+members = [".", "py/bridge", "bench/autorust"]
 default-members = ["."]
 
 [package]
@@ -22,6 +22,7 @@ authors = ["Valentin Buck"]
 exclude = [
     # The development-only bridge/oracle crate and the pytest gates.
     "py/",
+    "bench/",
     "CURRENT_STATE.md",
     "INDEXING.md",
     "AGENTS.md",

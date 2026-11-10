@@ -18,6 +18,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "autorust-bench"
+version = "0.1.0"
+dependencies = [
+ "autorust",
+]
+
+[[package]]
 name = "autorust-bridge"
 version = "0.0.0"
 dependencies = [
