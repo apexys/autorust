@@ -1339,11 +1339,16 @@ pub fn full_rewrite_to_sink_with(
     let limit = stage_limit();
     let mut i = 0usize;
     let mut cur = ast;
+    let st_t = crate::engine::prof::enabled().then(std::time::Instant::now);
+    let pre = stages();
+    if let Some(t) = st_t {
+        crate::engine::prof::add("codegen.stages_build", t.elapsed().as_secs_f64());
+    }
     // `optimize` is `ast.tag is None` (codegen/__init__.py:479): a kernel AST
     // already optimized by BEAM (`get_optimized_ast` tags it) skips the
     // pre-optimization stages and `apply_opts` entirely.
     if optimize {
-        for st in stages() {
+        for st in pre {
             if i + 1 > limit {
                 return cur;
             }
@@ -1352,8 +1357,12 @@ pub fn full_rewrite_to_sink_with(
             } else {
                 CtxVal::None
             };
+            let st_t = crate::engine::prof::enabled().then(std::time::Instant::now);
             cur = graph_rewrite(ctx, cur, &st.pm, st.bottom_up, None, false, false, ctxv)
                 .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name));
+            if let Some(t) = st_t {
+                crate::engine::prof::add(st.name, t.elapsed().as_secs_f64());
+            }
             if st.name == "simplify ranges" {
                 cur = crate::codegen::simplify::range_gates(ctx, cur);
             }
@@ -1371,7 +1380,11 @@ pub fn full_rewrite_to_sink_with(
         // do postrange optimization, BEAM or hand_coded_optimizations
         // Read once from the process settings (env `BEAM` is folded in there).
         let beam: usize = crate::settings::global().beam;
+        let opt_t = crate::engine::prof::enabled().then(std::time::Instant::now);
         cur = apply_opts(ctx, cur, ren, beam);
+        if let Some(t) = opt_t {
+            crate::engine::prof::add("apply_opts", t.elapsed().as_secs_f64());
+        }
         i += 1;
         #[cfg(feature = "dump")]
         if crate::helpers::env::get("TG_DUMP_PRE_EXPAND").as_deref() == Some("1") {
@@ -1379,10 +1392,16 @@ pub fn full_rewrite_to_sink_with(
             eprintln!("{}", dump_ast(ctx, cur.clone()));
         }
     } // end `if optimize`
-    for st in post_stages(ren) {
+    let ps_t = crate::engine::prof::enabled().then(std::time::Instant::now);
+    let posts = post_stages(ren);
+    if let Some(t) = ps_t {
+        crate::engine::prof::add("codegen.post_stages_build", t.elapsed().as_secs_f64());
+    }
+    for st in posts {
         if i + 1 > limit {
             return cur;
         }
+        let st_t = crate::engine::prof::enabled().then(std::time::Instant::now);
         cur = if st.name == "expander" {
             let (pm, _rm) = expander_pm_with(ctx, cur.clone());
             graph_rewrite(
@@ -1442,6 +1461,9 @@ pub fn full_rewrite_to_sink_with(
             )
             .unwrap_or_else(|e| panic!("TGERR: {}: {e}", st.name))
         };
+        if let Some(t) = st_t {
+            crate::engine::prof::add(st.name, t.elapsed().as_secs_f64());
+        }
         i += 1;
         #[cfg(feature = "dump")]
         if crate::helpers::env::get("TG_DUMP_IDX").is_some() {

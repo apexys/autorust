@@ -1376,9 +1376,21 @@ fn matmul_ranges(
     ctx: &mut UOpCtx,
     k: &Scheduler,
 ) -> Option<(UopId, UopId, UopId, crate::dtype::DTypeId)> {
+    let dbg = crate::helpers::env::get("AUTORUST_MM_DEBUG").is_some();
+    macro_rules! reject {
+        ($why:expr) => {{
+            if dbg {
+                eprintln!("MM reject: {}", $why);
+            }
+            return None;
+        }};
+    }
     let ros = k.reduceops(ctx);
-    if ros.len() != 1 || reduce_alu_op(ctx, &ros[0]) != Ops::Add {
-        return None;
+    if ros.len() != 1 {
+        reject!(format!("{} reduce ops", ros.len()));
+    }
+    if reduce_alu_op(ctx, &ros[0]) != Ops::Add {
+        reject!(format!("reduce op {:?}", reduce_alu_op(ctx, &ros[0])));
     }
     let red_dt = ctx.dt_of(&ros[0]);
     let rsrc0 = ctx.srcs(&ros[0])[0].clone();
@@ -1388,11 +1400,15 @@ fn matmul_ranges(
         rsrc0
     };
     if ctx.op_of(&mul) != Ops::Mul {
-        return None;
+        reject!(format!(
+            "reduce src is {:?} shape {:?}",
+            ctx.op_of(&mul),
+            k.full_shape(ctx)
+        ));
     }
     let mul_srcs = ctx.srcs(&mul).to_vec();
     if mul_srcs.len() != 2 {
-        return None;
+        reject!(format!("mul has {} srcs", mul_srcs.len()));
     }
     let in0r: Vec<UopId> = ctx.ranges(&mul_srcs[0]).iter().cloned().collect();
     let in1r: Vec<UopId> = ctx.ranges(&mul_srcs[1]).iter().cloned().collect();
@@ -1402,7 +1418,31 @@ fn matmul_ranges(
     let ir0: Vec<UopId> = in0r.iter().filter(|u| !in1r.contains(u)).cloned().collect();
     let ir1: Vec<UopId> = in1r.iter().filter(|u| !in0r.contains(u)).cloned().collect();
     if ir0.is_empty() || ir1.is_empty() {
-        return None;
+        let info = |ctx: &UOpCtx, rs: &[UopId]| -> Vec<(AxisType, i64)> {
+            rs.iter()
+                .map(|r| {
+                    (
+                        AxisType::range_axis_type(ctx, (*r).clone()),
+                        match ctx.arg_of(r) {
+                            Arg::Seq { items, .. } => match items.first() {
+                                Some(Arg::Int(i)) => *i,
+                                _ => -1,
+                            },
+                            _ => -1,
+                        },
+                    )
+                })
+                .collect()
+        };
+        let (a_ax, b_ax) = (info(ctx, &in0r), info(ctx, &in1r));
+        reject!(format!(
+            "no distinct output axis ({} vs {} ranges) shape {:?} a={:?} b={:?}",
+            in0r.len(),
+            in1r.len(),
+            k.full_shape(ctx),
+            a_ax,
+            b_ax
+        ));
     }
     Some((mul, ir0[0].clone(), ir1[0].clone(), red_dt))
 }
@@ -1525,50 +1565,87 @@ fn try_matmul_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
         // 8x16 threads with a 4x4 register tile, i.e. a 32x64 block tile.
         let want_lm = (dlm as i64).clamp(1, 64);
         let want_ln = (dln as i64).clamp(1, 64);
-        let mut local_picks: Vec<(UopId, i64, i64)> = Vec::new();
-        for (rng, want_threads, want_up, is_m) in [
-            (m_rng.clone(), want_lm, want_m, true),
-            (n_rng.clone(), want_ln, want_n, false),
-        ] {
-            let Some(i) = idx_of(k, ctx, &rng) else {
-                return false;
-            };
-            let ext = k.full_shape(ctx)[i];
-            // Largest register tile (UPCAST) that divides the extent; the block
-            // tile is then the largest thread count that divides the rest.
-            let plan = |up: i64| -> Option<(i64, i64)> {
-                if up < 1 || ext % up != 0 {
-                    return None;
-                }
-                for threads in [want_threads, 8, 4, 2] {
-                    let cand = threads * up;
-                    if cand <= ext && ext % cand == 0 {
-                        return Some((cand, threads));
+        // Largest register tile (UPCAST) that divides the extent; the block
+        // tile is then the largest thread count that divides the rest.
+        let axis_pick =
+            |ext: i64, want_threads: i64, want_up: i64, is_m: bool| -> (i64, i64) {
+                let plan = |up: i64| -> Option<(i64, i64)> {
+                    if up < 1 || ext % up != 0 {
+                        return None;
                     }
-                }
-                None
-            };
-            let threads_of = |up: i64| plan(up).map(|(_, t)| t).unwrap_or(0);
-            let mut up = [want_up, 4, 2]
-                .into_iter()
-                .find(|s| *s >= 1 && ext % s == 0)
-                .unwrap_or(1);
-            // A prime row count (e.g. ViT's 1576 = 8*197 at batch 8) leaves the
-            // M axis with a single thread: 16-thread blocks and a 2x slower GEMM.
-            // Step the register tile down when a smaller one buys >= 2 threads.
-            if large
-                && is_m
-                && threads_of(up) < 2
-                && let Some(better) = [want_up, 4, 2]
+                    for threads in [want_threads, 8, 4, 2] {
+                        let cand = threads * up;
+                        if cand <= ext && ext % cand == 0 {
+                            return Some((cand, threads));
+                        }
+                    }
+                    None
+                };
+                let threads_of = |up: i64| plan(up).map(|(_, t)| t).unwrap_or(0);
+                let mut up = [want_up, 4, 2]
                     .into_iter()
-                    .filter(|s| *s < up)
-                    .find(|s| threads_of(*s) >= 2)
-            {
-                up = better;
-            }
-            let local = plan(up).map(|(l, _)| l).unwrap_or(1);
+                    .find(|s| *s >= 1 && ext % s == 0)
+                    .unwrap_or(1);
+                // A prime row count (e.g. ViT's 1576 = 8*197 at batch 8) leaves
+                // the M axis with a single thread: 16-thread blocks and a 2x
+                // slower GEMM. Step the register tile down when a smaller one
+                // buys >= 2 threads.
+                if large
+                    && is_m
+                    && threads_of(up) < 2
+                    && let Some(better) = [want_up, 4, 2]
+                        .into_iter()
+                        .filter(|s| *s < up)
+                        .find(|s| threads_of(*s) >= 2)
+                {
+                    up = better;
+                }
+                let local = plan(up).map(|(l, _)| l).unwrap_or(1);
+                (local, up)
+            };
+        // `matmul_ranges` returns A's and B's private ranges in operand order,
+        // not necessarily the row/column order of the store. Tiling either axis
+        // is legal, but one orientation can leave a prime extent as the M axis
+        // (one thread). Try both and keep the one with more block threads.
+        let (Some(mi), Some(ni)) = (idx_of(k, ctx, &m_rng), idx_of(k, ctx, &n_rng)) else {
+            return false;
+        };
+        let (m_ext, n_ext) = (k.full_shape(ctx)[mi], k.full_shape(ctx)[ni]);
+        let threads = |p: (i64, i64)| (p.0 / p.1).max(1);
+        let regs = |p: (i64, i64)| p.1;
+        let a = axis_pick(m_ext, want_lm, want_m, true);
+        let b = axis_pick(n_ext, want_ln, want_n, false);
+        let fa = axis_pick(n_ext, want_lm, want_m, true);
+        let fb = axis_pick(m_ext, want_ln, want_n, false);
+        let score = |x: (i64, i64), y: (i64, i64)| (threads(x) * threads(y), regs(x) * regs(y));
+        let (m_rng, n_rng, mut a, mut b, m_ext, n_ext) = if score(fa, fb) > score(a, b) {
             if dbg {
-                eprintln!("  gpu pick axis_ext={ext} up={up} local={local}");
+                eprintln!("  gpu swapped M/N orientation ({m_ext} x {n_ext})");
+            }
+            (n_rng, m_rng, fa, fb, n_ext, m_ext)
+        } else {
+            (m_rng, n_rng, a, b, m_ext, n_ext)
+        };
+        // Blocks below one warp leave the SM under-occupied; trade the register
+        // tile for threads (up to a full warp) on the axis that can supply them.
+        if threads(a) * threads(b) < 32 {
+            let alt_a = axis_pick(m_ext, want_lm, 1, true);
+            let alt_b = axis_pick(n_ext, want_ln, 1, false);
+            let sa = threads(alt_a) * threads(b);
+            let sb = threads(a) * threads(alt_b);
+            if sa > threads(a) * threads(b) && sa >= sb {
+                a = alt_a;
+            } else if sb > threads(a) * threads(b) {
+                b = alt_b;
+            }
+            if dbg {
+                eprintln!("  gpu occupancy threads={}", threads(a) * threads(b));
+            }
+        }
+        let mut local_picks: Vec<(UopId, i64, i64)> = Vec::new();
+        for (rng, (local, up)) in [(m_rng, a), (n_rng, b)] {
+            if dbg {
+                eprintln!("  gpu pick up={up} local={local}");
             }
             local_picks.push((rng, local, up));
         }
@@ -1677,6 +1754,20 @@ fn try_conv_tiling(k: &mut Scheduler, ctx: &mut UOpCtx) -> bool {
         };
         if up > 1 {
             k.apply_opt(ctx, OptOp::Upcast, Some(pos), Some(up));
+        }
+    }
+
+    // Upcast the other spatial axis too: the 5x5 weight taps are then reused
+    // across two output rows, halving the strided weight loads per FMA.
+    let outs = k.axes_of(ctx, &[AxisType::Global]);
+    if outs.len() >= 2 {
+        let oy_ax = outs[outs.len() - 2];
+        let ext = k.full_shape(ctx)[oy_ax];
+        if ext % 2 == 0
+            && ext >= 2
+            && let Some(pos) = k.upcastable_dims(ctx).iter().position(|&a| a == oy_ax)
+        {
+            k.apply_opt(ctx, OptOp::Upcast, Some(pos), Some(2));
         }
     }
 
@@ -1940,10 +2031,16 @@ pub fn hand_coded_optimizations(k: &mut Scheduler, ctx: &mut UOpCtx) {
 pub fn apply_opts(ctx: &mut UOpCtx, ast: UopId, ren: &Renderer, beam: usize) -> UopId {
     // ast.tag is not None → already applied (replay)
     if !matches!(ctx.tag_of(&ast), Arg::None) {
+        if crate::helpers::env::get("AUTORUST_MM_DEBUG").is_some() {
+            eprintln!("APPLY skip (tagged) {:?}", ctx.tag_of(&ast));
+        }
         return ast;
     }
     let mut k = Scheduler::new(ctx, ast.clone(), ren);
     k.convert_loop_to_global(ctx);
+    if crate::helpers::env::get("AUTORUST_MM_DEBUG").is_some() {
+        eprintln!("APPLY shape={:?}", k.full_shape(ctx));
+    }
     // opts_to_apply from the schedule (M4) — apply if present
     let opts_to_apply = match ctx.arg_of(&ast) {
         Arg::Data(d) => match d.get("opts_to_apply") {
