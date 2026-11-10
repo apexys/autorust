@@ -119,6 +119,7 @@ These mirror the `Settings` fields above; the per-backend variables win over
 | variable | values | default | effect |
 |---|---|---|---|
 | `AUTORUST_ATTN` | `sdpa`/`0`, `sage`, anything else | `flash` | Attention implementation for `Tensor::attention`. |
+| `FA` | any non-`0` | off | Route `TransformerBlock` through the op-level FlashAttention port instead of SDPA (an algorithm reference; the fused kernels are reached by `Tensor::attention_with`). |
 | `AUTORUST_GEMM` | `0`/`never`, `all`/`force`/`always`, anything else | `auto` | Neutral library-GEMM policy. |
 | `AUTORUST_CUBLAS` | same | auto | CUDA override. |
 | `AUTORUST_CLBLAST` | same | auto | OpenCL override. |

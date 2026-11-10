@@ -18,4 +18,6 @@ Initial release.
 - Dynamically loaded cuBLAS / CLBlast / MetalPerformanceShaders host GEMM, a
   packed CPU GEMM, and fused FlashAttention kernels (scalar, TF32 and bf16
   tensor cores).
+- GPU GEMM register tiling that keeps prime row extents (e.g. ViT at batch 8)
+  on multi-thread tiles.
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.

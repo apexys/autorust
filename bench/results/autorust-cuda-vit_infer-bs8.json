@@ -8,14 +8,14 @@
   "jit": true,
   "warmup": 1,
   "iters": 3,
-  "ms_cold": 9668.2979,
-  "ms_median": 207.0038,
-  "ms_min": 206.9719,
-  "ms_iqr": 2.0722,
-  "images_per_s": 38.65,
+  "ms_cold": 1279.3708,
+  "ms_median": 105.3735,
+  "ms_min": 102.748,
+  "ms_iqr": 0.2423,
+  "images_per_s": 75.92,
   "name": "autorust-cuda-vit_infer-bs8",
   "variant": "CUDA",
-  "commit": "5cf311a",
-  "date": "2026-11-10T18:38:45",
-  "notes": "fused flash"
+  "commit": "aa803e0",
+  "date": "2026-11-10T20:14:20",
+  "notes": "SDPA"
 }

@@ -56,7 +56,10 @@ heuristic:
   inner loop does 64 FMAs from eight vector loads.
 - **GPU (`CUDA`/`CL`)**: `LOCAL` + `UPCAST` + `UNROLL`. Small/medium shapes use
   4x4 registers with 2x64 threads (block 8x256); large (`M*N >= 1M`) use 8x8
-  with 4x16 threads (block 32x128).
+  with 4x16 threads (block 32x128). When the M extent is prime-ish (ViT batch-8
+  `M = 1576 = 8*197`), an 8-wide register tile would leave a *single* thread on
+  M (16-thread blocks); the tile steps down to 4x8 with 2x16 threads, which
+  took the batch-8 FFN expansion from 8.1 to 2.9 ms (2.8x).
 - **Grid order** (`codegen/gpudims.rs`): global axes are sorted by extent
   ascending, so the largest dimension becomes `blockIdx.x` (fastest-varying).
   For `M=197` linears this runs all M blocks for one N tile before moving on,
@@ -77,6 +80,8 @@ every block re-reads A/B from global). Kernel-only (2026-11, `SYNC=1`,
 | 6312x384x384 (batch-8 qkv) | 0.85 | **2.23** | 1.85 |
 | 6312x1536x384 (up) | 0.62 | 1.23 | **1.29** |
 | 6312x384x1536 (down) | 0.89 | **3.57** | 3.49 |
+| 1576x3072x768 (batch-8 FFN, 4x8 tile) | 2.57 | **3.46** | — |
+| 1576x768x3072 (batch-8 down, 4x8 tile) | **4.31** | 3.96 | — |
 | 2048³, bf16 | **10.68** (FFMA, no `mma`) | 9.84 | — |
 
 Old "before" rows in the README (`512³ CUDA 144 → 650-830 GFLOP/s`,
@@ -276,35 +281,38 @@ training and ViT-B/16 — through autorust, candle, torch and tinygrad on CPU an
 CUDA. Inputs are synthetic and device-resident, the timed region is one
 training/inference step (no data loading, evaluation or logging), and each run
 is a fresh process with warmup. Raw JSON and the generated per-run tables are in
-[`bench/results/`](bench/results); these medians are from commit `5cf311a` on
-the environment above (the candle runs were re-taken at `82f6408` with the
-class-token fix; torch is eager, no `torch.compile`; autorust uses `Jit`,
-tinygrad `TinyJit`).
+[`bench/results/`](bench/results); these medians are from commit `aa803e0`
+(autorust CUDA rows, re-taken after the GEMM-tile and attention changes in
+CURRENT_STATE §9.19; the CPU rows are from `5cf311a`) on the environment above
+(the candle runs were re-taken at `82f6408` with the class-token fix; torch is
+eager, no `torch.compile`; autorust uses `Jit`, tinygrad `TinyJit`).
 
 All step times are milliseconds (lower is better).
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
 | MNIST CNN train, bs 512 | CPU | **64.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
-| MNIST CNN train, bs 512 | CUDA | 41.0 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| MNIST CNN train, bs 512 | CUDA | 39.2 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
 | ViT-B/16 infer, bs 1 | CPU | 438.1 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
-| ViT-B/16 infer, bs 1 | CUDA | 20.5 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
+| ViT-B/16 infer, bs 1 | CUDA | 15.1 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
 | ViT-B/16 infer, bs 8 | CPU | 1861.9 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 207.0 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
+| ViT-B/16 infer, bs 8 | CUDA | 105.4 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
 | ViT-B/16 train, bs 1 | CPU | 2230.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 300.2 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| ViT-B/16 train, bs 1 | CUDA | 332.3 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
-- **MNIST CUDA**: autorust is 1.4x faster than tinygrad and 3.2x faster than
-  candle; torch (cuDNN + cuBLAS + its fused BN/optimizer path) is 3.1x faster
+- **MNIST CUDA**: autorust is 1.45x faster than tinygrad and 3.4x faster than
+  candle; torch (cuDNN + cuBLAS + its fused BN/optimizer path) is 3.0x faster
   than autorust.
-- **ViT inference CUDA**: torch's cuBLAS/cuDNN path wins by ~2.3x at bs 1 and
-  ~4.5x at bs 8. autorust is ahead of tinygrad at bs 1 (5.7x) but behind it at
-  bs 8; candle's per-op overhead dominates its forward.
-- **ViT training CUDA**: autorust is 1.3x faster than tinygrad, but torch/candle
-  are much faster — cuDNN, tensor cores and library backward kernels are the
-  gap. This is the same f32 FFMA-vs-tensor-core story as the cuDNN note below.
+- **ViT inference CUDA**: torch's cuBLAS/cuDNN path wins by ~1.7x at bs 1 and
+  ~2.3x at bs 8. autorust is ahead of tinygrad at both batches (7.7x / 1.3x)
+  and slightly ahead of candle at bs 8; candle's per-op overhead dominates its
+  forward.
+- **ViT training CUDA**: autorust is 1.17x faster than tinygrad, but
+  torch/candle are much faster — cuDNN, tensor cores and library backward
+  kernels are the gap. This is the same f32 FFMA-vs-tensor-core story as the
+  cuDNN note below.
 - **CPU**: autorust's `RUST` backend is 54x/61x faster than tinygrad/candle on
   MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
   (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 2230.5 ms). tinygrad's

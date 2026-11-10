@@ -8,14 +8,14 @@
   "jit": true,
   "warmup": 1,
   "iters": 3,
-  "ms_cold": 53561.3025,
-  "ms_median": 300.231,
-  "ms_min": 299.6745,
-  "ms_iqr": 0.2652,
-  "images_per_s": 3.33,
+  "ms_cold": 6013.0068,
+  "ms_median": 332.2735,
+  "ms_min": 331.9229,
+  "ms_iqr": 1.5893,
+  "images_per_s": 3.01,
   "name": "autorust-cuda-vit_train",
   "variant": "CUDA",
-  "commit": "5cf311a",
-  "date": "2026-11-10T18:40:24",
-  "notes": "fused flash"
+  "commit": "aa803e0",
+  "date": "2026-11-10T20:14:31",
+  "notes": "SDPA"
 }

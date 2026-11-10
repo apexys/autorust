@@ -2856,3 +2856,49 @@ Known limits: the driver still has to understand the PTX ISA that the loaded
 NVRTC emits (the probe catches this at selection time); include headers still
 come from `$CUDA_PATH/include` or the three standard locations, so a
 non-standard toolkit should set `CUDA_PATH`.
+
+### 9.19 Benchmark round: prime-shape GEMM tiles + attention default (2026-11) — DONE
+
+`bench/results/` and [`PERFORMANCE.md`](PERFORMANCE.md#cross-framework-comparison)
+are the source of truth for the numbers; this entry records the two changes.
+
+1. **GPU matmul tiling for prime-ish row extents** (`codegen/postrange.rs`).
+   `try_matmul_tiling` picked the largest `UPCAST` that divides the extent and
+   only then the thread split. At ViT batch 8 the GEMM row count is
+   `1576 = 8*197`, so an 8-wide register tile left exactly one thread on M:
+   16-thread blocks for the FFN expansion and every backward GEMM with the same
+   M. Small shapes were fine only by luck.
+   The M axis now steps the register tile down (8 -> 4 -> 2) when the chosen
+   tile yields fewer than two threads, but only for the `large` (`M*N >= 1M`)
+   configuration. The N axis keeps the largest vectorizable tile, and the
+   small/medium configuration is untouched. Generated kernel-only (RTX 3060,
+   `NOSYNC=1`, `AUTORUST_GEMM=0`):
+   - `1576x3072x768` (batch-8 FFN up): 8.1 -> 2.9 ms (0.93 -> 2.57 TFLOP/s)
+   - `1576x768x3072` (down/backward): 7.2 -> 1.7 ms (1.03 -> 4.31 TFLOP/s)
+   - `1576x768x768` (projection): 1.65 -> 0.49 ms (1.13 -> 3.82 TFLOP/s)
+   - `2048^3` and `1024^3` unchanged (3.2 ms / 0.7 ms). cuBLAS remains the
+     library path when `HostGemm` matches.
+   ViT-B/16 inference, CUDA bs 8: 213 -> 105 ms (tinygrad 136 ms); bs 1: 20.5 ->
+   15.1 ms. MNIST CUDA 41.0 -> 39.2 ms. Training kernels are unchanged (the
+   differing shapes are all `small`).
+
+2. **The op-level FlashAttention port is opt-in again** (`models/transformer.rs`).
+   `TransformerBlock::attn` switched to the graph-level FA port whenever
+   `Settings::attention != Sdpa`. `Settings::attention` defaults to `Flash`
+   because that is the *tensor-level* setting (the fused kernels reached
+   through `Tensor::attention_with`), so the model silently used the 16x slower
+   op-level port on every backend. `FA=1` (read once, as `CURRENT_STATE §9.14`
+   already documented) is now the only switch; the default model path is
+   tinygrad's SDPA. This was worth another 213 -> 161 ms at bs 8 before the
+   tiling change.
+
+Also in this round: `fused_attention_ex` co-realizes q/k/v/mask with
+`Tensor::realize_many` instead of realizing them one at a time (they share the
+projection input, so sequential realizes re-scheduled the whole prefix graph).
+The fused path needs a session, so this does not move the graph-model
+benchmarks; it removes the redundant prefix work for `attention_with` callers.
+`bench/run.py` no longer forces `AUTORUST_ATTN=flash` on CUDA.
+
+Gates: `cargo test --release` (the one `causal_skips_half_the_work` timing test
+is load-sensitive and passes in isolation), `cargo clippy --all-targets`,
+`cargo rustdoc --lib -- -W missing_docs`, `cargo build --no-default-features`.
