@@ -44,7 +44,7 @@ RUNS = [
     ("tinygrad-cuda-mnist", "tinygrad", "cuda", "mnist_train", 512, 2, 10, ""),
     # --- ViT-B/16 inference, batch 1 ---
     ("autorust-rust-vit_infer-bs1", "autorust", "RUST", "vit_infer", 1, 1, 3, "AUTORUST_ATTN=sdpa"),
-    ("autorust-cuda-vit_infer-bs1", "autorust", "CUDA", "vit_infer", 1, 1, 3, "fused flash"),
+    ("autorust-cuda-vit_infer-bs1", "autorust", "CUDA", "vit_infer", 1, 1, 3, "SDPA"),
     ("candle-cpu-vit_infer-bs1", "candle", "cpu", "vit_infer", 1, 1, 2, ""),
     ("candle-cuda-vit_infer-bs1", "candle", "cuda", "vit_infer", 1, 1, 3, ""),
     ("torch-cpu-vit_infer-bs1", "torch", "cpu", "vit_infer", 1, 1, 3, ""),
@@ -53,7 +53,7 @@ RUNS = [
     ("tinygrad-cuda-vit_infer-bs1", "tinygrad", "cuda", "vit_infer", 1, 1, 3, ""),
     # --- ViT-B/16 inference, batch 8 ---
     ("autorust-rust-vit_infer-bs8", "autorust", "RUST", "vit_infer", 8, 1, 2, "AUTORUST_ATTN=sdpa"),
-    ("autorust-cuda-vit_infer-bs8", "autorust", "CUDA", "vit_infer", 8, 1, 3, "fused flash"),
+    ("autorust-cuda-vit_infer-bs8", "autorust", "CUDA", "vit_infer", 8, 1, 3, "SDPA"),
     ("candle-cpu-vit_infer-bs8", "candle", "cpu", "vit_infer", 8, 1, 2, ""),
     ("candle-cuda-vit_infer-bs8", "candle", "cuda", "vit_infer", 8, 1, 3, ""),
     ("torch-cpu-vit_infer-bs8", "torch", "cpu", "vit_infer", 8, 1, 2, ""),
@@ -61,7 +61,7 @@ RUNS = [
     ("tinygrad-cuda-vit_infer-bs8", "tinygrad", "cuda", "vit_infer", 8, 1, 3, ""),
     # --- ViT-B/16 training step, batch 1 (f32) ---
     ("autorust-rust-vit_train", "autorust", "RUST", "vit_train", 1, 1, 2, "AUTORUST_ATTN=sdpa"),
-    ("autorust-cuda-vit_train", "autorust", "CUDA", "vit_train", 1, 1, 3, "fused flash"),
+    ("autorust-cuda-vit_train", "autorust", "CUDA", "vit_train", 1, 1, 3, "SDPA"),
     ("candle-cpu-vit_train", "candle", "cpu", "vit_train", 1, 1, 2, ""),
     ("candle-cuda-vit_train", "candle", "cuda", "vit_train", 1, 1, 3, ""),
     ("torch-cpu-vit_train", "torch", "cpu", "vit_train", 1, 1, 2, ""),
@@ -79,8 +79,9 @@ def base_env():
         PYTHONUNBUFFERED="1",
         TOKENIZERS_PARALLELISM="false",
     )
-    # The autorust CPU backends should use the cheap SDPA path; the fused
-    # graph-level FlashAttention port is 16x slower there (see PERFORMANCE.md).
+    # The autorust CPU backends should use the cheap SDPA path; the op-level
+    # FlashAttention port is 16x slower there (see PERFORMANCE.md). The model
+    # itself always uses SDPA unless `FA=1` is set.
     env.setdefault("AUTORUST_ATTN", "sdpa")
     return env
 
@@ -103,8 +104,6 @@ def cmd_autorust(device, workload, batch, warmup, iters):
         BENCH_WARMUP=str(warmup),
         BENCH_ITERS=str(iters),
     )
-    if device == "CUDA":
-        env["AUTORUST_ATTN"] = "flash"
     return [str(AUTORUST_BIN)], env
 
 
