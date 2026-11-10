@@ -8,11 +8,6 @@
     any(target_os = "linux", target_os = "windows")
 ))]
 use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
-#[cfg(all(
-    feature = "backend_cuda",
-    any(target_os = "linux", target_os = "windows")
-))]
-use cudarc::nvrtc::compile_ptx;
 
 #[cfg(all(
     feature = "backend_cuda",
@@ -29,8 +24,23 @@ extern "C" __global__ void add_kernel(float *out, const float *a, const float *b
     if (i < n) out[i] = a[i] + b[i];
 }
 "#;
-    let ptx = compile_ptx(src).expect("nvrtc compile");
-    let module = ctx.load_module(ptx).expect("load_module");
+    let (major, minor) = ctx.compute_capability().expect("compute capability");
+    let arch = format!("sm_{major}{minor}");
+    let ptx = autorust::runtime::nvrtc::compile(
+        src,
+        &arch,
+        &[
+            "/usr/local/cuda/include".to_string(),
+            "/usr/include".to_string(),
+            "/opt/cuda/include".to_string(),
+        ],
+    )
+    .expect("nvrtc compile");
+    let module = ctx
+        .load_module(cudarc::nvrtc::Ptx::from_src(
+            String::from_utf8_lossy(&ptx).into_owned(),
+        ))
+        .expect("load_module");
     let f = module.load_function("add_kernel").expect("load_function");
 
     let a = stream.clone_htod(&[1.0f32, 2.0, 3.0, 4.0]).unwrap();

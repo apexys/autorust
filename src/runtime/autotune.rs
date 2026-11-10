@@ -100,10 +100,10 @@ pub fn is_available(device: &str) -> bool {
             feature = "backend_cuda",
             any(target_os = "linux", target_os = "windows")
         ))]
-        "CUDA" => {
-            index.is_some_and(|i| i < crate::runtime::ops_cuda::device_count())
-                && crate::runtime::ops_cuda::available()
-        }
+        "CUDA" => index.is_some_and(|i| {
+            i < crate::runtime::ops_cuda::device_count()
+                && crate::runtime::ops_cuda::device_available(i)
+        }),
         #[cfg(all(feature = "backend_metal", target_os = "macos"))]
         "METAL" => index == Some(0) && crate::runtime::ops_metal::available(),
         #[cfg(feature = "backend_cl")]
@@ -129,7 +129,13 @@ pub fn available_devices() -> Vec<String> {
         any(target_os = "linux", target_os = "windows")
     ))]
     if crate::runtime::ops_cuda::available() {
-        out.extend(indexed("CUDA", crate::runtime::ops_cuda::device_count()));
+        // Each ordinal is probed separately: mixed-GPU boxes can have a card
+        // the installed NVRTC cannot target.
+        out.extend(
+            (0..crate::runtime::ops_cuda::device_count())
+                .filter(|i| crate::runtime::ops_cuda::device_available(*i))
+                .map(|i| indexed_name("CUDA", i)),
+        );
     }
     #[cfg(all(feature = "backend_metal", target_os = "macos"))]
     if crate::runtime::ops_metal::available() {
@@ -154,15 +160,6 @@ pub fn available_devices() -> Vec<String> {
     #[cfg(feature = "backend_rayon")]
     out.push("RAYON".to_string());
     out
-}
-
-/// `BASE`, `BASE:1`, ..., `BASE:(count-1)` (index 0 is tinygrad's bare name).
-#[cfg(all(
-    feature = "backend_cuda",
-    any(target_os = "linux", target_os = "windows")
-))]
-fn indexed(base: &str, count: usize) -> Vec<String> {
-    (0..count).map(|i| indexed_name(base, i)).collect()
 }
 
 /// `BASE` for index 0 (tinygrad canonicalizes `:0` away), else `BASE:N`.

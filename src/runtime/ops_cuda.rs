@@ -14,14 +14,14 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig,
     PushKernelArg, result,
 };
-use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
+use cudarc::nvrtc::Ptx;
 
 use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
@@ -139,6 +139,9 @@ impl CudaInner {
             .unwrap_or(0);
         let ctx =
             CudaContext::new(ordinal).unwrap_or_else(|e| panic!("TGERR: cuInit/cuCtxCreate: {e}"));
+        // The context is current on this thread now: validate cuBLAS's handle
+        // before the scheduler can emit a host GEMM on it.
+        crate::runtime::cublas::probe_current_context();
         let (major, minor) = ctx.compute_capability().unwrap_or((0, 0));
         let arch = format!("sm_{major}{minor}");
         ARCH_SM.with(|a| a.set(((major * 10 + minor) as i64).max(0)));
@@ -236,28 +239,11 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             ),
             other => panic!("TGERR: unsupported epilogue dtype {other:?}"),
         };
-        let mut options = vec![format!("--gpu-architecture={}", self.arch)];
-        match crate::helpers::env::get("CUDA_PATH") {
-            Some(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
-            _ => {
-                options.push("-I/usr/local/cuda/include".to_string());
-                options.push("-I/usr/include".to_string());
-                options.push("-I/opt/cuda/include".to_string());
-            }
-        }
-        let ptx = compile_ptx_with_opts(
-            src,
-            CompileOptions {
-                options,
-                ..Default::default()
-            },
-        )
-        .unwrap_or_else(|e| panic!("TGERR: NVRTC epilogue compile: {e}"));
+        let ptx = crate::runtime::nvrtc::compile(src, &self.arch, &nvrtc_include_dirs())
+            .unwrap_or_else(|e| panic!("TGERR: NVRTC epilogue compile: {e}"));
         let module = self
             .ctx
-            .load_module(Ptx::from_src(
-                String::from_utf8_lossy(ptx.to_src().as_bytes()).to_string(),
-            ))
+            .load_module(Ptx::from_src(String::from_utf8_lossy(&ptx).into_owned()))
             .unwrap_or_else(|e| panic!("TGERR: cuModuleLoadData epilogue: {e}"));
         let func = module
             .load_function(name)
@@ -539,29 +525,26 @@ impl BackendAllocator for CudaAllocator {
 
 // ---------------- compiler ----------------
 
-/// NVRTC include/arch options (recomputed per compile; cheap).
-fn nvrtc_options(arch: &str) -> CompileOptions {
-    let mut options = vec![format!("--gpu-architecture={arch}")];
+/// NVRTC include search paths for `cuda_bf16.h`/`cuda_fp16.h`/`cuda_fp8.h`.
+fn nvrtc_include_dirs() -> Vec<String> {
     match crate::helpers::env::get("CUDA_PATH") {
-        Some(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
-        _ => {
-            options.push("-I/usr/local/cuda/include".to_string());
-            options.push("-I/usr/include".to_string());
-            options.push("-I/opt/cuda/include".to_string());
-        }
-    }
-    CompileOptions {
-        options,
-        ..Default::default()
+        Some(p) if !p.is_empty() => vec![format!("{p}/include")],
+        _ => vec![
+            "/usr/local/cuda/include".to_string(),
+            "/usr/include".to_string(),
+            "/opt/cuda/include".to_string(),
+        ],
     }
 }
 
 /// Compile one CUDA C source with NVRTC (`thread`-safe: no shared state).
+///
+/// The loader is version-agnostic ([`crate::runtime::nvrtc`]), so the toolkit
+/// installed at run time does not have to match the one used to build.
 fn nvrtc_compile(src: &str, arch: &str) -> Vec<u8> {
-    let ptx = compile_ptx_with_opts(src, nvrtc_options(arch)).unwrap_or_else(|e| {
+    crate::runtime::nvrtc::compile(src, arch, &nvrtc_include_dirs()).unwrap_or_else(|e| {
         panic!("TGERR: NVRTC Compile Error ({arch})\n--- src ---\n{src}\n--- e ---\n{e}")
-    });
-    ptx.to_src().into_bytes()
+    })
 }
 
 fn ptx_cache_key(arch: &str, src: &str) -> String {
@@ -858,18 +841,81 @@ impl UopRenderer for CudaUopRenderer {
 
 // ---------------- device + registration ----------------
 
-/// Whether a CUDA device is present, without opening a device singleton and
-/// without panicking (the default-device probe). `CudaContext::new` dynamically
-/// loads `libcuda`/`libcudart` and calls `cuInit`; failure (no driver/device or
-/// no lib) returns `false` rather than panicking.
+/// Trivial kernel used to prove NVRTC can target this GPU and the driver can
+/// load the resulting PTX, before the backend is offered to the scheduler.
+const PROBE_SRC: &str =
+    "extern \"C\" __global__ void autorust_probe(float *out) { out[threadIdx.x] = 1.0f; }";
+
+/// Compile + load a one-line kernel for this device's SM. Catches every
+/// version mismatch that used to abort mid-run: no NVRTC, an NVRTC too old for
+/// the GPU (`sm_120` on CUDA 12.4), or PTX the installed driver cannot load.
+fn probe_device(ordinal: usize) -> Result<(), String> {
+    if unsafe { !cudarc::driver::sys::is_culib_present() } {
+        return Err("CUDA driver library not found".to_string());
+    }
+    // `CudaContext::new` panics via cudarc's `culib()` only when the driver
+    // library is missing; the check above makes that path unreachable.
+    let ctx = CudaContext::new(ordinal).map_err(|e| format!("cuInit/cuCtxCreate: {e}"))?;
+    let (major, minor) = ctx
+        .compute_capability()
+        .map_err(|e| format!("compute capability: {e}"))?;
+    let arch = format!("sm_{major}{minor}");
+    let ptx = crate::runtime::nvrtc::compile(PROBE_SRC, &arch, &nvrtc_include_dirs())
+        .map_err(|e| format!("NVRTC cannot build for {arch}: {e}"))?;
+    let text = String::from_utf8_lossy(&ptx).into_owned();
+    ctx.load_module(Ptx::from_src(text))
+        .map_err(|e| format!("CUDA driver rejected NVRTC PTX for {arch}: {e}"))?;
+    // Same context is still current: probe the other runtime library (cuBLAS)
+    // while we are here, so `host_gemm` scheduling sees the real answer.
+    crate::runtime::cublas::probe_current_context();
+    Ok(())
+}
+
+/// Whether CUDA device `ordinal` can actually compile and load a kernel.
+///
+/// This is the `available()` gate used by device selection: the CUDA driver
+/// and NVRTC are separate installs and may come from different toolkit
+/// versions, so checking only `libcuda` (the old behavior) could select CUDA
+/// and then panic at the first compile. Probing the real compiler path lets
+/// `default_device()` fall through to CL/RUST/CPU when the toolkit is missing,
+/// mismatched, or too old for the GPU.
+///
+/// The result is cached per ordinal because the probe opens a context and
+/// compiles a kernel (~tens of ms once). A one-time warning explains the
+/// fallback.
+pub fn device_available(ordinal: usize) -> bool {
+    static PROBES: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
+    let probes = PROBES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(ok) = probes
+        .lock()
+        .map(|p| p.get(&ordinal).copied())
+        .unwrap_or(None)
+    {
+        return ok;
+    }
+    let result = probe_device(ordinal);
+    let ok = result.is_ok();
+    if let Err(reason) = &result {
+        static WARNED: OnceLock<()> = OnceLock::new();
+        // Only explain the fallback when a driver exists: otherwise CUDA is
+        // simply absent and the usual priority pick is silent.
+        if unsafe { cudarc::driver::sys::is_culib_present() } {
+            WARNED.get_or_init(|| {
+                eprintln!(
+                    "autorust: CUDA device {ordinal} disabled, falling back to the next backend: {reason}"
+                );
+            });
+        }
+    }
+    if let Ok(mut cache) = probes.lock() {
+        cache.insert(ordinal, ok);
+    }
+    ok
+}
+
+/// Whether CUDA device 0 is usable (the default-device probe).
 pub fn available() -> bool {
-    // `CudaContext::new` ultimately calls cudarc's `culib()`, which *panics* if
-    // the driver library cannot be loaded. That would abort `default_device()`
-    // on a machine without CUDA even though `dynamic-loading` lets the backend
-    // be compiled in. Probe the library without panicking first; only then is
-    // a `cuInit` failure a normal `Err`.
-    (unsafe { cudarc::driver::sys::is_culib_present() })
-        && cudarc::driver::CudaContext::new(0).is_ok()
+    device_available(0)
 }
 
 /// Number of CUDA devices the driver reports (`0` without a driver).
@@ -901,7 +947,7 @@ fn factory(name: String) -> crate::runtime::device::DeviceFactory {
         // Install the dispatcher whenever the library loads: whether a host
         // GEMM is *emitted* is the scheduler's decision (`AUTORUST_CUBLAS`),
         // and an already-open device must still be able to run one.
-        if crate::runtime::cublas::library_present() {
+        if crate::runtime::cublas::probe_current_context() {
             let inner2 = inner.clone();
             *dev.host_exec.borrow_mut() =
                 Some(Box::new(move |bufs, desc| inner2.host_gemm(bufs, desc)));

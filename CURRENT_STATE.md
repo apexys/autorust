@@ -2790,3 +2790,69 @@ Only for Ada/Hopper:
 Arch detection and the PTX cache already key on `sm_XX`, so a newer card needs
 no code change to run; `tests/flash_cuda.rs` and `tests/sage_cuda.rs` give
 per-arch numbers to add to the README table.
+
+### 9.18 CUDA toolkit-version independence (2026-11) — DONE
+
+The CUDA backend used cudarc's NVRTC loader, which bakes the toolkit version
+used at **build** time into its candidate list (`CUDA_MAJOR_VERSION`, so a
+CUDA-12 build only tried `libnvrtc.so.12` plus the unversioned `-dev` symlink).
+On a machine with a different major version — and no `cuda-nvrtc-dev` symlink —
+`Library::new` failed and cudarc's `panic_no_lib_found` aborted the process.
+`available()` only checked `libcuda`, so device selection happily picked CUDA
+and the failure surfaced at the first kernel compile.
+
+Changes:
+
+- **`runtime/nvrtc.rs`** — a small, version-agnostic NVRTC loader. It binds
+  `nvrtcCreateProgram` / `CompileProgram` / `GetPTX[Size]` /
+  `GetProgramLog[Size]` / `DestroyProgram` / `Version` (plus the supported-arch
+  query when present) through `libloading` and discovers the library the way
+  tinygrad's `DLL.findlib` does: `AUTORUST_NVRTC_LIB` / `NVRTC_PATH` first,
+  then every `libnvrtc.so[.N]` under `LD_LIBRARY_PATH`, the `CUDA_*` /
+  `CONDA_PREFIX` roots, the multiarch dirs and `/usr/local/cuda*` / `/opt/cuda*`
+  toolkits (newest version first, ELF check to skip linker scripts), then bare
+  sonames. Windows uses the same rules for `nvrtc64_*.dll` / `nvrtc.dll`.
+  An explicit override is authoritative; the loader does not silently fall back
+  to a different toolkit.
+- **`nvrtc::compile(src, arch, include_dirs)`** returns `Err(String)` with the
+  program log. It pre-checks the device SM against `nvrtcGetSupportedArchs`
+  and returns e.g. `NVRTC 12.4 does not support sm_120 (supported: ...)`
+  instead of a generic compilation failure.
+- **`ops_cuda::device_available(ordinal)`** is the new selection gate: driver
+  present, `CudaContext::new`, compile a one-line kernel for the device's SM,
+  and `cuModuleLoadData` the resulting PTX. Cached per ordinal (mixed-GPU
+  boxes can have one card the installed NVRTC cannot target). On failure it
+  logs one line and `available()` returns `false`, so `default_device()` falls
+  through to the next backend. `autotune::is_available`/`available_devices`
+  use the per-ordinal probe too.
+- The epilogue kernel, the Sage compile-tests and `bin/cuda_smoke` use the same
+  loader, so the main path no longer touches cudarc's NVRTC at all. cudarc
+  remains the CUDA *driver* layer (context/stream, buffers, module load,
+  launches); its only remaining `nvrtc` use is the `Ptx` value type required by
+  `CudaContext::load_module`, which does not dlopen anything.
+- **`runtime/libfind.rs`** — the discovery (overrides, search dirs, version
+  parsing/sorting, ELF check) is shared with cuBLAS, whose hardcoded
+  `libcublas.so.{13,12,11}` list had the same cross-toolkit limitation. cuBLAS
+  is now scanned the same way and probed by creating/destroying a handle on the
+  device's current context (`probe_current_context`, called from the CUDA device
+  probe and `CudaInner::open`). A cuBLAS from the wrong toolkit or a GPU it does
+  not support logs one line and disables the host-GEMM fast path; generated GEMM
+  kernels keep CUDA running. `AUTORUST_CUBLAS_LIB` remains an authoritative
+  override.
+- The CUDA compile path (batch, cache key, parallel workers) is unchanged; only
+  where the PTX comes from changed.
+
+Gates: `runtime/libfind.rs` unit tests cover NVRTC/cuBLAS filename parsing and
+version ordering (including rejecting `libcublasLt`); `runtime/nvrtc.rs` tests
+cover SM parsing, a clean missing-library error, unsupported-arch diagnostics,
+and a real trivial-kernel compile when NVRTC is present. Manually:
+`AUTORUST_NVRTC_LIB=/nonexistent` disables CUDA, prints the warning and runs
+MNIST on OpenCL with identical accuracy; `AUTORUST_CUBLAS_LIB=/nonexistent`
+keeps CUDA running on generated GEMM kernels; the normal run still opens the
+RTX 3060 (`sm_86`) and emits the same cuBLAS GEMMs. Full suite + clippy +
+rustdoc pass.
+
+Known limits: the driver still has to understand the PTX ISA that the loaded
+NVRTC emits (the probe catches this at selection time); include headers still
+come from `$CUDA_PATH/include` or the three standard locations, so a
+non-standard toolkit should set `CUDA_PATH`.

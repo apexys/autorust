@@ -160,9 +160,44 @@ parallel.
 | `AUTORUST_CC_ARCH` | arch | `native` | `-march`/`-mcpu` for `CC` kernels. |
 | `CUDA_PATH` | directory | `/usr/local/cuda`, `/usr`, `/opt/cuda` include paths | NVRTC include root (`$CUDA_PATH/include`). |
 | `AUTORUST_COMPILE_THREADS` | integer | `8` | NVRTC workers per kernel batch on CUDA (`1` = serial). NVRTC gains flatten after a handful of workers. |
+| `AUTORUST_NVRTC_LIB` | path/soname | first `libnvrtc.so*` found on the loader path | Force a specific NVRTC library. When set, no other NVRTC is tried. `NVRTC_PATH` is accepted as a tinygrad-compatible alias. |
 | `AUTORUST_CL_LIB` | path | `libOpenCL.so` | Load a specific OpenCL library (test/deployment override). |
-| `AUTORUST_CUBLAS_LIB` | path | `libcublas.so.{13,12,11}`, `.dylib`, `cublas64_*.dll` | Override the cuBLAS library. |
+| `AUTORUST_CUBLAS_LIB` | path/soname | newest `libcublas.so*` found on the loader path | Force a specific cuBLAS library. When set, no other cuBLAS is tried. |
 | `AUTORUST_CLBLAST_LIB` | path | `libclblast.so.1`, `.dylib`, `clblast.dll` | Override the CLBlast library. |
+
+### CUDA toolkit versions
+
+NVRTC is loaded at run time and is **independent of the toolkit used to build**
+`autorust`. The loader scans `LD_LIBRARY_PATH`/`PATH`, `CUDA_HOME` /
+`CUDA_PATH` / `CUDA_ROOT` / `CONDA_PREFIX`, the multiarch library directories,
+and every `cuda*` toolkit under `/usr/local` and `/opt`, preferring the newest
+`libnvrtc.so[.N]`; it then falls back to bare sonames. A binary built on CUDA 12
+therefore uses a CUDA 13 NVRTC on a colleague's machine (and vice versa) as long
+as the installed *driver* can load the PTX (PTX is forward compatible; an
+NVRTC newer than the driver can emit an ISA the driver rejects, which the probe
+below catches).
+
+Before offering `CUDA` to the scheduler, `ops_cuda::device_available` compiles
+and loads a one-line kernel for the device's SM (cached once per ordinal). If
+NVRTC is missing, too old for the GPU (for example `sm_120` with NVRTC 12.4),
+or the driver rejects the PTX, CUDA reports itself unavailable, prints one
+warning such as
+
+```
+autorust: CUDA device 0 disabled, falling back to the next backend: NVRTC cannot build for sm_86: ...
+```
+
+and `DEFAULT_DEVICE` selection continues with `METAL` → `CL` → `RUST` → `CC` →
+`RAYON`. An explicit `DEFAULT_DEVICE=CUDA` still selects CUDA, so the compile
+error is reported instead of silently running somewhere else.
+
+cuBLAS gets the same treatment: `runtime/libfind` is shared with NVRTC, so the
+newest installed `libcublas.so[.N]` / `cublas64_*.dll` is used regardless of
+the build toolkit. It is validated by creating and destroying a handle on the
+device's current context; if that fails (`CUBLAS_STATUS_ARCH_MISMATCH`, a
+driver too old for that cuBLAS, ...) it prints one warning and the scheduler
+uses the generated GEMM kernels instead. cuBLAS is only a fast path, so CUDA
+itself keeps running.
 
 ### Caches
 

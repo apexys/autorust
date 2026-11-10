@@ -45,8 +45,18 @@ pub mod cuda_flash_sage;
 pub mod cuda_flash_tc;
 pub mod device;
 pub mod interp;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+pub mod libfind;
 #[cfg(all(feature = "backend_metal", target_os = "macos"))]
 pub mod metal_flash;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+pub mod nvrtc;
 #[cfg(feature = "backend_cl")]
 pub mod ops_cl;
 #[cfg(feature = "backend_clang")]

@@ -143,26 +143,22 @@ unsafe impl Send for CublasLib {}
 unsafe impl Sync for CublasLib {}
 
 /// Candidate shared-library names, most specific first.
+///
+/// Discovery is shared with NVRTC ([`crate::runtime::libfind`]): the soname
+/// encodes the toolkit major version, so trying only the build-time version
+/// would break against a different installed toolkit.
 fn candidates() -> Vec<String> {
-    let mut v = Vec::new();
-    if let Some(path) = crate::helpers::env::get("AUTORUST_CUBLAS_LIB")
-        && !path.is_empty()
-    {
-        v.push(path);
+    let mut out = crate::runtime::libfind::env_overrides(&["AUTORUST_CUBLAS_LIB"]);
+    if !out.is_empty() {
+        return out;
     }
-    for name in [
-        "libcublas.so.13",
-        "libcublas.so.12",
-        "libcublas.so.11",
-        "libcublas.so",
-        "libcublas.12.dylib",
-        "libcublas.dylib",
-        "cublas64_13.dll",
-        "cublas64_12.dll",
-    ] {
-        v.push(name.to_string());
+    out.extend(crate::runtime::libfind::scanned_libraries("cublas"));
+    out.push(crate::runtime::libfind::unversioned_name("cublas"));
+    for major in (9..=20).rev() {
+        out.push(crate::runtime::libfind::versioned_name("cublas", major));
     }
-    v
+    out.dedup();
+    out
 }
 
 fn load() -> Option<CublasLib> {
@@ -221,12 +217,48 @@ pub fn library_present() -> bool {
     lib().is_some()
 }
 
-/// Whether cuBLAS is loaded and the fast path should be used.
+/// Cached result of [`probe_current_context`]: `None` until a CUDA context has
+/// been current on some thread, then the probe outcome.
+static PROBE: OnceLock<bool> = OnceLock::new();
+
+/// Whether the loaded cuBLAS can actually initialise on the CUDA context bound
+/// to the calling thread.
+///
+/// A soname match is not enough: cuBLAS from a newer toolkit can reject an old
+/// GPU (`CUBLAS_STATUS_ARCH_MISMATCH`) or an old driver. The CUDA device probe
+/// calls this while the context is current, so a broken library disables the
+/// host-GEMM fast path instead of panicking on the first scheduled GEMM.
+///
+/// Cached for the process (the handle is created once and destroyed again).
+pub fn probe_current_context() -> bool {
+    *PROBE.get_or_init(|| {
+        let Some(lib) = lib() else {
+            return false;
+        };
+        let mut raw: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe { (lib.create)(&mut raw) };
+        if rc != 0 || raw.is_null() {
+            eprintln!(
+                "autorust: cuBLAS cannot create a handle on this CUDA driver/GPU; using generated GEMM kernels"
+            );
+            return false;
+        }
+        unsafe { (lib.destroy)(raw) };
+        true
+    })
+}
+
+/// Whether cuBLAS is loadable and (once probed) actually usable.
 ///
 /// `AUTORUST_CUBLAS=0` disables it; any other value keeps the default (on when
-/// the library is present).
+/// the library is present). Before the device probe runs this is the load-only
+/// check, so scheduling that happens before the CUDA context exists still sees
+/// the library.
 pub fn available() -> bool {
-    lib().is_some()
+    match PROBE.get() {
+        Some(&ok) => ok,
+        None => lib().is_some(),
+    }
 }
 
 /// Math mode: TF32 on f32 GEMMs unless `AUTORUST_CUBLAS_TF32=0` (faster,

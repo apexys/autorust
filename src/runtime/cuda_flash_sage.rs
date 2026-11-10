@@ -542,38 +542,24 @@ mod tests {
     #[test]
     fn fp8_source_compiles_for_sm89() {
         let src = super::src(true);
-        let options = vec![
-            "--gpu-architecture=sm_89".to_string(),
-            "-I/usr/local/cuda/include".to_string(),
-            "-I/usr/include".to_string(),
-            "-I/opt/cuda/include".to_string(),
+        let includes = vec![
+            "/usr/local/cuda/include".to_string(),
+            "/usr/include".to_string(),
+            "/opt/cuda/include".to_string(),
         ];
-        cudarc::nvrtc::compile_ptx_with_opts(
-            src,
-            cudarc::nvrtc::CompileOptions {
-                options,
-                ..Default::default()
-            },
-        )
-        .expect("FP8 source must compile for sm_89");
+        crate::runtime::nvrtc::compile(&src, "sm_89", &includes)
+            .expect("FP8 source must compile for sm_89");
     }
 
     #[test]
     fn int8_source_compiles() {
         let src = super::src(false);
-        let options = vec![
-            "--gpu-architecture=sm_80".to_string(),
-            "-I/usr/local/cuda/include".to_string(),
-            "-I/usr/include".to_string(),
-            "-I/opt/cuda/include".to_string(),
+        let includes = vec![
+            "/usr/local/cuda/include".to_string(),
+            "/usr/include".to_string(),
+            "/opt/cuda/include".to_string(),
         ];
-        cudarc::nvrtc::compile_ptx_with_opts(
-            src,
-            cudarc::nvrtc::CompileOptions {
-                options,
-                ..Default::default()
-            },
-        )
-        .expect("INT8 source must compile for sm_80");
+        crate::runtime::nvrtc::compile(&src, "sm_80", &includes)
+            .expect("INT8 source must compile for sm_80");
     }
 }
