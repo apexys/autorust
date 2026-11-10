@@ -32,8 +32,11 @@ assert_eq!(c.to_list::<f32>(&mut sess), vec![11.0, 22.0, 33.0]); //to_list alloc
 ```
 
 Also look at our examples, especially:
-- `xor.rs` Train a dense NN to learn the XOR function
-- `frozen_vit` Include a ViT-B/16 as precompiled Rust-code in your application
+- [`xor.rs`](https://github.com/apexys/autorust/blob/main/examples/xor.rs) —
+  train a dense NN to learn the XOR function
+- [`frozen_vit`](https://github.com/apexys/autorust/tree/main/examples/frozen_vit) —
+  include a ViT-B/16 as precompiled Rust code in your application (a standalone
+  crate, so it lives in the repository rather than the published package)
 
 ## Dependencies
 
@@ -63,11 +66,11 @@ We integrate with native GEMM libraries when available (cuBLAS, CLBlast,
 MetalPerformanceShaders, plus our own packed CPU kernel) and have fast paths
 for attention and, to a lesser extent, convolutions.
 
-Here's a benchmark (see `bench`) comparing the performance across workloads and frameworks:
+Here's a benchmark ([`bench`](https://github.com/apexys/autorust/tree/main/bench)) comparing the performance across workloads and frameworks:
 
 (CPU: Ryzen 9 3900X, 64GB of DDR4 RAM, RTX 3060 12GB, Ubuntu 26.04)
 
-See [`PERFORMANCE.md`](PERFORMANCE.md) for methodology and tuning.
+See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md) for methodology and tuning.
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
@@ -84,7 +87,7 @@ See [`PERFORMANCE.md`](PERFORMANCE.md) for methodology and tuning.
 ## Scope and limitations
 
 - ONNX covers the T0/T1 inference surface (see
-  [`ONNX-Compat.md`](ONNX-Compat.md)); quantization, training ops and control
+  [`ONNX-Compat.md`](https://github.com/apexys/autorust/blob/main/ONNX-Compat.md)); quantization, training ops and control
   flow are not supported.
 - `METAL` has no hardware `double`: f64 is lowered to f32 with a one-time
   warning. Use `INTERP`/`CPU`/`CL`/`CUDA` when true f64 is required.
@@ -100,16 +103,16 @@ See [`PERFORMANCE.md`](PERFORMANCE.md) for methodology and tuning.
 
 (all of these documents are LLM-written)
 
-- [`CONFIGURATION.md`](CONFIGURATION.md) — environment variables and settings.
-- [`PERFORMANCE.md`](PERFORMANCE.md) — measurements, kernels and device
+- [`CONFIGURATION.md`](https://github.com/apexys/autorust/blob/main/CONFIGURATION.md) — environment variables and settings.
+- [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md) — measurements, kernels and device
   selection.
-- [`FREEZE.md`](FREEZE.md) — embedding a "precompiled" model in an application.
-- [`ONNX-Compat.md`](ONNX-Compat.md) — ONNX operator coverage and runner API.
-- [`INDEXING.md`](INDEXING.md) — tensor indexing, especially with Rust types.
-- [`CURRENT_STATE.md`](CURRENT_STATE.md) — canonical status and known gaps.
-- [`CHANGELOG.md`](CHANGELOG.md) — release notes.
-- [`AGENTS.md`](AGENTS.md) — how the LLM works on this codebase.
+- [`FREEZE.md`](https://github.com/apexys/autorust/blob/main/FREEZE.md) — embedding a "precompiled" model in an application.
+- [`ONNX-Compat.md`](https://github.com/apexys/autorust/blob/main/ONNX-Compat.md) — ONNX operator coverage and runner API.
+- [`INDEXING.md`](https://github.com/apexys/autorust/blob/main/INDEXING.md) — tensor indexing, especially with Rust types.
+- [`CURRENT_STATE.md`](https://github.com/apexys/autorust/blob/main/CURRENT_STATE.md) — canonical status and known gaps.
+- [`CHANGELOG.md`](https://github.com/apexys/autorust/blob/main/CHANGELOG.md) — release notes.
+- [`AGENTS.md`](https://github.com/apexys/autorust/blob/main/AGENTS.md) — how the LLM works on this codebase.
 
 ## License
 
-MIT. This is a derivative work of tinygrad (MIT); see [`LICENSE`](LICENSE).
+MIT. This is a derivative work of tinygrad (MIT); see [`LICENSE`](https://github.com/apexys/autorust/blob/main/LICENSE).
