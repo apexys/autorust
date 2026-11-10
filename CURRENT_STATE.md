@@ -2100,6 +2100,13 @@ showed the cost was framing, not math: `exec_launch` 29%, **`malloc`/`free`/`cal
 - **What's left.** 65% of remaining retired instructions are the interpreter loop itself
   (inlined dispatch + indexing + loads). Cutting that needs instruction-level fusion or
   codegen (R2.3), which this std-only, no-JIT port deliberately avoids.
+- **Scratch leak fixed (2026-11).** The `REG` param path built a fresh
+  `Vec<SendMemView>` and assigned it to the slot instead of taking one from
+  `Scratch::take_m`, so every `recycle` pushed another payload into `pool_m`
+  with no matching pop. RSS grew ~25 MB per MNIST step (106 → 429 MB over 10
+  steps at bs=8, JIT on or off); the same run now plateaus at ~150 MB. This
+  only affected the typed evaluator (`RAYON`), not `RUST`/`CC`, which is why
+  those benchmarks were flat.
 
 ---
 

@@ -536,11 +536,20 @@ impl TypedKernel {
                         sc.slots[i] = Slot::M(vs);
                     } else if instrs[i].addrspace == Some(AddrSpace::Reg) {
                         let (nel, s) = (instrs[i].numel, isz(dt(i)));
-                        let vs: Vec<SendMemView> = (0..wsize)
-                            .map(|_| {
-                                SendMemView::from_owned(vec![0u8; nel * s], s, nel, &mut sc.owned)
-                            })
-                            .collect();
+                        // Reuse the recycled payload: a fresh Vec here would be
+                        // pushed back into `pool_m` by every `recycle` and never
+                        // popped, growing the thread-local scratch per launch.
+                        let mut vs = sc.take_m(i);
+                        vs.clear();
+                        vs.reserve(wsize);
+                        for _ in 0..wsize {
+                            vs.push(SendMemView::from_owned(
+                                vec![0u8; nel * s],
+                                s,
+                                nel,
+                                &mut sc.owned,
+                            ));
+                        }
                         sc.slots[i] = Slot::M(vs);
                     } else {
                         let (nel, s) = (instrs[i].numel, isz(dt(i)));
