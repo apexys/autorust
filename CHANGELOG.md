@@ -19,5 +19,9 @@ Initial release.
   packed CPU GEMM, and fused FlashAttention kernels (scalar, TF32 and bf16
   tensor cores).
 - GPU GEMM register tiling that keeps prime row extents (e.g. ViT at batch 8)
-  on multi-thread tiles.
+  on multi-thread tiles, scores both contraction orientations, and the direct
+  conv tile reuses weights across two spatial rows.
+- Persistent rendered kernels: a warm process skips the codegen pipeline.
+- `ViT::forward_with` / `TransformerBlock::forward_with`: eval-mode inference
+  dispatches to the fused attention kernels.
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.

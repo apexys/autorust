@@ -43,8 +43,8 @@ RUNS = [
     ("tinygrad-cpu-mnist", "tinygrad", "cpu", "mnist_train", 512, 2, 5, "single-threaded"),
     ("tinygrad-cuda-mnist", "tinygrad", "cuda", "mnist_train", 512, 2, 10, ""),
     # --- ViT-B/16 inference, batch 1 ---
-    ("autorust-rust-vit_infer-bs1", "autorust", "RUST", "vit_infer", 1, 1, 3, "AUTORUST_ATTN=sdpa"),
-    ("autorust-cuda-vit_infer-bs1", "autorust", "CUDA", "vit_infer", 1, 1, 3, "SDPA"),
+    ("autorust-rust-vit_infer-bs1", "autorust", "RUST", "vit_infer", 1, 1, 3, "SDPA (CPU)"),
+    ("autorust-cuda-vit_infer-bs1", "autorust", "CUDA", "vit_infer", 1, 1, 3, "fused FA2"),
     ("candle-cpu-vit_infer-bs1", "candle", "cpu", "vit_infer", 1, 1, 2, ""),
     ("candle-cuda-vit_infer-bs1", "candle", "cuda", "vit_infer", 1, 1, 3, ""),
     ("torch-cpu-vit_infer-bs1", "torch", "cpu", "vit_infer", 1, 1, 3, ""),
@@ -52,16 +52,16 @@ RUNS = [
     ("tinygrad-cpu-vit_infer-bs1", "tinygrad", "cpu", "vit_infer", 1, 0, 1, "single-threaded"),
     ("tinygrad-cuda-vit_infer-bs1", "tinygrad", "cuda", "vit_infer", 1, 1, 3, ""),
     # --- ViT-B/16 inference, batch 8 ---
-    ("autorust-rust-vit_infer-bs8", "autorust", "RUST", "vit_infer", 8, 1, 2, "AUTORUST_ATTN=sdpa"),
-    ("autorust-cuda-vit_infer-bs8", "autorust", "CUDA", "vit_infer", 8, 1, 3, "SDPA"),
+    ("autorust-rust-vit_infer-bs8", "autorust", "RUST", "vit_infer", 8, 1, 2, "SDPA (CPU)"),
+    ("autorust-cuda-vit_infer-bs8", "autorust", "CUDA", "vit_infer", 8, 1, 3, "fused FA2"),
     ("candle-cpu-vit_infer-bs8", "candle", "cpu", "vit_infer", 8, 1, 2, ""),
     ("candle-cuda-vit_infer-bs8", "candle", "cuda", "vit_infer", 8, 1, 3, ""),
     ("torch-cpu-vit_infer-bs8", "torch", "cpu", "vit_infer", 8, 1, 2, ""),
     ("torch-cuda-vit_infer-bs8", "torch", "cuda", "vit_infer", 8, 1, 3, ""),
     ("tinygrad-cuda-vit_infer-bs8", "tinygrad", "cuda", "vit_infer", 8, 1, 3, ""),
     # --- ViT-B/16 training step, batch 1 (f32) ---
-    ("autorust-rust-vit_train", "autorust", "RUST", "vit_train", 1, 1, 2, "AUTORUST_ATTN=sdpa"),
-    ("autorust-cuda-vit_train", "autorust", "CUDA", "vit_train", 1, 1, 3, "SDPA"),
+    ("autorust-rust-vit_train", "autorust", "RUST", "vit_train", 1, 1, 2, "SDPA (CPU)"),
+    ("autorust-cuda-vit_train", "autorust", "CUDA", "vit_train", 1, 1, 3, "SDPA (training)"),
     ("candle-cpu-vit_train", "candle", "cpu", "vit_train", 1, 1, 2, ""),
     ("candle-cuda-vit_train", "candle", "cuda", "vit_train", 1, 1, 3, ""),
     ("torch-cpu-vit_train", "torch", "cpu", "vit_train", 1, 1, 2, ""),
@@ -79,10 +79,9 @@ def base_env():
         PYTHONUNBUFFERED="1",
         TOKENIZERS_PARALLELISM="false",
     )
-    # The autorust CPU backends should use the cheap SDPA path; the op-level
-    # FlashAttention port is 16x slower there (see PERFORMANCE.md). The model
-    # itself always uses SDPA unless `FA=1` is set.
-    env.setdefault("AUTORUST_ATTN", "sdpa")
+    # `AUTORUST_ATTN` is intentionally left at its default: the model uses the
+    # fused attention kernels on CUDA and falls back to SDPA elsewhere, and the
+    # op-level FA port stays opt-in via FA=1.
     return env
 
 
@@ -172,6 +171,13 @@ def main():
         cmd, env = COMMANDS[framework](device, workload, batch, warmup, iters)
         print(f"==> {name}: {' '.join(cmd)}", flush=True)
         t = time.time()
+        if framework == "autorust":
+            # Warm the on-disk caches (PTX + rendered kernels) like the docs'
+            # protocol says; otherwise ms_cold measures this binary's first
+            # process after a rebuild. Discard the result.
+            warm = dict(env, BENCH_ITERS="0", BENCH_WARMUP="0")
+            subprocess.run(cmd, cwd=ROOT, env=warm, capture_output=True,
+                           text=True, timeout=args.timeout)
         proc = subprocess.run(
             cmd, cwd=ROOT, env=env, capture_output=True, text=True,
             timeout=args.timeout,

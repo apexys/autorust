@@ -2902,3 +2902,77 @@ benchmarks; it removes the redundant prefix work for `attention_with` callers.
 Gates: `cargo test --release` (the one `causal_skips_half_the_work` timing test
 is load-sensitive and passes in isolation), `cargo clippy --all-targets`,
 `cargo rustdoc --lib -- -W missing_docs`, `cargo build --no-default-features`.
+
+### 9.20 Benchmark round 2: rendered-kernel cache, conv/GEMM tiles, fused ViT inference (2026-11) — DONE
+
+Goal: cut the scheduler/codegen cost of the benches and close the gap to torch
+(no `torch.compile`). Numbers below are `bench/results/` at `d6050aa`;
+`PERFORMANCE.md` has the curated tables.
+
+**Persistent rendered kernels** (`engine/realize.rs`). `prepare_program` calls
+`full_rewrite_to_sink_with` (~30 graph-rewrite stages) per kernel: 4.4 s of a
+ViT-B/16 training cold start over 1148 kernels, even with the PTX already in
+the source-keyed disk cache. The render result (ProgramInfo, ELF signature,
+source) is now stored under `gkey` (device + AST content) plus a hash of all
+`Settings`, the `USE_TC`/`TC_OPT`/`TC_SELECT` knobs and a **fingerprint of the
+running binary** (crate version + executable mtime/size). The binary fingerprint
+means any rebuild invalidates the entry, so a stale render cannot outlive the
+codegen that produced it; `CACHELEVEL=0` disables it. A hit rebuilds the
+PROGRAM from the cached metadata and fetches the PTX from the existing
+compiler cache (the `linear`/`sunk` srcs are not used by cached programs —
+`reuse_program` already builds a bare PROGRAM node).
+
+Warm-cache cold start (`ms_cold`, one process, warm PTX+render cache):
+
+| workload | before | now |
+|---|---|---|
+| MNIST bs512 | 505 ms | **205 ms** |
+| ViT infer bs1 | 697 ms | **456 ms** |
+| ViT infer bs8 | 1279 ms | **721 ms** |
+| ViT train bs1 | 6013 ms | **2602 ms** |
+
+**Codegen tiling.** Three findings from the new per-stage timings
+(`codegen.sink` is ~3.7 ms/kernel, spread over ~30 stages; `apply_opts` and the
+matmul tile are the rest):
+
+1. The direct-conv tile put `cout` on threads and upcast only `ox`; every
+   thread re-read the 5x5 weights for 4 outputs. Upcasting the other spatial
+   axis reuses the weights across two rows: MNIST bs512 **39.2 -> 21.7 ms**
+   (torch 13.1). The existing conv goldens all have `cout < 8` and never reach
+   `try_conv_tiling`, so `tests/conv_tiling.rs` adds a CUDA-vs-INTERP
+   differential (also re-run from a warm render cache).
+2. `matmul_ranges` labels A's private axis M and B's as N *in operand order*,
+   not store order. For the ViT backward `dX` ([197, 3072], K=768) that put the
+   prime token axis on N: 16 rows of grid with 2-thread blocks, 5.6 ms/kernel.
+   Score both orientations by block threads (and total upcast registers) and
+   keep the better one; if the winner still has < 32 threads, trade the
+   register tile for threads up to a warp. ViT training **332 -> 216 ms**.
+3. The multi-reduce q/k/v weight-gradient kernel is still fused
+   (`r_197_48_16_768_...`, ~67 ms/step): it has three reductions, so
+   `matmul_ranges` declines it and the generic heuristic emits scalar loads.
+   Splitting those stores is the next scheduler item.
+
+**Fused inference path** (`models/transformer.rs`, `models/vit.rs`). The graph
+model always used SDPA, so the hand-written FA2 kernels were reachable only by
+calling `Tensor::attention_with` directly. `ViT::forward_with(sess)` (and
+`TransformerBlock::forward_with`) now runs in eval mode on CUDA/CL/Metal:
+realize the layer input, realize the q/k/v projections **before** the
+reshape/transpose (so they stay library GEMMs rather than transposed-store
+kernels — that ordering was the bug in the earlier attempt), then let
+`attention_with` copy/launch the fused kernel. Training and CPU fall back to
+the graph path. The projections are co-realized and **pinned**: `realize_many`
+leaves only weak `BufTable` views, and without the pin the temporaries were
+freed while the q/k/v views still indexed them (nondeterministic garbage;
+`tests/nn_models::vit_session_path_matches_graph_path` pins it). ViT inference
+CUDA bs8 **102 -> 69.9 ms**, bs1 **15.8 -> 13.2-15.9 ms**.
+
+**Torch comparison** (median, no `torch.compile`): MNIST 21.7 vs 13.1 = 1.66x;
+ViT infer bs1 15.9 vs 8.7 = 1.82x; bs8 68.9 vs 46.4 = 1.49x; ViT train 216 vs
+43.8 = 4.9x. The three inference/MNIST workloads are within 2x; training is not
+(the fused multi-reduce gradients + f32 vs cuDNN). CPU (unchanged code path) is
+64.2 ms MNIST (faster than torch 175.9), ViT infer 438/1862 vs 165/701 (2.6x,
+MKL), train 2230 vs 616 (3.6x).
+
+Gates: `cargo test --release` (78 binaries), `cargo clippy --all-targets`,
+`cargo rustdoc --lib -- -W missing_docs`, `cargo build --no-default-features`;
+the conv and ViT-path differentials pass from a warm render cache.

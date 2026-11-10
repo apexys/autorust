@@ -59,7 +59,12 @@ heuristic:
   with 4x16 threads (block 32x128). When the M extent is prime-ish (ViT batch-8
   `M = 1576 = 8*197`), an 8-wide register tile would leave a *single* thread on
   M (16-thread blocks); the tile steps down to 4x8 with 2x16 threads, which
-  took the batch-8 FFN expansion from 8.1 to 2.9 ms (2.8x).
+  took the batch-8 FFN expansion from 8.1 to 2.9 ms (2.8x). `matmul_ranges`
+  returns A's and B's private axes in operand order, not store order, so both
+  orientations are scored and the one with more block threads wins; a block
+  below one warp trades register tile for threads. The ViT backward `dX`
+  (M=197 prime, N=3072) went from a 2-thread block at 5.6 ms to a tiled kernel
+  at 2.6 ms.
 - **Grid order** (`codegen/gpudims.rs`): global axes are sorted by extent
   ascending, so the largest dimension becomes `blockIdx.x` (fastest-varying).
   For `M=197` linears this runs all M blocks for one N tile before moving on,
@@ -94,14 +99,13 @@ storage halves the DRAM traffic, not because the generated kernel emits `mma`.
 Conv is not a `HostGemm`: it lowers to `pad -> pool -> expand -> mul -> sum`
 over `(cin, ky, kx)`. `try_conv_tiling` expresses it as an implicit GEMM
 (`M = batch*oy*ox`, `N = cout`, `K = cin*ky*kx`) without materialising im2col:
-output channels on threads (coalesced weights), the innermost spatial axis
-upcast into registers, and the kernel axes unrolled. On MNIST/RTX 3060 this
-took the training step from 588.6 to 258.4 ms at bs=512; see
-`CURRENT_STATE.md` §9.16-§9.17. BatchNorm training now realizes its input once
-instead of recomputing the conv in the statistics reduction, which took the
-MNIST step to 39.7 ms at bs=512 (CUDA) and 64.8 ms (RUST). Materialised im2col +
-`dot` (route B, deferred) remains the way to use the vendor GEMMs and the packed
-CPU kernel for conv.
+output channels on threads (coalesced weights), **both** spatial output axes
+upcast into registers (so a 5x5 weight tap is reused across two rows), and the
+kernel axes unrolled. On MNIST/RTX 3060 this took the training step from 588.6
+to 258.4 ms at bs=512 (one-axis upcast) and 39.2 to **21.7 ms** with the second
+axis; see `CURRENT_STATE.md` §9.16-§9.17 and §9.20. Materialised im2col + `dot`
+(route B, deferred) remains the way to use the vendor GEMMs and the packed CPU
+kernel for conv.
 
 ## Host GEMM (library path)
 
@@ -259,8 +263,8 @@ ViT-B/16 (`JIT=1`, steady state):
 | forward, `RUST` CPU | 4.1 s | **0.65-0.66 s** |
 | forward, `CC` CPU | — | **0.63 s** |
 | forward, frozen `RUST` plan | — | 0.86 s |
-| forward, CUDA | 166 ms | **21-22 ms** (cuBLAS) |
-| training step (fwd+bwd+Adam, CUDA) | — | ~387 ms |
+| forward, CUDA | 166 ms | **13-16 ms** (fused FA2) |
+| training step (fwd+bwd+Adam, CUDA) | ~387 ms | **216 ms** |
 | 512³ f32 GEMM, `RUST` | 27.6 GFLOP/s | **~370 GFLOP/s** |
 
 Clusterfun (DINOv3 ViT-S/16, 448px): CUDA + cuBLAS + fused FA2 **5.6 s** / 128
@@ -274,6 +278,37 @@ Accuracy (8 images, 448px, CUDA vs frozen CPU plan): embeddings 1.4e-6 max abs
 tensor-core attention costs about as much as TF32 cuBLAS and is worth it, while
 TF32 cuBLAS is not (hence the default).
 
+## Cold start and scheduling
+
+The steady-state medians above hide the front end, but a fresh process still
+has to build the graph, rangeify it and render every kernel. Two things make
+that cheaper:
+
+- **Persistent rendered kernels** (`engine/realize.rs`). The PTX cache is keyed
+  by source text, so it only helps after rendering. The render result
+  (ProgramInfo, ELF signature, source) is now stored under the AST content key
+  plus the codegen settings and a fingerprint of the running binary, so a
+  second process (or a later realize of the same kernel) skips the ~30
+  pipeline stages. On a ViT-B/16 training step rendering is ~4.4 s of the
+  cold start and drops to ~50 ms on a hit; `CACHELEVEL=0` disables it.
+- **Pipeline timings** under `AUTORUST_PROF=1`
+  (`codegen.sink/pi/linearize/source`, `compile.batch`, one row per stage, and
+  `sched.*`/`rb.*` for rangeify). `AUTORUST_MM_DEBUG=1` additionally prints the
+  chosen matmul tile or the reason `matmul_ranges` rejected a kernel.
+
+Warm-cache cold start (`ms_cold`, same process protocol as the table):
+
+| workload | before | now |
+|---|---|---|
+| MNIST CNN train, bs512 | 505 ms | **205 ms** |
+| ViT-B/16 infer, bs1 | 697 ms | **456 ms** |
+| ViT-B/16 infer, bs8 | 1279 ms | **721 ms** |
+| ViT-B/16 train, bs1 | 6013 ms | **2602 ms** |
+
+`bench/run.py` warms the on-disk caches with a discarded `ITERS=0` process
+before the measured one, matching the warm-cache protocol used for the other
+frameworks.
+
 ## Cross-framework comparison
 
 [`bench/`](bench/README.md) runs the same two models — `beautiful_mnist` CNN
@@ -281,9 +316,9 @@ training and ViT-B/16 — through autorust, candle, torch and tinygrad on CPU an
 CUDA. Inputs are synthetic and device-resident, the timed region is one
 training/inference step (no data loading, evaluation or logging), and each run
 is a fresh process with warmup. Raw JSON and the generated per-run tables are in
-[`bench/results/`](bench/results); these medians are from commit `aa803e0`
-(autorust CUDA rows, re-taken after the GEMM-tile and attention changes in
-CURRENT_STATE §9.19; the CPU rows are from `5cf311a`) on the environment above
+[`bench/results/`](bench/results); these medians are from commit `d6050aa`
+(autorust CUDA rows, re-taken after the codegen and fused-inference changes in
+CURRENT_STATE §9.20; the CPU rows are from `5cf311a`) on the environment above
 (the candle runs were re-taken at `82f6408` with the class-token fix; torch is
 eager, no `torch.compile`; autorust uses `Jit`, tinygrad `TinyJit`).
 
@@ -292,27 +327,29 @@ All step times are milliseconds (lower is better).
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
 | MNIST CNN train, bs 512 | CPU | **64.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
-| MNIST CNN train, bs 512 | CUDA | 39.2 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| MNIST CNN train, bs 512 | CUDA | 21.7 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
 | ViT-B/16 infer, bs 1 | CPU | 438.1 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
-| ViT-B/16 infer, bs 1 | CUDA | 15.1 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
+| ViT-B/16 infer, bs 1 | CUDA | 15.9 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
 | ViT-B/16 infer, bs 8 | CPU | 1861.9 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 105.4 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
+| ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
 | ViT-B/16 train, bs 1 | CPU | 2230.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 332.3 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| ViT-B/16 train, bs 1 | CUDA | 216.4 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
-- **MNIST CUDA**: autorust is 1.45x faster than tinygrad and 3.4x faster than
-  candle; torch (cuDNN + cuBLAS + its fused BN/optimizer path) is 3.0x faster
-  than autorust.
-- **ViT inference CUDA**: torch's cuBLAS/cuDNN path wins by ~1.7x at bs 1 and
-  ~2.3x at bs 8. autorust is ahead of tinygrad at both batches (7.7x / 1.3x)
-  and slightly ahead of candle at bs 8; candle's per-op overhead dominates its
-  forward.
-- **ViT training CUDA**: autorust is 1.17x faster than tinygrad, but
-  torch/candle are much faster — cuDNN, tensor cores and library backward
-  kernels are the gap. This is the same f32 FFMA-vs-tensor-core story as the
-  cuDNN note below.
+- **MNIST CUDA**: autorust is 2.6x faster than tinygrad and 1.7x slower than
+  torch (cuDNN + cuBLAS + fused BN/optimizer). The direct-conv tile now reuses
+  the 5x5 weights across two output rows, which is most of the gap that
+  remains.
+- **ViT inference CUDA**: eval mode uses the hand-written FA2 kernels through
+  `ViT::forward_with`, so torch's cuBLAS/cuDNN path is only ~1.5x ahead at
+  both batches. autorust is 7.3x/2.0x faster than tinygrad and ~1.7x faster
+  than candle at bs 8.
+- **ViT training CUDA**: autorust is 1.8x faster than tinygrad and 4.9x slower
+  than torch. The remaining gap is the f32 backward: the q/k/v weight
+  gradients are fused into a multi-reduce kernel the matmul tiler declines,
+  and torch uses cuBLAS/cuDNN throughout. This is the cuDNN/tensor-core story
+  below, not a scheduling cost (see §9.20).
 - **CPU**: autorust's `RUST` backend is 54x/61x faster than tinygrad/candle on
   MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
   (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 2230.5 ms). tinygrad's
