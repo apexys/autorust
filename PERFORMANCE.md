@@ -281,16 +281,18 @@ the environment above (the candle runs were re-taken at `82f6408` with the
 class-token fix; torch is eager, no `torch.compile`; autorust uses `Jit`,
 tinygrad `TinyJit`).
 
+All step times are milliseconds (lower is better).
+
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **64.2 ms** (RUST) | 3.90 s | 175.9 ms | 3.46 s |
+| MNIST CNN train, bs 512 | CPU | **64.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
 | MNIST CNN train, bs 512 | CUDA | 41.0 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | 438 ms (RUST) | 229 ms | **165 ms** | 14.6 s |
+| ViT-B/16 infer, bs 1 | CPU | 438.1 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
 | ViT-B/16 infer, bs 1 | CUDA | 20.5 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1.86 s (RUST) | 1.40 s | **701 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 207 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 2.23 s (RUST) | **243 ms** | 616 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 300 ms | **19.0 ms** | 43.8 ms | 388 ms |
+| ViT-B/16 infer, bs 8 | CPU | 1861.9 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
+| ViT-B/16 infer, bs 8 | CUDA | 207.0 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
+| ViT-B/16 train, bs 1 | CPU | 2230.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CUDA | 300.2 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
@@ -305,7 +307,7 @@ Reading it:
   gap. This is the same f32 FFMA-vs-tensor-core story as the cuDNN note below.
 - **CPU**: autorust's `RUST` backend is 54x/61x faster than tinygrad/candle on
   MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
-  (ViT train CPU: candle 243 ms, torch 616 ms, autorust 2.23 s). tinygrad's
+  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 2230.5 ms). tinygrad's
   `CPU` backend is single-threaded by design. `RAYON` is the typed interpreter
   (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
 
