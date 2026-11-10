@@ -2649,19 +2649,48 @@ from 86 ms to 21 ms; the generated kernel is now
 `r_32_20_20_8_4_32_5_5`. `nn_conv`/`nn_norm`/`ops` pass and a 20-step MNIST run
 still learns (loss 0.506 -> 0.248, 79.7% test accuracy).
 
-**Still open.**
-- BatchNorm's training statistics recompute the conv inside the mean
-  reduction (`r_32_16_2_5_5_32_20_20`, ~65 ms): `x` has three consumers
-  (`mean`, `var`, normalization) but gets fused into each reduction. Forcing a
-  realization in `BatchNorm::forward_ctx` exposed a separate bug (a PYTHON
-  running-stat param and a CUDA value end up in one kernel and trip the
-  mixed-device check), so this needs a scheduler/assign fix, not a local
-  realize.
-- The weight-gradient/BN kernel (`r_32_16_2_5_5_32_20_20`) is unchanged.
-- **B (deferred): im2col + `dot`**, materialised per batch chunk, to reuse
-  cuBLAS/CLBlast and especially the packed CPU GEMM (`RUST`/`CC` convs are still
-  ~1.66 s/step at bs=512). Keep it as a CPU fast path with a memory budget; the
-  current direct tiling is the general fix and also helps CUDA.
+### 9.17 BatchNorm statistics + cross-device state buffers (2026-11) — DONE
+
+BatchNorm training fused the conv producer into its mean reduction and
+recomputed it (`r_32_16_2_5_5_32_20_20`, ~65 ms); `x` has three consumers
+(mean, variance, normalization) and no realization boundary. Realizing `x`
+once in `BatchNorm::forward_ctx` fixes that, but exposed three scheduler/state
+bugs that had to be fixed first:
+
+- **`empty_like` preferred a host staging device.** A parameter's
+  `Contiguous(Copy(PYTHON))` initial-data view made `empty_like` allocate the
+  optimizer temporary on PYTHON while the rest of the graph was CUDA. Host-side
+  devices (`PYTHON`/`NPY`/`DISK`/`TINYFS`) now fall back to the sink device; the
+  cross-device copy is lowered separately.
+- **`zeros_param` created state leaves on PYTHON** (device `None`), so Adam
+  moments were updated by kernels mixing host and device buffers. It now
+  defaults to the process device; BatchNorm's running stats are device leaves
+  too (they are buffers, not trainable params).
+- **Cross-device copies were only recognised for 0-D/1-D stores.** A
+  multi-dimensional `assign` (`Store(Index(dst), Index(src))` over several
+  ranges) fell through to the mixed-device check and panicked. A general rule
+  now converts any pure same-index store into a COPY.
+
+Results with the realization (RTX 3060 / 3900X, f32):
+
+| workload | before 9.16 | after 9.16 (conv tiling) | now |
+|---|---|---|---|
+| MNIST CUDA bs=512 | 588.6 ms | 258.4 ms | **39.7 ms** |
+| MNIST CUDA bs=32 | 57.8 ms | 41.8 ms | **2.9 ms** |
+| MNIST RUST bs=512 | 1664.8 ms | 1664.8 ms | **64.8 ms** |
+| MNIST RAYON bs=32 | — | — | 390.7 ms (memory flat) |
+
+`cargo test` passes; a 20-step MNIST run still learns (loss 0.50 -> 0.86 at
+step 20, 0.098 / 77.3% at step 70 with the demo's small preset). Note that
+`Tensor::realize_many` without the pin is not sufficient here: the buffer can be
+reused between the stats and the normalization, which silently breaks training;
+`realize_device_ctx` (which pins) is required.
+
+**Still open.** The weight-gradient/BN kernel (`r_32_16_2_5_5_32_20_20`) is
+unchanged. **B (deferred): im2col + `dot`**, materialised per batch chunk, to
+reuse cuBLAS/CLBlast and especially the packed CPU GEMM. Keep it as a CPU fast
+path with a memory budget; the direct tiling plus the realization above already
+brings CPU convs into the same order of magnitude.
 
 ## Attention variants and hardware capability (status note)
 

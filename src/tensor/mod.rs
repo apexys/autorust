@@ -1186,7 +1186,14 @@ impl Tensor {
         device: Option<&str>,
     ) -> Tensor {
         ctx.with_ctx(|ctx| {
-            let t = creation::zeros(ctx, &shape.into_shape_vec(), dtype, device);
+            // Optimizer moments / running stats are updated in place on the
+            // compute device. Staging them on PYTHON means every update kernel
+            // reads host memory next to device buffers, which the scheduler
+            // rejects (and which forces a host round-trip per step).
+            let dev = device
+                .map(str::to_string)
+                .unwrap_or_else(creation::default_device);
+            let t = creation::zeros(ctx, &shape.into_shape_vec(), dtype, Some(&dev));
             t.to_param_ctx(ctx)
         })
     }

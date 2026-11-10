@@ -536,6 +536,46 @@ pub fn pm_copy_from_store() -> PatternMatcher {
                 copy_kernel_to_copy_uop(ctx, call, dst, src)
             }),
         ),
+        // Any rank: a store whose value is the source index itself, with the
+        // same index expression, is a cross-device copy. The two rules above
+        // only cover 0-D and 1-D stores; an `assign` of a multi-dimensional
+        // tensor (e.g. BatchNorm running stats or an optimizer state) otherwise
+        // falls through to the mixed-device check below.
+        (
+            UPat::ops1(Ops::Call)
+                .with_src_tup(vec![UPat::ops1(Ops::Sink).named("ast")])
+                .allow_all_srcs()
+                .named("call"),
+            r_ctx(|ctx, st| {
+                let (call, ast) = (sym_sget(st, "call"), sym_sget(st, "ast"));
+                let nodes = ctx.toposort(&ast);
+                let stores: Vec<_> = nodes
+                    .iter()
+                    .filter(|n| ctx.op_of(n) == Ops::Store)
+                    .cloned()
+                    .collect();
+                if stores.len() != 1 {
+                    return None;
+                }
+                let ssrcs = ctx.srcs(&stores[0]);
+                if ssrcs.len() != 2 {
+                    return None;
+                }
+                let (dst, src) = (ssrcs[0].clone(), ssrcs[1].clone());
+                if ctx.op_of(&dst) != Ops::Index || ctx.op_of(&src) != Ops::Index {
+                    return None;
+                }
+                let di = ctx.srcs(&dst);
+                let si = ctx.srcs(&src);
+                if di.len() != 2 || si.len() != 2 || di[1] != si[1] {
+                    return None;
+                }
+                if ctx.op_of(&di[0]) != Ops::Param || ctx.op_of(&si[0]) != Ops::Param {
+                    return None;
+                }
+                copy_kernel_to_copy_uop(ctx, call, dst, src)
+            }),
+        ),
         // all buffers must be on the same device for real kernels
         (
             UPat::ops1(Ops::Call)

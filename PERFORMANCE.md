@@ -92,9 +92,11 @@ over `(cin, ky, kx)`. `try_conv_tiling` expresses it as an implicit GEMM
 output channels on threads (coalesced weights), the innermost spatial axis
 upcast into registers, and the kernel axes unrolled. On MNIST/RTX 3060 this
 took the training step from 588.6 to 258.4 ms at bs=512; see
-`CURRENT_STATE.md` §9.16. BatchNorm training still recomputes the conv inside
-its statistics reduction, and materialised im2col + `dot` (route B, deferred)
-remains the way to use the vendor GEMMs and the packed CPU kernel for conv.
+`CURRENT_STATE.md` §9.16-§9.17. BatchNorm training now realizes its input once
+instead of recomputing the conv in the statistics reduction, which took the
+MNIST step to 39.7 ms at bs=512 (CUDA) and 64.8 ms (RUST). Materialised im2col +
+`dot` (route B, deferred) remains the way to use the vendor GEMMs and the packed
+CPU kernel for conv.
 
 ## Host GEMM (library path)
 

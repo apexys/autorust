@@ -500,17 +500,29 @@ impl BatchNorm {
                 None
             };
             // `num_batches_tracked = Tensor.zeros(dtype='long').is_param_(False)`
-            let num_batches_tracked = Some(Tensor::full(
-                &mut *ctx,
-                &[] as &[i64],
-                ConstVal::Int(0),
-                Some(crate::dtype::INT64),
-                None,
-            ));
+            // Running stats are buffers, not trainable params (`named_params`
+            // excludes them), but they still need a device-resident leaf:
+            // `assign` writes them in place every training step, and a PYTHON
+            // leaf next to CUDA values trips the mixed-device kernel check once
+            // the input is realized.
+            let dev = crate::tensor::creation::default_device();
+            let num_batches_tracked = Some(
+                Tensor::full(
+                    &mut *ctx,
+                    &[] as &[i64],
+                    ConstVal::Int(0),
+                    Some(crate::dtype::INT64),
+                    Some(&dev),
+                )
+                .to_param_ctx(&mut *ctx),
+            );
             let (running_mean, running_var) = if track_running_stats {
                 (
-                    Some(Tensor::zeros(&mut *ctx, [sz])),
-                    Some(Tensor::ones(&mut *ctx, [sz])),
+                    Some(Tensor::zeros_param(&mut *ctx, [sz], None, Some(&dev))),
+                    Some(
+                        Tensor::full(&mut *ctx, [sz], ConstVal::Float(1.0), None, Some(&dev))
+                            .to_param_ctx(&mut *ctx),
+                    ),
                 )
             } else {
                 (None, None)
@@ -574,6 +586,12 @@ impl BatchNorm {
         sess: &mut Session,
         training: bool,
     ) -> Tensor {
+        if training {
+            // `x` feeds the batch mean, the variance pass and the
+            // normalization; realize it once so the scheduler does not fuse the
+            // producer (a conv) into each reduction and recompute it.
+            x.realize_device_ctx(ctx, sess);
+        }
         let (batch_mean, batch_var) = self.calc_stats_ctx(x, ctx, training);
 
         if self.track_running_stats && training {

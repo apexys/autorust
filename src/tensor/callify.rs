@@ -132,7 +132,16 @@ pub fn empty_like(ctx: &mut UOpCtx, u: UopId, fallback: Option<&str>) -> UopId {
         }
         None => None,
     };
-    let canon = super::creation::canonicalize_device(dev_s.as_deref().or(fallback));
+    // A host-side device here (`PYTHON`/`NPY`/`DISK`) is usually the staging
+    // leaf of a parameter's initial data or a movement view of it. Allocating
+    // the new buffer on the sink's compute device keeps the surrounding kernel
+    // on one device; the cross-device copy is lowered by `pm_copy_from_store`.
+    let host_side = matches!(dev_s.as_deref(), Some("PYTHON" | "NPY" | "DISK" | "TINYFS"));
+    let canon = super::creation::canonicalize_device(if host_side {
+        fallback
+    } else {
+        dev_s.as_deref().or(fallback)
+    });
     let shape = ctx
         .shape(&u)
         .expect("TGERR: empty_like shape")
