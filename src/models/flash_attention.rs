@@ -501,12 +501,14 @@ pub fn fused_attention_ex(
     let mask_tensor = attn_mask.map(|m| m.contiguous());
     {
         let mut c = q.ctx().borrow_mut();
-        q.realize_device_ctx(&mut c, sess);
-        k.realize_device_ctx(&mut c, sess);
-        v.realize_device_ctx(&mut c, sess);
+        // Co-realize q/k/v in one schedule: they share the projection input, so
+        // realizing them one at a time would recompute the whole prefix graph
+        // once per projection.
+        let mut ts: Vec<&Tensor> = vec![q, k, v];
         if let Some(m) = &mask_tensor {
-            m.realize_device_ctx(&mut c, sess);
+            ts.push(m);
         }
+        Tensor::realize_many(&mut c, sess, ts);
     }
     let ctx = q.ctx().clone();
     let out = if bf16 {
