@@ -30,4 +30,6 @@ Initial release.
 - Pointwise contraction operands inside reduce bodies (GELU derivative,
   dropout mask, softmax backward) are staged once, so those backward GEMMs
   become affine and can use the matmul tiler/library GEMM.
+- CPU host GEMM reads a row-major `A` directly and packs a `[n, k]` weight once
+  per GEMM instead of per tile (1.2-1.5x on the larger ViT linears).
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.

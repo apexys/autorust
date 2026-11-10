@@ -133,9 +133,24 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   row-major). Install `libclblast1` (`apt install libclblast1`); without it the
   OpenCL backend keeps using generated kernels.
 - **CPU → packed blocked kernel** (`RUST`/`CC`/`RAYON`, f32). Rayon over
-  disjoint `(m,n)` tiles, both operands packed into microkernel panels, a 6x16
-  AVX2/FMA microkernel (12 YMM accumulators) and a scalar fringe, so prime
-  extents need no padding or masks.
+  disjoint `(m,n)` tiles, a 6x16 AVX2/FMA microkernel (12 YMM accumulators) and
+  a scalar fringe, so prime extents need no padding or masks. A row-major `A`
+  is read directly (no pack) and a `[n, k]` weight is transposed into one
+  contiguous `[k, n]` panel per GEMM; the old per-task packing re-read `B` once
+  per m-block and `A` once per n-block, which dominated the small-M ViT linears.
+  Microbenchmark (24 threads, f32, `gemm_bench`; MKL = torch 2.6 `torch.mm`):
+
+  | shape | generated `RUST` | packed before | packed now | MKL |
+  |---|---|---:|---:|---:|
+  | 197x768x768 | 94 | 273 | **290** | 93 |
+  | 197x3072x768 | 30 | 284 | **296** | 417 |
+  | 197x768x3072 | 65 | 315 | **464** | 613 |
+  | 1576x768x768 | 156 | 313 | **375** | 609 |
+
+  MKL still wins the larger shapes by ~1.3-1.6x, but the host GEMM is only
+  ~100 ms of a ~420 ms ViT inference step; the rest is generated elementwise
+  and attention kernels. A MKL-speed microkernel would take CPU ViT inference
+  from ~2.6x to at best ~2.4x of torch (see CURRENT_STATE §9.24).
 - **Metal → MPS** (`MPSMatrixMultiplication`, f32/f16). Opt-in
   (`AUTORUST_MPS=all`) because simdgroup tensor cores measured faster on an M2.
 
@@ -338,13 +353,13 @@ All step times are milliseconds (lower is better).
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **62.6 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CPU | **65.1 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
 | MNIST CNN train, bs 512 | CUDA | 21.7 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | 528.3 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
+| ViT-B/16 infer, bs 1 | CPU | 425.3 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
 | ViT-B/16 infer, bs 1 | CUDA | 15.9 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1965.1 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
+| ViT-B/16 infer, bs 8 | CPU | 1902.2 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
 | ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 1754.9 ms (RUST) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CPU | 1783.8 ms (RUST) | **243.4 ms** | 616.3 ms | — |
 | ViT-B/16 train, bs 1 | CUDA | 94.2 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
@@ -362,9 +377,9 @@ Reading it:
   pointwise contraction operands (GELU derivative, dropout mask, softmax
   backward) took the step from 332 to 94 ms; the remaining gap is the f32
   backward against cuBLAS/cuDNN (see §9.20-§9.23).
-- **CPU**: autorust's `RUST` backend is 55x/62x faster than tinygrad/candle on
+- **CPU**: autorust's `RUST` backend is 53x/60x faster than tinygrad/candle on
   MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
-  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 1754.9 ms). tinygrad's
+  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 1783.8 ms). tinygrad's
   `CPU` backend is single-threaded by design. `RAYON` is the typed interpreter
   (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
 
