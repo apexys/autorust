@@ -34,6 +34,8 @@ pub struct LibraryGemmPolicy {
     pub cuda: LibraryGemm,
     /// OpenCL driver (CLBlast).
     pub cl: LibraryGemm,
+    /// Apple Metal (MetalPerformanceShaders).
+    pub metal: LibraryGemm,
     /// Native CPU backends (packed kernel).
     pub cpu: LibraryGemm,
 }
@@ -44,6 +46,7 @@ impl LibraryGemmPolicy {
         LibraryGemmPolicy {
             cuda: p,
             cl: p,
+            metal: p,
             cpu: p,
         }
     }
@@ -149,6 +152,9 @@ impl Settings {
         if let Some(v) = env("AUTORUST_CLBLAST") {
             library_gemm.cl = parse(Some(&v));
         }
+        if let Some(v) = env("AUTORUST_MPS").or_else(|| env("AUTORUST_METAL_GEMM")) {
+            library_gemm.metal = parse(Some(&v));
+        }
         if let Some(v) = env("AUTORUST_CPU_GEMM") {
             library_gemm.cpu = parse(Some(&v));
         }
@@ -235,6 +241,7 @@ impl Settings {
         match backend {
             "cuda" => self.library_gemm.cuda,
             "cl" => self.library_gemm.cl,
+            "metal" => self.library_gemm.metal,
             _ => self.library_gemm.cpu,
         }
     }
@@ -242,7 +249,10 @@ impl Settings {
     /// Whether any backend may use a library GEMM.
     pub fn any_library_gemm(&self) -> bool {
         let p = self.library_gemm;
-        p.cuda != LibraryGemm::Never || p.cl != LibraryGemm::Never || p.cpu != LibraryGemm::Never
+        p.cuda != LibraryGemm::Never
+            || p.cl != LibraryGemm::Never
+            || p.metal != LibraryGemm::Never
+            || p.cpu != LibraryGemm::Never
     }
 
     /// Builder: BEAM width.

@@ -67,8 +67,11 @@ pub struct HostGemm {
     pub b_b: i64,
     /// Batch stride in `C`.
     pub c_b: i64,
-    /// Storage dtype of all three operands.
+    /// Storage dtype of `A`/`B` (the multiplication dtype).
     pub dtype: DTypeId,
+    /// Storage dtype of `C`. Usually equal to `dtype`; Metal's f16 inputs with
+    /// an f32 accumulator use `(FLOAT16, FLOAT32)`.
+    pub c_dtype: DTypeId,
     /// Scalar multiplier.
     pub alpha: f32,
     /// Optional bias vector slot (-1 when absent), added to every row.
@@ -96,7 +99,7 @@ impl HostGemm {
              c_slot: {}, a_off: {}, b_off: {}, c_off: {}, m: {}, n: {}, k: {}, \
              a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
              a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
-             alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
+             c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
              scale_off: {}, res_slot: {}, res_off: {} }}",
             self.a_slot,
             self.b_slot,
@@ -118,6 +121,7 @@ impl HostGemm {
             self.b_b,
             self.c_b,
             self.dtype.0,
+            self.c_dtype.0,
             self.alpha,
             self.bias_slot,
             self.bias_off,
@@ -154,6 +158,7 @@ impl HostGemm {
                 ("b_b".into(), int(self.b_b)),
                 ("c_b".into(), int(self.c_b)),
                 ("dtype".into(), int(self.dtype.0 as i64)),
+                ("c_dtype".into(), int(self.c_dtype.0 as i64)),
                 ("alpha".into(), Arg::Float(self.alpha as f64)),
                 ("bias_slot".into(), int(self.bias_slot)),
                 ("bias_off".into(), int(self.bias_off)),
@@ -200,6 +205,11 @@ impl HostGemm {
             b_b: i("b_b"),
             c_b: i("c_b"),
             dtype: DTypeId(i("dtype") as u16),
+            c_dtype: if d.fields.iter().any(|(n, _)| n == "c_dtype") {
+                DTypeId(i("c_dtype") as u16)
+            } else {
+                DTypeId(i("dtype") as u16)
+            },
             alpha,
             bias_slot: {
                 let v = i("bias_slot");
@@ -407,6 +417,7 @@ fn library_ready(ctx: &UOpCtx, kind: GemmDevice) -> bool {
     let backend = match kind {
         GemmDevice::Cuda => "cuda",
         GemmDevice::Cl => "cl",
+        GemmDevice::Metal => "metal",
         GemmDevice::Cpu => "cpu",
     };
     if ctx.settings.library_gemm_for(backend) == crate::settings::LibraryGemm::Never {
@@ -443,6 +454,16 @@ fn library_ready(ctx: &UOpCtx, kind: GemmDevice) -> bool {
                 false
             }
         }
+        GemmDevice::Metal => {
+            #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+            {
+                crate::runtime::ops_metal::mps_available()
+            }
+            #[cfg(not(all(feature = "backend_metal", target_os = "macos")))]
+            {
+                false
+            }
+        }
     }
 }
 
@@ -466,6 +487,10 @@ pub fn library_available(settings: &crate::settings::Settings) -> bool {
     if crate::runtime::clblast::available() {
         return true;
     }
+    #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+    if crate::runtime::ops_metal::mps_available() {
+        return true;
+    }
     false
 }
 
@@ -475,6 +500,7 @@ enum GemmDevice {
     Cpu,
     Cuda,
     Cl,
+    Metal,
 }
 
 fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
@@ -491,6 +517,9 @@ fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
             }
             if s.starts_with("CL") {
                 return Some(GemmDevice::Cl);
+            }
+            if s.starts_with("METAL") {
+                return Some(GemmDevice::Metal);
             }
             // `CC`/`CLANG` only exist as compiled backends with the feature;
             // without it the name falls back to the interpreter, which has no
@@ -514,7 +543,7 @@ fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
 /// Try to interpret a lowered kernel store as a library GEMM.
 ///
 /// Returns `None` for anything that is not a plain strided matrix product, or
-/// when the kernel is not on `CUDA` (the only backend with a library path).
+/// when the kernel's backend has no usable library GEMM.
 pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // Cheap reject for elementwise kernels: only the store value matters, and
     // we must not descend into AFTER (which embeds whole earlier kernels).
@@ -649,7 +678,13 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if msrcs.len() != 2 {
         return None;
     }
-    if ctx.dt_of(&mul) != red_dt || ctx.dt_of(&mul) != c_dt {
+    let mul_dt = ctx.dt_of(&mul);
+    // Metal f16 inputs may accumulate into (and store) f32.
+    let mixed_f16_f32 = kind == GemmDevice::Metal
+        && mul_dt == crate::dtype::FLOAT16
+        && red_dt == crate::dtype::FLOAT32
+        && c_dt == crate::dtype::FLOAT32;
+    if (mul_dt != red_dt || mul_dt != c_dt) && !mixed_f16_f32 {
         return None;
     }
     if !matches!(
@@ -671,10 +706,16 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let b_idx = operand(ctx, msrcs[1].clone())?;
     let (a_off0, a_map) = affine(ctx, &index_offset(ctx, &a_idx))?;
     let (b_off0, b_map) = affine(ctx, &index_offset(ctx, &b_idx))?;
-    let (a_slot, _, a_base) = base_of(ctx, &a_idx)?;
+    let (a_slot, a_dt, a_base) = base_of(ctx, &a_idx)?;
     let a_off = a_off0 + a_base;
-    let (b_slot, _, b_base) = base_of(ctx, &b_idx)?;
+    let (b_slot, b_dt, b_base) = base_of(ctx, &b_idx)?;
     let b_off = b_off0 + b_base;
+    // The library GEMM reads the operand buffers with the contraction dtype.
+    // A casted staging buffer (e.g. f32 -> f16 `from_slice`) must stay on the
+    // generated kernel.
+    if a_dt != mul_dt || b_dt != mul_dt {
+        return None;
+    }
 
     // n is the only range B iterates that A does not, and C stores it
     // contiguously (stride 1). m is the A-only range whose C stride equals the
@@ -825,11 +866,33 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let backend = match kind {
         GemmDevice::Cuda => "cuda",
         GemmDevice::Cl => "cl",
+        GemmDevice::Metal => "metal",
         GemmDevice::Cpu => "cpu",
     };
     let policy = ctx.settings.library_gemm_for(backend);
     let force = policy == crate::settings::LibraryGemm::Always;
     let cuda_f32 = kind == GemmDevice::Cuda && ctx.dt_of(&mul) == crate::dtype::FLOAT32;
+    if kind == GemmDevice::Metal {
+        // MPS is opt-in (`AUTORUST_MPS=all`): measured on an M2 it is within
+        // noise of (sometimes slower than) the generated kernel, while adding
+        // matrix/pipeline setup. `Auto` keeps the deterministic generated path.
+        // MPS only produces a row-major result, and a fused bias/scale/residual
+        // epilogue would need a separate kernel, so those stay generated too.
+        if !force || c_n != 1 || bias_slot >= 0 || scale_slot >= 0 || res_slot >= 0 {
+            return None;
+        }
+        // MPS supports f32/f32, f16/f16 and f16 inputs with an f32 result.
+        // bfloat16 is not accepted by MPSMatrixMultiplication on macOS.
+        let ok_dtypes = matches!(
+            (mul_dt, c_dt),
+            (crate::dtype::FLOAT32, crate::dtype::FLOAT32)
+                | (crate::dtype::FLOAT16, crate::dtype::FLOAT16)
+                | (crate::dtype::FLOAT16, crate::dtype::FLOAT32)
+        );
+        if !ok_dtypes {
+            return None;
+        }
+    }
     // The CPU host GEMM is a *different* implementation, not just a library
     // swap: it blocks and parallelizes, so it wins on every shape where the
     // generated kernel's 1-row tile loses its `B` reuse. Do not apply the
@@ -870,6 +933,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         b_b,
         c_b,
         dtype: ctx.dt_of(&mul),
+        c_dtype: c_dt,
         alpha,
         bias_slot,
         bias_off,

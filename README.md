@@ -158,6 +158,7 @@ always wins above `m*n*k >= 1e6`.
 | `AUTORUST_GEMM=0` | disable the library on every backend |
 | `AUTORUST_CUBLAS=all\|0` | CUDA-only alias (kept for compatibility) |
 | `AUTORUST_CUBLAS_TF32=1` | allow TF32 for f32 CUDA GEMMs |
+| `AUTORUST_MPS=all\|0` | force/disable the MetalPerformanceShaders host GEMM |
 | `AUTORUST_CUBLAS_LIB`, `AUTORUST_CLBLAST_LIB` | override the library path |
 | `AUTORUST_CPU_GEMM_MC`, `AUTORUST_CPU_GEMM_NC`, `AUTORUST_CPU_GEMM_KC` | CPU tile sizes (48 / 96 / 256) |
 
@@ -252,7 +253,10 @@ first tensor/realize.
   Objective-C runtime and Metal framework; shaders are compiled at runtime with
   `newLibraryWithSource:`, so no Xcode/Metal toolchain is needed. Buffers use
   shared storage (host upload/download is a CPU copy), and the allocator
-  supports real offset views. Shaders compile with precise math by default
+  supports real offset views. A MetalPerformanceShaders host-GEMM path exists
+  (f32/f32, f16/f16, f16 inputs with f32 accumulation); it is opt-in via
+  `AUTORUST_MPS=all`, because on the measured M2 it is within noise of the
+  generated kernel. Shaders compile with precise math by default
   (`METAL_FAST_MATH=1` opts into fast math — `x + -inf` otherwise folds to `x`
   and drops masks). Apple GPUs allow at most 31 buffer arguments per kernel;
   `Renderer::max_buffers` turns that into a scheduler fusion budget, so large

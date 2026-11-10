@@ -414,6 +414,7 @@ mod tests {
             b_b: 0,
             c_b: 0,
             dtype: dtype::FLOAT32,
+            c_dtype: dtype::FLOAT32,
             alpha: 1.0,
             bias_slot: -1,
             bias_off: 0,

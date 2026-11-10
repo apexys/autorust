@@ -57,7 +57,12 @@ backend_cl = ["dep:libloading"]
 # Metal backend (device "METAL"), macOS only. `objc2` links the OS-provided
 # `libobjc`/`Metal.framework`; no Xcode or Metal toolchain is needed at build
 # time (shaders are compiled at run time by `newLibraryWithSource:`).
-backend_metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
+backend_metal = [
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-metal",
+    "dep:objc2-metal-performance-shaders",
+]
 # CUDA backend (operations/codegen on the CUDA driver API via `cudarc`),
 # dynamically loaded; no CUDA libraries are required at build time.
 backend_cuda = ["dep:cudarc", "dep:libloading"]
@@ -117,6 +122,14 @@ objc2-foundation = { version = "0.3", optional = true, default-features = false,
     "std",
     "NSString",
     "NSError",
+] }
+objc2-metal-performance-shaders = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "MPSCore",
+    "MPSCoreTypes",
+    "MPSKernel",
+    "MPSMatrix",
+    "MPSMatrixMultiplication",
 ] }
 objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
     "std",

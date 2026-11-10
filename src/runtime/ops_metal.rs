@@ -20,6 +20,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
@@ -28,6 +29,9 @@ use objc2_metal::{
     MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineDescriptor,
     MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction, MTLLibrary,
     MTLMathMode, MTLPipelineOption, MTLResourceOptions, MTLSize,
+};
+use objc2_metal_performance_shaders::{
+    MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication,
 };
 
 use crate::dtype::DTypeId;
@@ -54,7 +58,15 @@ fn check_error(cb: &ProtocolObject<dyn MTLCommandBuffer>) {
     }
 }
 
+/// Number of host GEMMs encoded through MetalPerformanceShaders (diagnostics).
+pub static MPS_GEMMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 // ---------------- device inner ----------------
+
+/// MPS GEMM kernel cache key: `(m, n, k, trans_a, trans_b, alpha_bits, dtype)`.
+type MpsOpKey = (i64, i64, i64, bool, bool, u32, u16);
+/// MPS matrix descriptor cache key: `(rows, cols, leading_dim, dtype)`.
+type MpsDescKey = (i64, i64, i64, u16);
 
 /// The Metal device/queue pair shared by allocator, programs, and the
 /// synchronize path (python: `MetalDevice` fields).
@@ -63,6 +75,10 @@ struct MetalInner {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     /// Command buffers committed without `wait` (python `mtl_buffers_in_flight`).
     in_flight: RefCell<VecDeque<Retained<ProtocolObject<dyn MTLCommandBuffer>>>>,
+    /// Cached MPS GEMM kernels keyed by `(m,n,k,trans_a,trans_b,alpha,dtype)`.
+    mps_ops: RefCell<std::collections::HashMap<MpsOpKey, Retained<MPSMatrixMultiplication>>>,
+    /// Cached MPS matrix descriptors keyed by `(rows,cols,ld,dtype)`.
+    mps_descs: RefCell<std::collections::HashMap<MpsDescKey, Retained<MPSMatrixDescriptor>>>,
 }
 
 impl MetalInner {
@@ -78,6 +94,8 @@ impl MetalInner {
             device,
             queue,
             in_flight: RefCell::new(VecDeque::new()),
+            mps_ops: RefCell::new(std::collections::HashMap::new()),
+            mps_descs: RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -88,6 +106,146 @@ impl MetalInner {
             cb.waitUntilCompleted();
             check_error(&cb);
         }
+    }
+
+    /// Run a host GEMM (MetalPerformanceShaders `MPSMatrixMultiplication`).
+    ///
+    /// Mirrors the cuBLAS/CLBlast paths: the scheduler has already extracted a
+    /// plain strided matrix product; this only has to bind the three buffers
+    /// and encode the library kernel. Batches are encoded as separate GEMMs so
+    /// a shared operand stride (`*_b == 0`) is naturally supported. The caller
+    /// (`host_exec`) leaves the command buffer queued; subsequent Metal work is
+    /// ordered after it on the same queue.
+    fn host_gemm(
+        &self,
+        bufs: &[crate::runtime::buffer::OpaqueView],
+        desc: &crate::uop::arg::DataArg,
+    ) {
+        use crate::schedule::host_gemm::HostGemm;
+        let g = HostGemm::from_arg(&crate::uop::arg::Arg::Data(desc.clone()))
+            .unwrap_or_else(|| panic!("TGERR: bad HostGemm descriptor"));
+        MPS_GEMMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let isz = g.dtype.itemsize();
+        let c_isz = g.c_dtype.itemsize();
+        let mps_dtype = |dt: DTypeId| match dt {
+            crate::dtype::FLOAT32 => MPSDataType::Float32,
+            crate::dtype::FLOAT16 => MPSDataType::Float16,
+            other => panic!("TGERR: MPS GEMM unsupported dtype {other:?}"),
+        };
+        let a = metal_of(&*bufs[g.a_slot as usize]);
+        let b = metal_of(&*bufs[g.b_slot as usize]);
+        let c = metal_of(&*bufs[g.c_slot as usize]);
+        // An MPS matrix is row-major. A transposed operand is described by its
+        // stored shape; a column-major result is not representable without a
+        // second transpose, so `extract` keeps that on the generated kernel.
+        assert_eq!(g.c_n, 1, "TGERR: MPS GEMM requires a row-major C");
+        let (trans_a, a_rows, a_cols, a_ld) = if g.a_k == 1 {
+            (false, g.m, g.k, g.a_m)
+        } else {
+            (true, g.k, g.m, g.a_k)
+        };
+        let (trans_b, b_rows, b_cols, b_ld) = if g.b_n == 1 {
+            (false, g.k, g.n, g.b_k)
+        } else {
+            (true, g.n, g.k, g.b_n)
+        };
+        let desc_for = |rows: i64,
+                        cols: i64,
+                        ld: i64,
+                        dt: DTypeId,
+                        esz: usize|
+         -> Retained<MPSMatrixDescriptor> {
+            let key = (rows, cols, ld, dt.0);
+            if let Some(d) = self.mps_descs.borrow().get(&key) {
+                return d.clone();
+            }
+            let d = unsafe {
+                MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
+                    rows as usize,
+                    cols as usize,
+                    (ld * esz as i64) as usize,
+                    mps_dtype(dt),
+                )
+            };
+            self.mps_descs.borrow_mut().insert(key, d.clone());
+            d
+        };
+        let a_desc = desc_for(a_rows, a_cols, a_ld, g.dtype, isz);
+        let b_desc = desc_for(b_rows, b_cols, b_ld, g.dtype, isz);
+        let c_desc = desc_for(g.m, g.n, g.c_m, g.c_dtype, c_isz);
+        let op_key = (
+            g.m,
+            g.n,
+            g.k,
+            trans_a,
+            trans_b,
+            g.alpha.to_bits(),
+            g.dtype.0,
+        );
+        let mm = if let Some(mm) = self.mps_ops.borrow().get(&op_key) {
+            mm.clone()
+        } else {
+            let mm = unsafe {
+                MPSMatrixMultiplication::initWithDevice_transposeLeft_transposeRight_resultRows_resultColumns_interiorColumns_alpha_beta(
+                    MPSMatrixMultiplication::alloc(),
+                    &self.device,
+                    trans_a,
+                    trans_b,
+                    g.m as usize,
+                    g.n as usize,
+                    g.k as usize,
+                    g.alpha as f64,
+                    0.0,
+                )
+            };
+            self.mps_ops.borrow_mut().insert(op_key, mm.clone());
+            mm
+        };
+        let cb = self
+            .queue
+            .commandBuffer()
+            .expect("TGERR: Metal commandBuffer (MPS)");
+        for batch in 0..g.batch {
+            let elem = |frame: i64, stride: i64, esz: usize| -> usize {
+                ((frame + batch * stride) * esz as i64) as usize
+            };
+            let a_off = elem(g.a_off, g.a_b, isz);
+            let b_off = elem(g.b_off, g.b_b, isz);
+            let c_off = elem(g.c_off, g.c_b, c_isz);
+            let a_mat = unsafe {
+                MPSMatrix::initWithBuffer_offset_descriptor(
+                    MPSMatrix::alloc(),
+                    &a.buf,
+                    a_off,
+                    &a_desc,
+                )
+            };
+            let b_mat = unsafe {
+                MPSMatrix::initWithBuffer_offset_descriptor(
+                    MPSMatrix::alloc(),
+                    &b.buf,
+                    b_off,
+                    &b_desc,
+                )
+            };
+            let c_mat = unsafe {
+                MPSMatrix::initWithBuffer_offset_descriptor(
+                    MPSMatrix::alloc(),
+                    &c.buf,
+                    c_off,
+                    &c_desc,
+                )
+            };
+            unsafe {
+                mm.setBatchStart(0);
+                mm.setBatchSize(1);
+                mm.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(
+                    &cb, &a_mat, &b_mat, &c_mat,
+                );
+            }
+        }
+        cb.commit();
+        self.in_flight.borrow_mut().push_back(cb);
     }
 }
 
@@ -373,6 +531,11 @@ pub fn available() -> bool {
     MTLCreateSystemDefaultDevice().is_some()
 }
 
+/// Whether the host GEMM path (MetalPerformanceShaders) can be used.
+pub fn mps_available() -> bool {
+    available() && objc2::runtime::AnyClass::get(c"MPSMatrixMultiplication").is_some()
+}
+
 /// The `MetalDevice` composition + `Device._DeviceMap["METAL"]` assignment.
 pub fn register() {
     if !available() {
@@ -389,9 +552,16 @@ pub fn register() {
         let allocator = LruAllocator::with_backend(Box::new(MetalAllocator {
             inner: inner.clone(),
         }));
+        let ctor_inner = inner.clone();
         let ctor: crate::runtime::device::RuntimeCtor =
-            Rc::new(move |elf| Rc::new(RefCell::new(MetalProgram::new(inner.clone(), elf))));
-        Compiled::new("METAL", renderer, allocator, compiler, ctor)
+            Rc::new(move |elf| Rc::new(RefCell::new(MetalProgram::new(ctor_inner.clone(), elf))));
+        let dev = Compiled::new("METAL", renderer, allocator, compiler, ctor);
+        if mps_available() {
+            let inner2 = inner.clone();
+            *dev.host_exec.borrow_mut() =
+                Some(Box::new(move |bufs, desc| inner2.host_gemm(bufs, desc)));
+        }
+        dev
     });
     register_device_with_limit("METAL", Renderer::metal().max_buffers, factory);
 }

@@ -286,7 +286,21 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   step (the 38-buffer fused ViT kernel is split by the budget). `tests/bf16.rs`,
   `tests/rand.rs`, `tests/nn_attention.rs`, and `tests/nn_models.rs` pass with
   METAL as the default. Full suite with `AUTORUST_CL_LIB=/nonexistent` (to
-  bypass Apple's broken OpenCL driver): **231 passed, 0 failed, 11 ignored**.
+  bypass Apple's broken OpenCL driver): **234 passed, 0 failed, 11 ignored**.
+- **MPS host GEMM (opt-in).** `MetalAllocator`/`MetalProgram` now also expose the
+  `HostGemm` seam through MetalPerformanceShaders (`MPSMatrixMultiplication`).
+  The scheduler recognizes a plain affine contraction on METAL and attaches a
+  `HostGemm`; `MetalInner::host_gemm` binds the three `MTLBuffer`s as
+  `MPSMatrix` objects, supports strided/batched operands, and caches the MPS
+  kernel/descriptors by shape+layout. `HostGemm` gained `c_dtype` so f16 inputs
+  can write an f32 accumulator (MPS supports mixed f16/f32 descriptors; bf16 is
+  rejected by `MPSMatrixMultiplication` on macOS and stays on the generated
+  kernel). The path is **opt-in** (`AUTORUST_MPS=all`, or `LibraryGemm::Always`)
+  because on an M2 it measured at parity with/slightly slower than the generated
+  kernel (f32 512³ 1.76 vs 1.61 ms, 2048³ 24.0 vs 23.6 ms; f16/f16 2048³ 16.9 vs
+  17.3 ms), and the generated path is deterministic. Fused bias/scale/residual
+  epilogues and non-row-major `C` stay on the generated path. Gate:
+  `tests/mps_gemm.rs` (MPS used, f32/f16 numerics match generated, batched).
 - **Buffer-limit fusion budget (general, not Metal-only).** `Renderer` gained
   `max_buffers` (`usize::MAX` for every existing backend, **31** for Metal). The
   scheduler turns it into a fusion budget in `schedule/indexing.rs`
@@ -424,7 +438,7 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **231 passed, 11 ignored, 0 failed** with
+- `cargo test` → **234 passed, 11 ignored, 0 failed** with
   `AUTORUST_CL_LIB=/nonexistent` (2026-11; the OpenCL backend is skipped so the
   suite does not hit Apple's pre-existing OpenCL driver failure — see below).
   This run includes the Metal backend on an Apple M2. The ignored = 1
