@@ -1,19 +1,29 @@
 //! Device-selection tests for the backend priority (CURRENT_STATE.md §9.8):
-//! CUDA → CL → RUST → RAYON → INTERP, and the `RAYON`/`RUST` devices execute
-//! correctly.
+//! CUDA → METAL → CL → RUST → RAYON → INTERP, and the `RAYON`/`RUST`/`METAL`
+//! devices execute correctly.
 
-#[cfg(feature = "backend_rayon")]
+#[cfg(any(
+    feature = "backend_rayon",
+    all(feature = "backend_metal", target_os = "macos")
+))]
 use autorust::tensor::{Ctx, Tensor};
 
 #[test]
 fn pick_device_priority() {
-    use autorust::tensor::creation::pick_device;
+    use autorust::tensor::creation::{pick_device, pick_device_with_metal};
     // CUDA beats everything; CL beats RUST/CC/RAYON/INTERP; RUST beats CC.
     assert_eq!(pick_device(true, true, true, true), "CUDA");
     assert_eq!(pick_device(true, false, false, false), "CUDA");
     assert_eq!(pick_device(false, true, true, true), "CL");
     assert_eq!(pick_device(false, false, true, true), "RUST");
     assert_eq!(pick_device(false, false, false, true), "CC");
+    // Metal (macOS) outranks OpenCL but not CUDA.
+    assert_eq!(pick_device_with_metal(true, true, true, true, true), "CUDA");
+    assert_eq!(
+        pick_device_with_metal(true, false, true, true, true),
+        "METAL"
+    );
+    assert_eq!(pick_device_with_metal(false, false, true, true, true), "CL");
     let low = pick_device(false, false, false, false);
     if cfg!(feature = "backend_rayon") {
         assert_eq!(low, "RAYON");
@@ -127,4 +137,89 @@ fn rayon_matches_interp() {
     let r = build(&ctx, "RAYON");
     let i = build(&ctx, "INTERP");
     assert_eq!(r, i, "RAYON must match INTERP");
+}
+
+#[cfg(all(feature = "backend_metal", target_os = "macos"))]
+#[test]
+fn metal_is_registered() {
+    let devs = autorust::runtime::device::registered_devices();
+    assert!(devs.contains(&"METAL".to_string()), "registered: {devs:?}");
+}
+
+/// The Metal default-device probe must not panic (and is a no-op on non-macOS
+/// builds, where the backend module is not compiled).
+#[cfg(all(feature = "backend_metal", target_os = "macos"))]
+#[test]
+fn metal_availability_probe_does_not_panic() {
+    let _ = autorust::runtime::ops_metal::available();
+}
+
+#[cfg(all(feature = "backend_metal", target_os = "macos"))]
+#[test]
+fn metal_executes_elementwise() {
+    let ctx = Ctx::new();
+    let a = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, Some("METAL"));
+    let out = a.add(&a).mul(2.0).to_list_fresh::<f32>();
+    assert_eq!(out, vec![4.0, 8.0, 12.0, 16.0]);
+}
+
+#[cfg(all(feature = "backend_metal", target_os = "macos"))]
+#[test]
+fn metal_matches_interp() {
+    let ctx = Ctx::new();
+    let data = [0.5f32, -1.0, 2.25, 3.0, 4.0, 5.5, -6.0, 7.75];
+    let build = |dev: &str| {
+        let x = Tensor::from_slice(&ctx, &data, None, Some(dev));
+        x.mul(&x).add(1.0).sqrt().to_list_fresh::<f32>()
+    };
+    let m = build("METAL");
+    let i = build("INTERP");
+    assert_eq!(m.len(), i.len());
+    for (a, b) in m.iter().zip(i.iter()) {
+        assert!(
+            (a - b).abs() <= 1e-5 * b.abs().max(1.0),
+            "METAL {a} != INTERP {b}"
+        );
+    }
+}
+
+#[cfg(all(feature = "backend_metal", target_os = "macos"))]
+#[test]
+fn metal_splits_graphs_over_the_buffer_limit() {
+    // A single fused kernel would need 64 input buffers, over Metal's 31-slot
+    // limit. `Renderer::max_buffers` must make the scheduler realize
+    // intermediates so the graph still runs and sums correctly.
+    assert_eq!(
+        autorust::renderer::Renderer::metal().max_buffers,
+        31,
+        "Metal buffer-argument limit changed"
+    );
+    let ctx = Ctx::new();
+    let mut acc = Tensor::from_slice(&ctx, &[0.0f32], None, Some("METAL"));
+    for i in 0..64 {
+        let t = Tensor::from_slice(&ctx, &[i as f32], None, Some("METAL"));
+        acc = acc.add(&t);
+    }
+    let got = acc.to_list_fresh::<f32>();
+    assert_eq!(got, vec![(0..64).sum::<i32>() as f32]);
+}
+
+#[cfg(all(feature = "backend_metal", target_os = "macos"))]
+#[test]
+fn metal_allocator_supports_offset_views() {
+    // Metal has real (buf, offset, size) views, unlike the CL allocator.
+    let dev = autorust::runtime::device::device("METAL");
+    let base = dev.allocator.alloc(64);
+    dev.copyin_to(&*base, &[0u8; 64]);
+    let view = dev.allocator._offset(&*base, 16, 8);
+    dev.copyin_to(
+        &*view,
+        &[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    );
+    assert_eq!(dev.copyout(&*view), (1u8..=16).collect::<Vec<_>>());
+    // The bytes landed at offset 8 in the parent allocation.
+    let all = dev.copyout(&*base);
+    assert_eq!(&all[8..24], &(1u8..=16).collect::<Vec<_>>()[..]);
+    assert_eq!(&all[..8], &[0u8; 8]);
+    assert_eq!(&all[24..], &[0u8; 40]);
 }

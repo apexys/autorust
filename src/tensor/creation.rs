@@ -356,10 +356,11 @@ pub fn shape_from(args: impl super::ShapeArg) -> Shape {
 // **** constructors from host data (`Tensor.__init__` list/bytes paths -> `UOp._frompy`) ****
 
 /// Python `Device.DEFAULT` (device.py): env-configurable, else the best backend
-/// actually available. Selection priority: **CUDA → CL → RUST → CC → RAYON →
-/// INTERP**. `ops_interp` is always compiled; `RAYON` is compiled by default
-/// (`backend_rayon`); `CL`/`CUDA`/`RUST`/`CC` are opt-in features and, when
-/// present and usable, win over `RAYON`. There is no ported `NV` backend.
+/// actually available. Selection priority: **CUDA → METAL (macOS) → CL → RUST
+/// → CC → RAYON → INTERP**. `ops_interp` is always compiled; `RAYON` is
+/// compiled by default (`backend_rayon`); `METAL`/`CL`/`CUDA`/`RUST`/`CC` are
+/// opt-in features and, when present and usable, win over `RAYON`. There is no
+/// ported `NV` backend.
 pub static DEFAULT_DEVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The device-selection priority as a pure function of availability, so it can
@@ -370,8 +371,30 @@ pub fn pick_device(
     rust_available: bool,
     cc_available: bool,
 ) -> &'static str {
+    pick_device_with_metal(
+        false,
+        cuda_available,
+        cl_available,
+        rust_available,
+        cc_available,
+    )
+}
+
+/// Backend priority including Metal: CUDA → METAL → CL → RUST → CC → RAYON →
+/// INTERP. On macOS the native Metal GPU backend is preferred over the
+/// deprecated OpenCL stack; `pick_device` keeps its historical signature and
+/// behaves as if Metal were absent.
+pub fn pick_device_with_metal(
+    metal_available: bool,
+    cuda_available: bool,
+    cl_available: bool,
+    rust_available: bool,
+    cc_available: bool,
+) -> &'static str {
     if cuda_available {
         "CUDA"
+    } else if metal_available {
+        "METAL"
     } else if cl_available {
         "CL"
     } else if rust_available {
@@ -396,6 +419,10 @@ pub fn default_device() -> String {
             let cuda = crate::runtime::ops_cuda::available();
             #[cfg(not(feature = "backend_cuda"))]
             let cuda = false;
+            #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+            let metal = crate::runtime::ops_metal::available();
+            #[cfg(not(all(feature = "backend_metal", target_os = "macos")))]
+            let metal = false;
             #[cfg(feature = "backend_cl")]
             let cl = crate::runtime::ops_cl::available();
             #[cfg(not(feature = "backend_cl"))]
@@ -408,7 +435,7 @@ pub fn default_device() -> String {
             let cc = crate::runtime::ops_clang::available();
             #[cfg(not(feature = "backend_clang"))]
             let cc = false;
-            pick_device(cuda, cl, rust, cc).to_string()
+            pick_device_with_metal(metal, cuda, cl, rust, cc).to_string()
         })
         .clone()
 }

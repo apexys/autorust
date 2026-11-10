@@ -411,7 +411,13 @@ pub fn is_interp_engine(device: &str) -> bool {
 pub type DeviceFactory = Rc<dyn Fn() -> Rc<Compiled>>;
 
 /// A registered backend and its lazily-constructed device.
-type DeviceEntry = (DeviceFactory, Option<Rc<Compiled>>);
+struct DeviceEntry {
+    factory: DeviceFactory,
+    device: Option<Rc<Compiled>>,
+    /// Kernel-buffer limit from the backend's renderer facts (available without
+    /// constructing the device; the scheduler's fusion budget uses it).
+    max_buffers: usize,
+}
 
 thread_local! {
     static REGISTRY: RefCell<HashMap<String, DeviceEntry>> = RefCell::new(HashMap::new());
@@ -419,12 +425,39 @@ thread_local! {
 }
 
 /// `Device._DeviceMap[name] = ...` — register a backend under its canonical
-/// device name ("CL", "MYDEV", ...). Later registration wins.
+/// device name ("CL", "MYDEV", ...). Later registration wins. The scheduler's
+/// fusion budget is unbounded unless the backend registers a renderer limit.
 pub fn register_device(name: &str, factory: DeviceFactory) {
+    register_device_with_limit(name, usize::MAX, factory);
+}
+
+/// [`register_device`] with the renderer's kernel-buffer limit. Bounded
+/// backends (Metal, a future OpenGL compute backend) use this so the scheduler
+/// can consult the limit without constructing the device.
+pub fn register_device_with_limit(name: &str, max_buffers: usize, factory: DeviceFactory) {
     REGISTRY.with(|reg| {
-        reg.borrow_mut()
-            .insert(canonicalize_device_name(name), (factory, None));
+        reg.borrow_mut().insert(
+            canonicalize_device_name(name),
+            DeviceEntry {
+                factory,
+                device: None,
+                max_buffers,
+            },
+        );
     });
+}
+
+/// The kernel-buffer limit registered for `name` (unbounded when unknown).
+/// Does not construct the device.
+pub fn registered_max_buffers(name: &str) -> usize {
+    ensure_builtins();
+    let canon = canonicalize_device_name(name);
+    REGISTRY.with(|reg| {
+        reg.borrow()
+            .get(&canon)
+            .map(|e| e.max_buffers)
+            .unwrap_or(usize::MAX)
+    })
 }
 
 fn ensure_builtins() {
@@ -436,6 +469,8 @@ fn ensure_builtins() {
             super::ops_rayon::register();
             #[cfg(feature = "backend_cl")]
             super::ops_cl::register();
+            #[cfg(all(feature = "backend_metal", target_os = "macos"))]
+            super::ops_metal::register();
             #[cfg(feature = "backend_clang")]
             super::ops_clang::register();
             #[cfg(feature = "backend_cuda")]
@@ -452,7 +487,7 @@ pub fn total_compiles() -> usize {
     REGISTRY.with(|reg| {
         reg.borrow()
             .values()
-            .filter_map(|(_, d)| d.as_ref())
+            .filter_map(|e| e.device.as_ref())
             .map(|d| d.compile_count())
             .sum()
     })
@@ -478,20 +513,19 @@ pub fn device(name: &str) -> Rc<Compiled> {
     REGISTRY.with(|reg| {
         let mut reg = reg.borrow_mut();
         let fallback_name = canon.clone();
-        reg.entry(canon.clone()).or_insert_with(|| {
-            (
-                Rc::new(move || super::ops_interp::fallback(&fallback_name)) as DeviceFactory,
-                None,
-            )
+        reg.entry(canon.clone()).or_insert_with(|| DeviceEntry {
+            factory: Rc::new(move || super::ops_interp::fallback(&fallback_name)) as DeviceFactory,
+            device: None,
+            max_buffers: usize::MAX,
         });
     });
     loop {
         let action = REGISTRY.with(|reg| {
             let reg = reg.borrow();
             let e = reg.get(&canon)?;
-            match &e.1 {
+            match &e.device {
                 Some(d) => Some((None, Some(d.clone()))),
-                None => Some((Some(e.0.clone()), None)),
+                None => Some((Some(e.factory.clone()), None)),
             }
         });
         match action {
@@ -501,8 +535,8 @@ pub fn device(name: &str) -> Rc<Compiled> {
                 REGISTRY.with(|reg| {
                     let mut reg = reg.borrow_mut();
                     let e = reg.get_mut(&canon).unwrap();
-                    if e.1.is_none() {
-                        e.1 = Some(d);
+                    if e.device.is_none() {
+                        e.device = Some(d);
                     }
                 });
             }

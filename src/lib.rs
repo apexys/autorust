@@ -1,6 +1,6 @@
 //! A faithful Rust port of [tinygrad](https://github.com/tinygrad/tinygrad)
 //! v0.14: an interned UOp graph, a rangeify scheduler, a codegen pipeline, and
-//! native CPU/OpenCL/CUDA backends.
+//! native CPU/OpenCL/CUDA/Metal backends.
 //!
 //! The Python tree is the reference oracle. Rust never imports Python at
 //! runtime; the `py/` bridge is a development-only differential harness.
@@ -41,7 +41,8 @@
 //! # Features
 //!
 //! Default: `capi` + `backend_rayon` + `backend_rust` + `backend_clang` +
-//! `backend_cl` (all dynamically loaded at run time). CUDA (`backend_cuda`)
+//! `backend_cl` + `backend_metal` (all dynamically loaded at run time, except
+//! Metal which links the OS frameworks on macOS only). CUDA (`backend_cuda`)
 //! and the frozen-plan API (`freeze`) are opt-in. `--no-default-features` is
 //! std-only (plus `nanoserde`). See `Cargo.toml` and the README for the full
 //! table.

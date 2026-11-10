@@ -48,7 +48,7 @@ src/tensor/     Tensor front-end, grad, rand, nn, optim, marshal helpers
 src/onnx/       ONNX importer: std-only protobuf parser + T0/T1 op runner
 src/schedule/   rangeify/indexing/memory (Seam B)
 src/codegen/    to_program pipeline, linearize, simplify, coalesce, interp exec
-src/renderer/   Renderer trait + cstyle (OpenCL under `backend_cl`)
+src/renderer/   Renderer trait + cstyle (OpenCL under `backend_cl`, Metal under `backend_metal`)
 src/runtime/    Buffer/allocator/compiler/device traits, INTERP + CL
 src/engine/     realize, session (BufTable + ProgCache), jit (TinyJit), disk_cache, ProgramInfo
 src/bin/        oracle_* cargo bins driven by pytest (JSON graph files)
@@ -81,8 +81,10 @@ Run from this directory (`autorust/`):
   also run as plain scripts. Regenerate goldens with
   `../tinygrad/.venv/bin/python py/dump_golden.py` after editing either side.
 
-Feature flags: `backend_cl` (OpenCL via `opencl3`), `capi` (default; the C ABI
-loaded by the Python bridge), `trace`/`dump` (debug-only, off by default).
+Feature flags: `backend_cl` (OpenCL), `backend_metal` (Apple Metal, macOS-only),
+`backend_cuda` (CUDA), `backend_rayon`/`backend_rust`/`backend_clang` (CPU),
+`capi` (default; the C ABI loaded by the Python bridge), `trace`/`dump`
+(debug-only, off by default).
 
 ## Conventions
 

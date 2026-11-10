@@ -736,15 +736,22 @@ fn pad_constant_and_edge_reflect_wrap() {
         17,
     );
 
-    let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
+    // This op exercises f64 intermediates; Metal has no `double`, so pin the
+    // reference interpreter (the assertion is device-independent).
+    let mut m = OnnxModel::from_bytes(&bytes, Some("INTERP")).unwrap();
     let x = Tensor::from_slice(
         m.ctx(),
         &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
         Some(dtype::FLOAT32),
-        None,
+        Some("INTERP"),
     )
     .reshape([2, 3]);
-    let v = Tensor::from_slice(m.ctx(), &[1.0f32, 2.0, 3.0], Some(dtype::FLOAT32), None);
+    let v = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 2.0, 3.0],
+        Some(dtype::FLOAT32),
+        Some("INTERP"),
+    );
     let out = m.run(&[("x", x), ("v", v)]).unwrap();
     close(
         &out["const"].to_list::<f32>(m.session_mut()),
@@ -1228,12 +1235,13 @@ fn pow_handles_tensor_exponents_and_negative_bases() {
         &b::graph(&nodes, &[exp_vec, half], &inputs, &outputs, "pow"),
         17,
     );
-    let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
+    // `Pow` promotes through f64; use the interpreter on f64-less backends.
+    let mut m = OnnxModel::from_bytes(&bytes, Some("INTERP")).unwrap();
     let x = Tensor::from_slice(
         m.ctx(),
         &[-2.0f32, 2.0, 4.0, -4.0],
         Some(dtype::FLOAT32),
-        None,
+        Some("INTERP"),
     );
     let out = m.run(&[("x", x)]).unwrap();
     let g = out["general"].to_list::<f32>(m.session_mut());

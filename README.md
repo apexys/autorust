@@ -2,8 +2,8 @@
 
 A faithful Rust port of [tinygrad](https://github.com/tinygrad/tinygrad) v0.14:
 an interned UOp graph, a rangeify scheduler, a codegen pipeline, and native
-CPU/OpenCL/CUDA backends. The Python tree is the reference oracle; Rust never
-imports Python at runtime.
+CPU/OpenCL/CUDA/Metal backends. The Python tree is the reference oracle; Rust
+never imports Python at runtime.
 
 This README is a working draft. The maintainer will rewrite it; the technical
 statements below are the ones that matter.
@@ -18,8 +18,8 @@ The core engine is complete and differentially tested against tinygrad:
   C-style rendering, and the uop interpreter.
 - Backends: `INTERP` (faithful reference), `RAYON` (multithreaded CPU),
   `RUST` (native CPU: Rust kernels compiled by `rustc`), `CC` (native CPU:
-  portable C compiled by clang/gcc), `CL` (OpenCL), and `CUDA` (driver API +
-  NVRTC, bf16/WMMA).
+  portable C compiled by clang/gcc), `CL` (OpenCL), `CUDA` (driver API +
+  NVRTC, bf16/WMMA), and `METAL` (Apple Metal on macOS).
 - Frozen CPU plans: capture a `Jit` step, lower it to a `FrozenPlan`, and emit
   a self-contained Rust file for `build.rs`/`include!` (no runtime `rustc`);
   `Engine` selects eager GPU or frozen CPU automatically.
@@ -218,6 +218,7 @@ compiles the emitted crate and diffs it against eager).
 | `backend_rust` | yes | Native CPU backend (`RUST`): Rust kernel source → `rustc` cdylib → `libloading`. |
 | `backend_clang` | yes | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |
 | `backend_cl` | yes | OpenCL backend (`CL`), dynamically loaded at run time. |
+| `backend_metal` | yes | Metal backend (`METAL`), macOS only; links the OS frameworks, no Xcode needed. |
 | `backend_cuda` | no | CUDA backend (`CUDA`), via `cudarc`; dynamically loaded, no build-time CUDA libs. |
 | `freeze` | no | Capture/emit frozen CPU plans (`autorust::freeze`); enables `backend_rust`. |
 | `trace` | no | Rule-firing trace (`TG_TRACE`). |
@@ -226,9 +227,10 @@ compiles the emitted crate and diffs it against eager).
 `--no-default-features` is std-only (plus `nanoserde`). Optional backend crates
 are the only sanctioned non-core dependencies.
 
-Device selection is `CUDA → CL → RUST → CC → RAYON → INTERP` for the first
-available backend; `RUST` is only selected when `rustc` is on `PATH`, `CC` when
-`$CC` (or `clang`, else `cc`) works. Set `DEFAULT_DEVICE` to override. Runtime knobs (device, dtype,
+Device selection is `CUDA → METAL → CL → RUST → CC → RAYON → INTERP` for the first
+available backend; `METAL` is only considered on macOS, `RUST` is only selected
+when `rustc` is on `PATH`, and `CC` when `$CC` (or `clang`, else `cc`) works. Set
+`DEFAULT_DEVICE` to override. Runtime knobs (device, dtype,
 `BEAM`, `JIT`, `FA`, …) are environment variables read once and cached; build-
 time diagnostics/backends are Cargo features. Set runtime env vars before the
 first tensor/realize.
@@ -240,11 +242,23 @@ first tensor/realize.
   `get_transcendental_patterns`), parameter renumbering (`pm_number_params`),
   and the image path. Multi-device/sharding is out of scope.
 - **Backends**: CUDA tensor cores target `sm_86`; OpenCL has no offset views and
-  no native bf16; there is no AMD/Metal/WebGPU backend. The `RUST` CPU backend
+  no native bf16; Metal has no `double` and its tensor-core (simdgroup WMMA)
+  path is not ported yet. There is no AMD/WebGPU backend. The `RUST` CPU backend
   is x86-64-first (other architectures fall back to libm for math).
 - **OpenCL loading**: `backend_cl` loads `libOpenCL` dynamically (`cl_sys`);
   a binary built with it starts on machines without OpenCL and `CL` is simply
   unavailable. `AUTORUST_CL_LIB` overrides the library path for testing.
+- **Metal**: `backend_metal` is target-gated to macOS and links the OS-provided
+  Objective-C runtime and Metal framework; shaders are compiled at runtime with
+  `newLibraryWithSource:`, so no Xcode/Metal toolchain is needed. Buffers use
+  shared storage (host upload/download is a CPU copy), and the allocator
+  supports real offset views. Shaders compile with precise math by default
+  (`METAL_FAST_MATH=1` opts into fast math — `x + -inf` otherwise folds to `x`
+  and drops masks). Apple GPUs allow at most 31 buffer arguments per kernel;
+  `Renderer::max_buffers` turns that into a scheduler fusion budget, so large
+  graphs are split at an intermediate realization rather than failing to
+  compile. The same fact is the hook for other bounded backends (e.g. OpenGL
+  compute).
 - **Training**: eager autograd covers the ops used by the demos. Fused
   `Tensor.custom_kernel`/`@function` kernels are deferred.
 - **ONNX** covers the T0/T1 inference surface. Missing: `Scatter*`,

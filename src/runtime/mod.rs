@@ -31,6 +31,8 @@ pub mod ops_clang;
 #[cfg(feature = "backend_cuda")]
 pub mod ops_cuda;
 pub mod ops_interp;
+#[cfg(all(feature = "backend_metal", target_os = "macos"))]
+pub mod ops_metal;
 #[cfg(feature = "backend_rayon")]
 pub mod ops_rayon;
 #[cfg(feature = "backend_rust")]

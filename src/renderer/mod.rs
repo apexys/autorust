@@ -114,6 +114,11 @@ pub struct Renderer {
     pub local_max: Option<[i64; 3]>,
     /// Maximum shared-memory bytes.
     pub shared_max: i64,
+    /// Maximum number of kernel buffer arguments (`usize::MAX` when unbounded).
+    /// The scheduler uses this as a fusion budget: a graph that would need more
+    /// distinct buffers is split at an intermediate realization. Metal exposes
+    /// 31 `[[buffer(n)]]` slots; OpenGL compute is typically even smaller.
+    pub max_buffers: usize,
     /// `tensor_cores` (renderer/__init__.py:72) — the WMMA descriptions this
     /// renderer supports (empty for the interp/CL/clang backends).
     pub tensor_cores: Vec<tc::TensorCore>,
@@ -141,6 +146,7 @@ impl Renderer {
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
+            max_buffers: usize::MAX,
             tensor_cores: Vec::new(),
             code_for_op: python_alu_keys(),
             // ops_python.py:235 — 3.12+ keeps half, everything else stays.
@@ -170,6 +176,7 @@ impl Renderer {
             global_max: Some([1024, 0, 0]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
+            max_buffers: usize::MAX,
             tensor_cores: Vec::new(),
             code_for_op: cstyle_alu_keys_clang(),
             // cstyle.py:300 — fp8s excluded everywhere; bf16 only on x86/arm arch.
@@ -196,6 +203,7 @@ impl Renderer {
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 0,
+            max_buffers: usize::MAX,
             tensor_cores: Vec::new(),
             code_for_op: rust_alu_keys(),
             supported_dtypes: crate::dtype::ALL
@@ -222,6 +230,7 @@ impl Renderer {
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 0,
+            max_buffers: usize::MAX,
             tensor_cores: Vec::new(),
             code_for_op: cstyle_alu_keys_clang(),
             supported_dtypes: crate::dtype::ALL
@@ -244,6 +253,7 @@ impl Renderer {
             global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
             shared_max: 32768,
+            max_buffers: usize::MAX,
             tensor_cores: Vec::new(),
             code_for_op: cstyle_alu_keys(),
             supported_dtypes: opencl_supported_dtypes(""),
@@ -273,10 +283,37 @@ impl Renderer {
             global_max: Some([2147483647, 65535, 65535]),
             local_max: Some([1024, 1024, 64]),
             shared_max: 49152,
+            max_buffers: usize::MAX,
             tensor_cores: tc::get_cuda(arch),
             code_for_op: cstyle_alu_keys(),
             supported_dtypes: cuda_supported_dtypes(arch),
             extra_matcher: extra::cuda_extra_matcher(),
+        }
+    }
+
+    /// `MetalRenderer` (cstyle.py:251) — Apple GPU facts. Native `half` and
+    /// `bfloat`; no fp8 and no `double` (Apple Silicon GPUs do not implement
+    /// 64-bit floats), so those are left to dtype emulation.
+    pub fn metal() -> Renderer {
+        Renderer {
+            device: "METAL".to_string(),
+            has_local: true,
+            has_shared: true,
+            has_threads: false,
+            globalize_loops: false,
+            global_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
+            local_max: Some([0x8FFFFFFF, 0x8FFFFFFF, 0x8FFFFFFF]),
+            shared_max: 32768,
+            max_buffers: 31,
+            tensor_cores: Vec::new(),
+            code_for_op: cstyle_alu_keys(),
+            supported_dtypes: crate::dtype::ALL
+                .iter()
+                .cloned()
+                .filter(|&d| !in_fp8s(d) && d != crate::dtype::FLOAT64)
+                .collect(),
+            // cstyle.py:275 — unary ops that reject bfloat compute through f32.
+            extra_matcher: extra::metal_extra_matcher(),
         }
     }
 }

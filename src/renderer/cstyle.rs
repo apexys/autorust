@@ -71,6 +71,20 @@ pub struct CStyleLang {
     /// CPU C target: the fixed `(bufs, vals, gidx)` ABI, `gidx` chunking, and
     /// portable vector types. Works with clang and gcc (see [`render_cpu_c`]).
     cpu: bool,
+    /// Metal Shading Language flavor (`MetalRenderer`, cstyle.py:251): `kernel
+    /// void` with `gid`/`lid` thread attributes, `device`/`threadgroup`
+    /// address spaces, `as_type<>` bitcasts, and `constant int&` scalar args.
+    metal: bool,
+    /// Whether a vector type name is a C typedef identifier (`unsigned_char2`)
+    /// rather than a language spelling (`unsigned char2`). The CPU/clang
+    /// vector typedefs need the former; Metal needs the latter.
+    vector_underscore: bool,
+    /// Emit an explicit truncating float→int cast (`(long)` first, clamping
+    /// negatives for unsigned destinations) instead of relying on the GPU
+    /// language's `float -> small_int` cast, which is implementation-defined
+    /// and saturates on Apple OpenCL/Metal. The interpreter/CPU semantics are
+    /// truncation + wrap (`ctypes.c_<n>`).
+    trunc_float_to_int: bool,
 }
 
 impl CStyleLang {
@@ -100,6 +114,9 @@ impl CStyleLang {
             float4: "(float4)",
             rust: false,
             cpu: false,
+            metal: false,
+            vector_underscore: true,
+            trunc_float_to_int: false,
         }
     }
 
@@ -132,6 +149,9 @@ impl CStyleLang {
             float4: "",
             rust: true,
             cpu: false,
+            metal: false,
+            vector_underscore: false,
+            trunc_float_to_int: false,
         }
     }
 
@@ -169,6 +189,9 @@ impl CStyleLang {
             float4: "(float4)",
             rust: false,
             cpu: true,
+            metal: false,
+            vector_underscore: true,
+            trunc_float_to_int: false,
         }
     }
 
@@ -205,6 +228,9 @@ impl CStyleLang {
             float4: "(float4)",
             rust: false,
             cpu: false,
+            metal: false,
+            vector_underscore: false,
+            trunc_float_to_int: true,
         }
     }
 
@@ -239,6 +265,53 @@ impl CStyleLang {
             float4: "make_float4",
             rust: false,
             cpu: false,
+            metal: false,
+            vector_underscore: false,
+            trunc_float_to_int: false,
+        }
+    }
+
+    /// `MetalRenderer` language options (cstyle.py:251).
+    ///
+    /// Metal uses `kernel void` with implicit `gid`/`lid` thread attributes,
+    /// `device` global memory, `threadgroup` local memory, `as_type<>` for
+    /// bitcasts, and passes scalar `int` params as `constant int&` (the
+    /// runtime sets them with `setBytes`).
+    pub fn metal() -> CStyleLang {
+        CStyleLang {
+            clang_builtins: false,
+            buffer_prefix: "device ",
+            buffer_suffix: "",
+            var_prefix: "const ",
+            var_suffix: "",
+            smem_align: "",
+            smem_prefix: "threadgroup ",
+            smem_prefix_for_cast: true,
+            gep_arr_threshold: 0,
+            barrier: "threadgroup_barrier(mem_flags::mem_threadgroup);",
+            infinity: "INFINITY",
+            nan: "NAN",
+            type_map: &[
+                (dtype::INT8, "char"),
+                (dtype::UINT8, "uchar"),
+                (dtype::UINT16, "ushort"),
+                (dtype::UINT32, "uint"),
+                (dtype::UINT64, "ulong"),
+                (dtype::BFLOAT16, "bfloat"),
+            ],
+            workitem: Some(("gid", "lid", "gid")),
+            vector_defines: false,
+            kernel_typedef: "kernel void",
+            float4_style: ("(", ")"),
+            bf16_const_bits: false,
+            bitcast_builtin: false,
+            cuda: false,
+            float4: "float4",
+            rust: false,
+            cpu: false,
+            metal: true,
+            vector_underscore: false,
+            trunc_float_to_int: true,
         }
     }
 
@@ -269,7 +342,7 @@ impl CStyleLang {
         } else {
             ""
         };
-        let base = if sz > 1 {
+        let base = if sz > 1 && self.vector_underscore {
             self.type_name(dt).replace(' ', "_")
         } else {
             self.type_name(dt)
@@ -545,6 +618,11 @@ pub fn render_opencl(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
 /// `CUDARenderer.render(lst)`.
 pub fn render_cuda(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
     render_cstyle(ctx, lst, &CStyleLang::cuda())
+}
+
+/// `MetalRenderer.render(lst)`.
+pub fn render_metal(ctx: &mut UOpCtx, lst: &[UopId]) -> String {
+    render_cstyle(ctx, lst, &CStyleLang::metal())
 }
 
 fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
@@ -853,6 +931,23 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     // tinygrad truncate: unsigned destinations clamp negatives
                     // to zero before the C cast (which would be UB otherwise).
                     format!("TG_F2U({}, {})", lang.render_type(&i), g(&r, &i.srcs[0]))
+                } else if lang.trunc_float_to_int
+                    && i.numel == 1
+                    && dtype::is_float(src0.dt)
+                    && !dtype::is_float(i.dt)
+                    && i.dt != dtype::BOOL
+                {
+                    // The language float->small-int cast is implementation-
+                    // defined (Apple GPUs saturate). tinygrad's interpreter
+                    // truncates toward zero and wraps, so go through `long`
+                    // explicitly and clamp negatives for unsigned targets.
+                    let dst = lang.render_type(&i);
+                    let src = g(&r, &i.srcs[0]);
+                    if dtype::in_set(dtype::UINTS, i.dt) {
+                        format!("(({dst})(long)((({src}) < 0) ? 0 : ({src})))")
+                    } else {
+                        format!("(({dst})(long)({src}))")
+                    }
                 } else if src0.op == Ops::Const {
                     const_text(ctx, i.dt, (i.srcs[0]).clone(), lang)
                 } else {
@@ -913,6 +1008,10 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                         lang.render_type(&info[&i.srcs[0]]),
                         g(&r, &i.srcs[0])
                     )
+                } else if lang.metal {
+                    // MetalRenderer.string_rewrite (cstyle.py:282):
+                    // `as_type<{dtype}>({src})`.
+                    format!("as_type<{}>({})", lang.render_type(&i), g(&r, &i.srcs[0]))
                 } else if lang.cuda {
                     // CUDARenderer string_rewrite (cstyle.py:434): tg_bitcast<dst>((src)(x))
                     let dst = lang.render_dtype(i.dt, 1, None, false);
@@ -959,6 +1058,19 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                             b'g' => format!("blockIdx.{ch}"),
                             b'l' => format!("threadIdx.{ch}"),
                             _ => format!("(blockIdx.{ch}*blockDim.{ch}+threadIdx.{ch})"),
+                        };
+                        format!("{s}; /* {ext} */")
+                    } else if lang.metal {
+                        // MetalRenderer.code_for_workitem (cstyle.py:266): `gid.x` / `lid.x`.
+                        let ch = match dim {
+                            0 => 'x',
+                            1 => 'y',
+                            _ => 'z',
+                        };
+                        let s = match kind {
+                            b'g' => format!("gid.{ch}"),
+                            b'l' => format!("lid.{ch}"),
+                            other => panic!("TGERR: Metal has no workitem for {:?}", other as char),
                         };
                         format!("{s}; /* {ext} */")
                     } else {
@@ -1121,14 +1233,22 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
                     if i.op == Ops::Where && info[&i.srcs[0]].dt != dtype::BOOL {
                         idx_args[0] = format!("({}) != 0", idx_args[0]);
                     }
-                    let scalar = code_for_op(i.op, &idx_args, false, false, true, i.dt);
+                    let scalar = code_for_op(i.op, &idx_args, false, false, true, false, i.dt);
                     if i.numel > 1 {
                         format!("core::array::from_fn(|k| {scalar})")
                     } else {
                         scalar
                     }
                 } else {
-                    code_for_op(i.op, &args, lang.clang_builtins, lang.cuda, false, i.dt)
+                    code_for_op(
+                        i.op,
+                        &args,
+                        lang.clang_builtins,
+                        lang.cuda,
+                        false,
+                        lang.metal,
+                        i.dt,
+                    )
                 }
             }
             other => panic!("TGERR: cstyle op {other:?} not ported"),
@@ -1317,6 +1437,11 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         .iter()
         .map(|(nm, i, _writable)| {
             let as_ = i.addrspace;
+            if lang.metal && as_ == Some(AddrSpace::Alu) && i.dt == dtype::INT32 {
+                // MetalRenderer.arg_int_prefix (cstyle.py:263): scalar int
+                // params are `constant int&` set with `setBytes`.
+                return format!("constant int& {nm}");
+            }
             let vol = if i.volatile { "volatile " } else { "" };
             let (pre, suf) = if as_ == Some(AddrSpace::Alu) {
                 (lang.var_prefix, lang.var_suffix)
@@ -1349,6 +1474,21 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
     let ktypedef = lang
         .kernel_typedef
         .replace("{launch_bounds}", &launch_bounds.to_string());
+    if lang.metal {
+        // MetalRenderer.render_kernel (cstyle.py:286): the implicit `gid`/`lid`
+        // thread attributes are the last two kernel arguments.
+        let mut args = buftypes.clone();
+        args.push("uint3 gid [[threadgroup_position_in_grid]]".to_string());
+        args.push("uint3 lid [[thread_position_in_threadgroup]]".to_string());
+        let prg = format!(
+            "{} {}({}) {{\n{}\n}}",
+            ktypedef,
+            name,
+            args.join(", "),
+            kernel.join("\n")
+        );
+        return format!("#include <metal_stdlib>\nusing namespace metal;\n{prg}");
+    }
     let prg = format!(
         "{} {}({}) {{\n{}\n}}",
         ktypedef,
@@ -1774,6 +1914,7 @@ fn code_for_op(
     clang: bool,
     cuda: bool,
     rust: bool,
+    metal: bool,
     dt: crate::dtype::DTypeId,
 ) -> String {
     if rust {
@@ -1812,6 +1953,9 @@ fn code_for_op(
         Ops::Sin => {
             if h {
                 format!("hsin({})", a[0])
+            } else if metal {
+                // MetalRenderer.code_for_op (cstyle.py:272): `precise::sin`.
+                format!("precise::sin({})", a[0])
             } else {
                 format!("sin({})", a[0])
             }

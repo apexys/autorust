@@ -2003,7 +2003,7 @@ fn build_split_kernels() -> PatternMatcher {
 // ---------- get_kernel_graph (rangeify.py:584) ----------
 
 /// `get_kernel_graph` (rangeify.py:584) — run the full rangeify pipeline and return the kernel SINK.
-pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
+pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> UopId {
     // (single-device: multi_pm skipped; OPENPILOT_HACKS off)
     let prof = crate::engine::prof::enabled();
     let lap = |name: &'static str, t: Option<std::time::Instant>| {
@@ -2049,6 +2049,7 @@ pub fn get_kernel_graph(ctx: &mut UOpCtx, sink: UopId) -> UopId {
         ctx,
         tsink,
         crate::helpers::env::get("TG_DEBUG_RANGEIFY").is_some(),
+        max_buffers,
     );
     lap("rng.run_rangeify", t);
 

@@ -340,7 +340,8 @@ pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Uop
     // schedule to linear: pm_schedule lowers the top SINK
     let t0 = prof.then(std::time::Instant::now);
     let linear_call = {
-        let pm_sched = pm_schedule();
+        let max_buffers = sink_max_buffers(ctx, big_sink.clone());
+        let pm_sched = pm_schedule(max_buffers);
         graph_rewrite(
             ctx,
             big_sink,
@@ -392,11 +393,34 @@ pub fn create_linear_with_vars(ctx: &mut UOpCtx, big_sink: UopId) -> (UopId, Uop
     (linear, planned, held_bufs)
 }
 
+/// The smallest kernel-buffer limit among the devices touched by `sink`.
+///
+/// The scheduler uses it as a fusion budget. A device whose renderer declares
+/// `max_buffers == usize::MAX` does not constrain the schedule, so non-Metal
+/// backends keep byte-for-byte the old fusion behavior.
+fn sink_max_buffers(ctx: &mut UOpCtx, sink: UopId) -> usize {
+    let mut limit = usize::MAX;
+    let mut seen: Vec<String> = Vec::new();
+    for u in ctx.toposort(&sink) {
+        let Some(crate::uop::arg::DeviceSpec::Single(d)) =
+            super::indexing::device_of(ctx, u.clone())
+        else {
+            continue;
+        };
+        if seen.iter().any(|s| s == &d) {
+            continue;
+        }
+        seen.push(d.clone());
+        limit = limit.min(crate::runtime::device::registered_max_buffers(&d));
+    }
+    limit
+}
+
 /// `pm_schedule` / `lower_sink_to_linear` — lower the (callified) tensor SINK.
-pub fn pm_schedule() -> PatternMatcher {
+pub fn pm_schedule(max_buffers: usize) -> PatternMatcher {
     PatternMatcher::new(vec![(
         UPat::ops1(Ops::Sink).allow_all_srcs().named("function"),
-        r(|ctx, st, _| {
+        r(move |ctx, st, _| {
             let function = sym_sget(st, "function");
             // function.arg is KernelInfo for inner kernel sinks — leave those
             if let Arg::Data(d) = ctx.arg_of(&function)
@@ -406,7 +430,7 @@ pub fn pm_schedule() -> PatternMatcher {
             }
             let sched_sink = {
                 let t = crate::engine::prof::enabled().then(std::time::Instant::now);
-                let s = super::rangeify::get_kernel_graph(ctx, function);
+                let s = super::rangeify::get_kernel_graph(ctx, function, max_buffers);
                 if let Some(t) = t {
                     crate::engine::prof::add("sched.kernel_graph", t.elapsed().as_secs_f64());
                 }

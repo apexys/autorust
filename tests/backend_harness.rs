@@ -440,7 +440,9 @@ fn backends() -> Vec<String> {
 
 fn staging_dev(backend: &str) -> Dev<'_> {
     match backend {
-        "INTERP" | "CPU" => None, // the frozen "PYTHON" staging path
+        // `None` means "use the default device", which is not necessarily the
+        // interpreter. Pin INTERP explicitly so the test really exercises it.
+        "INTERP" | "CPU" => Some("INTERP"),
         other => Some(other),
     }
 }
@@ -780,20 +782,26 @@ fn cumsum_all_backends() {
 fn casts_all_backends() {
     let gm = goldens();
     for b in backends() {
-        run_named(
-            &b,
-            &gm,
-            &[
-                "cast_f2i",
-                "cast_i2f",
-                "cast_f2u8",
-                "cast_f2i8",
-                "cast_b2i32",
-                "cast_f2b",
-                "cast_f32_f64",
-                "cast_f64_f32",
-            ],
-        );
+        let has_f64 = device(&b)
+            .renderer
+            .facts()
+            .supported_dtypes
+            .contains(&dtype::FLOAT64);
+        let mut names = vec![
+            "cast_f2i",
+            "cast_i2f",
+            "cast_f2u8",
+            "cast_f2i8",
+            "cast_b2i32",
+            "cast_f2b",
+        ];
+        if has_f64 {
+            names.push("cast_f32_f64");
+            names.push("cast_f64_f32");
+        } else {
+            eprintln!("harness: {b} skipping f64 casts (not a supported dtype)");
+        }
+        run_named(&b, &gm, &names);
     }
 }
 

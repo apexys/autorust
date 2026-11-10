@@ -222,6 +222,25 @@ pub fn cuda_extra_matcher() -> PatternMatcher {
     create_non_native_float_pats(&dts, false).add(&PatternMatcher::new(vec![fp8_cast]))
 }
 
+/// `MetalRenderer.extra_matcher` (cstyle.py:275-280) — upcast the unary ALU ops
+/// that do not accept `bfloat` to f32, then cast back. (This is the PTX rule
+/// tinygrad copies into Metal.)
+pub fn metal_extra_matcher() -> PatternMatcher {
+    let ops = [Ops::Sqrt, Ops::Exp2, Ops::Log2, Ops::Sin];
+    PatternMatcher::new(vec![(
+        UPat::op_var(ops.to_vec())
+            .with_dtype(Some(vec![dtype::BFLOAT16]))
+            .named("x"),
+        r(|ctx, st, _| {
+            let x = sget(st, "x");
+            let (op, dt, srcs, arg, _tag) = ctx.snapshot(&x);
+            let nsrcs: Vec<UopId> = srcs.iter().map(|s| ctx.cast(s.clone(), f32())).collect();
+            let mid = ctx.uop(op, None, nsrcs, arg);
+            Some(ctx.cast(mid, dt))
+        }),
+    )])
+}
+
 /// `ClangRenderer.extra_matcher` (cstyle.py:278-281) — the f64/f16/bf16
 /// conversion fixups LLVM needs on systems without native support, plus bf16.
 pub fn clang_extra_matcher() -> PatternMatcher {

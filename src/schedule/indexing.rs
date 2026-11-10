@@ -976,8 +976,136 @@ fn finish_node(
     ictx.range_map.insert(x, (rngs, out_rngs.to_vec()));
 }
 
+/// Add realize-map entries so no fused kernel needs more than `max_buffers`
+/// buffer arguments (`limit` includes the kernel's output buffer).
+///
+/// Walks the graph producer-first, carrying each node's set of distinct input
+/// buffers (capped just over the budget). When a node's inputs exceed the
+/// budget it greedily realizes the largest non-leaf source, replacing that
+/// source's set with a single buffer in the consumer. This bounds every
+/// prospective kernel while keeping the cuts as late (and as few) as possible.
+fn budget_realizations(
+    ctx: &mut UOpCtx,
+    sink: UopId,
+    ictx: &mut IndexingContext,
+    max_buffers: usize,
+) {
+    // Leave ~1/3 headroom for scheduler-created output/stage buffers and
+    // multi-output kernels: the leaf-buffer union is a lower bound on the final
+    // kernel's argument count.
+    let budget = (max_buffers * 2 / 3).max(1);
+    let order = ctx.toposort(&sink);
+    let mut downstream: HashMap<UopId, Vec<UopId>> = HashMap::new();
+    let mut realized: std::collections::HashSet<UopId> = ictx.realize_map.keys().cloned().collect();
+    let mut extra: Vec<UopId> = Vec::new();
+
+    for x in order {
+        let op = ctx.op_of(&x);
+        if matches!(op, Ops::Buffer | Ops::Param) {
+            downstream.insert(x.clone(), vec![x.clone()]);
+            continue;
+        }
+        let (_op, _dt, raw_srcs, _arg, _tag) = ctx.snapshot(&x);
+        let srcs = data_srcs(ctx, op, &raw_srcs);
+        // (source, its downstream set)
+        let mut src_sets: Vec<(UopId, Vec<UopId>)> = srcs
+            .iter()
+            .map(|s| {
+                let set = downstream
+                    .get(s)
+                    .cloned()
+                    .unwrap_or_else(|| vec![s.clone()]);
+                (s.clone(), set)
+            })
+            .collect();
+
+        let mut union = union_capped(
+            src_sets.iter().flat_map(|(_, set)| set.iter().cloned()),
+            budget + 1,
+        );
+        while union.len() > budget {
+            // Realize the largest non-leaf source that is not a boundary yet.
+            let mut best: Option<usize> = None;
+            for (i, (s, set)) in src_sets.iter().enumerate() {
+                if set.len() <= 1
+                    || matches!(
+                        ctx.op_of(s),
+                        Ops::Buffer
+                            | Ops::Param
+                            | Ops::After
+                            | Ops::Call
+                            | Ops::Function
+                            | Ops::Linear
+                            | Ops::Mstack
+                            | Ops::Mselect
+                    )
+                {
+                    continue;
+                }
+                if best
+                    .map(|b| set.len() > src_sets[b].1.len())
+                    .unwrap_or(true)
+                {
+                    best = Some(i);
+                }
+            }
+            let Some(i) = best else { break };
+            let s = src_sets[i].0.clone();
+            if realized.contains(&s) {
+                // Already a boundary; its set should be a singleton, but guard
+                // against duplicate cut attempts.
+                src_sets[i].1 = vec![s.clone()];
+                union = union_capped(
+                    src_sets.iter().flat_map(|(_, set)| set.iter().cloned()),
+                    budget + 1,
+                );
+                continue;
+            }
+            if ctx.shape(&s).ok().flatten().is_none() {
+                break; // cannot materialize a shape-less node
+            }
+            realized.insert(s.clone());
+            extra.push(s.clone());
+            src_sets[i].1 = vec![s.clone()];
+            union = union_capped(
+                src_sets.iter().flat_map(|(_, set)| set.iter().cloned()),
+                budget + 1,
+            );
+        }
+
+        // The kernel producing x needs `union`; downstream consumers see x as
+        // one buffer only if x is already/now a realized boundary.
+        if realized.contains(&x) {
+            downstream.insert(x.clone(), vec![x.clone()]);
+        } else {
+            downstream.insert(x.clone(), union);
+        }
+    }
+
+    for x in extra {
+        // `None` mirrors `pm_generate_realize_map`'s "realize all axes" marker;
+        // the main rangeify loop fills in the concrete axis list.
+        ictx.realize_map.insert(x, None);
+    }
+}
+
+/// Union of a stream of buffer ids, deduplicated and capped at `cap` entries.
+fn union_capped<I: Iterator<Item = UopId>>(it: I, cap: usize) -> Vec<UopId> {
+    let mut out: Vec<UopId> = Vec::new();
+    for u in it {
+        if out.contains(&u) {
+            continue;
+        }
+        out.push(u);
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
+}
+
 /// `run_rangeify` — rewrite the SINK into ranged INDEX/STAGE/RANGE form.
-pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool) -> UopId {
+pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool, max_buffers: usize) -> UopId {
     let shared = Rc::new(RefCell::new(IndexingContext::new()));
 
     // get ops to realize
@@ -994,6 +1122,15 @@ pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool) -> UopId {
             CtxVal::Idx(shared.clone()),
         )
         .unwrap_or_else(|e| panic!("TGERR: get realize: {e}"));
+    }
+
+    // Fusion budget: a device with a hard kernel-buffer limit (Metal exposes 31
+    // `[[buffer(n)]]` slots) needs intermediate realizations so no one kernel
+    // reads more buffers than the limit. This is a port addition: tinygrad has
+    // no equivalent pass. `usize::MAX` (all non-Metal devices) is a no-op.
+    if max_buffers != usize::MAX {
+        let mut ictx = shared.borrow_mut();
+        budget_realizations(ctx, tsink.clone(), &mut ictx, max_buffers);
     }
 
     // get the consumer map

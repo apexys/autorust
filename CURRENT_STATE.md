@@ -23,9 +23,10 @@ Merged from the former `PLAN.md` / `CURRENT_STATE.md` / `NNImpl.md`.
 - **Dependency policy: std-only Rust + nanoserde** for the core. No PyO3/maturin, no serde/syn
   ecosystem, no libc/sha2 crates; nanoserde (single micro-crate) for the JSON graph
   interchange. **Optional backend deps are the one sanctioned exception**, each behind its
-  own feature: `opencl3` (`backend_cl`), `cudarc` (`backend_cuda`), and `rayon` + `bytemuck`
-  (`backend_rayon`, the multithreaded CPU backend, §9.8) — `--no-default-features` stays
-  std-only. Two FFI faces only: (a) plain cargo binaries for batch oracle work over
+  own feature: `opencl3` (`backend_cl`), `cudarc` (`backend_cuda`), `objc2`/
+  `objc2-foundation`/`objc2-metal` (`backend_metal`, macOS-target-gated), and
+  `rayon` + `bytemuck` (`backend_rayon`, the multithreaded CPU backend, §9.8) —
+  `--no-default-features` stays std-only. Two FFI faces only: (a) plain cargo binaries for batch oracle work over
   JSON graph files (one-shot — graph building, codegen diffs, CI), (b) a tiny `cdylib`
   C ABI (`#[no_mangle] extern "C"`, caller-owned buffers, ~5 functions) loaded from Python
   via stdlib `ctypes` for the per-kernel hot path (`ops_rust.py`) — bytes only, no JSON on
@@ -248,6 +249,71 @@ live in `autorust/py/` (driven against `tinygrad/`) + Rust unit tests in `autoru
   ✅ (see §8.7); (f) cstyle `extra_matcher` for bf16 (`create_non_native_float_pats` +
   `pm_manual_bf16_cast`) — see §9.6.
 
+### M9 — Metal backend (macOS) — DONE
+- **Dependencies.** `backend_metal` is the second GPU backend. It uses `objc2`,
+  `objc2-foundation` and `objc2-metal`, declared as **macOS-target-only optional
+  deps**, so Linux/Windows builds and `--all-features` never link them. Unlike CUDA
+  there is no dynamic-loading mode to arrange: `libobjc` and `Metal.framework` are
+  OS components, and shaders are compiled at run time with
+  `newLibraryWithSource:options:error:` (the same path tinygrad uses when
+  `METAL_XCODE` is unset), so no Xcode/Metal toolchain is required at build time.
+- **Renderer.** `CStyleLang::metal()` + `renderer::cstyle::render_metal` mirror
+  `MetalRenderer` (cstyle.py:251): `kernel void` with implicit `uint3 gid
+  [[threadgroup_position_in_grid]]` / `uint3 lid [[thread_position_in_threadgroup]]`,
+  `device` globals, `threadgroup` locals, `as_type<T>` bitcasts, `constant int&`
+  scalar args, `precise::sin`, native `half`/`bfloat`, and the bf16 unary
+  compute-through-f32 `extra_matcher`. `Renderer::metal()` exposes the facts
+  (shared_max 32768, `ALL` minus fp8 and f64, empty tensor cores).
+- **Runtime.** `runtime/ops_metal.rs`: `MetalAllocator` (`newBufferWithLength:options:`
+  with `StorageModeShared`; real `(buf, offset, size)` views; blit-encoder D2D
+  copies), `MetalProgram` (source → library → function → compute pipeline;
+  `dispatchThreadgroups:threadsPerThreadgroup:`; in-flight command buffers for
+  `synchronize`), and registration as `"METAL"` through the public seams.
+- **Fast math must stay off (default).** Passing `nil` compile options makes Metal
+  enable fast math, and `x + (-inf)` is then folded to `x` — which silently
+  dropped every causal `-inf` attention mask (`nn_attention` caught it). The
+  program always builds an `MTLCompileOptions` with `mathMode = Safe` unless
+  `METAL_FAST_MATH=1` (mirroring tinygrad's `setFastMathEnabled`), in which case
+  it uses `Fast`.
+- **Default device.** Priority is now **CUDA → METAL → CL → RUST → CC → RAYON →
+  INTERP**. On macOS Metal beats the deprecated OpenCL stack. `pick_device` keeps
+  its old signature (Metal absent); `pick_device_with_metal` is the new entry point.
+- **Gates.** `tests/backend_harness.rs` (12/12) runs its smoke/ALU/dtype/reduction/
+  matmul/cast batteries on METAL too; `tests/device_select.rs` covers registration,
+  priority, execution and offset views; `examples/xor` trains to convergence and
+  `FAST=1 STEPS=3 JIT=1 examples/mnist` (CNN + BatchNorm + advanced indexing +
+  Adam) runs a capture/replay step on METAL, as does a `FAST=1` ViT-MNIST train
+  step (the 38-buffer fused ViT kernel is split by the budget). `tests/bf16.rs`,
+  `tests/rand.rs`, `tests/nn_attention.rs`, and `tests/nn_models.rs` pass with
+  METAL as the default. Full suite with `AUTORUST_CL_LIB=/nonexistent` (to
+  bypass Apple's broken OpenCL driver): **231 passed, 0 failed, 11 ignored**.
+- **Buffer-limit fusion budget (general, not Metal-only).** `Renderer` gained
+  `max_buffers` (`usize::MAX` for every existing backend, **31** for Metal). The
+  scheduler turns it into a fusion budget in `schedule/indexing.rs`
+  (`budget_realizations`): producer-first, it carries each node's distinct input
+  buffers (capped just over the budget) and, when a node would exceed it,
+  realizes the largest non-leaf source; the downstream kernel then reads that
+  one buffer instead of its whole subtree. `budget = max_buffers * 2/3` leaves
+  headroom for the output/stage temporaries the scheduler adds later. A future
+  OpenGL-compute (or other bounded) backend only has to set this fact.
+  `MetalProgram` still asserts `signature.len() <= 31` with an actionable
+  message for the one case the budget cannot fix: a single op directly reading
+  more buffers than the limit. The tiny ViT golden (previously 38 buffers) now
+  runs on METAL.
+- **Known gaps.** No simdgroup/WMMA tensor cores (`tensor_cores` is empty, so the
+  scheduler emits regular kernels); no `double` (Apple GPUs do not implement
+  64-bit floats, so the harness skips f64 programs and the two ONNX tests with
+  f64 intermediates pin themselves to INTERP); no Metal graph-capture path; fused
+  `Tensor.custom_kernel` remains the M7 stretch. The fusion budget is a
+  conservative heuristic (leaf-buffer union, not the final argument count), so
+  it can over-split a graph; it is a no-op for `usize::MAX`. Port fixes found
+  while wiring the examples: `tests/backend_harness.rs` now pins INTERP
+  explicitly (`staging_dev(None)` meant "default device", not PYTHON), and the
+  MNIST/ViT `load_images`/`load_labels` no longer hold a `RefMut` across Tensor
+  methods. Float→small-int casts on Apple OpenCL/Metal saturate, so cstyle emits
+  an explicit `(long)` truncation (clamping negatives for unsigned) on those
+  backends, matching the interpreter's `ctypes` semantics.
+
 ---
 
 ## 5. Codegen rule parity (`full_rewrite_to_sink`)
@@ -355,11 +421,18 @@ Rust pipeline (`src/codegen/pipeline.rs` `stages()`/`post_stages()`). ✅ = wire
 ## 8. Implementation status
 
 ### 8.0 Build / test gate
-- `cargo test` → **200 passed, 11 ignored, 0 failed** (2026-10, with the ONNX
-  importer). The ignored = 1 `backend_harness` (`#[ignore = "M7 gate: XOR training
-  via tinygrad.nn (Gradient/Adam)"]`), 1 `nn_xor_parity::xor_parity_tinygrad_seed42`,
-  1 `mnist_e2e` (downloads data + a CNN train step), 1 `vit_e2e`, 1
+- `cargo test` → **231 passed, 11 ignored, 0 failed** with
+  `AUTORUST_CL_LIB=/nonexistent` (2026-11; the OpenCL backend is skipped so the
+  suite does not hit Apple's pre-existing OpenCL driver failure — see below).
+  This run includes the Metal backend on an Apple M2. The ignored = 1
+  `backend_harness` (`#[ignore = "M7 gate: XOR training via tinygrad.nn
+  (Gradient/Adam)"]`), 1 `nn_xor_parity::xor_parity_tinygrad_seed42`, 1
+  `mnist_e2e` (downloads data + a CNN train step), 1 `vit_e2e`, 1
   `onnx::external_checkpoint_smoke` (needs `ONNX_MODEL`), and 6 doc-tests.
+- **Apple OpenCL caveat:** with the default feature set on macOS, `tests/flash_cl.rs`
+  fails at `clCreateKernel` (`-48`/`newComputePipelineState failed`) in Apple's
+  OpenCL runtime. This is independent of Metal (the test is skipped by the env
+  above) and is the reason the full-suite count uses the CL workaround.
 - Python differential gates all green: `test_rewrite_diff.py` (10 tests),
   `test_roundtrip`, `test_tensor_diff`, `test_schedule_diff`, `test_codegen_diff`,
   `test_exec_diff`, `test_native_exec`.
@@ -521,11 +594,12 @@ those nodes).
   covers 159/159 kernels in the ops/conv/norm/attention/indexing/layer suites; matmul 512²
   ~87× / elementwise ~7.5× vs `INTERP` (4.3× over the f64 R1 path on matmul). Default device
   on a CPU-only host is `RAYON`.
-- INTERP always on; CL behind `backend_cl` (opencl3). M8 render byte-diff + numerics +
-  kernel-count parity on the RTX 3060. `tests/backend_harness.rs` 12 passed / 1 ignored.
+- INTERP always on; CL behind `backend_cl` (opencl3); METAL behind `backend_metal`
+  (macOS-only `objc2`, §M9). M8 render byte-diff + numerics + kernel-count parity on
+  the RTX 3060. `tests/backend_harness.rs` 12 passed / 1 ignored, now including METAL.
 - **Default device** (`Tensor::creation::default_device`): env `DEFAULT_DEVICE` if set, else
-  `CL` when `backend_cl` is compiled in and an OpenCL device is present
-  (`ops_cl::available`, a non-panicking probe), else `INTERP`. There is **no "NV"**: it was a
+  `CUDA` → `METAL` (macOS) → `CL` → `RUST` → `CC` → `RAYON` → `INTERP` for the first
+  available backend. The probes are non-panicking. There is **no "NV"**: it was a
   leftover name for a backend that was never ported (it silently ran on the interpreter), so
   `Tensor::device(ctx)` now reports the real one (`UOp.device`, ops.py:847).
 - The Python differential gates compare graph/`key()` hashes that embed the device string, so
@@ -547,6 +621,8 @@ those nodes).
   panics. Our forward/backward XOR graph never produces one, so CL training works. tinygrad
   avoids it unconditionally by carrying `Buffer.offset` into the kernel's buffer arg (the
   real fix if a future graph needs it); `tests/cl_offset.rs` pins the current panic.
+  `MetalAllocator` *does* implement `_offset` (shared allocation + byte offset) and
+  `tests/device_select.rs::metal_allocator_supports_offset_views` pins it.
 
 ### 8.10 In-place parameter updates: `Tensor::assign` (DONE)
 tinygrad's optimizers assign the update into the parameter's existing buffer

@@ -3,7 +3,7 @@ name = "autorust"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A faithful Rust port of tinygrad: UOp graphs, a rangeify scheduler, codegen and CPU/OpenCL/CUDA backends"
+description = "A faithful Rust port of tinygrad: UOp graphs, a rangeify scheduler, codegen and CPU/OpenCL/CUDA/Metal backends"
 license = "MIT"
 repository = "https://github.com/apexys/autorust"
 homepage = "https://github.com/apexys/autorust"
@@ -37,19 +37,27 @@ required-features = ["backend_cl"]
 name = "cuda_smoke"
 required-features = ["backend_cuda"]
 
+[[bin]]
+name = "metal_smoke"
+required-features = ["backend_metal"]
+
 [features]
 # `ops_interp` is always compiled (the faithful reference interpreter). The
 # default set adds the multithreaded CPU backend (`RAYON`), the dynamically
 # loaded native CPU backends (`RUST`/`CC`), and OpenCL (`CL`). CUDA stays opt-in
 # (build weight/test environment; it is dynamically loaded and needs no CUDA
 # libraries at build time).
-default = ["capi", "backend_rayon", "backend_rust", "backend_cl", "backend_clang"]
+default = ["capi", "backend_rayon", "backend_rust", "backend_cl", "backend_clang", "backend_metal"]
 # C ABI loaded by the Python ctypes bridge (py/bridge.py).
 capi = []
 # Multithreaded CPU backend (device "RAYON"), parallelized with `rayon`.
 backend_rayon = ["dep:rayon", "dep:bytemuck"]
 # OpenCL backend (device "CL"), loaded dynamically at run time.
 backend_cl = ["dep:libloading"]
+# Metal backend (device "METAL"), macOS only. `objc2` links the OS-provided
+# `libobjc`/`Metal.framework`; no Xcode or Metal toolchain is needed at build
+# time (shaders are compiled at run time by `newLibraryWithSource:`).
+backend_metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
 # CUDA backend (operations/codegen on the CUDA driver API via `cudarc`),
 # dynamically loaded; no CUDA libraries are required at build time.
 backend_cuda = ["dep:cudarc", "dep:libloading"]
@@ -98,6 +106,32 @@ cudarc = { version = "0.19", optional = true, default-features = false, features
     "dynamic-loading",
     "cuda-version-from-build-system",
     "fallback-latest",
+] }
+
+# Metal backend (`backend_metal`). Target-gated so non-macOS builds never see
+# these; on macOS they link the OS-provided Objective-C runtime and Metal
+# framework, so no toolchain or SDK download is required.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true, default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+] }
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLResource",
+    "MTLTypes",
 ] }
 
 [profile.dev]

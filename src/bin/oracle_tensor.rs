@@ -314,6 +314,10 @@ fn main() {
             render_calls_cuda(&mut ctx.raw(), planned);
             return;
         }
+        if autorust::helpers::env::get("TG_METAL_RENDER").is_some() {
+            render_calls_metal(&mut ctx.raw(), planned);
+            return;
+        }
         if autorust::helpers::env::get("TG_M5_EXEC").is_some() {
             let steps: Vec<ExecStep> = prog
                 .prog
@@ -426,6 +430,40 @@ fn render_calls_cuda(ctx: &mut UOpCtx, planned: UopId) {
             autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body.clone(), &ren, true);
         let lst = autorust::codegen::linearize::linearize(ctx, sunk);
         let text = autorust::renderer::cstyle::render_cuda(ctx, &lst);
+        let mut j = String::from("\"");
+        for ch in text.chars() {
+            match ch {
+                '"' => j.push_str("\\\""),
+                '\\' => j.push_str("\\\\"),
+                '\n' => j.push_str("\\n"),
+                '\t' => j.push_str("\\t"),
+                '\r' => j.push_str("\\r"),
+                c if (c as u32) < 0x20 => j.push_str(&format!("\\u{:04x}", c as u32)),
+                c => j.push(c),
+            }
+        }
+        j.push('"');
+        outs.push(j);
+    }
+    println!("{{\"ok\": true, \"renders\": [{}]}}", outs.join(", "));
+}
+
+/// Metal gate: render each compute kernel's linearized uops with the
+/// Metal-flavored cstyle renderer and emit the text per call.
+fn render_calls_metal(ctx: &mut UOpCtx, planned: UopId) {
+    let ren = autorust::renderer::Renderer::metal();
+    let calls: Vec<UopId> = ctx.srcs(&planned).to_vec();
+    let mut outs: Vec<String> = Vec::new();
+    for call in calls.iter() {
+        let body = &ctx.srcs(call)[0].clone();
+        if ctx.op_of(body) == autorust::uop::Ops::Copy {
+            outs.push("null".to_string());
+            continue;
+        }
+        let sunk =
+            autorust::codegen::pipeline::full_rewrite_to_sink_with(ctx, body.clone(), &ren, true);
+        let lst = autorust::codegen::linearize::linearize(ctx, sunk);
+        let text = autorust::renderer::cstyle::render_metal(ctx, &lst);
         let mut j = String::from("\"");
         for ch in text.chars() {
             match ch {
