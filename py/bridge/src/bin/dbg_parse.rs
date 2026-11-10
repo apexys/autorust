@@ -17,6 +17,10 @@ fn main() {
             Ok(g) => {
                 let out = autorust::uop::to_string_flat(&g.to_flat());
                 println!("OK {} bytes out", out.len());
+                print!(
+                    "{}",
+                    autorust_bridge::graph_summary(&j).expect("graph_summary")
+                );
             }
         },
     }

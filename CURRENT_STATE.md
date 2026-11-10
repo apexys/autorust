@@ -2123,11 +2123,13 @@ API shape, and missing user-facing features.
 - Edition 2024 is current; `rust-version = "1.88"` is the first release with
   the edition-2024 let-chains used in the code. CI is deferred by request.
 - **The Python bridge is its own crate** (`py/bridge`, package
-  `autorust-bridge`, `publish = false`). It holds the `cdylib` C ABI over
-  `autorust::rebuild` and the oracle/dev binaries that used to live in
-  `src/bin`. The library is now a plain `rlib` — no `capi` feature, no
-  `cdylib`, no dev-only binaries in the published package. `cargo build`
-  builds only the library (`default-members = ["."]`); the harness uses
+  `autorust-bridge`, `publish = false`). It holds the `cdylib` C ABI, the
+  `rebuild`/`graph_summary` JSON round-trip helpers (thin wrappers over the
+  public `uop::{parse_flat, to_string_flat, Graph}` codec), and the oracle/dev
+  binaries that used to live in `src/bin`. The library is now a plain `rlib` —
+  no `capi` feature, no `cdylib`, no tooling-only entry points, no dev-only
+  binaries in the published package. `cargo build` builds only the library
+  (`default-members = ["."]`); the harness uses
   `cargo build -p autorust-bridge`.
 
 **API decision: `Ctx` lives inside `Tensor` — DONE (2026-10)**

@@ -16,7 +16,7 @@ fn main() {
                 .expect("failed to read stdin");
         }
     }
-    match autorust::rebuild(&input) {
+    match autorust_bridge::rebuild(&input) {
         Ok(out) => {
             print!("{out}");
             std::io::stdout().flush().unwrap();

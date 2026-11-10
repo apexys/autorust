@@ -85,34 +85,3 @@ pub mod tensor;
 pub mod uop;
 
 pub use runtime::autotune::{select_fastest_device, set_default_device};
-
-/// JSON graph round-trip through the interned graph (used by the development
-/// bridge/oracle crate under `py/bridge`).
-pub fn rebuild(json: &str) -> Result<String, String> {
-    let fg = uop::parse_flat(json)?;
-    let g = uop::Graph::from_flat(&fg)?;
-    Ok(uop::to_string_flat(&g.to_flat()))
-}
-
-/// Rebuild and return root summary (op names + dtype attrs) for quick CLI checks.
-pub fn graph_summary(json: &str) -> Result<String, String> {
-    let fg = uop::parse_flat(json)?;
-    let g = uop::Graph::from_flat(&fg)?;
-    let order = g.toposort();
-    let mut out = String::new();
-    for id in order {
-        out.push_str(&format!(
-            "{} {} {} srcs={} arg={:?}\n",
-            id.id(),
-            id.op.pyname(),
-            id.dtype.attr(),
-            id.srcs
-                .iter()
-                .map(|s| s.id().to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-            id.arg
-        ));
-    }
-    Ok(out)
-}

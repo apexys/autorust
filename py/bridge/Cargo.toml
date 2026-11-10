@@ -5,11 +5,12 @@ edition = "2024"
 publish = false
 description = "Development-only C ABI and oracle binaries for the autorust Python differential harness"
 
-# `py/bridge.py` loads this as `target/debug/libautorust_bridge.so`. The
-# published `autorust` crate is a plain rlib; nothing here ships.
+# `py/bridge.py` loads the `cdylib` as
+# `target/debug/libautorust_bridge.so`; the `rlib` lets the oracle bins share
+# `rebuild`/`graph_summary`. Nothing here ships.
 [lib]
 name = "autorust_bridge"
-crate-type = ["cdylib"]
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 autorust = { path = "../.." }
