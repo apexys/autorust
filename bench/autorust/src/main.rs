@@ -92,6 +92,9 @@ impl Module for Mnist {
 
 /// First call (capture/compile) plus the per-step samples after warmup.
 fn measure(mut step: impl FnMut(), warmup: usize, iters: usize) -> (f64, Vec<f64>) {
+    // Profile only the measured region; model construction (parameter init)
+    // otherwise dominates the table on workloads with hundreds of weights.
+    autorust::engine::prof::reset();
     let t = Instant::now();
     step();
     let cold = t.elapsed().as_secs_f64() * 1e3;
@@ -219,7 +222,7 @@ fn main() {
             let x = Tensor::zeros(&ctx, [bs, 3, img, img]).to_param();
             let mut jit = Jit::new();
             let run = |jit: &mut Jit, sess: &mut Session| {
-                let out = jit.call(&ctx, sess, |_c, _s| model.forward(&x));
+                let out = jit.call(&ctx, sess, |_c, s| model.forward_with(&x, s));
                 // Force completion in the *same* session: a fresh session would
                 // re-schedule the output and measure that instead of the step.
                 let _ = out.to_list::<f32>(sess);

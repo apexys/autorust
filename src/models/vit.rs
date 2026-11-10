@@ -112,6 +112,51 @@ impl ViT {
             .permute_ctx(ctx, &[0, 2, 1])
     }
 
+    /// Session-aware [`ViT::forward`]: eval-mode inference runs the fused
+    /// attention kernels; training and backends without them fall back to the
+    /// graph path (the realized projections would only add copies there).
+    pub fn forward_with(&self, x: &Tensor, sess: &mut crate::engine::session::Session) -> Tensor {
+        let fused_device = x.device().is_some_and(|d| {
+            d.starts_with("CUDA") || d.starts_with("CL") || d.starts_with("METAL")
+        });
+        let fused_attention = crate::settings::global().attention
+            != crate::models::flash_attention::AttentionKind::Sdpa;
+        if sess.training_enabled() || !fused_device || !fused_attention {
+            return self.forward_ctx(x, &mut x.ctx().borrow_mut());
+        }
+        let bs = x.shape()[0usize].clone();
+        let ce = {
+            let ctx = &mut x.ctx().borrow_mut();
+            let z = Tensor::zeros(&mut *ctx, vec![bs.clone(), SVal::I(1), SVal::I(1)]);
+            self.cls.add_ctx(ctx, &z)
+        };
+        let pe = self.patch_embed(x);
+        let x = {
+            let ctx = &mut x.ctx().borrow_mut();
+            let x = ce.cat_ctx(ctx, &[pe], 1);
+            x.add_ctx(ctx, &self.pos_embedding)
+        };
+        let mut x = x;
+        for tb in &self.tbs {
+            // Pin the block input: the fused attention realizes q/k/v, and
+            // without a boundary every block would re-schedule the whole prefix.
+            x.realize_device_ctx(&mut x.ctx().borrow_mut(), sess);
+            x = tb.forward_with(&x, sess);
+        }
+        let cls_tok = {
+            let ctx = &mut x.ctx().borrow_mut();
+            x.getitem_ctx(ctx, &[Ix::All, Ix::Index(0)])
+        };
+        let cls_tok = {
+            let ctx = &mut cls_tok.ctx().borrow_mut();
+            cls_tok
+                .layernorm_ctx(ctx, -1, 1e-5)
+                .linear_ctx(ctx, &self.encoder_norm.0, Some(&self.encoder_norm.1))
+        };
+        let ctx = &mut cls_tok.ctx().borrow_mut();
+        cls_tok.linear_ctx(ctx, &self.head.0, Some(&self.head.1))
+    }
+
     /// `ViT.forward` (vit.py:24-30).
     pub fn forward(&self, x: &Tensor) -> Tensor {
         self.forward_ctx(x, &mut x.ctx().borrow_mut())

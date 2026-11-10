@@ -3,6 +3,7 @@
 //! activation is an [`Act`]. Dropout is applied by `Tensor::dropout` (active
 //! only under `TRAINING`).
 
+use crate::engine::session::Session;
 use crate::tensor::nn::Module;
 use crate::tensor::{AsCtx, Tensor};
 use crate::uop::ctx::UOpCtx;
@@ -168,6 +169,136 @@ impl TransformerBlock {
         } else {
             q.scaled_dot_product_attention_ctx(ctx, &k, &v, mask, 0.0, false, false)
         };
+        let attention = attention.transpose_ctx(ctx, 1, 2);
+        let merged = attention.reshape_ctx(
+            ctx,
+            vec![
+                bs,
+                SVal::I(-1),
+                SVal::I((self.num_heads * self.head_size) as i128),
+            ],
+        );
+        merged.linear_ctx(ctx, &self.out.0, Some(&self.out.1))
+    }
+
+    /// Session-aware [`Self::forward`]: in eval mode the fused attention kernel
+    /// runs instead of the graph-level SDPA (training keeps SDPA, because the
+    /// fused path hands back a realized buffer and cuts autograd).
+    pub fn forward_with(&self, x: &Tensor, sess: &mut Session) -> Tensor {
+        if sess.training_enabled() {
+            return self.forward_ctx(x, &mut x.ctx().borrow_mut());
+        }
+        self.forward_mask_with(x, None, sess)
+    }
+
+    #[doc(hidden)]
+    pub fn forward_mask_with(
+        &self,
+        x: &Tensor,
+        mask: Option<&Tensor>,
+        sess: &mut Session,
+    ) -> Tensor {
+        let drop = |t: &Tensor| {
+            let ctx = &mut t.ctx().borrow_mut();
+            t.dropout_ctx(ctx, self.dropout)
+        };
+        if self.prenorm {
+            let n1 = {
+                let ctx = &mut x.ctx().borrow_mut();
+                x.layernorm_ctx(ctx, -1, 1e-5)
+                    .linear_ctx(ctx, &self.ln1.0, Some(&self.ln1.1))
+            };
+            let a = self.attn_mask_with(&n1, mask, sess);
+            let a = drop(&a);
+            let x = {
+                let ctx = &mut x.ctx().borrow_mut();
+                x.add_ctx(ctx, &a)
+            };
+            let n2 = {
+                let ctx = &mut x.ctx().borrow_mut();
+                x.layernorm_ctx(ctx, -1, 1e-5)
+                    .linear_ctx(ctx, &self.ln2.0, Some(&self.ln2.1))
+            };
+            let h = {
+                let ctx = &mut n2.ctx().borrow_mut();
+                let ff = n2.linear_ctx(ctx, &self.ff1.0, Some(&self.ff1.1));
+                let g = self.act.apply(&ff, ctx);
+                g.linear_ctx(ctx, &self.ff2.0, Some(&self.ff2.1))
+            };
+            let h = drop(&h);
+            let ctx = &mut x.ctx().borrow_mut();
+            x.add_ctx(ctx, &h)
+        } else {
+            let a = self.attn_mask_with(x, mask, sess);
+            let a = drop(&a);
+            let x = {
+                let ctx = &mut x.ctx().borrow_mut();
+                x.add_ctx(ctx, &a)
+            };
+            let x = {
+                let ctx = &mut x.ctx().borrow_mut();
+                x.layernorm_ctx(ctx, -1, 1e-5)
+                    .linear_ctx(ctx, &self.ln1.0, Some(&self.ln1.1))
+            };
+            let h = {
+                let ctx = &mut x.ctx().borrow_mut();
+                let h = x.linear_ctx(ctx, &self.ff1.0, Some(&self.ff1.1));
+                let h = self.act.apply(&h, ctx);
+                h.linear_ctx(ctx, &self.ff2.0, Some(&self.ff2.1))
+            };
+            let h = drop(&h);
+            let x = {
+                let ctx = &mut x.ctx().borrow_mut();
+                x.add_ctx(ctx, &h)
+            };
+            let ctx = &mut x.ctx().borrow_mut();
+            x.layernorm_ctx(ctx, -1, 1e-5)
+                .linear_ctx(ctx, &self.ln2.0, Some(&self.ln2.1))
+        }
+    }
+
+    /// Attention with fused q/k/v: realize the projections **before** the
+    /// reshape/transpose so they stay plain library GEMMs, then let the fused
+    /// kernel read the transposed views (a cheap copy).
+    #[doc(hidden)]
+    pub fn attn_mask_with(
+        &self,
+        x: &Tensor,
+        mask: Option<&Tensor>,
+        sess: &mut Session,
+    ) -> Tensor {
+        let (q0, k0, v0, bs) = {
+            let ctx = &mut x.ctx().borrow_mut();
+            let q = x.linear_ctx(ctx, &self.query.0, Some(&self.query.1));
+            let k = x.linear_ctx(ctx, &self.key.0, Some(&self.key.1));
+            let v = x.linear_ctx(ctx, &self.value.0, Some(&self.value.1));
+            (q, k, v, x.shape_ctx(ctx).into_vec()[0].clone())
+        };
+        {
+            let ctx = &mut x.ctx().borrow_mut();
+            // `q0/k0/v0` are temporaries: pin their storage, or the session's
+            // weak BufTable views die with them while the views built below
+            // still index these buffers.
+            for b in Tensor::realize_many(ctx, sess, [&q0, &k0, &v0]) {
+                sess.pin(b);
+            }
+        }
+        let view = |t: &Tensor| {
+            let ctx = &mut t.ctx().borrow_mut();
+            t.reshape_ctx(
+                ctx,
+                vec![
+                    bs.clone(),
+                    SVal::I(-1),
+                    SVal::I(self.num_heads as i128),
+                    SVal::I(self.head_size as i128),
+                ],
+            )
+            .transpose_ctx(ctx, 1, 2)
+        };
+        let (q, k, v) = (view(&q0), view(&k0), view(&v0));
+        let attention = q.attention_with(&k, &v, mask, 0.0, false, sess);
+        let ctx = &mut x.ctx().borrow_mut();
         let attention = attention.transpose_ctx(ctx, 1, 2);
         let merged = attention.reshape_ctx(
             ctx,

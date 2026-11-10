@@ -89,3 +89,30 @@ fn vit_matches_tinygrad() {
         close(&out.to_list::<f32>(&mut sess), g.out, 1e-3, g.name);
     }
 }
+
+/// The session-aware forward (fused attention in eval mode) must agree with the
+/// graph-level `forward`. On CUDA the f32 kernel is TF32, hence the tolerance.
+#[test]
+fn vit_session_path_matches_graph_path() {
+    let ctx = Ctx::new();
+    Tensor::manual_seed(7);
+    let vit = ViT::build(&mut ctx.raw(), 1, 32, 4, 3, 32, 8, 10);
+    let vit = vit.into_params();
+    let n = 2 * 3 * 32 * 32;
+    let xd: Vec<f32> = (0..n).map(|i| ((i * 29 % 101) as f32 - 50.0) * 0.02).collect();
+    let x = Tensor::from_slice(&ctx, &xd, None, None).reshape([2, 3, 32, 32]);
+
+    let mut s1 = Session::new();
+    let want = vit.forward(&x).to_list::<f32>(&mut s1);
+
+    let mut s2 = Session::new();
+    let got = vit.forward_with(&x, &mut s2).to_list::<f32>(&mut s2);
+
+    assert_eq!(got.len(), want.len());
+    let maxd = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(maxd < 2e-3, "ViT session path vs graph maxabs {maxd:e}");
+}
