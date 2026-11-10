@@ -2126,6 +2126,10 @@ fn get_kernel_graph_once(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> U
             crate::engine::prof::count("rng.graph_nodes");
         }
     }
+
+    // Cleanups for speed and runability, before `pm_add_buffers` creates the
+    // kernel outputs (`remove_bufferize` must not run after that).
+    let t = prof.then(std::time::Instant::now);
     let pm = symbolic()
         .add(&crate::codegen::simplify::pm_reduce_simplify())
         .add(&pm_const_buffer_folding())

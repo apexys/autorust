@@ -1778,18 +1778,86 @@ pub fn substitute(
     if dvars.is_empty() {
         return root;
     }
-    let pm = substitute_pm();
-    graph_rewrite(
-        ctx,
-        root,
-        pm,
-        true,
-        None,
-        walk,
-        enter_calls,
-        CtxVal::Subst(dvars),
-    )
-    .unwrap_or_else(|e| panic!("TGERR: substitute failed: {e}"))
+    if walk || enter_calls {
+        let pm = substitute_pm();
+        return graph_rewrite(
+            ctx,
+            root,
+            pm,
+            true,
+            None,
+            walk,
+            enter_calls,
+            CtxVal::Subst(dvars),
+        )
+        .unwrap_or_else(|e| panic!("TGERR: substitute failed: {e}"));
+    }
+    // Direct bottom-up DFS with a memo. `remove_bufferize` runs this once per
+    // bufferize on subtrees of the whole model graph; the generic rewrite
+    // (rule match + waitlist) made that O(n^2) (17 s of a 20 s schedule).
+    let mut memo: HashMap<UopId, UopId> = HashMap::new();
+    let mut stack: Vec<(UopId, bool)> = vec![(root.clone(), false)];
+    while let Some((u, ready)) = stack.pop() {
+        if memo.contains_key(&u) {
+            continue;
+        }
+        if let Some(v) = dvars.get(&u) {
+            // The generic rewrite substitutes the replacement's own srcs as
+            // well (the value is re-walked); alias it instead of copying `v`
+            // verbatim, or nested range substitutions are lost.
+            if !ready {
+                stack.push((u.clone(), true));
+                if !memo.contains_key(v) {
+                    stack.push((v.clone(), false));
+                }
+            } else {
+                let out = memo.get(v).cloned().unwrap_or_else(|| v.clone());
+                memo.insert(u, out);
+            }
+            continue;
+        }
+        let op = ctx.op_of(&u);
+        let srcs = ctx.srcs(&u).to_vec();
+        let skip = |i: usize| op == Ops::Function || (op == Ops::Call && i == 0);
+        if !ready {
+            stack.push((u.clone(), true));
+            for (i, s) in srcs.iter().enumerate() {
+                if !skip(i) && !memo.contains_key(s) {
+                    stack.push((s.clone(), false));
+                }
+            }
+            continue;
+        }
+        let mut changed = false;
+        let new_srcs: Vec<UopId> = srcs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                if skip(i) {
+                    return s.clone();
+                }
+                match memo.get(s) {
+                    Some(v) => {
+                        if v != s {
+                            changed = true;
+                        }
+                        v.clone()
+                    }
+                    None => s.clone(),
+                }
+            })
+            .collect();
+        let out = if changed {
+            let dt = rebuild_dtype(ctx, u.clone(), &new_srcs);
+            let arg = ctx.arg_of(&u).clone();
+            let tag = ctx.tag_of(&u).clone();
+            ctx.uop_tag(op, Some(dt), new_srcs, arg, tag)
+        } else {
+            u.clone()
+        };
+        memo.insert(u, out);
+    }
+    memo.get(&root).cloned().unwrap_or(root)
 }
 
 static SUBSTITUTE_PM: PmSlot = PmSlot::new();
