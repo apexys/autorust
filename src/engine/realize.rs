@@ -372,15 +372,30 @@ fn reuse_program(ctx: &mut UOpCtx, p: &CompiledProg) -> Rc<CompiledProg> {
     })
 }
 
-/// `to_program` (codegen/__init__.py:500) — cached do_to_program. The device
-/// supplies its renderer (facts + render) and compiler through the public
-/// backend seams.
-pub fn to_program(
+/// A rendered kernel waiting for its compile step (parallel-compile batch).
+struct PreparedProgram {
+    key: u64,
+    gkey: u64,
+    sunk: UopId,
+    lst: Vec<UopId>,
+    pi: ProgramInfo,
+    src_text: String,
+    dev: Rc<crate::runtime::device::Compiled>,
+}
+
+enum Prepared {
+    /// Cache/global hit or a host-dispatch kernel: no compilation needed.
+    Ready(Rc<CompiledProg>),
+    Compile(Box<PreparedProgram>),
+}
+
+/// Render one kernel and return either a ready program or the source to compile.
+fn prepare_program(
     ctx: &mut UOpCtx,
     ast: UopId,
     dev: &Rc<crate::runtime::device::Compiled>,
     cache: &mut ProgCache,
-) -> Rc<CompiledProg> {
+) -> Prepared {
     let key = ctx.g.content_key(&ast);
     let gkey = global_program_key(ctx, dev, &ast);
     if crate::engine::prof::enabled() {
@@ -393,12 +408,12 @@ pub fn to_program(
         // expensive artifacts (`elf`, `pi`) are arena-independent; re-intern a
         // fresh PROGRAM node in this ctx and reuse them (no re-lower/re-render/
         // re-compile).
-        return reuse_program(ctx, &p);
+        return Prepared::Ready(reuse_program(ctx, &p));
     }
     if let Some(p) = GLOBAL_PROGS.with(|g| g.borrow_mut().get(gkey)) {
         crate::engine::prof::count("codegen.global_prog_hit");
         cache.insert(key, p.clone());
-        return reuse_program(ctx, &p);
+        return Prepared::Ready(reuse_program(ctx, &p));
     }
     // Host-dispatch kernel (library GEMM): no rendering/compilation. The AST is
     // still walked for its buffer slots so the executor can resolve `bufs`.
@@ -419,7 +434,7 @@ pub fn to_program(
         });
         cache.insert(key, cp.clone());
         GLOBAL_PROGS.with(|g| g.borrow_mut().insert(gkey, cp.clone()));
-        return cp;
+        return Prepared::Ready(cp);
     }
     // 1. full_rewrite_to_sink
     let optimize = matches!(ctx.tag_of(&ast), Arg::None);
@@ -476,8 +491,33 @@ pub fn to_program(
         }
         eprintln!("LST### END name={}", pname);
     }
-    // 5. do_compile: through the device's compiler seam
-    let lib = dev.compiler.compile_cached(&src_text);
+    Prepared::Compile(Box::new(PreparedProgram {
+        key,
+        gkey,
+        sunk,
+        lst,
+        pi,
+        src_text,
+        dev: dev.clone(),
+    }))
+}
+
+/// Build the PROGRAM/ELF from a rendered kernel and its compiled bytes.
+fn finish_program(
+    ctx: &mut UOpCtx,
+    p: PreparedProgram,
+    lib: Vec<u8>,
+    cache: &mut ProgCache,
+) -> Rc<CompiledProg> {
+    let PreparedProgram {
+        key,
+        gkey,
+        sunk,
+        lst,
+        pi,
+        src_text,
+        dev: _,
+    } = p;
     let linear_uop = ctx.uop(
         Ops::Linear,
         Some(crate::dtype::VOID),
@@ -531,6 +571,24 @@ pub fn to_program(
     cp
 }
 
+/// `to_program` (codegen/__init__.py:500) — cached do_to_program. The device
+/// supplies its renderer (facts + render) and compiler through the public
+/// backend seams.
+pub fn to_program(
+    ctx: &mut UOpCtx,
+    ast: UopId,
+    dev: &Rc<crate::runtime::device::Compiled>,
+    cache: &mut ProgCache,
+) -> Rc<CompiledProg> {
+    match prepare_program(ctx, ast, dev, cache) {
+        Prepared::Ready(cp) => cp,
+        Prepared::Compile(p) => {
+            let lib = dev.compiler.compile_cached(&p.src_text);
+            finish_program(ctx, *p, lib, cache)
+        }
+    }
+}
+
 // ---------------- compile_linear + run_linear ----------------
 
 /// `lower_and_compile` (realize.py:263) — swap compiled PROGRAMs into every
@@ -542,19 +600,60 @@ pub fn compile_linear(
     cache: &mut ProgCache,
 ) -> (UopId, HashMap<u32, Rc<CompiledProg>>) {
     let calls = ctx.srcs(&linear).to_vec();
+    // Phase 1: render serially (needs the arena), collecting the sources that
+    // still need compiling. Cache hits and host kernels are ready immediately.
+    let mut ready: HashMap<u32, Rc<CompiledProg>> = HashMap::new();
+    let mut pending: Vec<(u32, PreparedProgram)> = Vec::new();
+    for c in &calls {
+        let ast = ctx.srcs(c)[0].clone();
+        if ctx.op_of(&ast) != Ops::Sink {
+            continue;
+        }
+        // device from the first global arg's buffer
+        let first_arg = ctx.srcs(c)[1].clone();
+        let dev_name = buffer_of(ctx, &mut BufTable::default(), first_arg)
+            .device()
+            .to_string();
+        let dev = device(&dev_name);
+        match prepare_program(ctx, ast, &dev, cache) {
+            Prepared::Ready(cp) => {
+                ready.insert(c.id(), cp);
+            }
+            Prepared::Compile(p) => pending.push((c.id(), *p)),
+        }
+    }
+    // Phase 2: batch-compile per device (NVRTC parallelizes internally).
+    if !pending.is_empty() {
+        let mut groups: Vec<(Rc<crate::runtime::device::Compiled>, Vec<usize>)> = Vec::new();
+        for (i, (_, p)) in pending.iter().enumerate() {
+            if let Some(g) = groups.iter_mut().find(|(d, _)| Rc::ptr_eq(d, &p.dev)) {
+                g.1.push(i);
+            } else {
+                groups.push((p.dev.clone(), vec![i]));
+            }
+        }
+        let mut libs: Vec<Option<Vec<u8>>> = (0..pending.len()).map(|_| None).collect();
+        for (dev, idxs) in &groups {
+            let srcs: Vec<String> = idxs
+                .iter()
+                .map(|&i| pending[i].1.src_text.clone())
+                .collect();
+            let compiled = dev.compiler.compile_batch(&srcs);
+            for (i, lib) in idxs.iter().copied().zip(compiled) {
+                libs[i] = Some(lib);
+            }
+        }
+        // Phase 3: build the PROGRAM/ELF nodes (serially, needs the arena).
+        for (i, (cid, p)) in pending.into_iter().enumerate() {
+            let cp = finish_program(ctx, p, libs[i].take().unwrap(), cache);
+            ready.insert(cid, cp);
+        }
+    }
     let mut replaced = false;
     let mut new_calls: Vec<UopId> = Vec::with_capacity(calls.len());
     let mut progs: HashMap<u32, Rc<CompiledProg>> = HashMap::new();
     for c in &calls {
-        let ast = &ctx.srcs(c)[0].clone();
-        if ctx.op_of(ast) == Ops::Sink {
-            // device from the first global arg's buffer
-            let first_arg = &ctx.srcs(c)[1].clone();
-            let dev_name = buffer_of(ctx, &mut BufTable::default(), first_arg.clone())
-                .device()
-                .to_string();
-            let dev = device(&dev_name);
-            let cp = to_program(ctx, ast.clone(), &dev, cache);
+        if let Some(cp) = ready.get(&c.id()).cloned() {
             let mut new_srcs = vec![cp.uop.clone()];
             new_srcs.extend(ctx.srcs(c)[1..].iter().cloned());
             let new_call = ctx.uop(

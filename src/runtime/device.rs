@@ -178,6 +178,11 @@ pub trait Comp {
     }
     /// `Compiler.compile` with an in-memory cache keyed by source.
     fn compile_cached(&self, src: &str) -> Vec<u8>;
+    /// Compile a batch of sources, preserving order. Backends that can compile
+    /// concurrently (CUDA/NVRTC) override this; the default stays serial.
+    fn compile_batch(&self, srcs: &[String]) -> Vec<Vec<u8>> {
+        srcs.iter().map(|s| self.compile_cached(s)).collect()
+    }
 }
 
 /// The empty compiler default.

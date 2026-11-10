@@ -159,6 +159,7 @@ parallel.
 | `CC` | path/name | `clang`, else `cc` | C compiler for the `CC` backend. |
 | `AUTORUST_CC_ARCH` | arch | `native` | `-march`/`-mcpu` for `CC` kernels. |
 | `CUDA_PATH` | directory | `/usr/local/cuda`, `/usr`, `/opt/cuda` include paths | NVRTC include root (`$CUDA_PATH/include`). |
+| `AUTORUST_COMPILE_THREADS` | integer | `8` | NVRTC workers per kernel batch on CUDA (`1` = serial). NVRTC gains flatten after a handful of workers. |
 | `AUTORUST_CL_LIB` | path | `libOpenCL.so` | Load a specific OpenCL library (test/deployment override). |
 | `AUTORUST_CUBLAS_LIB` | path | `libcublas.so.{13,12,11}`, `.dylib`, `cublas64_*.dll` | Override the cuBLAS library. |
 | `AUTORUST_CLBLAST_LIB` | path | `libclblast.so.1`, `.dylib`, `clblast.dll` | Override the CLBlast library. |
@@ -192,6 +193,7 @@ All of these are inert unless set; most accept any value.
 | `AUTORUST_DEVICE_VERBOSE` | Per-launch `RUST` backend lines (grid, args, buffer count). |
 | `AUTORUST_RUST_DUMP`, `AUTORUST_CC_DUMP` | Print the compiled Rust/C kernel source. |
 | `AUTORUST_ATTN_DEBUG` | One-time line describing the selected fused-attention kernel. |
+| `AUTORUST_COMPILE_DEBUG` | Per-batch CUDA compile stats (`srcs`, unique sources, threads, ms). |
 | `TG_RW_TRACE`, `TG_RW_VISITS` | Rule-rewrite trace / visit histogram (also enables `AUTORUST_PROF`). |
 | `TG_DEBUG_RANGEIFY` | Rangeify debug output. |
 

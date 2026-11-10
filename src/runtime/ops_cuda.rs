@@ -15,6 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig,
@@ -538,6 +539,37 @@ impl BackendAllocator for CudaAllocator {
 
 // ---------------- compiler ----------------
 
+/// NVRTC include/arch options (recomputed per compile; cheap).
+fn nvrtc_options(arch: &str) -> CompileOptions {
+    let mut options = vec![format!("--gpu-architecture={arch}")];
+    match crate::helpers::env::get("CUDA_PATH") {
+        Some(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
+        _ => {
+            options.push("-I/usr/local/cuda/include".to_string());
+            options.push("-I/usr/include".to_string());
+            options.push("-I/opt/cuda/include".to_string());
+        }
+    }
+    CompileOptions {
+        options,
+        ..Default::default()
+    }
+}
+
+/// Compile one CUDA C source with NVRTC (`thread`-safe: no shared state).
+fn nvrtc_compile(src: &str, arch: &str) -> Vec<u8> {
+    let ptx = compile_ptx_with_opts(src, nvrtc_options(arch)).unwrap_or_else(|e| {
+        panic!("TGERR: NVRTC Compile Error ({arch})\n--- src ---\n{src}\n--- e ---\n{e}")
+    });
+    ptx.to_src().into_bytes()
+}
+
+fn ptx_cache_key(arch: &str, src: &str) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    format!("{arch}:{:016x}:{}", h.finish(), src.len())
+}
+
 struct CudaCompiler {
     inner: Rc<CudaInner>,
 }
@@ -545,28 +577,9 @@ struct CudaCompiler {
 impl Comp for CudaCompiler {
     /// `NVRTCCompiler.compile` — CUDA C source → PTX bytes.
     fn compile(&self, src: &str) -> Vec<u8> {
-        // python: `--gpu-architecture={arch}` (arch = "sm_86") plus the CUDA
-        // include search paths for cuda_bf16.h/cuda_fp16.h/cuda_fp8.h.
-        let mut options = vec![format!("--gpu-architecture={}", self.inner.arch)];
-        match crate::helpers::env::get("CUDA_PATH") {
-            Some(p) if !p.is_empty() => options.push(format!("-I{p}/include")),
-            _ => {
-                options.push("-I/usr/local/cuda/include".to_string());
-                options.push("-I/usr/include".to_string());
-                options.push("-I/opt/cuda/include".to_string());
-            }
-        }
-        let opts = CompileOptions {
-            options,
-            ..Default::default()
-        };
-        let ptx = compile_ptx_with_opts(src, opts).unwrap_or_else(|e| {
-            panic!(
-                "TGERR: NVRTC Compile Error ({})\n--- src ---\n{src}\n--- e ---\n{e}",
-                self.inner.arch
-            )
-        });
-        ptx.to_src().into_bytes()
+        // python: `--gpu-architecture={arch}` plus the CUDA include search
+        // paths for cuda_bf16.h/cuda_fp16.h/cuda_fp8.h.
+        nvrtc_compile(src, &self.inner.arch)
     }
 
     fn compile_cached(&self, src: &str) -> Vec<u8> {
@@ -589,6 +602,94 @@ impl Comp for CudaCompiler {
         }
         self.inner.compile_cache.borrow_mut().put(src, lib.clone());
         lib
+    }
+
+    /// Parallel NVRTC over a batch of kernel sources. NVRTC programs are
+    /// independent, so the compiles are spread over threads; cache/disk lookups
+    /// stay serial.
+    fn compile_batch(&self, srcs: &[String]) -> Vec<Vec<u8>> {
+        if srcs.len() <= 1 {
+            return srcs.iter().map(|s| self.compile_cached(s)).collect();
+        }
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; srcs.len()];
+        // Identical sources repeat across transformer blocks/optimizer params;
+        // compile each unique source once and fan the result out.
+        let mut unique: Vec<(String, Vec<usize>, String)> = Vec::new();
+        for (i, src) in srcs.iter().enumerate() {
+            if let Some(v) = self.inner.compile_cache.borrow().get(src) {
+                out[i] = Some(v);
+                continue;
+            }
+            let key = ptx_cache_key(&self.inner.arch, src);
+            if let Some(text) = crate::engine::disk_cache::get("cuda_ptx", &key) {
+                let lib = text.into_bytes();
+                self.inner.compile_cache.borrow_mut().put(src, lib.clone());
+                out[i] = Some(lib);
+                continue;
+            }
+            if let Some(g) = unique.iter_mut().find(|(s, _, _)| s == src) {
+                g.1.push(i);
+            } else {
+                unique.push((src.clone(), vec![i], key));
+            }
+        }
+        if !unique.is_empty() {
+            let t0 = std::time::Instant::now();
+            let arch = self.inner.arch.clone();
+            // NVRTC gains flatten after a handful of workers; cap the default
+            // so a many-core box does not spawn 24 short-lived threads per batch.
+            let cap = crate::helpers::env::get("AUTORUST_COMPILE_THREADS")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(8);
+            let threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(cap)
+                .min(unique.len())
+                .max(1);
+            let next = AtomicUsize::new(0);
+            let compiled = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(threads);
+                for _ in 0..threads {
+                    handles.push(scope.spawn(|| {
+                        let mut local = Vec::new();
+                        loop {
+                            let j = next.fetch_add(1, Ordering::Relaxed);
+                            if j >= unique.len() {
+                                break;
+                            }
+                            local.push((j, nvrtc_compile(&unique[j].0, &arch)));
+                        }
+                        local
+                    }));
+                }
+                let mut all = Vec::new();
+                for h in handles {
+                    all.extend(h.join().unwrap());
+                }
+                all
+            });
+            if crate::helpers::env::get("AUTORUST_COMPILE_DEBUG").is_some() {
+                eprintln!(
+                    "CB srcs={} unique={} threads={} ms={:.1}",
+                    srcs.len(),
+                    unique.len(),
+                    threads,
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            for (j, lib) in compiled {
+                let (src, idxs, key) = &unique[j];
+                if let Ok(text) = std::str::from_utf8(&lib) {
+                    crate::engine::disk_cache::put("cuda_ptx", key, text);
+                }
+                self.inner.compile_cache.borrow_mut().put(src, lib.clone());
+                for &i in idxs {
+                    out[i] = Some(lib.clone());
+                }
+            }
+        }
+        out.into_iter().map(|v| v.unwrap()).collect()
     }
 }
 
