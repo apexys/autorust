@@ -1,0 +1,17 @@
+[package]
+name = "autorust-bridge"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Development-only C ABI and oracle binaries for the autorust Python differential harness"
+
+# `py/bridge.py` loads this as `target/debug/libautorust_bridge.so`. The
+# published `autorust` crate is a plain rlib; nothing here ships.
+[lib]
+name = "autorust_bridge"
+crate-type = ["cdylib"]
+
+[dependencies]
+autorust = { path = "../.." }
+# `oracle_tensor` parses the pytest JSON with the same derive the library uses.
+nanoserde = "0.2.1"

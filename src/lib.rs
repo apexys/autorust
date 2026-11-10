@@ -40,7 +40,7 @@
 //!
 //! # Features
 //!
-//! Default: `capi` + `backend_rayon` + `backend_rust` + `backend_clang` +
+//! Default: `backend_rayon` + `backend_rust` + `backend_clang` +
 //! `backend_cl` + `backend_metal` + `backend_cuda` + `freeze`. All GPU backends
 //! are dynamically loaded at run time, so no vendor SDK is needed at build
 //! time; Metal links the OS frameworks on macOS only, and CUDA exists only on
@@ -86,12 +86,8 @@ pub mod uop;
 
 pub use runtime::autotune::{select_fastest_device, set_default_device};
 
-/// C ABI for the Python `ctypes` bridge (default feature `capi`).
-#[cfg(feature = "capi")]
-pub mod capi;
-
-/// JSON graph round-trip through the interned graph (used by oracle binaries
-/// and the cdylib face).
+/// JSON graph round-trip through the interned graph (used by the development
+/// bridge/oracle crate under `py/bridge`).
 pub fn rebuild(json: &str) -> Result<String, String> {
     let fg = uop::parse_flat(json)?;
     let g = uop::Graph::from_flat(&fg)?;

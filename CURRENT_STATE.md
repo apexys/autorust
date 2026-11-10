@@ -2028,7 +2028,7 @@ coverage grows.
 6. **JIT replay** — the owned `RayonKernel` is built at `render`/compile time and cached in
    the elf, so it replays for free (same as `InterpProgram`).
 7. **Dependency policy** — `rayon` only behind `backend_rayon`; the default artifact's
-   runtime deps stay `nanoserde` (+ `capi`).
+   runtime deps stay `nanoserde` (the Python bridge is a separate dev-only crate).
 
 #### 9.8.1 R2 implementation — dtype-native register machine (DONE)
 
@@ -2122,6 +2122,13 @@ API shape, and missing user-facing features.
   matrix, validation plan, and security notes.
 - Edition 2024 is current; `rust-version = "1.88"` is the first release with
   the edition-2024 let-chains used in the code. CI is deferred by request.
+- **The Python bridge is its own crate** (`py/bridge`, package
+  `autorust-bridge`, `publish = false`). It holds the `cdylib` C ABI over
+  `autorust::rebuild` and the oracle/dev binaries that used to live in
+  `src/bin`. The library is now a plain `rlib` — no `capi` feature, no
+  `cdylib`, no dev-only binaries in the published package. `cargo build`
+  builds only the library (`default-members = ["."]`); the harness uses
+  `cargo build -p autorust-bridge`.
 
 **API decision: `Ctx` lives inside `Tensor` — DONE (2026-10)**
 - `Tensor` gains a `Ctx` handle (a shared `Rc<RefCell<UOpCtx>>`), so graph
@@ -2410,7 +2417,7 @@ pointers must remain valid; the OS reclaims it at exit.
 Gates: `cargo test --features backend_cl` 212 passed; the CL harness 12 passed;
 `cl_reduce`/`cl_offset` pass; `ocl_smoke` works on the NVIDIA ICD.
 
-Default features are now `capi, backend_rayon, backend_rust, backend_clang,
+Default features are now `backend_rayon, backend_rust, backend_clang,
 backend_cl, backend_metal, backend_cuda, freeze` (2026-11: CUDA and `freeze`
 were promoted to defaults for the public release; CUDA costs ~3.5 s of build
 time and one dependency, and `freeze` reuses `rayon`/`backend_rust`). Cargo has

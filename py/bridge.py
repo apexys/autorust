@@ -23,7 +23,8 @@ from tinygrad.codegen.opt import Opt, OptOps
 from tinygrad.schedule.indexing import BufferizeOpts
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
-_LIB = ctypes.CDLL(str(_ROOT / "target" / "debug" / "libautorust.so"))
+# Built with `cargo build -p autorust-bridge` (the shim crate lives in py/bridge).
+_LIB = ctypes.CDLL(str(_ROOT / "target" / "debug" / "libautorust_bridge.so"))
 _LIB.autorust_rebuild.restype = ctypes.POINTER(ctypes.c_ubyte)
 _LIB.autorust_rebuild.argtypes = [ctypes.POINTER(ctypes.c_ubyte), ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
 _LIB.autorust_exec_add.restype = None

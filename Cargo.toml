@@ -1,3 +1,10 @@
+# The development-only bridge/oracle crate lives under `py/bridge` (excluded
+# from the published package). `default-members` keeps `cargo build`/`test` on
+# the library; use `cargo build -p autorust-bridge` for the Python harness.
+[workspace]
+members = [".", "py/bridge"]
+default-members = ["."]
+
 [package]
 name = "autorust"
 version = "0.1.0"
@@ -13,18 +20,12 @@ keywords = ["tinygrad", "tensor", "autograd", "gpu", "compiler"]
 categories = ["artificial-intelligence", "science", "hardware-support"]
 authors = ["Valentin Buck"]
 exclude = [
+    # The development-only bridge/oracle crate and the pytest gates.
     "py/",
     "CURRENT_STATE.md",
     "INDEXING.md",
     "AGENTS.md",
     ".github/",
-    # Development-only harness binaries: the Python bridge drives them and they
-    # expect `py/` (excluded) plus a checkout of the tinygrad oracle.
-    "src/bin/oracle_*",
-    "src/bin/pm_inventory.rs",
-    "src/bin/dbg_parse.rs",
-    "src/bin/dump_rules.rs",
-    "src/bin/probe_2d.rs",
 ]
 
 [package.metadata.docs.rs]
@@ -33,9 +34,6 @@ exclude = [
 # backend surface if the default set ever shrinks. No `--cfg docsrs`: the crate
 # does not emit `doc(cfg)` badges, so that flag would be dead.
 features = ["backend_cuda", "freeze"]
-
-[lib]
-crate-type = ["lib", "cdylib"]
 
 [[bin]]
 name = "ocl_smoke"
@@ -58,7 +56,6 @@ required-features = ["backend_metal"]
 # `backend_cuda` is enabled everywhere but its dependency and code are gated on
 # `any(target_os = "linux", target_os = "windows")`.
 default = [
-    "capi",
     "backend_rayon",
     "backend_rust",
     "backend_clang",
@@ -67,8 +64,6 @@ default = [
     "backend_cuda",
     "freeze",
 ]
-# C ABI loaded by the Python ctypes bridge (py/bridge.py).
-capi = []
 # Multithreaded CPU backend (device "RAYON"), parallelized with `rayon`.
 backend_rayon = ["dep:rayon", "dep:bytemuck"]
 # OpenCL backend (device "CL"), loaded dynamically at run time.

@@ -214,7 +214,6 @@ compiles the emitted crate and diffs it against eager).
 
 | Feature | Default | What it enables |
 |---|---|---|
-| `capi` | yes | Small C ABI used by the development-only Python bridge. |
 | `backend_rayon` | yes | Multithreaded CPU backend (`RAYON`), via `rayon`/`bytemuck`. |
 | `backend_rust` | yes | Native CPU backend (`RUST`): Rust kernel source → `rustc` cdylib → `libloading`. |
 | `backend_clang` | yes | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |

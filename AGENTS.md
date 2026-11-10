@@ -55,8 +55,10 @@ src/bin/        oracle_* cargo bins driven by pytest (JSON graph files)
 examples/       runnable demos (xor.rs, mnist.rs) — mirror tinygrad
 tests/onnx.rs   ONNX parser/op tests; external checkpoint test is #[ignore]d
 tests/          Rust unit/differential/golden/nn tests
-py/             dev-only Python bridge + differential gates
+py/             dev-only Python bridge + differential gates (not published)
     bridge.py       uop_to_json / json_to_uop / realize_in_tg
+    bridge/         cdylib shim (C ABI over `autorust::rebuild`) + oracle bins;
+                    build with `cargo build -p autorust-bridge`
     tests/          test_*_diff.py gates against the tinygrad tree
 CURRENT_STATE.md   the canonical status/plan document
 INDEXING.md        the getitem index-DSL reference
@@ -84,8 +86,10 @@ Run from this directory (`autorust/`):
 Feature flags: all backends and `freeze` are **default** — `backend_cl`
 (OpenCL), `backend_metal` (Apple Metal, macOS-only), `backend_cuda` (CUDA,
 Linux/Windows only; its dependency and code are target-gated), `freeze` (AOT
-plans), `backend_rayon`/`backend_rust`/`backend_clang` (CPU), and `capi` (the C
-ABI loaded by the Python bridge). `trace`/`dump` are debug-only, off by default.
+plans), and `backend_rayon`/`backend_rust`/`backend_clang` (CPU). The Python
+bridge is a separate, unpublished crate (`py/bridge`, `cargo build -p
+autorust-bridge`); the library publishes no C ABI and no `cdylib`. `trace`/`dump`
+are debug-only, off by default.
 `--no-default-features` must keep compiling and staying std-only (plus
 `nanoserde`) — that is a gate, not an aspiration.
 

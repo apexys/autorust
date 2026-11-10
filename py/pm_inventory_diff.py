@@ -83,7 +83,7 @@ def tg_inventory():
 
 
 def rust_inventory():
-    out = subprocess.run(["cargo", "run", "--quiet", "--bin", "pm_inventory"],
+    out = subprocess.run(["cargo", "run", "--quiet", "-p", "autorust-bridge", "--bin", "pm_inventory"],
                          cwd=ROOT, capture_output=True, text=True, check=True).stdout
     pms, cur = {}, None
     for line in out.splitlines():

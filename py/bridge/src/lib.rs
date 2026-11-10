@@ -1,12 +1,16 @@
-//! C ABI exports loaded by the Python `ctypes` bridge (`py/bridge.py`).
+//! Development-only C ABI loaded by the Python `ctypes` bridge
+//! (`py/bridge.py`), plus the oracle binaries the pytest gates drive.
 //!
-//! Gated behind the default `capi` feature: a pure-Rust build can drop the
-//! `ctypes` surface with `cargo build --no-default-features` (the `cdylib`
-//! target still builds, just without these symbols).
+//! This crate is not published and is not a dependency of `autorust`: it is a
+//! `cdylib` shim over the public JSON graph codec (`autorust::rebuild`), so the
+//! library itself stays a plain `rlib` with no C surface and no `cdylib`.
+//!
+//! Build it with `cargo build -p autorust-bridge`; the shared object lands in
+//! the workspace `target/debug/libautorust_bridge.so`.
 
 use std::alloc::{Layout, alloc, dealloc};
 
-use crate::rebuild;
+use autorust::rebuild;
 
 /// # Safety
 /// `in_ptr` must point to `in_len` bytes of JSON; `out_len` must be writable.

@@ -20,7 +20,7 @@ ORACLE = "./target/debug/oracle_tensor"
 
 def build_oracle():
     env = dict(os.environ)
-    subprocess.run(["cargo", "build", "--features", "backend_cl", "--bin", "oracle_tensor"],
+    subprocess.run(["cargo", "build", "-p", "autorust-bridge", "--bin", "oracle_tensor"],
                    check=True, capture_output=True, env=env)
 
 
