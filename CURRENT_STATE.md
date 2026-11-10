@@ -3079,3 +3079,33 @@ single dominant prologue kernel; the rest is the f32 backward (generated GEMMs
 ~2-3 TFLOP/s vs cuBLAS ~5-6) plus elementwise work. Closing to 2x needs f32
 tensor cores (TF32 changes output) or a GEMM-backward rewrite, not another
 scheduler cut.
+
+### 9.24 CPU host GEMM: direct operands, packing once, measured ceiling (2026-11) — DONE
+
+The packed CPU GEMM re-packed `A` for every `(m,n)` tile and `B` for every
+m-block. On ViT's 197-row linears that packing traffic dominated the
+arithmetic (B re-read 5x, A up to 8x). `run_raw` now has a direct path when
+`a_k == 1` (row-major A) and `b_n == 1` or `b_k == 1` (row-major or a `[n,k]`
+weight): A is read in place with its own strides, and a transposed weight is
+copied once per GEMM into a contiguous `[k,n]` buffer. The microkernel takes
+`(a_rs, a_ks, b_ks)` strides; the old per-task packing remains as the
+column-major fallback.
+
+Microbenchmark (`gemm_bench`, 24 threads, f32, GFLOP/s; MKL = torch 2.6):
+
+| shape | generated | packed before | packed now | MKL |
+|---|---:|---:|---:|---:|
+| 197x768x768 | 94 | 273 | **290** | 93 |
+| 197x3072x768 | 30 | 284 | **296** | 417 |
+| 197x768x3072 | 65 | 315 | **464** | 613 |
+| 1576x768x768 | 156 | 313 | **375** | 609 |
+
+Tile retuning (MC/NC/KC sweeps) does not beat the 48/96/256 default on these
+shapes. End-to-end `RUST` medians are within noise of before (ViT infer 1
+425 ms, bs8 1902 ms, train 1784 ms; MNIST 65 ms): `kx.host` is ~100 ms of a
+~420 ms inference step, so a MKL-speed microkernel would only reach ~2.4x
+torch. The remaining CPU time is generated elementwise/attention kernels — a
+codegen/vectorization project, not a host-GEMM one. Added a unit test for the
+`[n,k]` weight layout with bias/alpha/residual epilogue.
+
+Gates: full `cargo test --release` (78 binaries), clippy, rustdoc.

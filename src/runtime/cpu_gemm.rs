@@ -110,10 +110,14 @@ fn tile() -> Tile {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn micro_6x16(
     kc: usize,
     ap: *const f32,
+    a_rs: usize,
+    a_ks: usize,
     bp: *const f32,
+    b_ks: usize,
     c: *mut f32,
     ldc: usize,
     first: bool,
@@ -121,10 +125,10 @@ unsafe fn micro_6x16(
     use std::arch::x86_64::*;
     let mut acc = [_mm256_setzero_ps(); 12];
     for k in 0..kc {
-        let b0 = _mm256_loadu_ps(bp.add(k * NR));
-        let b1 = _mm256_loadu_ps(bp.add(k * NR + 8));
+        let b0 = _mm256_loadu_ps(bp.add(k * b_ks));
+        let b1 = _mm256_loadu_ps(bp.add(k * b_ks + 8));
         for i in 0..MR {
-            let a = _mm256_set1_ps(*ap.add(k * MR + i));
+            let a = _mm256_set1_ps(*ap.add(i * a_rs + k * a_ks));
             acc[2 * i] = _mm256_fmadd_ps(a, b0, acc[2 * i]);
             acc[2 * i + 1] = _mm256_fmadd_ps(a, b1, acc[2 * i + 1]);
         }
@@ -152,7 +156,10 @@ unsafe fn micro_gen(
     nr: usize,
     kc: usize,
     ap: *const f32,
+    a_rs: usize,
+    a_ks: usize,
     bp: *const f32,
+    b_ks: usize,
     c: *mut f32,
     ldc: usize,
     first: bool,
@@ -160,9 +167,9 @@ unsafe fn micro_gen(
     let mut acc = [[0.0f32; NR]; MR];
     for k in 0..kc {
         for j in 0..nr {
-            let b = *bp.add(k * NR + j);
+            let b = *bp.add(k * b_ks + j);
             for i in 0..mr {
-                acc[i][j] += *ap.add(k * MR + i) * b;
+                acc[i][j] += *ap.add(i * a_rs + k * a_ks) * b;
             }
         }
     }
@@ -221,60 +228,139 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
     let avx = have_avx2();
     let bsz = g.batch as usize;
     for batch in 0..bsz {
+        let base = |slot: i64, off: i64| -> *mut u8 {
+            let p = bases[slot as usize] as *mut u8;
+            unsafe { p.offset((off * 4) as isize) }
+        };
+        let a = unsafe { base(g.a_slot, g.a_off).add(batch * g.a_b as usize * 4) as *mut f32 };
+        let b = unsafe { base(g.b_slot, g.b_off).add(batch * g.b_b as usize * 4) as *mut f32 };
+        let c = unsafe { base(g.c_slot, g.c_off).add(batch * g.c_b as usize * 4) as *mut f32 };
+        let batch_rel = batch as isize * g.c_b as isize;
+        let (a_m, a_k) = (g.a_m as isize, g.a_k as isize);
+        let (b_k, b_n) = (g.b_k as isize, g.b_n as isize);
+        let c_m = g.c_m as isize;
         let nb = n.div_ceil(t.nc);
         let tasks = m.div_ceil(t.mc) * nb;
         let need = t.mc * t.kc + t.kc * t.nc;
+        // Fast path: A row-major (k contiguous), B row-major or a `[n, k]`
+        // weight packed once per GEMM. The per-task packing below re-reads B
+        // for every m-block and A for every n-block, which dominates small-M
+        // GEMMs (ViT's 197-row linears).
+        let direct = a_k == 1 && (b_n == 1 || b_k == 1);
+        let packed_b: Option<Vec<f32>> = if direct && b_n != 1 {
+            let mut p = vec![0.0f32; k * n];
+            let baddr = b as usize;
+            p.par_chunks_mut(n).enumerate().for_each(|(kk, row)| {
+                let src = unsafe { (baddr as *const f32).offset(kk as isize) };
+                for (j, dst) in row.iter_mut().enumerate() {
+                    unsafe { *dst = *src.offset(j as isize * b_n) };
+                }
+            });
+            Some(p)
+        } else {
+            None
+        };
+        let b_fast_addr = packed_b
+            .as_ref()
+            .map(|p| p.as_ptr() as usize)
+            .unwrap_or(b as usize);
+        let b_fast_ks = if packed_b.is_some() { n } else { b_k as usize };
+        let (a_addr, b_addr, c_addr) = (a as usize, b as usize, c as usize);
         (0..tasks).into_par_iter().for_each(|task| {
-            let base = |slot: i64, off: i64| -> *mut f32 {
-                let p = bases[slot as usize] as *mut u8;
-                unsafe { p.offset((off * 4) as isize) as *mut f32 }
-            };
-            let a = unsafe { base(g.a_slot, g.a_off).offset(batch as isize * g.a_b as isize) };
-            let b = unsafe { base(g.b_slot, g.b_off).offset(batch as isize * g.b_b as isize) };
-            let c = unsafe { base(g.c_slot, g.c_off).offset(batch as isize * g.c_b as isize) };
-            let batch_rel = batch as isize * g.c_b as isize;
-            let (a_m, a_k) = (g.a_m as isize, g.a_k as isize);
-            let (b_k, b_n) = (g.b_k as isize, g.b_n as isize);
-            let c_m = g.c_m as isize;
-            SCRATCH.with(|slot| {
-                let mut buf = slot.borrow_mut();
-                buf.resize(need, 0.0);
-                let ap_all = buf.as_mut_ptr();
-                let bp_all = unsafe { ap_all.add(t.mc * t.kc) };
-                let mb = task / nb;
-                let nblk = task % nb;
-                let m0 = mb * t.mc;
-                let n0 = nblk * t.nc;
-                let m_cnt = t.mc.min(m - m0);
-                let n_cnt = t.nc.min(n - n0);
-                let mpan = m_cnt.div_ceil(MR);
-                let npan = n_cnt.div_ceil(NR);
+            let mb = task / nb;
+            let nblk = task % nb;
+            let m0 = mb * t.mc;
+            let n0 = nblk * t.nc;
+            let m_cnt = t.mc.min(m - m0);
+            let n_cnt = t.nc.min(n - n0);
+            let mpan = m_cnt.div_ceil(MR);
+            let npan = n_cnt.div_ceil(NR);
+            if direct {
+                let a = a_addr as *mut f32;
+                let bf = b_fast_addr as *const f32;
+                let c = c_addr as *mut f32;
                 let mut k0 = 0;
                 let mut first = true;
                 while k0 < k {
                     let kc = t.kc.min(k - k0);
                     unsafe {
-                        // Pack A panels: ap[(ip*kc + kk)*MR + ii], zero-padded.
-                        // Walk whichever axis is contiguous to keep the reads
-                        // sequential (ViT weights are `[n, k]`, A is `[m, k]`).
-                        if a_k == 1 {
-                            for ip in 0..mpan {
-                                let rows = MR.min(m_cnt - ip * MR);
-                                for ii in 0..MR {
-                                    let dst = ap_all.add(ip * kc * MR + ii);
-                                    if ii < rows {
-                                        let src = a.offset((m0 + ip * MR + ii) as isize * a_m);
-                                        for kk in 0..kc {
-                                            *dst.add(kk * MR) = *src.offset((k0 + kk) as isize);
-                                        }
-                                    } else {
-                                        for kk in 0..kc {
-                                            *dst.add(kk * MR) = 0.0;
-                                        }
-                                    }
+                        for ip in 0..mpan {
+                            let mr = MR.min(m_cnt - ip * MR);
+                            for jp in 0..npan {
+                                let nr = NR.min(n_cnt - jp * NR);
+                                let cbase = c.offset(
+                                    (m0 + ip * MR) as isize * c_m + (n0 + jp * NR) as isize,
+                                );
+                                let ap = a.offset(
+                                    (m0 + ip * MR) as isize * a_m + k0 as isize,
+                                ) as *const f32;
+                                let bp = bf.offset(
+                                    (k0 as isize) * b_fast_ks as isize
+                                        + (n0 + jp * NR) as isize,
+                                );
+                                if mr == MR && nr == NR && avx {
+                                    #[cfg(target_arch = "x86_64")]
+                                    micro_6x16(
+                                        kc,
+                                        ap,
+                                        a_m as usize,
+                                        1,
+                                        bp,
+                                        b_fast_ks,
+                                        cbase,
+                                        c_m as usize,
+                                        first,
+                                    );
+                                    #[cfg(not(target_arch = "x86_64"))]
+                                    micro_gen(
+                                        mr,
+                                        nr,
+                                        kc,
+                                        ap,
+                                        a_m as usize,
+                                        1,
+                                        bp,
+                                        b_fast_ks,
+                                        cbase,
+                                        c_m as usize,
+                                        first,
+                                    );
+                                } else {
+                                    micro_gen(
+                                        mr,
+                                        nr,
+                                        kc,
+                                        ap,
+                                        a_m as usize,
+                                        1,
+                                        bp,
+                                        b_fast_ks,
+                                        cbase,
+                                        c_m as usize,
+                                        first,
+                                    );
                                 }
                             }
-                        } else {
+                        }
+                    }
+                    first = false;
+                    k0 += kc;
+                }
+            } else {
+                SCRATCH.with(|slot| {
+                    let mut buf = slot.borrow_mut();
+                    buf.resize(need, 0.0);
+                    let ap_all = buf.as_mut_ptr();
+                    let bp_all = unsafe { ap_all.add(t.mc * t.kc) };
+                    let a = a_addr as *mut f32;
+                    let b = b_addr as *mut f32;
+                    let c = c_addr as *mut f32;
+                    let mut k0 = 0;
+                    let mut first = true;
+                    while k0 < k {
+                        let kc = t.kc.min(k - k0);
+                        unsafe {
+                            // Pack A panels: ap[(ip*kc + kk)*MR + ii], zero-padded.
                             for ip in 0..mpan {
                                 let rows = MR.min(m_cnt - ip * MR);
                                 for ii in 0..MR {
@@ -292,98 +378,109 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
                                     }
                                 }
                             }
-                        }
-                        // Pack B panels: bp[(jp*kc + kk)*NR + jj], zero-padded.
-                        if b_k == 1 {
-                            // B stored [n, k] (a transposed weight): read each
-                            // column panel row-wise and scatter into k-major.
-                            for jp in 0..npan {
-                                let cols = NR.min(n_cnt - jp * NR);
-                                for jj in 0..NR {
-                                    let dst = bp_all.add(jp * kc * NR + jj);
-                                    if jj < cols {
-                                        let src = b.offset((n0 + jp * NR + jj) as isize * b_n);
-                                        for kk in 0..kc {
-                                            *dst.add(kk * NR) = *src.offset((k0 + kk) as isize);
+                            // Pack B panels: bp[(jp*kc + kk)*NR + jj], zero-padded.
+                            if b_k == 1 {
+                                for jp in 0..npan {
+                                    let cols = NR.min(n_cnt - jp * NR);
+                                    for jj in 0..NR {
+                                        let dst = bp_all.add(jp * kc * NR + jj);
+                                        if jj < cols {
+                                            let src =
+                                                b.offset((n0 + jp * NR + jj) as isize * b_n);
+                                            for kk in 0..kc {
+                                                *dst.add(kk * NR) =
+                                                    *src.offset((k0 + kk) as isize);
+                                            }
+                                        } else {
+                                            for kk in 0..kc {
+                                                *dst.add(kk * NR) = 0.0;
+                                            }
                                         }
-                                    } else {
-                                        for kk in 0..kc {
-                                            *dst.add(kk * NR) = 0.0;
+                                    }
+                                }
+                            } else {
+                                for jp in 0..npan {
+                                    let cols = NR.min(n_cnt - jp * NR);
+                                    for kk in 0..kc {
+                                        let src = b.offset(
+                                            (k0 + kk) as isize * b_k
+                                                + (n0 + jp * NR) as isize * b_n,
+                                        );
+                                        let dst = bp_all.add((jp * kc + kk) * NR);
+                                        for jj in 0..cols {
+                                            *dst.add(jj) = *src.offset(jj as isize * b_n);
+                                        }
+                                        for jj in cols..NR {
+                                            *dst.add(jj) = 0.0;
                                         }
                                     }
                                 }
                             }
-                        } else {
-                            for jp in 0..npan {
-                                let cols = NR.min(n_cnt - jp * NR);
-                                for kk in 0..kc {
-                                    let src = b.offset(
-                                        (k0 + kk) as isize * b_k + (n0 + jp * NR) as isize * b_n,
+                            for ip in 0..mpan {
+                                let mr = MR.min(m_cnt - ip * MR);
+                                for jp in 0..npan {
+                                    let nr = NR.min(n_cnt - jp * NR);
+                                    let cbase = c.offset(
+                                        (m0 + ip * MR) as isize * c_m
+                                            + (n0 + jp * NR) as isize,
                                     );
-                                    let dst = bp_all.add((jp * kc + kk) * NR);
-                                    for jj in 0..cols {
-                                        *dst.add(jj) = *src.offset(jj as isize * b_n);
-                                    }
-                                    for jj in cols..NR {
-                                        *dst.add(jj) = 0.0;
+                                    let ap = ap_all.add(ip * kc * MR);
+                                    let bp = bp_all.add(jp * kc * NR);
+                                    if mr == MR && nr == NR && avx {
+                                        #[cfg(target_arch = "x86_64")]
+                                        micro_6x16(
+                                            kc, ap, 1, MR, bp, NR, cbase, c_m as usize, first,
+                                        );
+                                        #[cfg(not(target_arch = "x86_64"))]
+                                        micro_gen(
+                                            mr, nr, kc, ap, 1, MR, bp, NR, cbase, c_m as usize,
+                                            first,
+                                        );
+                                    } else {
+                                        micro_gen(
+                                            mr, nr, kc, ap, 1, MR, bp, NR, cbase, c_m as usize,
+                                            first,
+                                        );
                                     }
                                 }
                             }
                         }
-                        for ip in 0..mpan {
-                            let mr = MR.min(m_cnt - ip * MR);
-                            for jp in 0..npan {
-                                let nr = NR.min(n_cnt - jp * NR);
-                                let cbase = c.offset(
-                                    (m0 + ip * MR) as isize * c_m + (n0 + jp * NR) as isize,
-                                );
-                                let ap = ap_all.add(ip * kc * MR);
-                                let bp = bp_all.add(jp * kc * NR);
-                                if mr == MR && nr == NR && avx {
-                                    #[cfg(target_arch = "x86_64")]
-                                    micro_6x16(kc, ap, bp, cbase, c_m as usize, first);
-                                    #[cfg(not(target_arch = "x86_64"))]
-                                    micro_gen(mr, nr, kc, ap, bp, cbase, c_m as usize, first);
-                                } else {
-                                    micro_gen(mr, nr, kc, ap, bp, cbase, c_m as usize, first);
-                                }
-                            }
-                        }
+                        first = false;
+                        k0 += kc;
                     }
-                    first = false;
-                    k0 += kc;
-                }
-                // Epilogue: alpha, bias, per-column scale, residual.
-                let needs_epi =
-                    g.alpha != 1.0 || g.bias_slot >= 0 || g.scale_slot >= 0 || g.res_slot >= 0;
-                if needs_epi {
-                    let bias = (g.bias_slot >= 0).then(|| base(g.bias_slot, g.bias_off));
-                    let scale = (g.scale_slot >= 0).then(|| base(g.scale_slot, g.scale_off));
-                    let res = (g.res_slot >= 0).then(|| base(g.res_slot, g.res_off));
-                    // The residual is indexed exactly like `C` (already
-                    // batch-offset); bias/scale are per column.
-                    let rbase = res.map(|r| unsafe { r.offset(batch_rel) });
-                    unsafe {
-                        for i in 0..m_cnt {
-                            for j in 0..n_cnt {
-                                let rel = (m0 + i) as isize * c_m + (n0 + j) as isize;
-                                let p = c.offset(rel);
-                                let mut v = *p * g.alpha;
-                                if let Some(b) = bias {
-                                    v += *b.add(n0 + j);
-                                }
-                                if let Some(s) = scale {
-                                    v *= *s.add(n0 + j);
-                                }
-                                if let Some(r) = rbase {
-                                    v += *r.offset(rel);
-                                }
-                                *p = v;
+                });
+            }
+            // Epilogue: alpha, bias, per-column scale, residual.
+            let needs_epi =
+                g.alpha != 1.0 || g.bias_slot >= 0 || g.scale_slot >= 0 || g.res_slot >= 0;
+            if needs_epi {
+                let c = c_addr as *mut f32;
+                let bias = (g.bias_slot >= 0)
+                    .then(|| base(g.bias_slot, g.bias_off) as *const f32);
+                let scale = (g.scale_slot >= 0)
+                    .then(|| base(g.scale_slot, g.scale_off) as *const f32);
+                let res = (g.res_slot >= 0)
+                    .then(|| unsafe { (base(g.res_slot, g.res_off) as *const f32).offset(batch_rel) });
+                unsafe {
+                    for i in 0..m_cnt {
+                        for j in 0..n_cnt {
+                            let rel = (m0 + i) as isize * c_m + (n0 + j) as isize;
+                            let p = c.offset(rel);
+                            let mut v = *p * g.alpha;
+                            if let Some(b) = bias {
+                                v += *b.add(n0 + j);
                             }
+                            if let Some(s) = scale {
+                                v *= *s.add(n0 + j);
+                            }
+                            if let Some(r) = res {
+                                v += *r.offset(rel);
+                            }
+                            *p = v;
                         }
                     }
                 }
-            });
+            }
         });
     }
     Ok(())
@@ -423,6 +520,44 @@ mod tests {
             scale_off: 0,
             res_slot: -1,
             res_off: 0,
+        }
+    }
+
+    /// The ViT `Linear` layout: `B` is stored `[n, k]` (`b_k == 1`,
+    /// `b_n == k`) and the epilogue has bias/alpha/residual. Exercises the
+    /// direct path (B packed once per GEMM).
+    #[test]
+    fn matches_naive_weight_layout_with_epilogue() {
+        let (m, n, k) = (197usize, 96usize, 768usize);
+        let a: Vec<f32> = (0..m * k).map(|i| ((i % 131) as f32) * 0.0078125 - 0.5).collect();
+        let bt: Vec<f32> = (0..n * k).map(|i| ((i % 127) as f32) * 0.0078125 - 0.5).collect();
+        let bias: Vec<f32> = (0..n).map(|j| j as f32 * 0.01).collect();
+        let res: Vec<f32> = (0..m * n).map(|i| ((i % 17) as f32) * 0.001).collect();
+        let mut c: Vec<f32> = (0..m * n).map(|i| ((i % 19) as f32) * 0.002).collect();
+        let mut g = desc(m as i64, n as i64, k as i64);
+        // B = [n, k] row-major.
+        g.b_k = 1;
+        g.b_n = k as i64;
+        g.alpha = 0.5;
+        g.bias_slot = 3;
+        g.res_slot = 4;
+        let ptrs = [
+            a.as_ptr() as *mut u8,
+            bt.as_ptr() as *mut u8,
+            c.as_mut_ptr() as *mut u8,
+            bias.as_ptr() as *mut u8,
+            res.as_ptr() as *mut u8,
+        ];
+        unsafe { run_raw(&g, &ptrs).unwrap() };
+        for i in 0..m {
+            for j in 0..n {
+                let mut s = 0.0f32;
+                for kk in 0..k {
+                    s += a[i * k + kk] * bt[j * k + kk];
+                }
+                let want = 0.5 * s + bias[j] + res[i * n + j];
+                assert!((want - c[i * n + j]).abs() < 1e-3, "{i},{j}");
+            }
         }
     }
 
