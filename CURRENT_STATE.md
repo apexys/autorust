@@ -3800,3 +3800,34 @@ which one is needed.
 
 State unchanged (`b9a7567` tree): RUST train 1.58 s, CUDA train 94-100 ms, six of
 eight rows within 2x.
+
+### 9.43 Content-keyed LINEAR dedup: hypothesis falsified (2026-11)
+
+Implemented the §9.42 dedup: while building the LINEAR, drop an earlier store
+kernel when a *structurally identical* one appears later (`UOpCtx.g.content_key`)
+and nothing else wrote that destination in between (write-aware, so a
+read-between-writes sequence cannot change meaning). It drops **zero** kernels —
+for the 705-kernel step LINEAR as well:
+
+```
+[dedup] linear=705 dropped=0
+```
+
+So the ~657 fill launches per step are **not** repeated copies of identical
+kernels: they are distinct store kernels (same loop structure, hence the same
+`E_589824_4` / `E_147456_4` name, but different destinations/parameter slots).
+The duplication is therefore *per-path buffer renumbering*: each co-realized
+path gives the same logical buffer a different `ParamArg`, so the content keys
+differ and identity/content dedup cannot see them.
+
+Counting also corrects the "2 per weight" reading: 216 launches of the
+2.36M-element fill over 12 `ff1` weights is ~18 per weight, and 441 launches of
+the 589k-element fill over 48 attention weights is ~9 per weight. Those are the
+two `rand::uniform` init buffers (`full(high-low)`, `full(low)`) of
+`scaled_uniform`, re-executed per path.
+
+Reverted (inert). The next attempt on this thread must key on the *logical*
+buffer (the pre-renumbering base) rather than the renumbered `ParamArg`, or
+remove the initialiser stores from the step graph before scheduling. State
+unchanged: RUST train 1.56-1.65 s, CUDA train 94-100 ms, six of eight rows
+within 2x.
