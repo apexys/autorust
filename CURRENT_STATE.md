@@ -3770,3 +3770,33 @@ param's pre-`to_param` chain) and cut that link; that is where the ~350 ms/step
 of fill traffic actually lives.
 
 Gates: 78/78, clippy, rustdoc.
+
+### 9.42 The fill traffic is duplicated inside the captured step (2026-11)
+
+Executed-fill accounting (a realize counter in `engine/prof.rs` + a per-launch
+print in `exec_kernel` for the two fill programs, env `AUTORUST_STEP_TAG`):
+
+```
+[fill-exec] total 2190 executions over 221 realizes
+  by realize root: {After: 438, <n=608>: 1752}
+```
+
+- **1,752 of the 2,190 fill launches happen inside a single captured step** (one
+  `Jit` replay, which does not advance the realize counter — hence the `?`/608
+  attribution). That is ~44% of the step's ~5,000 kernel launches, matching the
+  ~350 ms/step derived from the ITERS-diff.
+- They come from only **~130 distinct fill kernels** (§9.41), i.e. each init
+  store is emitted **~13-17 times** into the captured `LINEAR`. So the cost is
+  *duplication in the schedule*, not store creation: the same
+  `STORE(const)` kernel appears once per reachable path (every optimizer
+  `assign` co-realized into the step's single LINEAR), and `create_schedule`'s
+  identity dedup does not collapse them because each path carries its own copy.
+
+The next fix is therefore in the scheduler: dedup kernel bodies by *content*
+(the store's AST key), not by node identity, when building the LINEAR — or stop
+the parameter-initialiser store from being reachable from an `assign`'s value at
+all. Both are now precisely scoped; the accounting probe above is what proves
+which one is needed.
+
+State unchanged (`b9a7567` tree): RUST train 1.58 s, CUDA train 94-100 ms, six of
+eight rows within 2x.
