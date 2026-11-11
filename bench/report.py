@@ -12,9 +12,9 @@ BENCH = pathlib.Path(__file__).resolve().parent
 RESULTS = BENCH / "results"
 
 WORKLOADS = [
-    ("mnist_train", "MNIST CNN training (batch 512)"),
+    ("mnist_train", "MNIST CNN training"),
     ("vit_infer", "ViT-B/16 inference"),
-    ("vit_train", "ViT-B/16 training step (batch 1, f32)"),
+    ("vit_train", "ViT-B/16 training step (f32)"),
 ]
 
 
@@ -47,7 +47,7 @@ def main():
             lines += ["| run | device | batch | median | ms/image | images/s |", "|---|---|---:|---:|---:|---:|"]
         else:
             lines += ["| run | device | batch | median | images/s | s/epoch |", "|---|---|---:|---:|---:|---:|"]
-        for r in sorted(subset, key=lambda r: (r["device"], r["ms_median"])):
+        for r in sorted(subset, key=lambda r: (r["device"], r.get("batch", 0), r["ms_median"])):
             images = r["batch"] / (r["ms_median"] / 1e3)
             image_ms = r["ms_median"] / r["batch"]
             name = r.get("name", r["framework"])

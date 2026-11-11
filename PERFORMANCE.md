@@ -407,6 +407,52 @@ autorust runs with a warm on-disk kernel cache, while the other frameworks
 compile per process (`ms_cold` is recorded in the JSON but excluded from these
 steady-state medians).
 
+### Batch-size scaling
+
+The headline rows compare at one batch each. Re-running the same steps at other
+batches (`bench/run.py --only '.*(mnist-bs64|vit_train-bs4)'`; raw JSON in
+`bench/results/`) shows that the MNIST gap is stable while the ViT training gap
+grows with batch:
+
+| workload | device | batch | autorust | torch | ratio |
+|---|---|---:|---:|---:|---:|
+| MNIST CNN train | CPU | 64 | 9.9 ms | 19.9 ms | 0.50x |
+| MNIST CNN train | CPU | 512 | 65.5 ms | 175.9 ms | 0.37x |
+| MNIST CNN train | CUDA | 64 | 3.1 ms | 2.3 ms | 1.32x |
+| MNIST CNN train | CUDA | 512 | 22.2 ms | 13.1 ms | 1.69x |
+| ViT-B/16 train | CPU | 1 | 1634.5 ms | 616.3 ms | 2.65x |
+| ViT-B/16 train | CPU | 4 | 4205.1 ms | 1498.0 ms | 2.81x |
+| ViT-B/16 train | CUDA | 1 | 95.9 ms | 43.8 ms | 2.19x |
+| ViT-B/16 train | CUDA | 4 | 317.1 ms | 102.4 ms | 3.10x |
+
+A wider ad-hoc sweep (five timed iterations per point) on the same steps shows
+the per-image cost directly. ViT-B/16 training, ms per step and per image:
+
+| device | batch | autorust step | autorust ms/img | torch step | torch ms/img |
+|---|---:|---:|---:|---:|---:|
+| CUDA | 1 | 98.8 | 98.8 | 45.8 | 45.8 |
+| CUDA | 2 | 169.6 | 84.8 | 65.5 | 32.7 |
+| CUDA | 4 | 320.8 | 80.2 | 102.2 | 25.5 |
+| CUDA | 8 | 628.8 | 78.6 | 177.0 | 22.1 |
+| CPU | 1 | 1600.9 | 1600.9 | 609.5 | 609.5 |
+| CPU | 2 | 3152.8 | 1576.4 | 999.0 | 499.5 |
+| CPU | 4 | 4211.8 | 1053.0 | 1342.4 | 335.6 |
+
+The step time grows almost linearly with batch on both devices: the generated
+f32 GEMM is already saturated at batch 1, so extra rows buy nothing, while
+cuBLAS keeps improving its tile choice (torch's CUDA per-image cost halves from
+bs 1 to bs 8). In other words, the remaining ViT-training gap is not launch or
+scheduling overhead that a bigger batch would amortize; it is the steady-state
+GEMM/elementwise throughput of the f32 path. MNIST, which is conv- and
+optimizer-heavy, behaves differently: on CPU autorust is 2x faster than torch at
+bs 64 and 2.7x at bs 512, and on CUDA it is within 1.3x at bs 64.
+
+CPU batch sizes above 1 used to hang: a cold `threefry` RNG kernel made rustc's
+loop vectorizer run for over ten minutes (CURRENT_STATE §9.50). The RUST
+renderer now keeps that vectorizer off shift-chain kernels, so the batch 2/4
+rows run in seconds.
+
+
 ## Reading the numbers
 
 - This machine occasionally carries unrelated load (load average ~11), which

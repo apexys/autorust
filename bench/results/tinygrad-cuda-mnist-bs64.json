@@ -1,0 +1,22 @@
+{
+  "framework": "tinygrad",
+  "version": "0.14.0",
+  "device": "CUDA",
+  "workload": "mnist_train",
+  "batch": 64,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 2221.2593,
+  "ms_median": 8.4191,
+  "ms_min": 8.378,
+  "ms_iqr": 1.2384,
+  "images_per_s": 7601.77,
+  "params": 88044,
+  "name": "tinygrad-cuda-mnist-bs64",
+  "variant": "cuda",
+  "commit": "00e3871",
+  "date": "2026-11-11T10:00:22",
+  "notes": ""
+}

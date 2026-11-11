@@ -11,9 +11,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Performance and correctness release; no API changes. Net effect on the
 benchmark suite: ViT-B/16 training CUDA 332 -> 96 ms, CPU inference 425 -> 171 ms
 at bs 1 and 1902 -> 1188 ms at bs 8, CPU training 1784 -> 1634 ms; MNIST CUDA
-39 -> 22 ms. Six of the eight bench rows are now within 2x of eager torch
-(`torch.compile` off), and warm cold starts drop from 505/697/1279/6013 ms to
-216/474/760/2498 ms.
+39 -> 22 ms. Six of the eight original bench rows are now within 2x of eager
+torch (`torch.compile` off), and warm cold starts drop from 505/697/1279/6013 ms
+to 216/474/760/2498 ms. The ViT training gap is batch-dependent rather than
+fixed overhead: the generated f32 GEMM saturates at batch 1 (per-image time
+stays ~79 ms on CUDA) while cuBLAS keeps improving, so at batch 4 the step is
+317 vs 102 ms; at batch 64 MNIST is 1.3x off torch on CUDA and 2x faster on CPU.
 
 ### Performance
 
@@ -54,6 +57,12 @@ at bs 1 and 1902 -> 1188 ms at bs 8, CPU training 1784 -> 1634 ms; MNIST CUDA
   op-level FlashAttention port by default: the default `Settings::attention`
   selects the fused tensor-level kernels, and the 16x-slower op-level port is
   now only used with `FA=1`. The default follows tinygrad's model and uses SDPA.
+- The `RUST` renderer keeps rustc's loop vectorizer off integer shift chains
+  (the `threefry` RNG kernels): the vectorizer is exponential in the chain
+  length (20 shifts 0.26 s, 24 1.8 s, 28 16 s, the RNG kernel 80+), so a cold
+  batch-2 training run could spend over ten minutes in `rustc` on one kernel.
+  The loop index goes through `core::hint::black_box` for those kernels only;
+  every other kernel keeps its vectorized work-item loop.
 - The runtime cache is keyed by the buffer signature as well as the compiled
   artifact: a cached runtime could be reused for an artifact with different
   slots, launching with an out-of-bounds buffer index.

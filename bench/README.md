@@ -12,9 +12,9 @@ Results live in [`results/`](results) as raw JSON plus a generated
 
 | workload | model | shapes | metric |
 |---|---|---|---|
-| `mnist_train` | `beautiful_mnist` CNN (2 conv, BN, pool ×2, 576→10) | batch 512, 1×28×28, Adam 1e-3, CE | ms/step, img/s, s/epoch |
+| `mnist_train` | `beautiful_mnist` CNN (2 conv, BN, pool ×2, 576→10) | batch 64 and 512, 1×28×28, Adam 1e-3, CE | ms/step, img/s, s/epoch |
 | `vit_infer` | ViT-B/16 (12 layers, 768 wide, 12 heads) | batch 1 and 8, 3×224×224, patch 16, 1000 classes | ms/step, ms/image, img/s |
-| `vit_train` | same ViT + CE + backward + Adam 3e-4 | batch 1, f32 | ms/step, img/s |
+| `vit_train` | same ViT + CE + backward + Adam 3e-4 | batch 1 and 4, f32 | ms/step, img/s |
 
 Inputs are **synthetic and device-resident** (`rand` for MNIST, `zeros` for
 ViT), with fixed labels; the timed region is one training/inference step and
@@ -36,8 +36,11 @@ about the framework, not the data pipeline. The MNIST model itself is the
 - On CPU autorust uses `AUTORUST_ATTN=sdpa`; the fused FlashAttention path is
   CUDA-only and the graph-level port is much slower (see `PERFORMANCE.md`). On
   CUDA it uses the fused flash path.
-- `mnist_train` uses the batch-512 demo; RAYON (the typed interpreter) is run
-  with fewer steps because it is 1-2 orders of magnitude slower.
+- `mnist_train` is run at the demo's batch 512 and at batch 64 (the size most
+  people type); `vit_train` at batch 1 and 4, because the training gap grows
+  with batch (see `PERFORMANCE.md#batch-size-scaling`). RAYON (the typed
+  interpreter) is run with fewer steps because it is 1-2 orders of magnitude
+  slower.
 - Not included: bf16/tensor-core runs, `torch.compile`, `@function` transforms,
   multi-GPU. They are candidates for a follow-up.
 

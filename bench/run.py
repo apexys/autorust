@@ -42,6 +42,15 @@ RUNS = [
     ("torch-cuda-mnist", "torch", "cuda", "mnist_train", 512, 2, 10, ""),
     ("tinygrad-cpu-mnist", "tinygrad", "cpu", "mnist_train", 512, 2, 5, "single-threaded"),
     ("tinygrad-cuda-mnist", "tinygrad", "cuda", "mnist_train", 512, 2, 10, ""),
+    # --- MNIST CNN training, batch 64 (the batch people actually type) ---
+    ("autorust-rust-mnist-bs64", "autorust", "RUST", "mnist_train", 64, 3, 10, ""),
+    ("autorust-cuda-mnist-bs64", "autorust", "CUDA", "mnist_train", 64, 3, 10, ""),
+    ("candle-cpu-mnist-bs64", "candle", "cpu", "mnist_train", 64, 2, 8, ""),
+    ("candle-cuda-mnist-bs64", "candle", "cuda", "mnist_train", 64, 2, 8, ""),
+    ("torch-cpu-mnist-bs64", "torch", "cpu", "mnist_train", 64, 2, 10, ""),
+    ("torch-cuda-mnist-bs64", "torch", "cuda", "mnist_train", 64, 2, 10, ""),
+    ("tinygrad-cpu-mnist-bs64", "tinygrad", "cpu", "mnist_train", 64, 2, 5, "single-threaded"),
+    ("tinygrad-cuda-mnist-bs64", "tinygrad", "cuda", "mnist_train", 64, 2, 10, ""),
     # --- ViT-B/16 inference, batch 1 ---
     ("autorust-rust-vit_infer-bs1", "autorust", "RUST", "vit_infer", 1, 1, 3, "SDPA (CPU)"),
     ("autorust-cuda-vit_infer-bs1", "autorust", "CUDA", "vit_infer", 1, 1, 3, "fused FA2"),
@@ -67,6 +76,14 @@ RUNS = [
     ("torch-cpu-vit_train", "torch", "cpu", "vit_train", 1, 1, 2, ""),
     ("torch-cuda-vit_train", "torch", "cuda", "vit_train", 1, 1, 3, ""),
     ("tinygrad-cuda-vit_train", "tinygrad", "cuda", "vit_train", 1, 1, 3, ""),
+    # --- ViT-B/16 training step, batch 4 (how the deficit scales with batch) ---
+    ("autorust-rust-vit_train-bs4", "autorust", "RUST", "vit_train", 4, 1, 2, "SDPA (CPU)"),
+    ("autorust-cuda-vit_train-bs4", "autorust", "CUDA", "vit_train", 4, 1, 3, "SDPA (training)"),
+    ("candle-cpu-vit_train-bs4", "candle", "cpu", "vit_train", 4, 1, 2, ""),
+    ("candle-cuda-vit_train-bs4", "candle", "cuda", "vit_train", 4, 1, 3, ""),
+    ("torch-cpu-vit_train-bs4", "torch", "cpu", "vit_train", 4, 1, 2, ""),
+    ("torch-cuda-vit_train-bs4", "torch", "cuda", "vit_train", 4, 1, 3, ""),
+    ("tinygrad-cuda-vit_train-bs4", "tinygrad", "cuda", "vit_train", 4, 1, 3, ""),
 ]
 
 

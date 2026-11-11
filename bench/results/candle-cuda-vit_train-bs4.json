@@ -1,0 +1,21 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CUDA",
+  "workload": "vit_train",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 143.0226,
+  "ms_median": 62.3915,
+  "ms_min": 61.2217,
+  "ms_iqr": 0.5618,
+  "images_per_s": 64.11,
+  "name": "candle-cuda-vit_train-bs4",
+  "variant": "cuda",
+  "commit": "00e3871",
+  "date": "2026-11-11T10:01:14",
+  "notes": ""
+}

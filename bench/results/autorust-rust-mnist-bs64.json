@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "mnist_train",
+  "batch": 64,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 3,
+  "iters": 10,
+  "ms_cold": 100.2028,
+  "ms_median": 9.858,
+  "ms_min": 9.6437,
+  "ms_iqr": 0.4723,
+  "images_per_s": 6492.18,
+  "name": "autorust-rust-mnist-bs64",
+  "variant": "RUST",
+  "commit": "00e3871",
+  "date": "2026-11-11T09:59:57",
+  "notes": ""
+}

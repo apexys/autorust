@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "vit_train",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 2,
+  "ms_cold": 7289.5006,
+  "ms_median": 4205.1429,
+  "ms_min": 4173.0374,
+  "ms_iqr": 64.2109,
+  "images_per_s": 0.95,
+  "name": "autorust-rust-vit_train-bs4",
+  "variant": "RUST",
+  "commit": "00e3871",
+  "date": "2026-11-11T10:00:56",
+  "notes": "SDPA (CPU)"
+}

@@ -1,0 +1,21 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CUDA",
+  "workload": "mnist_train",
+  "batch": 64,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 8,
+  "ms_cold": 95.8336,
+  "ms_median": 17.3976,
+  "ms_min": 16.2478,
+  "ms_iqr": 1.9141,
+  "images_per_s": 3678.67,
+  "name": "candle-cuda-mnist-bs64",
+  "variant": "cuda",
+  "commit": "00e3871",
+  "date": "2026-11-11T10:00:04",
+  "notes": ""
+}

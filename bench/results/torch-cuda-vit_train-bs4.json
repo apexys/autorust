@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "vit_train",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 334.2871,
+  "ms_median": 102.3742,
+  "ms_min": 100.3268,
+  "ms_iqr": 2.103,
+  "images_per_s": 39.07,
+  "name": "torch-cuda-vit_train-bs4",
+  "variant": "cuda",
+  "commit": "00e3871",
+  "date": "2026-11-11T10:01:26",
+  "notes": ""
+}

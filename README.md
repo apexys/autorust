@@ -74,6 +74,8 @@ See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
+| MNIST CNN train, bs 64 | CPU | **9.9 ms** (RUST) | 434.6 ms | 19.9 ms | 404.4 ms |
+| MNIST CNN train, bs 64 | CUDA | 3.1 ms | 17.4 ms | **2.3 ms** | 8.4 ms |
 | MNIST CNN train, bs 512 | CPU | **65.5 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
 | MNIST CNN train, bs 512 | CUDA | 22.2 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
 | ViT-B/16 infer, bs 1 | CPU | 170.6 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
@@ -82,6 +84,14 @@ See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.
 | ViT-B/16 infer, bs 8 | CUDA | 70.5 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
 | ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
 | ViT-B/16 train, bs 1 | CUDA | 95.9 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+
+The ViT training gap is batch-dependent rather than a fixed overhead: the
+generated f32 GEMM is already saturated at bs 1, so a bigger batch buys nothing
+(per-image time stays ~79 ms on CUDA), while torch's cuBLAS keeps improving
+(bs 1 -> 8: 45.8 -> 22.1 ms/image). At bs 4 autorust/CUDA is 317 ms vs torch's
+102 ms. MNIST scales the other way: autorust is 2x faster than torch on CPU at
+both bs 64 and bs 512. Full sweep in
+[`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#batch-size-scaling).
 
 
 ## Scope and limitations

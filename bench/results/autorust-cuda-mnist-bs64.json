@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "mnist_train",
+  "batch": 64,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 3,
+  "iters": 10,
+  "ms_cold": 193.967,
+  "ms_median": 3.076,
+  "ms_min": 3.0671,
+  "ms_iqr": 0.0039,
+  "images_per_s": 20806.36,
+  "name": "autorust-cuda-mnist-bs64",
+  "variant": "CUDA",
+  "commit": "00e3871",
+  "date": "2026-11-11T09:59:59",
+  "notes": ""
+}

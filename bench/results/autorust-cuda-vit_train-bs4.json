@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "vit_train",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 2598.1062,
+  "ms_median": 317.1141,
+  "ms_min": 316.8575,
+  "ms_iqr": 0.2662,
+  "images_per_s": 12.61,
+  "name": "autorust-cuda-vit_train-bs4",
+  "variant": "CUDA",
+  "commit": "00e3871",
+  "date": "2026-11-11T10:01:08",
+  "notes": "SDPA (training)"
+}

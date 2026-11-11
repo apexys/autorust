@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "mnist_train",
+  "batch": 64,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 300.812,
+  "ms_median": 2.3344,
+  "ms_min": 2.3229,
+  "ms_iqr": 0.0283,
+  "images_per_s": 27415.55,
+  "name": "torch-cuda-mnist-bs64",
+  "variant": "cuda",
+  "commit": "00e3871",
+  "date": "2026-11-11T10:00:09",
+  "notes": ""
+}
