@@ -3597,3 +3597,36 @@ unchanged and the full suite passes. The remaining work is to make
 a kernel built after the split walk — i.e. derive `globals` from the `lctx` map
 order rather than from the body's `ParamArg` slots — which is a contained change
 in `realize.rs`/`split_store_inner`, not another rangeify pass.
+
+### 9.37 Root cause of the hoisted-kernel arg mismatch: inherited PARAM slots (2026-11)
+
+§9.36 left `args=1` vs `globals=[0, 3, 4]`. The cause is now identified: the
+hoisted contraction kernel is built from a body that `to_define_global` already
+lowered under the *outer* kernel's `LocalAddBufferContext`, so its operands are
+renumbered `PARAM` nodes. A fresh `debuf` on that body only registers `BUFFER`
+nodes (the new temp), which is why the CALL had one argument while
+`program_info_from_sink` — which reads the `ParamArg` slots straight from the
+body — reported three.
+
+Two candidate fixes were tried:
+
+- **slot-keyed argument list** in `split_store_inner` (build `args[slot]` from
+  the body's PARAM nodes so both sides agree). This compiles and matches the
+  globals, but the slots then refer to buffers of the *outer* kernel's mapping,
+  and the run dies inside `rayon` (bad buffer pointer). Reverted.
+- the fixpoint + hoist without it still produces the one-arg CALL (§9.36).
+
+The correct form is the one tinygrad gets for free: a kernel body must be
+lowered with a **fresh** context while its buffers are still `BUFFER` nodes, so
+slots are assigned 0..n-1 in that body's first-touch order. That means the hoist
+must emit the inner kernel from a *pre-lowering* body — the reduce is only
+visible after `to_define_global`, so the pass would have to (a) find the reduce
+post-lowering, then (b) rebuild an equivalent pre-lowering body for it (the
+reduce's own `STAGE` from `create_bufferize_and_index_srcs`), which is exactly
+the rangeify realize path that cannot see this reduce (§9.33).
+
+That closes the loop: the CPU hot kernel cannot be split without teaching
+`pm_generate_realize_map` to realize a reduce that is only reachable inside an
+already-materialized operand, or without per-kernel param renumbering. Both are
+scheduler reworks, not one-line changes. Tree at `6c2cbda`; suite green;
+bench medians unchanged (RUST train 1.56-1.64 s, CUDA train 94-100 ms).
