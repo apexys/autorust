@@ -3944,3 +3944,25 @@ visible after lowering.
 
 Gates: 78/78, clippy, rustdoc. Medians unchanged (RUST train 1.59-1.63 s,
 MNIST 64.3 ms, ViT infer 181.7 ms).
+
+### 9.47 ProgramInfo now derived from the linear body (2026-11)
+
+`prepare_program` computed `ProgramInfo` from the SINK (`program_info_from_sink`)
+and the ELF signature from the *linearized* body
+(`signature_from_linear(ctx, &lst)`). `pm_linearize_cleanups` can rewrite or
+introduce nodes, so the two traversals could disagree — exactly the
+`len is 6 but the index is 7` crash seen for a kernel created after
+`split_kernels`. `program_info_from_list` now re-derives `vars/globals/outs/ins`
+from `lst` (sorted and deduped, so ordering is unchanged), giving both sides one
+source of truth.
+
+This is landed and neutral for the current code paths (the cleanups do not
+rewrite PARAMs for kernels built during the split): 78/78 tests, clippy, rustdoc
+clean; RUST train 1.56-1.64 s, CUDA train 94.5 ms, medians unchanged.
+
+It does **not** by itself fix the hoisted kernel: re-enabling the split fixpoint
+plus the post-`to_define_global` hoist still fails with `len is 6 but the index is
+7` at launch, so the disagreement survives this change — the linear list for that
+kernel must be produced by a path where the signature counts a slot the info
+traversal does not see (or vice versa), and the next probe should print both slot
+sets for the failing program rather than relying on the executor's index panic.

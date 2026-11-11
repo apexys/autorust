@@ -631,6 +631,10 @@ fn prepare_program(
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "LINEAR");
     }
     let lst = pm_linearize_cleanups(ctx, lst);
+    // Re-derive the ProgramInfo from the *linear* body: the cleanups can rewrite
+    // nodes (a kernel built after the split walk in particular), and `globals`
+    // must agree with the ELF signature, which is built from `lst`.
+    let pi = program_info_from_list(ctx, sunk.clone(), &lst);
     if let Some(t) = t_lin {
         crate::engine::prof::add("codegen.linearize", t.elapsed().as_secs_f64());
     }
@@ -868,6 +872,59 @@ pub fn compile_linear(
         linear
     };
     (lin, progs)
+}
+
+/// [`program_info_from_sink`] over an explicit linear body.
+///
+/// The ELF signature is derived from the linear ops (`signature_from_linear`), so
+/// `globals` must come from the same traversal: `pm_linearize_cleanups` can
+/// introduce/replace PARAMs that the SINK toposort does not contain, which made
+/// a kernel created after `split_kernels` launch with more signature slots than
+/// `bufs` entries.
+fn program_info_from_list(ctx: &mut UOpCtx, sink: UopId, lst: &[UopId]) -> ProgramInfo {
+    let mut pi = program_info_from_sink(ctx, sink);
+    for u in lst {
+        match ctx.op_of(u) {
+            Ops::Param => {
+                let Arg::Param(p) = ctx.arg_of(u) else {
+                    continue;
+                };
+                if p.addrspace == Some(crate::dtype::AddrSpace::Alu) {
+                    if !pi.vars.contains(&p.slot) {
+                        pi.vars.push(p.slot);
+                    }
+                } else if !pi.globals.contains(&p.slot) {
+                    pi.globals.push(p.slot);
+                }
+            }
+            Ops::Store | Ops::Load => {
+                let s0 = ctx.srcs(u)[0].clone();
+                if let Some(buf) = buf_param_of(ctx, s0)
+                    && let Arg::Param(p) = ctx.arg_of(&buf)
+                    && p.addrspace != Some(crate::dtype::AddrSpace::Alu)
+                {
+                    let list = if ctx.op_of(u) == Ops::Store {
+                        &mut pi.outs
+                    } else {
+                        &mut pi.ins
+                    };
+                    if !list.contains(&p.slot) {
+                        list.push(p.slot);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    pi.vars.sort_unstable();
+    pi.vars.dedup();
+    pi.globals.sort_unstable();
+    pi.globals.dedup();
+    pi.outs.sort_unstable();
+    pi.outs.dedup();
+    pi.ins.sort_unstable();
+    pi.ins.dedup();
+    pi
 }
 
 /// `resolve_params` (realize.py:157) for the non-jit path: call args pass
