@@ -3421,3 +3421,47 @@ adding more rangeify staging.
 
 State unchanged: RUST train 1.56-1.64 s (2.5-2.66x), CUDA train 94-100 ms
 (2.15-2.29x); six of eight rows within 2x.
+
+### 9.32 Per-program KPROF keys; the CPU hot kernel is a single program (2026-11)
+
+`AUTORUST_KPROF` printed only the kernel *name*, and the name encodes the loop
+structure — so distinct programs collided (two different sources rendered as
+`r_384_197_8_192_4`), which made the last rounds' attribution wrong. The host
+path now appends the program's content key (`CompiledProg::elf_key`, the ELF
+content hash) as a fourth column:
+
+```
+KPROF  <name>  <secs>  <program-key>
+```
+
+RUST ViT training, per-program (141 distinct programs in the capture):
+
+| program | key | calls | time |
+|---|---|---:|---:|
+| `r_384_197_8_192_4` | `a8522231781e4338` | 33 | **1134 ms** |
+| `HostGemm` | — | 393 | 728 ms |
+| `r_96_197_8_768_4` | `5eeef187ae79c426` | 36 | 485 ms |
+| `E_589824_4` | `729c7ea48388bd2e` | 432 | 437 ms |
+| `E_147456_4` | `51c8169efd39cf60` | 882 | 265 ms |
+
+So the "1,222 ms kernel" is *one* program (33 launches, ~34 ms each) plus a
+couple of same-named smaller ones — not a single 310 ms/step blob, and not an
+aggregation artefact in the way the previous note claimed. It is a genuine
+generated matmul of [197, 3072] x K=768 at ~27 GFLOP/s.
+
+The store value of that kernel is `Add` (extents `[197, 3072]`) and the
+extractor sees it (`extract` peels `Add/Mul`); it bails in the *extras*
+classification because the peeled operands are per-element expressions (the
+quick-GELU derivative times a dropout mask), which the `HostGemm` descriptor
+cannot express. Hoisting the reduce at `split_store` time was re-implemented
+with the counter plumbed through `split_kernels` and the destination-index
+shape fixed (`INDEX(Param, expr)` has two srcs), but the pre-lowering body does
+not expose the reduce to `find_biggest_reduce` (it sits behind an `AFTER`), so
+the pass stays inert and was reverted. The working next step is to peel the
+epilogue *after* `to_define_global` inside `split_store`, where the reduce is
+visible (the earlier `[ext-fused] value=Add exts=[197, 3072]` probe), and to emit
+the temp-buffer kernel there.
+
+Gates: clippy, rustdoc, full suite green; the change is profiler-only, so the
+bench medians are unchanged (CUDA 21.9/15.7/69.2/94.1, RUST
+67.0/170.9/1148.2/1638.5).

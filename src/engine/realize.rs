@@ -957,7 +957,15 @@ fn exec_kernel(
         let tk = kprof.then(std::time::Instant::now);
         f(&bufs, host);
         if let Some(tk) = tk {
-            eprintln!("KPROF\t{}\t{:.6}", host.tag, tk.elapsed().as_secs_f64());
+            // Key by program content: two distinct kernels can share a name
+            // (the name encodes the loop structure), which made aggregate
+            // profiles misattribute time.
+            eprintln!(
+                "KPROF\t{}\t{:.6}\t{:016x}",
+                host.tag,
+                tk.elapsed().as_secs_f64(),
+                cp.elf_key
+            );
         }
         if let Some(a) = t0 {
             use crate::engine::prof::add;
@@ -972,10 +980,14 @@ fn exec_kernel(
     rt.borrow_mut()
         .call(&bufs, gs, ls, &cp.pi.vals(var_vals), false);
     if let Some(tk) = tk {
+        // Key by program content: two distinct kernels can share a name (the
+        // name encodes the loop structure), which made aggregate profiles
+        // misattribute time.
         eprintln!(
-            "KPROF\t{}\t{:.6}",
+            "KPROF\t{}\t{:.6}\t{:016x}",
             crate::renderer::cstyle::to_function_name_pub(&cp.pi.name),
-            tk.elapsed().as_secs_f64()
+            tk.elapsed().as_secs_f64(),
+            cp.elf_key
         );
     }
     if let (Some(a), Some(b), Some(c), Some(d)) = (t0, t1, t2, t3) {
