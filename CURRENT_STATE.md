@@ -3284,3 +3284,49 @@ CUDA is unchanged (the pass is host-only): MNIST 21.9 (1.67x), ViT infer
 14.0/69.3 (1.61x/1.49x), train 97.2 (2.22x).
 
 Gates: full `cargo test --release` (78 binaries), clippy, rustdoc.
+
+### 9.29 Training rows: where the remaining time actually is (2026-11) — ANALYSIS
+
+The two rows still above 2x are the training ones. Both were profiled
+per-kernel this round; neither gap is scheduling or GEMM dispatch.
+
+**CUDA training (96.8-124 ms/step, torch 43.8).** `AUTORUST_KPROF=1`
+stream-synchronised per-launch trace, 4 steps (421.6 ms of kernels total):
+
+| category | launches | kernel time | share |
+|---|---:|---:|---:|
+| elementwise (`E_*`) | 12,095 | 254 ms | **60.2%** |
+| generated matmul / attention (`r_*`) | 1,413 | 168 ms | 39.8% |
+| cuBLAS | 0 | — | — |
+
+163.6 ms of the 421.6 (39%) is in kernels under 50 µs each: the optimizer's
+per-parameter moment updates (`E_2`: 6,373 launches), bias/scale epilogues and
+the loss. Auto never picks cuBLAS for these training shapes, so the 2.2x is not
+a library-dispatch gap — it is elementwise work plus per-launch overhead plus
+the generated f32 matmul rate. The earlier measured library ceiling (91.9 ms
+with `GEMM=all` + TF32 = 2.10x) bounds only the matmul part, which is 40% of
+the step; the elementwise 60% would have to be fused (or the optimizer update
+batched) to move this row.
+
+**CPU training (1.61-1.65 s, torch 616 ms).** The fused FFN-backward kernel
+`r_384_197_8_192_4` is 1,220-1,284 ms over 36 launches (~310 ms/step), and
+`host_gemm::extract` never sees it: instrumenting the extractor shows no reduce
+of that output size is ever offered, i.e. the contraction sits inside a store
+whose top is not the reduce (it is a realised sum from §9.21 with a
+dropout/`where` prologue). The rest of the step is ~120 ms of contiguous copies
+(`E_147456_4` = 768 copies of a 589,824-element buffer per step) and generated
+attention fragments.
+
+Attempted this round and **not** landed: moving the operand-staging step ahead
+of the "already realized / kernel root" guards in
+`realize_interior_contractions`, and carrying the realize mark across the
+`PAD -> WHERE` rewrite, so a §9.21-realized backward sum would stage its
+`where(...)` operand. Neither changed the kernel list (the extractor still never
+sees the reduce), so both were reverted; the remaining work is to make
+`extract` accept a store whose value is an elementwise op over a realised
+reduce, or to fuse the factorising elementwise kernels, not another rangeify
+guard.
+
+Measured state unchanged for the eight rows of `bench/results`: CUDA 21.9 /
+14.0 / 69.3 / 96.8 ms and RUST 64.1 / 173.2 / 1163.8 / 1634.2 ms, i.e. six of
+eight within 2x of torch.
