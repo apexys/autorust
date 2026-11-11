@@ -1414,8 +1414,24 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
             }
         }
         let body = kernel.join("\n");
+        // `rustc`'s loop vectorizer is exponential in the length of an integer
+        // shift/xor chain: measured on rustc 1.97 at `-C opt-level=3 -C
+        // target-cpu=native`, a loop body with 20 shifts compiles in 0.26 s,
+        // 24 in 1.8 s, 28 in 16 s and the RNG kernels' 80+ shifts take over
+        // ten minutes. The hash/`threefry` kernels are exactly that shape, so
+        // route their loop index through `black_box`: the vectorizer cannot
+        // vectorize an opaque induction variable and falls back to the (already
+        // vectorized, tiny) body. It costs nothing at runtime and leaves every
+        // other kernel's gidx loop vectorizable.
+        const SHIFT_HEAVY: usize = 24;
+        let shifts = body.matches(" << ").count() + body.matches(" >> ").count();
         let body = if gidx_params.iter().any(|(n, _)| n == "gidx0") {
-            format!("for __gidx0 in gidx0_start..gidx0_end {{\nlet gidx0 = __gidx0;\n{body}\n}}")
+            let idx = if shifts >= SHIFT_HEAVY {
+                "core::hint::black_box(__gidx0)"
+            } else {
+                "__gidx0"
+            };
+            format!("for __gidx0 in gidx0_start..gidx0_end {{\nlet gidx0 = {idx};\n{body}\n}}")
         } else {
             body
         };

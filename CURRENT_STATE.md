@@ -4023,3 +4023,28 @@ GEMM, so it was reverted (the cache fix is kept).
 
 Gates: 78/78, clippy, rustdoc. Medians: RUST train 1.57-1.64 s, CUDA train
 94.5 ms, six of eight rows within 2x.
+
+### 9.50 rustc's loop vectorizer is exponential on integer shift chains (2026-11)
+
+Batch-2 CPU training hung for over ten minutes in `rustc`, not in a kernel: the
+disk cache was cold for the new shape, and one generated kernel
+(`E_2`, the `threefry` hash behind `rand`/dropout, 166 lines) never finished
+compiling. Reproduced standalone on rustc 1.97.1 with the real flags
+(`-C opt-level=3 -C target-cpu=native`); `-C opt-level=0/1`, `-C
+target-cpu=x86-64` (no SSE4.1) and `-C llvm-args=-vectorize-loops=false` all
+compile it in milliseconds, so the loop vectorizer is the culprit. A synthetic
+loop shows the blowup is in the length of the **integer shift/xor chain**, not
+the body in general (f32 chains of 84 ops: 0.07 s): 20 shifts 0.26 s, 22 0.65 s,
+24 1.8 s, 26 5.2 s, 28 16 s, 30 > 30 s; the RNG kernel has 80+.
+
+Fix: `render_rust` routes the `gidx0` loop index through `core::hint::black_box`
+when the body has at least 24 shifts. An opaque induction variable makes the
+vectorizer bail on the outer work-item loop, which costs nothing at runtime
+(the body is already vectorized; these kernels are tiny) and leaves every other
+kernel's loop vectorizable. `tests/rust_render.rs::shift_heavy_kernels_mark_the_loop_index`
+pins both sides.
+
+With the fix, RUST ViT-B/16 training runs at batch 2/4 (3.15/4.21 s) instead of
+hanging. The same shapes are fine on CUDA (`CC` uses `restrict`, and CUDA has no
+work-item loop).
+

@@ -154,3 +154,41 @@ fn renders_boolean_where_and_casts() {
         compile(k);
     }
 }
+
+/// Integer shift chains (the `threefry` hash in `rand`/dropout) make rustc's
+/// loop vectorizer take exponentially long, so the rendered loop index goes
+/// through `black_box`. A plain elementwise kernel must keep the plain loop.
+#[test]
+fn shift_heavy_kernels_mark_the_loop_index() {
+    let ctx = Ctx::new();
+    let data: Vec<u32> = (0..1024).collect();
+    let a = Tensor::from_slice(&ctx, &data, Some(autorust::dtype::UINT32), Some("INTERP"));
+    let mut x = a;
+    for i in 0..20u32 {
+        x = x.shl(3 + (i % 7) as i64).rshift(5 + (i % 5) as i64);
+        x = x.bitwise_xor(i as i64);
+    }
+    let kernels = {
+        let mut c = ctx.borrow_mut();
+        render_roots(&mut c, vec![x.uop().clone()])
+    };
+    assert!(!kernels.is_empty(), "expected a shift kernel");
+    assert!(
+        kernels.iter().any(|k| k.contains("core::hint::black_box")),
+        "expected a black_box loop index:\n{}",
+        kernels.join("\n---\n")
+    );
+    for k in &kernels {
+        compile(k);
+    }
+
+    let plain = Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0], None, Some("INTERP"));
+    let out = plain.add(1.0).mul(2.0);
+    let kernels = {
+        let mut c = ctx.borrow_mut();
+        render_roots(&mut c, vec![out.uop().clone()])
+    };
+    for k in &kernels {
+        assert!(!k.contains("core::hint::black_box"), "{k}");
+    }
+}
