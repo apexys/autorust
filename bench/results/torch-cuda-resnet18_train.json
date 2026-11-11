@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "resnet18_train",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 374.841,
+  "ms_median": 64.1781,
+  "ms_min": 60.0672,
+  "ms_iqr": 4.8958,
+  "images_per_s": 498.61,
+  "name": "torch-cuda-resnet18_train",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:06:56",
+  "notes": ""
+}

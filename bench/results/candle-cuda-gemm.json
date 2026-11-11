@@ -1,0 +1,63 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CUDA",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 73.2254,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 0.6879,
+      "tflops": 3.1217
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 3.7142,
+      "tflops": 4.6254
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 55.0882,
+      "tflops": 2.4949
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 1.5288,
+      "tflops": 5.6189
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 3.2169,
+      "tflops": 2.6703
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 3.6031,
+      "tflops": 4.7681
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 4.3511,
+      "tflops": 3.9484
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 1.0352,
+      "tflops": 2.0745
+    }
+  ],
+  "name": "candle-cuda-gemm",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:04:52",
+  "notes": ""
+}

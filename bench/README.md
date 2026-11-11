@@ -1,7 +1,7 @@
 # Cross-framework benchmark
 
-Compares **autorust**, **candle**, **torch** and **tinygrad** on the same two
-models, on CPU and CUDA. This directory is development-only: it is excluded
+Compares **autorust**, **candle**, **torch** and **tinygrad** on the same
+workloads, on CPU and CUDA. This directory is development-only: it is excluded
 from the published crate, and `bench/candle` is a standalone package so candle
 never enters autorust's dependency graph.
 
@@ -15,6 +15,17 @@ Results live in [`results/`](results) as raw JSON plus a generated
 | `mnist_train` | `beautiful_mnist` CNN (2 conv, BN, pool ×2, 576→10) | batch 64 and 512, 1×28×28, Adam 1e-3, CE | ms/step, img/s, s/epoch |
 | `vit_infer` | ViT-B/16 (12 layers, 768 wide, 12 heads) | batch 1 and 8, 3×224×224, patch 16, 1000 classes | ms/step, ms/image, img/s |
 | `vit_train` | same ViT + CE + backward + Adam 3e-4 | batch 1 and 4, f32 | ms/step, img/s |
+| `vit_infer_bf16` | ViT-B/16 weights and input cast to bf16 (tensor-core path) | batch 8 | ms/step, img/s |
+| `gemm` / `gemm_bf16` | matmul shape sweep (8 shapes) | 1024³…4096³, TN/NT, batched 8×512³ | per-case ms, TFLOP/s |
+| `memops` | add, copy, gelu, softmax, layernorm, sum, amax, transpose | 16M f32 elements (4096² for the 2-D ops) | per-op ms, GB/s |
+| `optim` | AdamW over 100M parameters in 32 tensors | gradients set once, no zero_grad | ms/step, GB/s |
+| `resnet18_infer`/`_train`, `resnet50_infer` | torchvision-shaped ResNet | batch 32, 3×224×224, 1000 classes | ms/step, img/s |
+| `mobilenet_infer` | MobileNetV2 (inverted residuals, depthwise 3×3) | batch 32, 3×224×224 | ms/step, img/s |
+| `unet_infer` | 4-level UNet (GroupNorm, max-pool, conv_transpose, upsample, cat) | batch 4, 3×64×64 | ms/step, img/s |
+| `llm_prefill` | 6-layer LLaMA-style decoder (GQA 12/4, RoPE, causal mask) | 512 tokens, vocab 32000, f32 | ms/step, token/s |
+| `llm_decode` | one token against a 512-token KV cache, Gumbel-max sampling | batch 1 | ms/step, token/s |
+| `onnx_mnist` | the same MNIST CNN exported to ONNX, run through `OnnxModel` | batch 32, `bench/assets/mnist_bs32.onnx` | ms/step, img/s |
+| `freeze` | `vit_freeze` example: eager JIT replay vs frozen CPU plan | 1 layer, d=192, 64² | per-case ms |
 
 Inputs are **synthetic and device-resident** (`rand` for MNIST, `zeros` for
 ViT), with fixed labels; the timed region is one training/inference step and
@@ -41,8 +52,21 @@ about the framework, not the data pipeline. The MNIST model itself is the
   with batch (see `PERFORMANCE.md#batch-size-scaling`). RAYON (the typed
   interpreter) is run with fewer steps because it is 1-2 orders of magnitude
   slower.
-- Not included: bf16/tensor-core runs, `torch.compile`, `@function` transforms,
-  multi-GPU. They are candidates for a follow-up.
+- `gemm`, `memops` and `optim` are microbenches: one JSON per framework with a
+  `cases` array, rendered as per-case tables by `report.py`. The GEMM bf16 rows
+  are CUDA-only (torch's CPU bf16 GEMM is unusably slow here, candle's CPU
+  matmul is f32-only, tinygrad 0.14 rejects bf16 on this CUDA path).
+- `llm_decode` reuses the same 512-token cache for every timed step (the cache
+  is concatenated into the graph each step), so it measures per-token cost
+  without including cache growth.
+- The ONNX asset is committed; regenerate it with
+  `uv pip install --python bench/.venv/bin/python onnx` and
+  `bench/.venv/bin/python bench/tools/export_onnx.py`.
+- `freeze` runs `target/release/examples/vit_freeze`
+  (`cargo build --release --example vit_freeze`); it is autorust-only.
+- Not included: `torch.compile`, `@function` transforms, multi-GPU, and
+  tinygrad/candle for the new conv/LLM rows (their bench drivers only cover the
+  original workloads and GEMM). They are candidates for a follow-up.
 
 Caveats that affect interpretation:
 
@@ -84,6 +108,7 @@ UV_CACHE_DIR=/tmp/opencode/uv-cache uv pip install \
 
 # 2. Rust sides
 cargo build --release -p autorust-bench
+cargo build --release --example vit_freeze                   # frozen-plan row
 (cd bench/candle && cargo build --release --features cuda)   # CPU path included
 
 # 3. Run / report
@@ -97,7 +122,9 @@ tinygrad runs with the checkout's venv (`../tinygrad/.venv/bin/python`), so
 `tinygrad` must be checked out next to `autorust` (or adjust `TINYGRAD_PY` in
 `run.py`).
 
-Each JSON file contains: `framework`, `version`, `device`, `workload`,
+Microbench JSON files additionally carry `cases: [{case, ms, tflops|gbs}]`;
+their `ms_median` is the sum of the cases (only used by the runner's summary
+line). Each JSON file contains: `framework`, `version`, `device`, `workload`,
 `batch`, `dtype`, `jit`, `warmup`, `iters`, `ms_cold`, `ms_median`, `ms_min`,
 `ms_iqr`, `images_per_s`, plus `name`, `variant`, `commit`, `date` and `notes`
 added by `run.py`. `ms_cold` is the first step including capture/compile; it is

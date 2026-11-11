@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "vit_infer_bf16",
+  "batch": 8,
+  "dtype": "bf16",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 573.0471,
+  "ms_median": 61.623,
+  "ms_min": 59.3786,
+  "ms_iqr": 1.303,
+  "images_per_s": 129.82,
+  "name": "autorust-cuda-vit_infer_bf16",
+  "variant": "CUDA",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:49",
+  "notes": ""
+}

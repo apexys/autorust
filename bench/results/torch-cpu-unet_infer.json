@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "unet_infer",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 121.8528,
+  "ms_median": 16.5941,
+  "ms_min": 16.337,
+  "ms_iqr": 12.4786,
+  "images_per_s": 241.05,
+  "name": "torch-cpu-unet_infer",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:00",
+  "notes": ""
+}

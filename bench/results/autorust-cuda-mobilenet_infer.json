@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "mobilenet_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 417.3493,
+  "ms_median": 54.8094,
+  "ms_min": 52.8816,
+  "ms_iqr": 2.4988,
+  "images_per_s": 583.84,
+  "name": "autorust-cuda-mobilenet_infer",
+  "variant": "CUDA",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:37",
+  "notes": ""
+}

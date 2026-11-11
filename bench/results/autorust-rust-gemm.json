@@ -1,0 +1,63 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 485.1856,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 4.6574,
+      "tflops": 0.4611
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 32.7577,
+      "tflops": 0.5245
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 329.8564,
+      "tflops": 0.4167
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 16.8902,
+      "tflops": 0.5086
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 14.2672,
+      "tflops": 0.6021
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 49.4259,
+      "tflops": 0.3476
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 32.6442,
+      "tflops": 0.5263
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 4.6866,
+      "tflops": 0.4582
+    }
+  ],
+  "name": "autorust-rust-gemm",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:04:47",
+  "notes": ""
+}

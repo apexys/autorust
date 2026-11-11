@@ -92,6 +92,30 @@ generated f32 GEMM is close to saturation already at bs 1 (per-image 98.8 ->
 both bs 64 and bs 512. Full sweep in
 [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#batch-size-scaling).
 
+### More workloads
+
+The bench also isolates the pieces the two models hide:
+
+| workload | device | autorust | torch | note |
+|---|---|---:|---:|---|
+| f32 GEMM, 2048³ | CUDA | **2.20 ms** (7.8 TF/s) | 2.21 ms (7.8 TF/s) | at parity with cuBLAS |
+| bf16 GEMM, 4096³ | CUDA | 9.50 ms (14.5 TF/s) | **5.43 ms** (25.3 TF/s) | tensor cores selected, kernel ~0.6x |
+| memory-bound add, 64 MB | CUDA | **0.62 ms** (325 GB/s) | 0.63 ms (322 GB/s) | elementwise at peak |
+| memory-bound softmax | CUDA | 0.86 ms (155 GB/s) | **0.47 ms** (288 GB/s) | two-pass reduce |
+| AdamW, 100M params | CUDA | 102 ms | **26 ms** | per-tensor launch overhead |
+| ResNet-18 infer, bs 32 | CUDA | 373.6 ms | **17.1 ms** | conv lowering is the gap |
+| ResNet-18 train, bs 32 | CPU | **1177.5 ms** | 1110.8 ms | parity on CPU |
+| MobileNetV2 infer, bs 32 | CPU | **243.7 ms** | 837.6 ms | depthwise beats oneDNN |
+| UNet infer, 64² | CUDA | 18.7 ms | **1.6 ms** | conv_transpose/upsample |
+| LLM prefill, 512 tok | CUDA | 317 ms | **16.4 ms** | attention + head |
+| LLM decode, 1 tok | CUDA | 17.1 ms | **3.6 ms** | ~300 kernels/token |
+| ViT-B/16 infer, bf16 | CUDA | 61.6 ms | **18.2 ms** | TC tiling on 197 tokens |
+| MNIST infer via ONNX, bs 32 | CUDA | 10.9 ms | **0.35 ms** | runner reschedules per call |
+
+Per-case tables (GEMM shapes, each memory op, both optimizer devices, the
+frozen-plan comparison) are in
+[`bench/results/summary.md`](https://github.com/apexys/autorust/blob/main/bench/results/summary.md)
+and [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#microbenches).
 
 ## Scope and limitations
 

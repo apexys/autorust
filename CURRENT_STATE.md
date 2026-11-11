@@ -4093,3 +4093,65 @@ estimate (rounded down to a multiple of 8) instead of assuming every GPU is the
 12 GB reference card.
 
 
+
+### 9.51 The benchmark now covers the pieces the two models hide (2026-11)
+
+The matrix only had MNIST (conv/linear) and ViT (attention), so a gap could be
+a GEMM tile, a conv lowering, a launch count or the front end and the table
+could not tell them apart. Eight workloads were added, each with the same
+protocol as the existing rows (`bench/run.py`, raw JSON in `bench/results/`):
+
+- **GEMM sweep** (`gemm`, `gemm_bf16`): 1024³/2048³/4096³, two rectangular
+  shapes, transposed-A, transposed-B and batched 8×512³, f32 and bf16, one
+  element read back to force completion. This is the control for every model
+  row: the f32 GEMM is at parity with cuBLAS on CUDA (7.8-9.4 TFLOP/s at 2048³+
+  vs torch's 7.4-8.5) and the bf16 path is 0.5-0.6x torch (9-14 vs 13-25) with
+  tensor cores selected. On CPU the packed GEMM is 0.4-0.6 TFLOP/s vs MKL's
+  0.6-1.0; transposed-A is the weak case (0.3 vs 0.7).
+- **Memory-bound ops** (`memops`): add/copy/gelu/softmax/layernorm/sum/amax/
+  transpose over 16M f32 elements, reported in GB/s. Pure elementwise matches
+  torch on CUDA (325 vs 322 GB/s) and is 2x faster on CPU; reductions are the
+  gap (softmax 155 vs 288, amax 64 vs 292 GB/s) because they are two-pass.
+- **AdamW-only step** (`optim`): 100M parameters in 32 tensors with grads
+  attached once. CPU is faster than torch (232 vs 296 ms); CUDA is 4x slower
+  (102 vs 26 ms) because the update stays per-tensor elementwise launches
+  (27 GB/s vs torch's 106).
+- **Conv models**: ResNet-18 (infer + train), ResNet-50, MobileNetV2 and a
+  small UNet. Dense conv is the weak path: ResNet-18 inference is 4.8x off
+  torch on CPU and 21.9x on CUDA (the direct-conv kernel runs at ~9-30 GFLOP/s
+  against 8 TFLOP/s for the GEMM). ResNet-18 *inference* is slower than its own
+  training step on CPU although training does more work, which points at the
+  BatchNorm-fused inference conv selecting a slower lowering. MobileNetV2 is
+  the exception (depthwise has no GEMM lowering; the elementwise path beats
+  oneDNN on CPU, 3.4x). The UNet exposes conv_transpose/upsample/cat (33.9x off
+  torch on CPU).
+- **Autoregressive decoder** (`llm_prefill`, `llm_decode`): 6-layer LLaMA-style
+  model (12/4 GQA, RoPE, causal mask, 512-token KV cache, Gumbel-max sampling).
+  Prefill is 2.2x/19.4x off torch (CPU/CUDA). Decode launches ~300 kernels per
+  token and is 8.1x/4.7x off; the gap is per-kernel dispatch, not FLOPs (torch
+  runs the same explicit matmul+softmax, not SDPA).
+- **bf16 ViT** (`vit_infer_bf16`): weights and input cast to bf16, exercising
+  the TC matmul and bf16 attention. 61.6 ms vs torch's 18.2 at bs 8: only 1.15x
+  faster than f32 because the 197-token axis is prime and the TC tiles pad it.
+- **ONNX runner** (`onnx_mnist`): the MNIST CNN exported to
+  `bench/assets/mnist_bs32.onnx` (regenerate with `bench/tools/export_onnx.py`)
+  and run through `OnnxModel::run`. 14.7 ms/call on CPU vs torch's 3.7: the
+  runner rebuilds and schedules the graph per call.
+- **Frozen plan** (`freeze`): the `vit_freeze` example now also times eager JIT
+  replay vs `FrozenRunner` (1.60 vs 2.00 ms for the small ViT, 17 ms plan
+  build). Per-step parity is expected (same kernels); the frozen path's win is
+  deployment (no scheduler/rustc), and the runner's input copies are why it is
+  not faster.
+
+The bf16 sweep immediately found a renderer bug: a bf16 kernel whose lanes
+vectorize 2-wide emits `make_nv_bfloat162`, which `cuda_bf16.h` does not
+provide (it only typedefs `nv_bfloat162`); tinygrad has the same latent bug
+because it also only emits vector prefixes for 4/8-wide. `render_kernel` now
+defines the 2-wide constructor in terms of `__halves2bfloat162`. The bf16 GEMM
+rows are CUDA-only: torch's CPU bf16 GEMM is unusably slow here, candle's CPU
+matmul is f32-only and tinygrad 0.14 rejects bf16 on this CUDA path.
+
+Rows live in `bench/run.py`; `bench/report.py` renders the microbenches as
+per-case tables (their JSON carries a `cases` array). tinygrad/candle drivers
+only cover the original workloads plus GEMM, so the other new rows are
+autorust+torch; noted in `bench/README.md`.

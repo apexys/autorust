@@ -208,6 +208,80 @@ fn main() -> Result<()> {
         _ => Device::Cpu,
     };
     let dev_name = if dev.is_cuda() { "CUDA" } else { "CPU" };
+
+    if workload == "gemm" {
+        use candle_core::IndexOp;
+        let dtype = match std::env::var("BENCH_DTYPE").as_deref() {
+            Ok("bf16") => DType::BF16,
+            _ => DType::F32,
+        };
+        let dt_name = if dtype == DType::BF16 { "bf16" } else { "f32" };
+        let warmup = env_usize("BENCH_WARMUP", 1);
+        let iters = env_usize("BENCH_ITERS", 3);
+        let shapes: &[(&str, usize, usize, usize, usize, bool, bool)] = &[
+            ("1024³", 1, 1024, 1024, 1024, false, false),
+            ("2048³", 1, 2048, 2048, 2048, false, false),
+            ("4096³", 1, 4096, 4096, 4096, false, false),
+            ("1024x1024x4096", 1, 1024, 1024, 4096, false, false),
+            ("4096x1024x1024", 1, 4096, 1024, 1024, false, false),
+            ("TN 2048³", 1, 2048, 2048, 2048, true, false),
+            ("NT 2048³", 1, 2048, 2048, 2048, false, true),
+            ("batched 8x512³", 8, 512, 512, 512, false, false),
+        ];
+        let only = std::env::var("BENCH_GEMM_ONLY").ok();
+        let mut cases = Vec::new();
+        for &(name, batch, m, n, k, ta, tb) in shapes {
+            let label = format!("{dt_name} {name}");
+            if let Some(p) = &only
+                && !label.contains(p)
+            {
+                continue;
+            }
+            let a = Tensor::rand(0f32, 1f32, (batch, m, k), &dev)?.to_dtype(dtype)?;
+            let bshape = if tb { (batch, n, k) } else { (batch, k, n) };
+            let b = Tensor::rand(0f32, 1f32, bshape, &dev)?.to_dtype(dtype)?;
+            let lhs = if ta { a.transpose(1, 2)?.contiguous()? } else { a };
+            let rhs = if tb { b.transpose(1, 2)?.contiguous()? } else { b };
+            let step = || -> Result<()> {
+                let c = lhs.matmul(&rhs)?;
+                let _ = c.i((0, 0, 0))?.to_scalar::<f32>()?;
+                Ok(())
+            };
+            step()?;
+            for _ in 0..warmup {
+                step()?;
+            }
+            let mut samples = Vec::with_capacity(iters);
+            for _ in 0..iters {
+                let t = Instant::now();
+                step()?;
+                samples.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (ms, _, _) = stats(samples);
+            let flops = 2.0 * (batch * m * n * k) as f64;
+            cases.push((label, ms, flops / (ms * 1e9)));
+        }
+        let total: f64 = cases.iter().map(|c| c.1).sum();
+        let json_cases: Vec<String> = cases
+            .iter()
+            .map(|(n, ms, v)| format!("{{\"case\":\"{n}\",\"ms\":{ms:.4},\"tflops\":{v:.4}}}"))
+            .collect();
+        for (n, ms, v) in &cases {
+            println!("gemm {dev_name} {n}: {ms:.3} ms ({v:.2} tflops)");
+        }
+        let json = format!(
+            "{{\"framework\":\"candle\",\"version\":\"0.11.1\",\"device\":\"{dev_name}\",\
+             \"workload\":\"gemm\",\"batch\":1,\"dtype\":\"{dt_name}\",\"jit\":false,\
+             \"warmup\":{warmup},\"iters\":{iters},\"ms_cold\":0.0,\"ms_median\":{total:.4},\
+             \"ms_min\":0.0,\"ms_iqr\":0.0,\"images_per_s\":0.0,\"cases\":[{c}]}}",
+            c = json_cases.join(",")
+        );
+        if let Ok(path) = std::env::var("BENCH_OUT") {
+            std::fs::write(path, &json).expect("write BENCH_OUT");
+        }
+        println!("RESULT {json}");
+        return Ok(());
+    }
     let training = workload.ends_with("train");
     let default_bs = if workload == "mnist_train" { 512 } else { 1 };
     let bs = env_usize("BENCH_BS", default_bs);

@@ -1,0 +1,63 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "memops",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 0.0,
+  "ms_median": 5.0477,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "add 16777216",
+      "ms": 0.6189,
+      "gbs": 325.2885
+    },
+    {
+      "case": "copy 16777216",
+      "ms": 0.4223,
+      "gbs": 317.8444
+    },
+    {
+      "case": "gelu 16777216",
+      "ms": 0.4225,
+      "gbs": 317.6849
+    },
+    {
+      "case": "softmax 16777216",
+      "ms": 0.8643,
+      "gbs": 155.298
+    },
+    {
+      "case": "layernorm 16777216",
+      "ms": 0.8605,
+      "gbs": 155.9851
+    },
+    {
+      "case": "sum 16777216",
+      "ms": 0.3809,
+      "gbs": 176.2049
+    },
+    {
+      "case": "amax 16777216",
+      "ms": 1.0482,
+      "gbs": 64.0251
+    },
+    {
+      "case": "transpose 16777216",
+      "ms": 0.4303,
+      "gbs": 311.9311
+    }
+  ],
+  "name": "autorust-cuda-memops",
+  "variant": "CUDA",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:10",
+  "notes": ""
+}

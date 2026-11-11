@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "resnet18_train",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 1147.6516,
+  "ms_median": 1110.8317,
+  "ms_min": 1054.8879,
+  "ms_iqr": 372.1376,
+  "images_per_s": 28.81,
+  "name": "torch-cpu-resnet18_train",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:06:53",
+  "notes": ""
+}

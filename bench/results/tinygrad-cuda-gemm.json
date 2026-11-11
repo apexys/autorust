@@ -1,0 +1,63 @@
+{
+  "framework": "tinygrad",
+  "version": "0.14.0",
+  "device": "CUDA",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 137.1171,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 1.693,
+      "tflops": 1.2685
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 11.6093,
+      "tflops": 1.4798
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 93.7488,
+      "tflops": 1.466
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 6.2419,
+      "tflops": 1.3762
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 5.9141,
+      "tflops": 1.4524
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 3.4815,
+      "tflops": 4.9346
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 12.7535,
+      "tflops": 1.3471
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 1.675,
+      "tflops": 1.282
+    }
+  ],
+  "name": "tinygrad-cuda-gemm",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:01",
+  "notes": ""
+}

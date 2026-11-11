@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "mobilenet_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 869.8384,
+  "ms_median": 837.5666,
+  "ms_min": 741.1631,
+  "ms_iqr": 67.3829,
+  "images_per_s": 38.21,
+  "name": "torch-cpu-mobilenet_infer",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:46",
+  "notes": ""
+}

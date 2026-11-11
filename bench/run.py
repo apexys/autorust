@@ -84,6 +84,62 @@ RUNS = [
     ("torch-cpu-vit_train-bs4", "torch", "cpu", "vit_train", 4, 1, 2, ""),
     ("torch-cuda-vit_train-bs4", "torch", "cuda", "vit_train", 4, 1, 3, ""),
     ("tinygrad-cuda-vit_train-bs4", "tinygrad", "cuda", "vit_train", 4, 1, 3, ""),
+    # --- Microbenches: GEMM sweep (f32 + bf16), memory-bound ops, AdamW ---
+    ("autorust-rust-gemm", "autorust", "RUST", "gemm", 1, 1, 3, ""),
+    ("autorust-cuda-gemm", "autorust", "CUDA", "gemm", 1, 1, 3, ""),
+    ("candle-cpu-gemm", "candle", "cpu", "gemm", 1, 1, 3, ""),
+    ("candle-cuda-gemm", "candle", "cuda", "gemm", 1, 1, 3, ""),
+    ("torch-cpu-gemm", "torch", "cpu", "gemm", 1, 1, 3, ""),
+    ("torch-cuda-gemm", "torch", "cuda", "gemm", 1, 1, 3, ""),
+    ("tinygrad-cuda-gemm", "tinygrad", "cuda", "gemm", 1, 1, 3, ""),
+    ("autorust-cuda-gemm-bf16", "autorust", "CUDA", "gemm_bf16", 1, 1, 3, ""),
+    ("torch-cuda-gemm-bf16", "torch", "cuda", "gemm_bf16", 1, 1, 3, ""),
+    ("autorust-rust-memops", "autorust", "RUST", "memops", 1, 2, 5, ""),
+    ("autorust-cuda-memops", "autorust", "CUDA", "memops", 1, 2, 5, ""),
+    ("torch-cpu-memops", "torch", "cpu", "memops", 1, 2, 5, ""),
+    ("torch-cuda-memops", "torch", "cuda", "memops", 1, 2, 5, ""),
+    ("autorust-rust-optim", "autorust", "RUST", "optim", 1, 2, 10, ""),
+    ("autorust-cuda-optim", "autorust", "CUDA", "optim", 1, 2, 10, ""),
+    ("torch-cpu-optim", "torch", "cpu", "optim", 1, 2, 10, ""),
+    ("torch-cuda-optim", "torch", "cuda", "optim", 1, 2, 10, ""),
+    # --- Conv nets: ResNet-18/50, MobileNetV2 (depthwise), small UNet ---
+    ("autorust-rust-resnet18_infer", "autorust", "RUST", "resnet18_infer", 32, 3, 5, ""),
+    ("autorust-cuda-resnet18_infer", "autorust", "CUDA", "resnet18_infer", 32, 3, 5, ""),
+    ("torch-cpu-resnet18_infer", "torch", "cpu", "resnet18_infer", 32, 3, 5, ""),
+    ("torch-cuda-resnet18_infer", "torch", "cuda", "resnet18_infer", 32, 3, 5, ""),
+    ("autorust-rust-resnet18_train", "autorust", "RUST", "resnet18_train", 32, 2, 3, ""),
+    ("autorust-cuda-resnet18_train", "autorust", "CUDA", "resnet18_train", 32, 2, 3, ""),
+    ("torch-cpu-resnet18_train", "torch", "cpu", "resnet18_train", 32, 2, 3, ""),
+    ("torch-cuda-resnet18_train", "torch", "cuda", "resnet18_train", 32, 2, 3, ""),
+    ("autorust-rust-resnet50_infer", "autorust", "RUST", "resnet50_infer", 32, 2, 3, ""),
+    ("autorust-cuda-resnet50_infer", "autorust", "CUDA", "resnet50_infer", 32, 2, 3, ""),
+    ("torch-cpu-resnet50_infer", "torch", "cpu", "resnet50_infer", 32, 2, 3, ""),
+    ("torch-cuda-resnet50_infer", "torch", "cuda", "resnet50_infer", 32, 2, 3, ""),
+    ("autorust-rust-mobilenet_infer", "autorust", "RUST", "mobilenet_infer", 32, 2, 5, ""),
+    ("autorust-cuda-mobilenet_infer", "autorust", "CUDA", "mobilenet_infer", 32, 2, 5, ""),
+    ("torch-cpu-mobilenet_infer", "torch", "cpu", "mobilenet_infer", 32, 2, 5, ""),
+    ("torch-cuda-mobilenet_infer", "torch", "cuda", "mobilenet_infer", 32, 2, 5, ""),
+    ("autorust-rust-unet_infer", "autorust", "RUST", "unet_infer", 4, 2, 3, ""),
+    ("autorust-cuda-unet_infer", "autorust", "CUDA", "unet_infer", 4, 2, 5, ""),
+    ("torch-cpu-unet_infer", "torch", "cpu", "unet_infer", 4, 2, 3, ""),
+    ("torch-cuda-unet_infer", "torch", "cuda", "unet_infer", 4, 2, 5, ""),
+    # --- Autoregressive decoder (GQA + RoPE + KV cache + sampling) ---
+    ("autorust-rust-llm_prefill", "autorust", "RUST", "llm_prefill", 512, 1, 3, ""),
+    ("autorust-cuda-llm_prefill", "autorust", "CUDA", "llm_prefill", 512, 1, 3, ""),
+    ("torch-cpu-llm_prefill", "torch", "cpu", "llm_prefill", 512, 1, 3, ""),
+    ("torch-cuda-llm_prefill", "torch", "cuda", "llm_prefill", 512, 1, 3, ""),
+    ("autorust-rust-llm_decode", "autorust", "RUST", "llm_decode", 1, 2, 5, ""),
+    ("autorust-cuda-llm_decode", "autorust", "CUDA", "llm_decode", 1, 2, 5, ""),
+    ("torch-cpu-llm_decode", "torch", "cpu", "llm_decode", 1, 2, 5, ""),
+    ("torch-cuda-llm_decode", "torch", "cuda", "llm_decode", 1, 2, 5, ""),
+    # --- bf16 ViT (tensor-core path), ONNX runner, frozen AOT plan ---
+    ("autorust-cuda-vit_infer_bf16", "autorust", "CUDA", "vit_infer_bf16", 8, 1, 3, ""),
+    ("torch-cuda-vit_infer_bf16", "torch", "cuda", "vit_infer_bf16", 8, 1, 3, ""),
+    ("autorust-rust-onnx_mnist", "autorust", "RUST", "onnx_mnist", 32, 2, 10, ""),
+    ("autorust-cuda-onnx_mnist", "autorust", "CUDA", "onnx_mnist", 32, 2, 10, ""),
+    ("torch-cpu-onnx_mnist", "torch", "cpu", "onnx_mnist", 32, 2, 10, ""),
+    ("torch-cuda-onnx_mnist", "torch", "cuda", "onnx_mnist", 32, 2, 10, ""),
+    ("autorust-rust-freeze", "autorust", "RUST", "freeze", 1, 2, 5, ""),
 ]
 
 
@@ -110,16 +166,25 @@ def parse_result(output):
 
 
 def cmd_autorust(device, workload, batch, warmup, iters):
+    env = base_env()
+    if workload == "freeze":
+        exe = ROOT / "target" / "release" / "examples" / "vit_freeze"
+        if not exe.exists():
+            raise SystemExit("missing frozen example: cargo build --release --example vit_freeze")
+        env.update(BENCH_WARMUP=str(warmup), BENCH_ITERS=str(iters))
+        return [str(exe)], env
     if not AUTORUST_BIN.exists():
         raise SystemExit("missing autorust-bench: cargo build --release -p autorust-bench")
-    env = base_env()
+    base = "gemm" if workload == "gemm_bf16" else workload
     env.update(
         DEFAULT_DEVICE=device,
-        BENCH_WORKLOAD=workload,
+        BENCH_WORKLOAD=base,
         BENCH_BS=str(batch),
         BENCH_WARMUP=str(warmup),
         BENCH_ITERS=str(iters),
     )
+    if workload.endswith("bf16"):
+        env["BENCH_BF16"] = "1"
     return [str(AUTORUST_BIN)], env
 
 
@@ -129,27 +194,33 @@ def cmd_candle(device, workload, batch, warmup, iters):
     env = base_env()
     env.update(
         BENCH_DEVICE=device,
-        BENCH_WORKLOAD=workload,
+        BENCH_WORKLOAD="gemm" if workload == "gemm_bf16" else workload,
         BENCH_BS=str(batch),
         BENCH_WARMUP=str(warmup),
         BENCH_ITERS=str(iters),
     )
+    if workload.endswith("bf16"):
+        env["BENCH_DTYPE"] = "bf16"
     return [str(CANDLE_BIN)], env
 
 
 def cmd_torch(device, workload, batch, warmup, iters):
+    dtype = "bf16" if workload.endswith("bf16") else "f32"
+    base = "gemm" if workload == "gemm_bf16" else workload
     return [
         str(TORCH_PY), str(BENCH / "torch" / "bench.py"),
-        "--device", device, "--workload", workload, "--batch", str(batch),
-        "--warmup", str(warmup), "--iters", str(iters),
+        "--device", device, "--workload", base, "--batch", str(batch),
+        "--warmup", str(warmup), "--iters", str(iters), "--dtype", dtype,
     ], base_env()
 
 
 def cmd_tinygrad(device, workload, batch, warmup, iters):
+    dtype = "bf16" if workload.endswith("bf16") else "f32"
+    base = "gemm" if workload == "gemm_bf16" else workload
     return [
         str(TINYGRAD_PY), str(BENCH / "tinygrad" / "bench.py"),
-        "--device", device, "--workload", workload, "--batch", str(batch),
-        "--warmup", str(warmup), "--iters", str(iters),
+        "--device", device, "--workload", base, "--batch", str(batch),
+        "--warmup", str(warmup), "--iters", str(iters), "--dtype", dtype,
     ], base_env()
 
 
@@ -209,8 +280,12 @@ def main():
                       date=time.strftime("%Y-%m-%dT%H:%M:%S"), notes=notes)
         out = RESULTS / f"{name}.json"
         out.write_text(json.dumps(result, indent=2) + "\n")
-        print(f"    {result['ms_median']:.3f} ms  ({result['images_per_s']:.0f} img/s)"
-              f"  [{time.time() - t:.1f}s]", flush=True)
+        if "cases" in result:
+            print(f"    {len(result['cases'])} cases, total {result['ms_median']:.1f} ms"
+                  f"  [{time.time() - t:.1f}s]", flush=True)
+        else:
+            print(f"    {result['ms_median']:.3f} ms  ({result['images_per_s']:.0f} img/s)"
+                  f"  [{time.time() - t:.1f}s]", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "mobilenet_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 530.4664,
+  "ms_median": 243.7258,
+  "ms_min": 238.4545,
+  "ms_iqr": 7.1731,
+  "images_per_s": 131.3,
+  "name": "autorust-rust-mobilenet_infer",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:32",
+  "notes": ""
+}

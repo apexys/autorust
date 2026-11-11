@@ -1,0 +1,28 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "optim",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 0.0,
+  "ms_median": 26.3287,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "adamw 100000000 params, 32 tensors",
+      "ms": 26.3287,
+      "gbs": 106.3477
+    }
+  ],
+  "name": "torch-cuda-optim",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:35",
+  "notes": ""
+}

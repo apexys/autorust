@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "unet_infer",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 187.2259,
+  "ms_median": 1.6042,
+  "ms_min": 1.6,
+  "ms_iqr": 0.0095,
+  "images_per_s": 2493.42,
+  "name": "torch-cuda-unet_infer",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:02",
+  "notes": ""
+}

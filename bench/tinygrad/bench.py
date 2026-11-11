@@ -27,7 +27,7 @@ import contextlib
 import json
 import time
 
-from tinygrad import Context, Tensor, TinyJit, nn
+from tinygrad import Context, Tensor, TinyJit, dtypes, nn
 
 
 class Mnist:
@@ -116,10 +116,68 @@ def build(workload, batch, dim=768, layers=12, heads=12, img=224):
     return model, x, y
 
 
+GEMM_SHAPES = [
+    ("1024³", 1, 1024, 1024, 1024, False, False),
+    ("2048³", 1, 2048, 2048, 2048, False, False),
+    ("4096³", 1, 4096, 4096, 4096, False, False),
+    ("1024x1024x4096", 1, 1024, 1024, 4096, False, False),
+    ("4096x1024x1024", 1, 4096, 1024, 1024, False, False),
+    ("TN 2048³", 1, 2048, 2048, 2048, True, False),
+    ("NT 2048³", 1, 2048, 2048, 2048, False, True),
+    ("batched 8x512³", 8, 512, 512, 512, False, False),
+]
+
+
+def run_gemm(warmup, iters, dtype_name, only):
+    dt = dtypes.bfloat16 if dtype_name == "bf16" else dtypes.float32
+    cases = []
+    for name, batch, m, n, k, ta, tb in GEMM_SHAPES:
+        label = f"{dtype_name} {name}"
+        if only and only not in label:
+            continue
+        a = Tensor.rand(batch, m, k).cast(dt).realize()
+        bshape = (batch, n, k) if tb else (batch, k, n)
+        b = Tensor.rand(*bshape).cast(dt).realize()
+        lhs = a.transpose(-2, -1) if ta else a
+        rhs = b.transpose(-2, -1) if tb else b
+
+        @TinyJit
+        def step(a, b):
+            return a.matmul(b).realize()
+
+        # `.item()` after the jitted call forces the queue to drain (tinygrad's
+        # realize is async otherwise, so the loop would only time enqueues).
+        step(lhs, rhs)[0, 0, 0].item()
+        for _ in range(warmup):
+            step(lhs, rhs)[0, 0, 0].item()
+        samples = []
+        for _ in range(iters):
+            t0 = time.perf_counter()
+            step(lhs, rhs)[0, 0, 0].item()
+            samples.append((time.perf_counter() - t0) * 1e3)
+        samples.sort()
+        ms = samples[len(samples) // 2]
+        flops = 2.0 * batch * m * n * k
+        cases.append((label, ms, flops / (ms * 1e9)))
+    total = sum(c[1] for c in cases)
+    for name, ms, val in cases:
+        print(f"gemm {_DEV} {name}: {ms:.3f} ms ({val:.2f} tflops)")
+    payload = {
+        "framework": "tinygrad", "version": "0.14.0", "device": _DEV,
+        "workload": "gemm", "batch": 1, "dtype": dtype_name, "jit": True,
+        "warmup": warmup, "iters": iters, "ms_cold": 0.0,
+        "ms_median": round(total, 4), "ms_min": 0.0, "ms_iqr": 0.0,
+        "images_per_s": 0.0,
+        "cases": [{"case": n, "ms": round(ms, 4), "tflops": round(v, 4)} for n, ms, v in cases],
+    }
+    print("RESULT " + json.dumps(payload))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workload", default="mnist_train",
-                    choices=["mnist_train", "vit_infer", "vit_train"])
+                    choices=["mnist_train", "vit_infer", "vit_train", "gemm"])
+    ap.add_argument("--dtype", default="f32", choices=["f32", "bf16"])
     ap.add_argument("--device", default=_DEV.lower(), choices=["cpu", "cuda"])
     ap.add_argument("--batch", type=int, default=None)
     ap.add_argument("--warmup", type=int, default=None)
@@ -129,6 +187,13 @@ def main():
     ap.add_argument("--heads", type=int, default=12)
     ap.add_argument("--img", type=int, default=224)
     args = ap.parse_args()
+
+    if args.workload == "gemm":
+        run_gemm(
+            args.warmup or 1, args.iters or 3, args.dtype,
+            os.environ.get("BENCH_GEMM_ONLY"),
+        )
+        return
 
     training = args.workload.endswith("train")
     batch = args.batch if args.batch is not None else (

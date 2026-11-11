@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "onnx_mnist",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 208.2992,
+  "ms_median": 0.3487,
+  "ms_min": 0.3435,
+  "ms_iqr": 0.0089,
+  "images_per_s": 91758.38,
+  "name": "torch-cuda-onnx_mnist",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:58",
+  "notes": ""
+}

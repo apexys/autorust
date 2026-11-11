@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "resnet18_train",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 896.1111,
+  "ms_median": 441.818,
+  "ms_min": 436.459,
+  "ms_iqr": 0.3424,
+  "images_per_s": 72.43,
+  "name": "autorust-cuda-resnet18_train",
+  "variant": "CUDA",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:06:43",
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "llm_prefill",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 372.0294,
+  "ms_median": 417.8463,
+  "ms_min": 347.8191,
+  "ms_iqr": 155.7901,
+  "images_per_s": 1225.33,
+  "name": "torch-cpu-llm_prefill",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:18",
+  "notes": ""
+}

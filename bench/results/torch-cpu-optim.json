@@ -1,0 +1,28 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "optim",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 0.0,
+  "ms_median": 295.7799,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "adamw 100000000 params, 32 tensors",
+      "ms": 295.7799,
+      "gbs": 9.4665
+    }
+  ],
+  "name": "torch-cpu-optim",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:32",
+  "notes": ""
+}

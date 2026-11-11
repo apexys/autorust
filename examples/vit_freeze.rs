@@ -49,6 +49,7 @@ fn main() {
 
     let t = Instant::now();
     let built = plan::build(&ctx, &mut sess, &jit, std::slice::from_ref(&x), &weights);
+    let build_ms = t.elapsed().as_secs_f64() * 1e3;
     println!(
         "freeze: {:.2}s, {} storages, {} views, {} steps, {} kernels, {} init copies",
         t.elapsed().as_secs_f64(),
@@ -83,4 +84,46 @@ fn main() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0], want, "frozen bytes differ from eager");
     println!("frozen output matches eager ({} bytes)", got[0].len());
+
+    // Steady-state comparison: replay the captured eager plan vs the frozen
+    // runner (both execute the same kernels; the difference is the runtime).
+    let warmup = env_i64("BENCH_WARMUP", 2) as usize;
+    let iters = env_i64("BENCH_ITERS", 5) as usize;
+    let measure = |mut step: Box<dyn FnMut()>| -> f64 {
+        for _ in 0..warmup {
+            step();
+        }
+        let mut xs = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let t = Instant::now();
+            step();
+            xs.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        xs.sort_by(f64::total_cmp);
+        xs[xs.len() / 2]
+    };
+    let eager_ms = measure(Box::new(|| {
+        let outs = jit.call_many(&ctx, &mut sess, |_c, _s| vec![model.forward(&x)]);
+        // Match the frozen runner's host copy of the output.
+        let b = outs[0].realized_buffer().expect("eager output realized");
+        let d = device(b.device());
+        let _ = d.copyout(&*b.get_buf(&d));
+    }));
+    let frozen_ms = measure(Box::new(|| {
+        let _ = runner.run(std::slice::from_ref(&x), &weights);
+    }));
+    println!(
+        "freeze bench: eager {eager_ms:.3} ms, frozen {frozen_ms:.3} ms ({:.2}x)",
+        eager_ms / frozen_ms
+    );
+    println!(
+        "RESULT {{\"framework\":\"autorust\",\"version\":\"{}\",\"device\":\"RUST\",\
+         \"workload\":\"freeze\",\"batch\":1,\"dtype\":\"f32\",\"jit\":true,\
+         \"warmup\":{warmup},\"iters\":{iters},\"ms_cold\":0.0,\"ms_median\":{eager_ms:.4},\
+         \"ms_min\":0.0,\"ms_iqr\":0.0,\"images_per_s\":0.0,\
+         \"cases\":[{{\"case\":\"eager jit\",\"ms\":{eager_ms:.4}}},\
+         {{\"case\":\"frozen plan\",\"ms\":{frozen_ms:.4}}},\
+         {{\"case\":\"plan build\",\"ms\":{build_ms:.4}}}]}}",
+        env!("CARGO_PKG_VERSION")
+    );
 }

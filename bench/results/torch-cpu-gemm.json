@@ -1,0 +1,63 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 330.3261,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 3.2555,
+      "tflops": 0.6596
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 25.8069,
+      "tflops": 0.6657
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 226.8407,
+      "tflops": 0.6059
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 12.1148,
+      "tflops": 0.709
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 12.5173,
+      "tflops": 0.6862
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 24.8313,
+      "tflops": 0.6919
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 22.717,
+      "tflops": 0.7563
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 2.2424,
+      "tflops": 0.9577
+    }
+  ],
+  "name": "torch-cpu-gemm",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:04:56",
+  "notes": ""
+}

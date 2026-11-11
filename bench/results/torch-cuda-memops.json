@@ -1,0 +1,63 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "memops",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 0.0,
+  "ms_median": 4.0376,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "add 16777216",
+      "ms": 0.6255,
+      "gbs": 321.8604
+    },
+    {
+      "case": "copy 16777216",
+      "ms": 0.4328,
+      "gbs": 310.1464
+    },
+    {
+      "case": "gelu 16777216",
+      "ms": 0.4272,
+      "gbs": 314.2132
+    },
+    {
+      "case": "softmax 16777216",
+      "ms": 0.4669,
+      "gbs": 287.4903
+    },
+    {
+      "case": "layernorm 16777216",
+      "ms": 0.641,
+      "gbs": 209.3985
+    },
+    {
+      "case": "sum 16777216",
+      "ms": 0.2335,
+      "gbs": 287.3672
+    },
+    {
+      "case": "amax 16777216",
+      "ms": 0.2296,
+      "gbs": 292.3331
+    },
+    {
+      "case": "transpose 16777216",
+      "ms": 0.9812,
+      "gbs": 136.7855
+    }
+  ],
+  "name": "torch-cuda-memops",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:14",
+  "notes": ""
+}

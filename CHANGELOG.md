@@ -32,7 +32,12 @@ to 216/474/760/2498 ms. The ViT training gap is batch-dependent rather than
 fixed overhead: the generated f32 GEMM is close to saturation at batch 1
 (per-image 98.8 -> 78.6 ms on CUDA through bs 8) while cuBLAS keeps improving
 (45.8 -> 22.1 ms/image), so at batch 4 the step is 317 vs 102 ms; at batch 64
-MNIST is 1.3x off torch on CUDA and 2x faster on CPU.
+MNIST is 1.3x off torch on CUDA and 2x faster on CPU. The benchmark matrix also
+grew beyond the two models: a GEMM sweep (f32/bf16, transposed and batched), a
+memory-bound op set, an AdamW-only step, ResNet-18/50, MobileNetV2, a small
+UNet, an autoregressive prefill/decode pair (GQA, RoPE, KV cache, sampling), a
+bf16 ViT row, the ONNX runner and a frozen-plan comparison (dev-only; see
+`PERFORMANCE.md`).
 
 ### Performance
 
@@ -73,6 +78,11 @@ MNIST is 1.3x off torch on CUDA and 2x faster on CPU.
   op-level FlashAttention port by default: the default `Settings::attention`
   selects the fused tensor-level kernels, and the 16x-slower op-level port is
   now only used with `FA=1`. The default follows tinygrad's model and uses SDPA.
+- CUDA bf16 kernels whose lanes vectorized 2-wide failed to compile:
+  `cuda_bf16.h` typedefs `nv_bfloat162` but has no `make_nv_bfloat162`, so the
+  generated constructor was undefined. The renderer now defines it via
+  `__halves2bfloat162`; bf16 elementwise kernels (and the benchmark's bf16 GEMM
+  sweep) compile and run on CUDA.
 - The `RUST` renderer keeps rustc's loop vectorizer off integer shift chains
   (the `threefry` RNG kernels): the vectorizer is exponential in the chain
   length (20 shifts 0.26 s, 24 1.8 s, 28 16 s, the RNG kernel 80+), so a cold

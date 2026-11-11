@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "resnet50_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 879.866,
+  "ms_median": 531.8992,
+  "ms_min": 512.9858,
+  "ms_iqr": 6.0425,
+  "images_per_s": 60.16,
+  "name": "autorust-rust-resnet50_infer",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:09",
+  "notes": ""
+}

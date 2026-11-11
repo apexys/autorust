@@ -1,0 +1,63 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 26.4585,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 0.4223,
+      "tflops": 5.0848
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 2.2045,
+      "tflops": 7.7932
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 17.1469,
+      "tflops": 8.0154
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 1.157,
+      "tflops": 7.424
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 1.1058,
+      "tflops": 7.7683
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 1.8344,
+      "tflops": 9.3656
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 2.163,
+      "tflops": 7.9426
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 0.4246,
+      "tflops": 5.0575
+    }
+  ],
+  "name": "autorust-cuda-gemm",
+  "variant": "CUDA",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:04:50",
+  "notes": ""
+}

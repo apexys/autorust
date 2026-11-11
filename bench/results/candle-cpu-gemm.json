@@ -1,0 +1,63 @@
+{
+  "framework": "candle",
+  "version": "0.11.1",
+  "device": "CPU",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 273.7233,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 4.1669,
+      "tflops": 0.5154
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 28.6727,
+      "tflops": 0.5992
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 162.5025,
+      "tflops": 0.8458
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 11.3713,
+      "tflops": 0.7554
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 12.3543,
+      "tflops": 0.6953
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 24.9287,
+      "tflops": 0.6892
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 24.113,
+      "tflops": 0.7125
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 5.614,
+      "tflops": 0.3825
+    }
+  ],
+  "name": "candle-cpu-gemm",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:04:52",
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "resnet50_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 503.9413,
+  "ms_median": 97.7078,
+  "ms_min": 95.2617,
+  "ms_iqr": 1.2042,
+  "images_per_s": 327.51,
+  "name": "autorust-cuda-resnet50_infer",
+  "variant": "CUDA",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:17",
+  "notes": ""
+}

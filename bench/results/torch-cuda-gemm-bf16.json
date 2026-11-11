@@ -1,0 +1,63 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "bf16",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 9.3738,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "bf16 1024\u00b3",
+      "ms": 0.1532,
+      "tflops": 14.0204
+    },
+    {
+      "case": "bf16 2048\u00b3",
+      "ms": 0.7478,
+      "tflops": 22.9724
+    },
+    {
+      "case": "bf16 4096\u00b3",
+      "ms": 5.4272,
+      "tflops": 25.3242
+    },
+    {
+      "case": "bf16 1024x1024x4096",
+      "ms": 0.401,
+      "tflops": 21.4216
+    },
+    {
+      "case": "bf16 4096x1024x1024",
+      "ms": 0.3998,
+      "tflops": 21.4854
+    },
+    {
+      "case": "bf16 TN 2048\u00b3",
+      "ms": 1.3433,
+      "tflops": 12.7895
+    },
+    {
+      "case": "bf16 NT 2048\u00b3",
+      "ms": 0.7643,
+      "tflops": 22.4779
+    },
+    {
+      "case": "bf16 batched 8x512\u00b3",
+      "ms": 0.1372,
+      "tflops": 15.6478
+    }
+  ],
+  "name": "torch-cuda-gemm-bf16",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:05",
+  "notes": ""
+}

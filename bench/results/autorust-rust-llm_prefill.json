@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "llm_prefill",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 914.3182,
+  "ms_min": 914.3182,
+  "ms_iqr": 0.0,
+  "images_per_s": 559.98,
+  "name": "autorust-rust-llm_prefill",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:10",
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "unet_infer",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 882.7313,
+  "ms_median": 562.6885,
+  "ms_min": 556.8234,
+  "ms_iqr": 4.8815,
+  "images_per_s": 7.11,
+  "name": "autorust-rust-unet_infer",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:55",
+  "notes": ""
+}

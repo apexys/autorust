@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "resnet18_train",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 1842.433,
+  "ms_median": 1177.5485,
+  "ms_min": 1157.1262,
+  "ms_iqr": 5.2613,
+  "images_per_s": 27.18,
+  "name": "autorust-rust-resnet18_train",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:06:32",
+  "notes": ""
+}

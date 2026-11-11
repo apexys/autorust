@@ -1,0 +1,63 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "memops",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 0.0,
+  "ms_median": 73.3052,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "add 16777216",
+      "ms": 9.9227,
+      "gbs": 20.2896
+    },
+    {
+      "case": "copy 16777216",
+      "ms": 7.2789,
+      "gbs": 18.4392
+    },
+    {
+      "case": "gelu 16777216",
+      "ms": 7.7666,
+      "gbs": 17.2813
+    },
+    {
+      "case": "softmax 16777216",
+      "ms": 15.2897,
+      "gbs": 8.7783
+    },
+    {
+      "case": "layernorm 16777216",
+      "ms": 12.6869,
+      "gbs": 10.5792
+    },
+    {
+      "case": "sum 16777216",
+      "ms": 2.3396,
+      "gbs": 28.6833
+    },
+    {
+      "case": "amax 16777216",
+      "ms": 2.8156,
+      "gbs": 23.8349
+    },
+    {
+      "case": "transpose 16777216",
+      "ms": 15.2052,
+      "gbs": 8.8271
+    }
+  ],
+  "name": "autorust-rust-memops",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:08",
+  "notes": ""
+}

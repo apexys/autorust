@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "mobilenet_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 215.9239,
+  "ms_median": 22.5065,
+  "ms_min": 20.8699,
+  "ms_iqr": 1.9241,
+  "images_per_s": 1421.81,
+  "name": "torch-cuda-mobilenet_infer",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:49",
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "resnet18_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 3,
+  "iters": 5,
+  "ms_cold": 466.9565,
+  "ms_median": 374.3849,
+  "ms_min": 348.5716,
+  "ms_iqr": 36.7325,
+  "images_per_s": 85.47,
+  "name": "torch-cpu-resnet18_infer",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:06:09",
+  "notes": ""
+}

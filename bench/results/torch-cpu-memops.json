@@ -1,0 +1,63 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "memops",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 0.0,
+  "ms_median": 141.3278,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "add 16777216",
+      "ms": 19.4253,
+      "gbs": 10.3641
+    },
+    {
+      "case": "copy 16777216",
+      "ms": 16.4186,
+      "gbs": 8.1747
+    },
+    {
+      "case": "gelu 16777216",
+      "ms": 16.3477,
+      "gbs": 8.2102
+    },
+    {
+      "case": "softmax 16777216",
+      "ms": 18.5722,
+      "gbs": 7.2268
+    },
+    {
+      "case": "layernorm 16777216",
+      "ms": 16.0971,
+      "gbs": 8.338
+    },
+    {
+      "case": "sum 16777216",
+      "ms": 3.2233,
+      "gbs": 20.82
+    },
+    {
+      "case": "amax 16777216",
+      "ms": 0.5826,
+      "gbs": 115.1791
+    },
+    {
+      "case": "transpose 16777216",
+      "ms": 50.661,
+      "gbs": 2.6493
+    }
+  ],
+  "name": "torch-cpu-memops",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:05:13",
+  "notes": ""
+}

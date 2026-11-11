@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "llm_decode",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 40.9032,
+  "ms_median": 53.0182,
+  "ms_min": 34.0579,
+  "ms_iqr": 60.0294,
+  "images_per_s": 18.86,
+  "name": "torch-cpu-llm_decode",
+  "variant": "cpu",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:40",
+  "notes": ""
+}

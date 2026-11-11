@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "unet_infer",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 301.0522,
+  "ms_median": 18.7054,
+  "ms_min": 18.6933,
+  "ms_iqr": 1.8402,
+  "images_per_s": 213.84,
+  "name": "autorust-cuda-unet_infer",
+  "variant": "CUDA",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:07:57",
+  "notes": ""
+}

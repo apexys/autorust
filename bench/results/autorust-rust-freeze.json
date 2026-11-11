@@ -1,0 +1,35 @@
+{
+  "framework": "autorust",
+  "version": "0.1.1",
+  "device": "RUST",
+  "workload": "freeze",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 0.0,
+  "ms_median": 1.5992,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "eager jit",
+      "ms": 1.5992
+    },
+    {
+      "case": "frozen plan",
+      "ms": 2.005
+    },
+    {
+      "case": "plan build",
+      "ms": 17.1972
+    }
+  ],
+  "name": "autorust-rust-freeze",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:59",
+  "notes": ""
+}

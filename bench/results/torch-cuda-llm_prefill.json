@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "llm_prefill",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 231.982,
+  "ms_median": 16.3763,
+  "ms_min": 15.7622,
+  "ms_iqr": 0.9823,
+  "images_per_s": 31264.69,
+  "name": "torch-cuda-llm_prefill",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:20",
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "RUST",
+  "workload": "onnx_mnist",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 24.5602,
+  "ms_median": 14.676,
+  "ms_min": 13.501,
+  "ms_iqr": 1.4262,
+  "images_per_s": 2180.42,
+  "name": "autorust-rust-onnx_mnist",
+  "variant": "RUST",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:53",
+  "notes": ""
+}

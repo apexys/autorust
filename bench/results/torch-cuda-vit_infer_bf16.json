@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "vit_infer_bf16",
+  "batch": 8,
+  "dtype": "bf16",
+  "jit": false,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 251.0588,
+  "ms_median": 18.2091,
+  "ms_min": 18.1438,
+  "ms_iqr": 1.9664,
+  "images_per_s": 439.34,
+  "name": "torch-cuda-vit_infer_bf16",
+  "variant": "cuda",
+  "commit": "40ead06",
+  "date": "2026-11-11T21:08:52",
+  "notes": ""
+}
