@@ -4061,3 +4061,35 @@ With the fix, RUST ViT-B/16 training runs at batch 2/4 (3.15/4.21 s) instead of
 hanging. The same shapes are fine on CUDA (`CC` uses `restrict`, and CUDA has no
 work-item loop).
 
+### 9.51 Backend memory reporting (2026-11)
+
+`Compiled` now reports device capacity through `MemoryInfo { total, free }`.
+The query threads through the existing allocator seam, so it works for every
+registered backend without constructing a parallel device-properties API:
+`Compiled::memory_info()` → `LruAllocator::memory_info()` →
+`BackendAllocator::memory_info()` (default `None`).
+
+- **CUDA** — `cuMemGetInfo_v2` after binding the context; reports both total and
+  free bytes.
+- **OpenCL** — `CL_DEVICE_GLOBAL_MEM_SIZE`; reports total, with `free: None`
+  because OpenCL has no portable free-memory query (vendor extensions were
+  deliberately avoided).
+- **Metal** — `recommendedMaxWorkingSetSize` for the budget and
+  `currentAllocatedSize` for the process's current use; `free` is the
+  difference.
+- **Host/interp** — `None`; there is no per-backend limit to report.
+
+`free` is a snapshot, not a reservation: other processes and the driver still
+change it. Callers should apply a safety margin, and remember that `LruAllocator`
+cached blocks remain allocated even though they are reusable.
+
+Gates: `tests/memory_info.rs` checks the host default is `None` and, when the
+backend is present, CUDA returns `free <= total`, OpenCL returns a positive
+total with `free: None`, and Metal returns a positive working set. Clippy and
+rustdoc pass.
+
+ClusterFun uses this to replace its fixed GPU batch size with a memory-bounded
+estimate (rounded down to a multiple of 8) instead of assuming every GPU is the
+12 GB reference card.
+
+

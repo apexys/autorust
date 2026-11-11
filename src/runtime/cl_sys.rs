@@ -42,6 +42,7 @@ pub const CL_QUEUE_PROFILING_ENABLE: cl_command_queue_properties = 1 << 1;
 pub const CL_DEVICE_NAME: cl_device_info = 0x102B;
 pub const CL_DRIVER_VERSION: cl_device_info = 0x102D;
 pub const CL_DEVICE_EXTENSIONS: cl_device_info = 0x1030;
+pub const CL_DEVICE_GLOBAL_MEM_SIZE: cl_device_info = 0x101F;
 pub const CL_PROGRAM_BUILD_LOG: cl_program_build_info = 0x1183;
 pub const CL_PROGRAM_BINARY_SIZES: cl_program_info = 0x1165;
 pub const CL_PROGRAM_BINARIES: cl_program_info = 0x1166;
@@ -371,6 +372,22 @@ impl Device {
     /// `CL_DEVICE_NAME`.
     pub fn name(&self) -> ClResult<String> {
         self.info_string(CL_DEVICE_NAME, "name")
+    }
+    /// `CL_DEVICE_GLOBAL_MEM_SIZE` in bytes.
+    pub fn global_mem_size(&self) -> ClResult<cl_ulong> {
+        let cl = ClLib::get().ok_or(ClError(-1))?;
+        let mut value: cl_ulong = 0;
+        let mut size = 0usize;
+        check(unsafe {
+            (cl.get_device_info)(
+                self.id,
+                CL_DEVICE_GLOBAL_MEM_SIZE,
+                std::mem::size_of::<cl_ulong>(),
+                (&mut value as *mut cl_ulong).cast::<c_void>(),
+                &mut size,
+            )
+        })?;
+        Ok(value)
     }
     /// `CL_DRIVER_VERSION`.
     pub fn driver_version(&self) -> ClResult<String> {

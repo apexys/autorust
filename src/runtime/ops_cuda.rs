@@ -27,7 +27,7 @@ use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
 use crate::runtime::buffer::OpaqueT;
 use crate::runtime::device::{
-    BackendAllocator, Comp, Compiled, LruAllocator, Prog, TinyElf, register_device,
+    BackendAllocator, Comp, Compiled, LruAllocator, MemoryInfo, Prog, TinyElf, register_device,
 };
 use crate::uop::UopId;
 use crate::uop::ctx::UOpCtx;
@@ -528,6 +528,17 @@ impl BackendAllocator for CudaAllocator {
             base: o.base,
             offset: o.offset + offset,
             size,
+        })
+    }
+    fn memory_info(&self) -> Option<MemoryInfo> {
+        self.inner.ctx.bind_to_thread().ok()?;
+        let mut free = 0usize;
+        let mut total = 0usize;
+        // SAFETY: `cuMemGetInfo_v2` writes two usize through valid pointers.
+        let rc = unsafe { cudarc::driver::sys::cuMemGetInfo_v2(&mut free, &mut total) };
+        (rc == cudarc::driver::sys::CUresult::CUDA_SUCCESS).then_some(MemoryInfo {
+            total,
+            free: Some(free),
         })
     }
 }

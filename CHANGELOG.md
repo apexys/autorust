@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Backend memory reporting.** `Compiled::memory_info()` returns
+  `MemoryInfo { total, free }`, implemented through
+  `BackendAllocator::memory_info()`: CUDA uses `cuMemGetInfo_v2`, OpenCL reports
+  `CL_DEVICE_GLOBAL_MEM_SIZE`, Metal reports its recommended working set, and
+  host memory reports `None`.
+
 ### Fixed
 
 - **CUDA NVRTC fallback.** The device probe now tries every installed NVRTC

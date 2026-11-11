@@ -18,6 +18,21 @@ use crate::uop::arg::DataArg;
 use super::buffer::{OpaqueT, OpaqueView};
 // ---------------- Allocator ----------------
 
+/// Device memory capacity and current availability.
+///
+/// `total` is the backend's capacity in bytes. `free` is the amount currently
+/// available when the driver exposes it; some backends (notably OpenCL without
+/// a vendor extension) can only report the total. Use a safety margin: the
+/// value is a snapshot, and allocations from other processes or the driver's
+/// own bookkeeping are not under this allocator's control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryInfo {
+    /// Total device memory in bytes.
+    pub total: usize,
+    /// Currently available device memory in bytes, when known.
+    pub free: Option<usize>,
+}
+
 /// The runtime-implemented allocator methods (python `Allocator._alloc` etc).
 /// Opaques are backend-owned (`OpaqueT` trait objects); the default host
 /// implementation is `MemAllocator`.
@@ -39,6 +54,10 @@ pub trait BackendAllocator {
         let mut tmp = vec![0u8; src.size()];
         self._copyout(&mut tmp, src);
         self._copyin(dest, &tmp);
+    }
+    /// Device memory capacity/availability, when the backend can report it.
+    fn memory_info(&self) -> Option<MemoryInfo> {
+        None
     }
 }
 
@@ -140,6 +159,11 @@ impl LruAllocator {
                 self.inner._free(o);
             }
         }
+    }
+
+    /// Device memory capacity/availability, when the backend can report it.
+    pub fn memory_info(&self) -> Option<MemoryInfo> {
+        self.inner.memory_info()
     }
 
     /// Copy host bytes into `dest` through the backend allocator.
@@ -290,6 +314,11 @@ impl Compiled {
     pub fn runtime(self: &Rc<Self>, elf: TinyElf) -> Rc<RefCell<dyn Prog>> {
         let key = elf_key(&elf);
         self.runtime_keyed(key, &elf)
+    }
+
+    /// Device memory capacity/availability, when the backend can report it.
+    pub fn memory_info(&self) -> Option<MemoryInfo> {
+        self.allocator.memory_info()
     }
 
     /// Compile and launch a **hand-written kernel** for this backend.

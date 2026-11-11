@@ -25,8 +25,8 @@ use crate::runtime::cl_sys::{
     CommandQueue, Context, Device, Kernel, Mem, Program, cl_device_id, cl_mem, get_all_devices,
 };
 use crate::runtime::device::{
-    BackendAllocator, Comp, Compiled, DeviceFactory, LruAllocator, Prog, TinyElf, register_device,
-    register_device_family,
+    BackendAllocator, Comp, Compiled, DeviceFactory, LruAllocator, MemoryInfo, Prog, TinyElf,
+    register_device, register_device_family,
 };
 use crate::uop::UopId;
 use crate::uop::ctx::UOpCtx;
@@ -394,6 +394,12 @@ impl BackendAllocator for ClAllocator {
     }
     fn _offset(&self, _buf: &dyn OpaqueT, _size: usize, _offset: usize) -> Rc<dyn OpaqueT> {
         panic!("TGERR: need offset"); // python's CLAllocator has no _offset either
+    }
+    fn memory_info(&self) -> Option<MemoryInfo> {
+        // OpenCL has no portable free-memory query. Return the total so callers
+        // can still size a budget; vendor extensions are deliberately avoided.
+        let total = self.inner.dev.global_mem_size().ok()? as usize;
+        Some(MemoryInfo { total, free: None })
     }
 }
 

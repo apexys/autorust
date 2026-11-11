@@ -38,7 +38,7 @@ use crate::dtype::DTypeId;
 use crate::renderer::{Renderer, UopRenderer};
 use crate::runtime::buffer::OpaqueT;
 use crate::runtime::device::{
-    BackendAllocator, Comp, Compiled, IdentityCompiler, LruAllocator, Prog, TinyElf,
+    BackendAllocator, Comp, Compiled, IdentityCompiler, LruAllocator, MemoryInfo, Prog, TinyElf,
     register_device_with_limit,
 };
 use crate::uop::UopId;
@@ -363,6 +363,19 @@ impl BackendAllocator for MetalAllocator {
             buf: b.buf.clone(),
             size,
             offset: b.offset + offset,
+        })
+    }
+    fn memory_info(&self) -> Option<MemoryInfo> {
+        // Metal's recommended working set is the budget the OS wants us to stay
+        // under; `currentAllocatedSize` is what this process has allocated.
+        let total = self.inner.device.recommendedMaxWorkingSetSize() as usize;
+        if total == 0 {
+            return None;
+        }
+        let used = self.inner.device.currentAllocatedSize();
+        Some(MemoryInfo {
+            total,
+            free: Some(total.saturating_sub(used)),
         })
     }
 }
