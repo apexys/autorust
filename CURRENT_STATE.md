@@ -3692,3 +3692,39 @@ That is the point where this approach stops being a local change: either
 structure the info pass does not fully traverse. Both were left undone rather
 than shipped broken; the tree is at `4aaeb7c` and the benchmark medians are
 unchanged (RUST train 1.53-1.64 s, CUDA train 94-100 ms).
+
+### 9.40 Session close: what is measured, what is not (2026-11)
+
+Final state of the benchmark work. Gates green (`cargo test --release` 78/78,
+clippy, rustdoc, `--no-default-features`, `cargo publish --dry-run`), tree clean.
+
+Measured and delivered:
+
+- **Scheduling/codegen**: warm cold starts 505/697/1279/6013 ms ->
+  **216/474/760/2498 ms** (persistent rendered kernels keyed by AST content +
+  codegen settings + a binary fingerprint; per-stage timings; contraction
+  split; reduce-body prologue staging; interior-contraction splits; big-operand
+  staging for attention).
+- **Six of eight benchmark rows within 2x of torch** (no `torch.compile`):
+  CUDA 21.9 / 14.0 / 69.3 ms (1.67x / 1.61x / 1.49x), CPU MNIST 65.8 ms
+  (0.37x, faster), CPU ViT infer 179.2 / 1149.1 ms (1.09x / 1.64x).
+
+Not delivered:
+
+- **CPU ViT train 1625.0 ms vs 616.3 (2.64x)** and **CUDA ViT train 94.9 ms vs
+  43.8 (2.17x)**. Per-step decomposition (build phase subtracted): CPU = 453 ms
+  one generated matmul, 205 ms packed GEMM, 183 ms constant-fill stores, 79 ms
+  copies, ~700 ms other generated kernels; CUDA = 60% elementwise, 40% matmul,
+  39% of the time in sub-50 us launches.
+- The epilogue hoist that would move the 453 ms matmul onto the packed GEMM is
+  blocked at the last link: a kernel built after `split_kernels` nests a CALL
+  inside another kernel's value, and `program_info_from_sink`'s `globals`
+  (6 entries) disagree with `to_elf`'s signature (slot 7). See §9.36-§9.39 for
+  the four links already solved (fixpoint, per-kernel renumbering, dependency
+  AFTERs, slot/arg invariants).
+- The ~183 ms/step constant-fill stores are *not* produced by `Tensor::full`
+  (§9.35) and remain unnamed.
+
+So the objective's first clause is met and evidenced; the second is met for six
+of eight rows, and for the two training rows the work is decomposed but not
+reduced. "Whatever is actually achievable" cannot be claimed for those rows.
