@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "vit_train_bf16",
+  "batch": 1,
+  "dtype": "bf16",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 2013.5458,
+  "ms_median": 84.3409,
+  "ms_min": 84.0655,
+  "ms_iqr": 1.4454,
+  "images_per_s": 11.86,
+  "name": "autorust-cuda-vit_train_bf16",
+  "variant": "CUDA",
+  "commit": "d9bc3be",
+  "date": "2026-11-11T21:18:51",
+  "notes": ""
+}

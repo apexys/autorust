@@ -15,7 +15,7 @@ Results live in [`results/`](results) as raw JSON plus a generated
 | `mnist_train` | `beautiful_mnist` CNN (2 conv, BN, pool ×2, 576→10) | batch 64 and 512, 1×28×28, Adam 1e-3, CE | ms/step, img/s, s/epoch |
 | `vit_infer` | ViT-B/16 (12 layers, 768 wide, 12 heads) | batch 1 and 8, 3×224×224, patch 16, 1000 classes | ms/step, ms/image, img/s |
 | `vit_train` | same ViT + CE + backward + Adam 3e-4 | batch 1 and 4, f32 | ms/step, img/s |
-| `vit_infer_bf16` | ViT-B/16 weights and input cast to bf16 (tensor-core path) | batch 8 | ms/step, img/s |
+| `vit_infer_bf16` / `vit_train_bf16` | ViT-B/16 weights and input cast to bf16 (tensor-core path) | batch 8 infer / batch 1 train | ms/step, img/s |
 | `gemm` / `gemm_bf16` | matmul shape sweep (8 shapes) | 1024³…4096³, TN/NT, batched 8×512³ | per-case ms, TFLOP/s |
 | `memops` | add, copy, gelu, softmax, layernorm, sum, amax, transpose | 16M f32 elements (4096² for the 2-D ops) | per-op ms, GB/s |
 | `optim` | AdamW over 100M parameters in 32 tensors | gradients set once, no zero_grad | ms/step, GB/s |

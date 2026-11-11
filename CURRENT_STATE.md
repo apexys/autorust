@@ -4130,9 +4130,12 @@ protocol as the existing rows (`bench/run.py`, raw JSON in `bench/results/`):
   Prefill is 2.2x/19.4x off torch (CPU/CUDA). Decode launches ~300 kernels per
   token and is 8.1x/4.7x off; the gap is per-kernel dispatch, not FLOPs (torch
   runs the same explicit matmul+softmax, not SDPA).
-- **bf16 ViT** (`vit_infer_bf16`): weights and input cast to bf16, exercising
-  the TC matmul and bf16 attention. 61.6 ms vs torch's 18.2 at bs 8: only 1.15x
-  faster than f32 because the 197-token axis is prime and the TC tiles pad it.
+- **bf16 ViT** (`vit_infer_bf16`, `vit_train_bf16`): weights and input cast to
+  bf16, exercising the TC matmul and bf16 attention. Inference is 61.6 vs
+  torch's 18.2 ms at bs 8 and training 84.3 vs 20.9 ms at bs 1: only 1.14-1.15x
+  faster than f32 because the 197-token axis is prime and the TC tiles pad it,
+  while torch's bf16 halves its f32 cost (so the bf16 gap, 3.4-4.0x, is wider
+  than the f32 one).
 - **ONNX runner** (`onnx_mnist`, `onnx_resnet`): the MNIST CNN and a
   width-0.25 ResNet-18 exported to `bench/assets/*.onnx` (regenerate with
   `bench/tools/export_onnx.py`) and run through `OnnxModel::run`. 14.7/204.8 ms

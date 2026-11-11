@@ -22,6 +22,7 @@ WORKLOADS = [
     ("vit_infer", "ViT-B/16 inference", "img"),
     ("vit_train", "ViT-B/16 training step (f32)", "img"),
     ("vit_infer_bf16", "ViT-B/16 inference (bf16)", "img"),
+    ("vit_train_bf16", "ViT-B/16 training step (bf16)", "img"),
     ("resnet18_infer", "ResNet-18 inference (224²)", "img"),
     ("resnet18_train", "ResNet-18 training step (224²)", "img"),
     ("resnet50_infer", "ResNet-50 inference (224²)", "img"),

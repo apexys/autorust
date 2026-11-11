@@ -676,7 +676,7 @@ def main():
             "mnist_train", "vit_infer", "vit_train", "gemm", "memops", "optim",
             "resnet18_train", "resnet18_infer", "resnet50_infer", "mobilenet_infer",
             "unet_infer", "llm_prefill", "llm_decode", "vit_infer_bf16",
-            "onnx_mnist", "onnx_resnet",
+            "onnx_mnist", "onnx_resnet", "vit_train_bf16",
         ],
     )
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
@@ -726,12 +726,13 @@ def main():
         return
 
     # original MNIST / ViT rows
-    training = args.workload.endswith("train")
+    training = args.workload.endswith("train") or args.workload == "vit_train_bf16"
     batch = args.batch if args.batch is not None else (
         512 if args.workload == "mnist_train" else (1 if args.workload == "vit_train" else 8))
     warmup = args.warmup if args.warmup is not None else (5 if training else 3)
     iters = args.iters if args.iters is not None else (30 if args.workload == "mnist_train" else 5)
 
+    dt = torch.bfloat16 if args.dtype == "bf16" else torch.float32
     if args.workload == "mnist_train":
         model = Mnist()
         x = torch.rand(batch, 1, 28, 28)
@@ -740,8 +741,8 @@ def main():
         model = Vit(layers=args.layers, dim=args.dim, heads=args.heads, img=args.img)
         x = torch.zeros(batch, 3, args.img, args.img)
         y = torch.randint(0, 1000, (batch,))
-    model = model.to(dev)
-    x, y = x.to(dev), y.to(dev)
+    model = model.to(dev, dtype=dt)
+    x, y = x.to(dev, dtype=dt), y.to(dev)
     model.train(training)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3 if args.workload == "mnist_train" else 3e-4)
     if args.compile:
@@ -760,7 +761,8 @@ def main():
 
     cold, samples = measure(step, warmup, iters, dev)
     emit(
-        args.workload, dev.type, batch, "f32", bool(args.compile), warmup, iters, cold, samples
+        args.workload, dev.type, batch, args.dtype, bool(args.compile), warmup, iters,
+        cold, samples,
     )
 
 

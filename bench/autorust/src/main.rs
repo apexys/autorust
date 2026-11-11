@@ -562,6 +562,51 @@ fn main() {
             let (cold, samples) = measure(&mut step, warmup, iters);
             emit("onnx_mnist", &device, bs, "f32", true, warmup, iters, cold, samples);
         }
+        "vit_train_bf16" => {
+            let bs = env_i64("BENCH_BS", 1);
+            let warmup = env_i64("BENCH_WARMUP", 1) as usize;
+            let iters = env_i64("BENCH_ITERS", 3) as usize;
+            let layers = env_i64("BENCH_LAYERS", 12);
+            let embed = env_i64("BENCH_EMBED", 768);
+            let heads = env_i64("BENCH_HEADS", 12);
+            let img = env_i64("BENCH_IMG", 224);
+            let model = vit_dtype::cast(
+                &ViT::build(&ctx, layers, embed, heads, 3, img, 16, 1000),
+                dtype::BFLOAT16,
+            );
+            let params: Vec<Tensor> = model.params().collect();
+            let opt = Adam::new(params.clone(), 3e-4);
+            let x = Tensor::zeros(&ctx, [bs, 3, img, img])
+                .cast(dtype::BFLOAT16)
+                .to_param();
+            let y = Tensor::randint(&ctx, &[bs], 0, 1000, Some(dtype::INT32), None).to_param();
+            sess.training(true);
+            let mut jit = Jit::new();
+            let step = |sess: &mut Session| {
+                let out = model.forward(&x);
+                let loss = out.sparse_categorical_crossentropy(&y, -1, 0.0, "mean");
+                loss.backward(&params, None);
+                opt.schedule_step(sess, std::slice::from_ref(&loss));
+                opt.zero_grad();
+                loss
+            };
+            let run = |jit: &mut Jit, sess: &mut Session| {
+                let loss = jit.call(&ctx, sess, |_c, s| step(s));
+                let _ = loss.cast(dtype::FLOAT32).item::<f32>(sess);
+            };
+            let (cold, samples) = measure(|| run(&mut jit, &mut sess), warmup, iters);
+            emit(
+                "vit_train_bf16",
+                &device,
+                bs,
+                "bf16",
+                true,
+                warmup,
+                iters,
+                cold,
+                samples,
+            );
+        }
         "onnx_resnet" => {
             let bs = env_i64("BENCH_BS", 8);
             let warmup = env_i64("BENCH_WARMUP", 2) as usize;
@@ -573,20 +618,20 @@ fn main() {
                 .unwrap_or_else(|e| panic!("load {path}: {e}"));
             let x = Tensor::rand(m.ctx(), &[bs, 3, 224, 224], None, None);
             x.realize(m.session_mut());
-            let mut step = || {
+            let step = || {
                 let mut out = m.run(&[("x", x.clone())]).expect("onnx run");
                 let y = out.remove("logits").expect("logits");
                 let _ = y
                     .getitem(&vec![Ix::slice(None, Some(1), 1); 2])
                     .to_list::<f32>(m.session_mut());
             };
-            let (cold, samples) = measure(|| step(), warmup, iters);
+            let (cold, samples) = measure(step, warmup, iters);
             emit("onnx_resnet", &device, bs, "f32", true, warmup, iters, cold, samples);
         }
         other => panic!(
             "unknown BENCH_WORKLOAD={other} (mnist_train|vit_infer|vit_train|gemm|memops|\
              optim|resnet18_train|resnet18_infer|resnet50_infer|mobilenet_infer|unet_infer|\
-             llm_prefill|llm_decode|vit_infer_bf16|onnx_mnist|onnx_resnet)"
+             llm_prefill|llm_decode|vit_infer_bf16|vit_train_bf16|onnx_mnist|onnx_resnet)"
         ),
     }
     autorust::engine::prof::report();

@@ -135,6 +135,8 @@ RUNS = [
     # --- bf16 ViT (tensor-core path), ONNX runner, frozen AOT plan ---
     ("autorust-cuda-vit_infer_bf16", "autorust", "CUDA", "vit_infer_bf16", 8, 1, 3, ""),
     ("torch-cuda-vit_infer_bf16", "torch", "cuda", "vit_infer_bf16", 8, 1, 3, ""),
+    ("autorust-cuda-vit_train_bf16", "autorust", "CUDA", "vit_train_bf16", 1, 1, 3, ""),
+    ("torch-cuda-vit_train_bf16", "torch", "cuda", "vit_train_bf16", 1, 1, 3, ""),
     ("autorust-rust-onnx_mnist", "autorust", "RUST", "onnx_mnist", 32, 2, 10, ""),
     ("autorust-cuda-onnx_mnist", "autorust", "CUDA", "onnx_mnist", 32, 2, 10, ""),
     ("torch-cpu-onnx_mnist", "torch", "cpu", "onnx_mnist", 32, 2, 10, ""),
@@ -210,7 +212,7 @@ def cmd_candle(device, workload, batch, warmup, iters):
 
 def cmd_torch(device, workload, batch, warmup, iters):
     dtype = "bf16" if workload.endswith("bf16") else "f32"
-    base = "gemm" if workload == "gemm_bf16" else workload
+    base = {"gemm_bf16": "gemm"}.get(workload, workload)
     return [
         str(TORCH_PY), str(BENCH / "torch" / "bench.py"),
         "--device", device, "--workload", base, "--batch", str(batch),
@@ -220,7 +222,7 @@ def cmd_torch(device, workload, batch, warmup, iters):
 
 def cmd_tinygrad(device, workload, batch, warmup, iters):
     dtype = "bf16" if workload.endswith("bf16") else "f32"
-    base = "gemm" if workload == "gemm_bf16" else workload
+    base = {"gemm_bf16": "gemm"}.get(workload, workload)
     return [
         str(TINYGRAD_PY), str(BENCH / "tinygrad" / "bench.py"),
         "--device", device, "--workload", base, "--batch", str(batch),

@@ -110,6 +110,7 @@ The bench also isolates the pieces the two models hide:
 | LLM prefill, 512 tok | CUDA | 317 ms | **16.4 ms** | attention + head |
 | LLM decode, 1 tok | CUDA | 17.1 ms | **3.6 ms** | ~300 kernels/token |
 | ViT-B/16 infer, bf16 | CUDA | 61.6 ms | **18.2 ms** | TC tiling on 197 tokens |
+| ViT-B/16 train, bf16 | CUDA | 84.3 ms | **20.9 ms** | f32 was 95.9 vs 43.8 |
 | MNIST infer via ONNX, bs 32 | CUDA | 10.9 ms | **0.35 ms** | runner reschedules per call |
 | ResNet-18 (w=0.25) via ONNX, bs 8 | CUDA | 67.7 ms | **1.25 ms** | same, larger graph |
 
