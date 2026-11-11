@@ -3497,3 +3497,40 @@ The remaining work is therefore explicitly: teach the split walk to *revisit*
 §9.26) instead of hand-building the CALL, then the hoist can simply emit the
 `AFTER(buf, [END(STORE(...))])` like `bufferize_to_store` does and let the
 existing machinery callify it.
+
+### 9.34 Per-step profile: subtract the model-build phase (2026-11)
+
+`AUTORUST_KPROF` traces include the model-build phase (weight init materialises
+`Tensor::full(low)`/`full(range)` buffers for `rand::uniform`), so raw traces
+overstate the per-step cost and made earlier attribution wrong. Differencing an
+`ITERS=0` run against an `ITERS=3` run and dividing by three gives the true
+per-step cost. A one-off check confirms the build phase is iteration-independent
+(`E_589824_4` counts 72 in both the 0- and 3-iteration inference runs).
+
+RUST ViT-B/16 training, per step (sum 1647 ms, measured 1635 ms):
+
+| ms/step | calls | program | key |
+|---:|---:|---|---|
+| **453.2** | 11 | `r_384_197_8_192_4` | `a8522231781e4338` |
+| 204.6 | 131 | `HostGemm` | — |
+| 159.5 | 12 | `r_96_197_8_768_4` | `5eeef187ae79c426` |
+| 138.5 | 144 | `E_589824_4` (a fill) | `729c7ea48388bd2e` |
+| 78.9 | 294 | `E_147456_4` (a fill) | `51c8169efd39cf60` |
+| 55.9 | 12 | `r_197_197_3_4_16_4` | `c239dbc3aee70cbd` |
+| 44.8 | 24 | `E_589824_4` (a fill) | `724d1260b2f9741d` |
+| 40.7 / 39.2 | 12 / 12 | `r_96_197_8_192_4` (two programs) | — |
+| 34.4 | 12 | `r_96_96_8_8_197` | — |
+
+The 589,824-element "fills" are *not* the weight-init buffers (those are
+iteration-independent): in training 144 + 24 of them run **per step**, and both
+are stores of a constant (`Tensor::full`, `buffer=true`) whose destination is a
+weight-sized buffer. Where they are created is still open — the scalar elementwise
+helpers (`binop_c`/`add_c`/`mul_c`) thread a scalar CONST, so the 0.9/0.999
+scale factors are not the source; the next probe should print the *tensor-graph*
+producer of a `full(..., buffer=true)` between the second and third iterations.
+
+This also corrects §9.31/§9.32: the hot program is 453 ms/step (27%), not
+310-450, and the fills+copy kernels together are 262 ms/step (16%), i.e. the CPU
+training step is ~40% elementwise/fill traffic, 27% one generated matmul, 12%
+packed GEMM. No code change this round; the tree is at `9ce81d8` and the bench
+medians are unchanged.
