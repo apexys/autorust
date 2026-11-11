@@ -3566,3 +3566,34 @@ from `create_schedule`), or to name the fill kernels' destinations by giving
 No code change: the tree is at `ac8d422` (plus this note) and the benchmark
 medians are unchanged. CPU ViT train remains 1.56-1.64 s (2.66x) and CUDA ViT
 train 94-100 ms (2.15x); both are decomposed but not reduced.
+
+### 9.36 Split fixpoint + hoist: the CALL argument list is the last blocker (2026-11)
+
+Implemented the `split_kernels` fixpoint this round: `split_store` now skips a
+body whose store is already a `CALL` (so revisiting is safe), the ParamArg
+counter is threaded through `CtxVal::Cnt`, and the split runs up to four passes,
+stopping when the root stops changing. With the fixpoint in place the
+post-`to_define_global` epilogue hoist can finally emit
+`AFTER(buf, [END(STORE(...))])` and let a later pass callify it instead of
+hand-building the CALL.
+
+Result: the target program is now produced correctly — the hot kernel is split
+and the reduce becomes its own kernel — but at launch the *outer* CALL carries
+**one argument** while its `KernelInfo` declares `globals=[0, 3, 4]`:
+
+```
+[arg-mismatch] r_384_197_8_192_4 globals=[0, 3, 4] args=1 resolved=[Bitcast]
+```
+
+`pm_no_indexing_calls` turns a CALL argument that was an `INDEX` into its buffer,
+which here ends up as a `Bitcast`, and the argument list built from
+`LocalAddBufferContext.map_vals` for the re-lowered body does not line up with the
+globals the KernelInfo records. That is the same class of mismatch as §9.35's
+report (parameter slots vs. arg list) and is *not* solved by the fixpoint.
+
+All changes were reverted (tree at `864e1ec`); the benchmark medians are
+unchanged and the full suite passes. The remaining work is to make
+`program_info_from_sink` and the CALL argument list share one source of truth for
+a kernel built after the split walk — i.e. derive `globals` from the `lctx` map
+order rather than from the body's `ParamArg` slots — which is a contained change
+in `realize.rs`/`split_store_inner`, not another rangeify pass.
