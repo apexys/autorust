@@ -1554,6 +1554,22 @@ fn render_cstyle(ctx: &mut UOpCtx, lst: &[UopId], lang: &CStyleLang) -> String {
         if seen_dts.iter().any(|(d, _)| *d == dtype::BFLOAT16) {
             prefix.push("#include <cuda_bf16.h>".to_string());
         }
+        // `cuda_bf16.h` already typedefs `nv_bfloat162`, so the 2-wide type
+        // cannot be redeclared (the 4/8-wide structs below are not in the
+        // header). tinygrad upstream has the same latent bug: a bf16 kernel
+        // whose lanes vectorize 2-wide renders `make_nv_bfloat162`, which the
+        // header does not provide. Define it in terms of the builtin halves
+        // constructor.
+        if seen_dts
+            .iter()
+            .any(|(d, c)| *d == dtype::BFLOAT16 && *c == 2)
+        {
+            prefix.push(
+                "__device__ nv_bfloat162 make_nv_bfloat162(nv_bfloat16 x, nv_bfloat16 y) { \
+                 return __halves2bfloat162(x, y); }"
+                    .to_string(),
+            );
+        }
         for (dt, count) in &seen_dts {
             let fp8 = dtype::in_set(dtype::FP8S, *dt);
             let halfbf = *dt == dtype::FLOAT16 || *dt == dtype::BFLOAT16;
