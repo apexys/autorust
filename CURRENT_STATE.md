@@ -3534,3 +3534,35 @@ This also corrects §9.31/§9.32: the hot program is 453 ms/step (27%), not
 training step is ~40% elementwise/fill traffic, 27% one generated matmul, 12%
 packed GEMM. No code change this round; the tree is at `9ce81d8` and the bench
 medians are unchanged.
+
+### 9.35 Per-step constant-fill stores: attribution attempts (2026-11) — ANALYSIS
+
+§9.34 showed ~183 ms/step in kernels that store a constant into a weight-sized
+buffer (`E_589824_4`/`E_147456_4`). Four probes failed to name the producer:
+
+1. **`creation::full` instrumentation** (value + numel + `buffer` flag, env
+   `AUTORUST_FULL_DEBUG`): differencing `ITERS=0` against `ITERS=3` gives **zero
+   per-step `Tensor::full` calls**. The build creates them once (`Float(0.0)`
+   589824 ×99 — the Adam moments and similar; `Float(-1.0)`/`Float(2.0)` from
+   `rand::uniform`'s `range`/`low`), and they are not re-created per step.
+2. **Backtrace on the `-1.0` full**: `rand::uniform` → `scaled_uniform` →
+   `TransformerBlock::new`, i.e. weight init — confirms the build-phase origin.
+3. **Scalar elementwise helpers**: `binop_c`/`add_c`/`mul_c` thread a scalar
+   CONST (`ufix`), so the optimizer's 0.9/0.999 scale factors cannot materialise
+   a full tensor.
+4. **`zeros_param`**: uses `to_param_ctx`, which realises the init once and
+   re-creates the leaf from bytes with `register_initial` (no in-graph STORE), so
+   the moments are not the per-step fills.
+
+So the per-step fills are *stores of an expanded constant that no
+`Tensor::full` call produces* — i.e. an op whose operand is a scalar const
+(`where(cond, x, c)`, `zeros_like`, `ones_like`, a padded/valid gate) being
+materialised as its own kernel. The remaining probe is to print the *tensor-graph
+node* that is stored into a weight-sized buffer between step 1 and step 2
+(e.g. tag the scheduler with a "step ≥ 1" flag and print the store's value tree
+from `create_schedule`), or to name the fill kernels' destinations by giving
+`register_initial` params a debug name.
+
+No code change: the tree is at `ac8d422` (plus this note) and the benchmark
+medians are unchanged. CPU ViT train remains 1.56-1.64 s (2.66x) and CUDA ViT
+train 94-100 ms (2.15x); both are decomposed but not reduced.
