@@ -488,9 +488,9 @@ Reading it:
   (1024³) loses to torch, where launch/tile overhead dominates. This is the
   important control for the ViT training gap: the generated tiled matmul is not
   what is 2-3x behind.
-- **bf16 is 0.5-0.6x torch**: tensor cores are selected (`AUTORUST_TENSOR_CORES=0`
+- **bf16 is 0.4-0.9x torch**: tensor cores are selected (`AUTORUST_TENSOR_CORES=0`
   drops 1024³ from 8.1 to 5.3 TFLOP/s, so the TC path is in use), but torch's
-  cutlass/cuBLAS kernels reach 21-25 TFLOP/s where ours sit at 9-14. The gap is
+  cutlass/cuBLAS kernels reach 13-25 TFLOP/s where ours sit at 8-15. The gap is
   the TC kernel itself, not dispatch.
 - On CPU the packed GEMM reaches 0.4-0.6 TFLOP/s against torch/MKL's 0.6-1.0.
   The transposed-A case is the weakest (0.3 vs 0.7): `AᵀB` needs a copy that the
