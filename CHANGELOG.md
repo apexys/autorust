@@ -35,6 +35,8 @@ Initial release.
   batched GEMM packs an unbatched weight once per call instead of per batch.
 - The scheduler materializes interior host-backend contractions (the FFN
   expansion under GELU) so the packed CPU GEMM takes the matmul and the
-  epilogue runs as its own kernel: RUST ViT-B/16 inference 425 -> 227 ms at
-  bs 1, 1902 -> 1601 ms at bs 8, training 1784 -> 1661 ms.
+  epilogue runs as its own kernel, and stages the pointwise operands of big
+  contractions (attention's biased Q/K): RUST ViT-B/16 inference 425 -> 173 ms
+  at bs 1 (1.05x torch), 1902 -> 1164 ms at bs 8 (1.66x), training 1784 ->
+  1634 ms.
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.

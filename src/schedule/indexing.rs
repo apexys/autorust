@@ -1485,6 +1485,12 @@ fn on_host_device(ctx: &mut UOpCtx, u: UopId) -> bool {
 /// the generated matmul runs at roughly a tenth of the packed kernel's rate.
 /// Materializing it makes the contraction a plain GEMM plus a small
 /// elementwise kernel.
+///
+/// Independently of the split, a *big* contraction (>= 16M MACs) whose operand
+/// is a pointwise expression gets that operand staged: attention's `Q`/`K` add
+/// their bias inside the reduction, so the score kernel is neither a library
+/// GEMM nor a reusable buffer. Staging costs one small copy and turns the same
+/// kernel into a plain batched matmul.
 fn realize_interior_contractions(
     ctx: &mut UOpCtx,
     order: &[UopId],
@@ -1531,37 +1537,54 @@ fn realize_interior_contractions(
             .take(n_axes as usize)
             .map(|d| d.clone().as_i128_or_panic())
             .product();
-        // Attention's contractions (K = head size / token count) are better
-        // fused with their softmax handful of ops.
-        if k < 512 || !on_host_device(ctx, x.clone()) {
+        if !on_host_device(ctx, x.clone()) {
             continue;
         }
-        // The GEMM operands must be buffers: a non-affine operand (the
-        // layernorm output feeding the FFN, say) is otherwise recomputed inside
-        // the kernel, which keeps the contraction off the library path. Only
-        // split when every operand can be staged; otherwise the reduce would
-        // become a generated GEMM with a fused prologue, which is slower than
-        // leaving the whole kernel fused.
+        let out_numel: i128 = ctx
+            .shape(x)
+            .ok()
+            .flatten()
+            .map(|s| {
+                s.iter()
+                    .map(|d| d.clone().as_i128_or_panic())
+                    .product::<i128>()
+            })
+            .unwrap_or(i128::MAX);
+        let macs = out_numel.saturating_mul(k);
         let Some((a, b)) = contraction_operands(ctx, x.clone()) else {
             continue;
         };
-        // One operand must be a direct buffer (the weight); a weight-gradient
-        // contraction has two activation operands and is better left fused
-        // (staging both would only add copies).
         let simple = [
             is_simple_load(ctx, a.clone()),
             is_simple_load(ctx, b.clone()),
         ];
-        if simple[0] == simple[1] {
-            // `x * x` (a normalisation variance) is the one useful both-
-            // operand case: splitting the sum materialises the normalised
-            // activation the projections read. Keep it small; a weight-gradient
-            // contraction (big activation operands) only pays for copies.
-            if a != b {
-                continue;
+        // Stage a pointwise operand of a big contraction (attention's biased
+        // Q/K) so the kernel becomes a plain matmul. Small enough to be cheap
+        // and only when the GEMM is large.
+        if macs >= 16_000_000 {
+            for (operand, is_simple) in [(a.clone(), simple[0]), (b.clone(), simple[1])] {
+                if is_simple || operand == *x {
+                    continue;
+                }
+                if ctx
+                    .shape(&operand)
+                    .ok()
+                    .flatten()
+                    .map(|s| {
+                        s.iter()
+                            .map(|d| d.clone().as_i128_or_panic())
+                            .product::<i128>()
+                    })
+                    .unwrap_or(i128::MAX)
+                    <= 4_000_000
+                {
+                    ictx.realize_map.insert(operand.clone(), None);
+                    ictx.non_removable.insert(operand);
+                }
             }
-            let numel = ctx
-                .shape(&a)
+        }
+        let numel_of = |ctx: &mut UOpCtx, u: &UopId| -> i128 {
+            ctx.shape(u)
                 .ok()
                 .flatten()
                 .map(|s| {
@@ -1569,8 +1592,27 @@ fn realize_interior_contractions(
                         .map(|d| d.clone().as_i128_or_panic())
                         .product::<i128>()
                 })
-                .unwrap_or(i128::MAX);
-            if numel > 512_000 {
+                .unwrap_or(i128::MAX)
+        };
+        if a == b {
+            // `x * x` (a normalisation variance): cheap to stage, and the split
+            // materialises the normalised activation the projections read.
+            if macs < 1_000_000 || numel_of(ctx, &a) > 512_000 {
+                continue;
+            }
+        } else if simple[0] == simple[1] {
+            // Both operands are already buffers (attention's Q/K/P/V views) or
+            // both are expressions (a weight-gradient contraction). Only the
+            // former is cheap; require a big GEMM so the extra kernel pays.
+            if !simple[0] || macs < 16_000_000 {
+                continue;
+            }
+        } else {
+            // Exactly one operand is a buffer: the forward projection shape
+            // (`activation @ weight`). Stage the activation; a small K cannot
+            // amortise the extra kernel (attention's head contractions), and a
+            // tiny GEMM is not worth a buffer either.
+            if k < 512 || macs < 1_000_000 {
                 continue;
             }
         }

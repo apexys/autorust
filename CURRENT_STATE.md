@@ -3245,3 +3245,42 @@ host-only): MNIST 21.8 (1.67x), ViT infer 14.7/71.6 (1.69x/1.54x), train 96.8
 
 Gates: full `cargo test --release` (78 binaries), clippy, rustdoc,
 `--no-default-features`, `cargo publish --dry-run`.
+
+### 9.28 CPU attention into the packed GEMM; 6 of 8 rows within 2x (2026-11) — DONE
+
+§9.27 brought the CPU FFN expansion onto the packed host GEMM. The remaining
+RUST ViT cost was attention: `r_12_197_197_2_4_16_4` (QK^T) took 43 ms/layer at
+bs 8 and `r_12_197_8_8_8_197` (P·V) 27 ms/layer, i.e. ~500 ms + ~320 ms per
+step for 0.06 GFLOP each. The generated kernels re-read a 64-float Q/K row per
+output element (the score kernel's bias adds are inside the reduction, so the
+operands are not buffers and cuBLAS-style reuse never happens).
+
+`realize_interior_contractions` now also **stages the pointwise operand of any
+contraction with >= 16M MACs** (operand <= 4M elements), independently of the
+epilogue split. Attention's `Q + q_bias` and `K + k_bias` become buffers, so the
+score kernel is a plain batched matmul the host GEMM claims; `P·V` reaches it
+directly because the softmax output is already a buffer. The split rule gained
+corresponding cases: both operands already buffers (attention) needs
+`>= 16M` MACs, one buffer + one expression keeps `K >= 512` (the forward
+projections), and a weight-gradient pair (two expressions) stays fused.
+
+`AUTORUST_KPROF=1`, RUST ViT-B/16:
+
+| workload | before | now | torch | ratio |
+|---|---:|---:|---:|---:|
+| infer bs 1 | 227.1 ms | **173.2** | 165.1 | **1.05x** |
+| infer bs 8 | 1601.3 ms | **1163.8** | 701.5 | **1.66x** |
+| train bs 1 | 1660.7 ms | **1634.2** | 616.3 | 2.65x |
+| MNIST bs 512 | 64.7 ms | **64.1** | 175.9 | 0.36x |
+
+The bs-8 profile is now ~75% `HostGemm` (12 layers x [1576,3072,768] and
+[1576,768,3072] plus 4 projections); the generated kernels that remain are the
+softmax and small elementwise passes. On this CPU (AVX2, 24 threads) the packed
+kernel sustains 290-464 GFLOP/s against MKL's ~600, and 8-12 ms of the step is
+the layer's fused softmax; that is the measured CPU floor for the current
+microkernel, not a scheduling gap.
+
+CUDA is unchanged (the pass is host-only): MNIST 21.9 (1.67x), ViT infer
+14.0/69.3 (1.61x/1.49x), train 97.2 (2.22x).
+
+Gates: full `cargo test --release` (78 binaries), clippy, rustdoc.
