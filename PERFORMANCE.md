@@ -439,9 +439,9 @@ the per-image cost directly. ViT-B/16 training, ms per step and per image:
 | CPU | 4 | 4211.8 | 1053.0 | 1342.4 | 335.6 |
 
 The step time grows almost linearly with batch on both devices: the generated
-f32 GEMM is already saturated at batch 1, so extra rows buy nothing, while
-cuBLAS keeps improving its tile choice (torch's CUDA per-image cost halves from
-bs 1 to bs 8). In other words, the remaining ViT-training gap is not launch or
+f32 GEMM is close to saturation at batch 1 (per-image 98.8 -> 78.6 ms on CUDA
+from bs 1 to 8), so extra rows buy little, while cuBLAS keeps improving its tile
+choice (torch's CUDA per-image cost halves from bs 1 to bs 8). In other words, the remaining ViT-training gap is not launch or
 scheduling overhead that a bigger batch would amortize; it is the steady-state
 GEMM/elementwise throughput of the f32 path. MNIST, which is conv- and
 optimizer-heavy, behaves differently: on CPU autorust is 2x faster than torch at

@@ -86,10 +86,9 @@ See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.
 | ViT-B/16 train, bs 1 | CUDA | 95.9 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 The ViT training gap is batch-dependent rather than a fixed overhead: the
-generated f32 GEMM is already saturated at bs 1, so a bigger batch buys nothing
-(per-image time stays ~79 ms on CUDA), while torch's cuBLAS keeps improving
-(bs 1 -> 8: 45.8 -> 22.1 ms/image). At bs 4 autorust/CUDA is 317 ms vs torch's
-102 ms. MNIST scales the other way: autorust is 2x faster than torch on CPU at
+generated f32 GEMM is close to saturation already at bs 1 (per-image 98.8 ->
+78.6 ms on CUDA from bs 1 to 8), while torch's cuBLAS keeps improving
+(45.8 -> 22.1 ms/image). At bs 4 autorust/CUDA is 317 ms vs torch's 102 ms. MNIST scales the other way: autorust is 2x faster than torch on CPU at
 both bs 64 and bs 512. Full sweep in
 [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#batch-size-scaling).
 
