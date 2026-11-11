@@ -3966,3 +3966,29 @@ plus the post-`to_define_global` hoist still fails with `len is 6 but the index 
 kernel must be produced by a path where the signature counts a slot the info
 traversal does not see (or vice versa), and the next probe should print both slot
 sets for the failing program rather than relying on the executor's index panic.
+
+### 9.48 The hoist's launch failure is not a signature/globals mismatch (2026-11)
+
+Ran the requested side-by-side diagnostic (env `AUTORUST_SLOT_DEBUG`: print
+`name`, ELF signature slots, `pi.globals` and the CALL arg count for every
+launch) with the split fixpoint and the post-`to_define_global` hoist enabled.
+
+Result: **7,049 launches logged, every one with `sig == globals` and
+`args > max(slot)`** — including the multi-slot kernels (`E_3072_197`:
+`sig=[0,1,2,5] globals=[0,1,2,5] args=6`). The very next launch then panics with
+`index out of bounds: the len is 6 but the index is 7` inside
+`runtime::ops_rust::call`, and it produces **no** `[slot]` line, so the crashing
+program never reaches `exec_kernel`'s diagnostic.
+
+That rules out the `program_info_from_sink` vs `to_elf` theory (§9.36-§9.39,
+§9.47): the info and signature agree for every kernel that goes through
+`exec_kernel`. The crash must come from a launch whose `CompiledProg`/runtime
+pair is inconsistent — the only remaining candidate is the runtime-keyed program
+cache (`dev.runtime_keyed(cp.elf_key, &cp.elf)`): a program built for one ELF
+reused under a colliding/reused key would carry a different signature than
+`cp.elf` (whose slots the diagnostic checks).
+
+Next probe: print inside `runtime_keyed` whether it returned a cached runtime and
+compare the cached runtime's signature with the requested ELF's. Everything else
+was reverted; the tree is at `97544f3` and the medians are unchanged (RUST train
+1.54-1.64 s, CUDA train 94.5 ms).
