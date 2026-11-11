@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CPU",
+  "workload": "onnx_resnet",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 109.1483,
+  "ms_median": 17.4104,
+  "ms_min": 13.513,
+  "ms_iqr": 8.2972,
+  "images_per_s": 459.5,
+  "name": "torch-cpu-onnx_resnet",
+  "variant": "cpu",
+  "commit": "734867d",
+  "date": "2026-11-11T21:17:03",
+  "notes": ""
+}

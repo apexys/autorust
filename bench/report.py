@@ -30,6 +30,7 @@ WORKLOADS = [
     ("llm_prefill", "LLM prefill (512 tokens)", "token"),
     ("llm_decode", "LLM decode (1 token, 512-token KV cache)", "token"),
     ("onnx_mnist", "MNIST inference via the ONNX runner (bs 32)", "img"),
+    ("onnx_resnet", "ResNet-18 (width 0.25) via the ONNX runner (bs 8)", "img"),
 ]
 
 # Multi-case workloads: (workload, title, metric key or None).

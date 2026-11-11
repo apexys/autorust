@@ -4133,10 +4133,12 @@ protocol as the existing rows (`bench/run.py`, raw JSON in `bench/results/`):
 - **bf16 ViT** (`vit_infer_bf16`): weights and input cast to bf16, exercising
   the TC matmul and bf16 attention. 61.6 ms vs torch's 18.2 at bs 8: only 1.15x
   faster than f32 because the 197-token axis is prime and the TC tiles pad it.
-- **ONNX runner** (`onnx_mnist`): the MNIST CNN exported to
-  `bench/assets/mnist_bs32.onnx` (regenerate with `bench/tools/export_onnx.py`)
-  and run through `OnnxModel::run`. 14.7 ms/call on CPU vs torch's 3.7: the
-  runner rebuilds and schedules the graph per call.
+- **ONNX runner** (`onnx_mnist`, `onnx_resnet`): the MNIST CNN and a
+  width-0.25 ResNet-18 exported to `bench/assets/*.onnx` (regenerate with
+  `bench/tools/export_onnx.py`) and run through `OnnxModel::run`. 14.7/204.8 ms
+  per call on CPU vs torch's 3.7/17.4: the runner rebuilds and schedules the
+  graph per call, and the cost scales with the graph (54x behind on the ResNet
+  CUDA row).
 - **Frozen plan** (`freeze`): the `vit_freeze` example now also times eager JIT
   replay vs `FrozenRunner` (1.60 vs 2.00 ms for the small ViT, 17 ms plan
   build). Per-step parity is expected (same kernels); the frozen path's win is

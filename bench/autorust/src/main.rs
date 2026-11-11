@@ -427,12 +427,12 @@ fn main() {
             let y = Tensor::randint(&ctx, &[bs], 0, 1000, Some(dtype::INT32), None).to_param();
             let (cold, samples) = match workload.as_str() {
                 "resnet18_train" | "resnet18_infer" => {
-                    let model = resnet::ResNet::new(&ctx, 18, 1000).into_params();
+                    let model = resnet::ResNet::new(&ctx, 18, 1000, 1.0).into_params();
                     run_vision(&ctx, &mut sess, model, &x, &y, training, 1e-3, warmup, iters,
                         |m, x, s, t| m.forward(x, s, t))
                 }
                 "resnet50_infer" => {
-                    let model = resnet::ResNet::new(&ctx, 50, 1000).into_params();
+                    let model = resnet::ResNet::new(&ctx, 50, 1000, 1.0).into_params();
                     run_vision(&ctx, &mut sess, model, &x, &y, training, 1e-3, warmup, iters,
                         |m, x, s, t| m.forward(x, s, t))
                 }
@@ -562,10 +562,31 @@ fn main() {
             let (cold, samples) = measure(&mut step, warmup, iters);
             emit("onnx_mnist", &device, bs, "f32", true, warmup, iters, cold, samples);
         }
+        "onnx_resnet" => {
+            let bs = env_i64("BENCH_BS", 8);
+            let warmup = env_i64("BENCH_WARMUP", 2) as usize;
+            let iters = env_i64("BENCH_ITERS", 5) as usize;
+            let path = std::env::var("BENCH_ONNX").unwrap_or_else(|_| {
+                "bench/assets/resnet18w25_bs8.onnx".to_string()
+            });
+            let mut m = autorust::onnx::OnnxModel::load_with_device(&path, Some(&device))
+                .unwrap_or_else(|e| panic!("load {path}: {e}"));
+            let x = Tensor::rand(m.ctx(), &[bs, 3, 224, 224], None, None);
+            x.realize(m.session_mut());
+            let mut step = || {
+                let mut out = m.run(&[("x", x.clone())]).expect("onnx run");
+                let y = out.remove("logits").expect("logits");
+                let _ = y
+                    .getitem(&vec![Ix::slice(None, Some(1), 1); 2])
+                    .to_list::<f32>(m.session_mut());
+            };
+            let (cold, samples) = measure(|| step(), warmup, iters);
+            emit("onnx_resnet", &device, bs, "f32", true, warmup, iters, cold, samples);
+        }
         other => panic!(
             "unknown BENCH_WORKLOAD={other} (mnist_train|vit_infer|vit_train|gemm|memops|\
              optim|resnet18_train|resnet18_infer|resnet50_infer|mobilenet_infer|unet_infer|\
-             llm_prefill|llm_decode|vit_infer_bf16|onnx_mnist)"
+             llm_prefill|llm_decode|vit_infer_bf16|onnx_mnist|onnx_resnet)"
         ),
     }
     autorust::engine::prof::report();

@@ -152,14 +152,18 @@ class Bottleneck(nn.Module):
 
 
 class ResNet(nn.Module):
-    def __init__(self, depth=18, classes=1000):
+    def __init__(self, depth=18, classes=1000, width=1.0):
         super().__init__()
         layers = [2, 2, 2, 2] if depth == 18 else [3, 4, 6, 3]
         block = Basic if depth == 18 else Bottleneck
-        self.stem = conv_bn(3, 64, 7, 2, 3)
-        stages, cin = [], 64
+
+        def w(c):
+            return max(8, int(c * width) // 8 * 8)
+
+        self.stem = conv_bn(3, w(64), 7, 2, 3)
+        stages, cin = [], w(64)
         for i, n in enumerate(layers):
-            cout = 64 << i
+            cout = w(64 << i)
             blocks = []
             for b in range(n):
                 stride = 2 if i > 0 and b == 0 else 1
@@ -167,7 +171,7 @@ class ResNet(nn.Module):
                 cin = cout
             stages.append(nn.Sequential(*blocks))
         self.stages = nn.Sequential(*stages)
-        self.fc = nn.Linear(512, classes)
+        self.fc = nn.Linear(cin, classes)
 
     def forward(self, x):
         x = F.relu(self.stem(x))
@@ -563,9 +567,14 @@ def run_model(workload, dev, dtype_name, warmup, iters):
     batch = env_int("BENCH_BS", 8 if workload == "vit_infer_bf16" else 32)
     torch.manual_seed(0)
 
-    if workload == "onnx_mnist":
-        model = Mnist().to(dev).eval()
-        x = torch.rand(batch, 1, 28, 28, device=dev)
+    if workload in ("onnx_mnist", "onnx_resnet"):
+        if workload == "onnx_mnist":
+            model, batch = Mnist(), env_int("BENCH_BS", 32)
+            x = torch.rand(batch, 1, 28, 28, device=dev)
+        else:
+            model, batch = ResNet(18, width=0.25), env_int("BENCH_BS", 8)
+            x = torch.rand(batch, 3, 224, 224, device=dev)
+        model = model.to(dev).eval()
         with torch.no_grad():
             def step():
                 return model(x).detach()
@@ -597,10 +606,6 @@ def run_model(workload, dev, dtype_name, warmup, iters):
         model = Unet()
         batch = env_int("BENCH_BS", 4)
         x = torch.rand(batch, 3, 64, 64, device=dev)
-    elif workload == "onnx_mnist":
-        model = Mnist()
-        batch = env_int("BENCH_BS", 32)
-        x = torch.rand(batch, 1, 28, 28, device=dev)
     else:
         raise SystemExit(f"unknown model workload {workload}")
 
@@ -671,7 +676,7 @@ def main():
             "mnist_train", "vit_infer", "vit_train", "gemm", "memops", "optim",
             "resnet18_train", "resnet18_infer", "resnet50_infer", "mobilenet_infer",
             "unet_infer", "llm_prefill", "llm_decode", "vit_infer_bf16",
-            "onnx_mnist",
+            "onnx_mnist", "onnx_resnet",
         ],
     )
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
@@ -713,7 +718,7 @@ def main():
         return
     if args.workload in (
         "resnet18_train", "resnet18_infer", "resnet50_infer", "mobilenet_infer",
-        "unet_infer", "vit_infer_bf16", "onnx_mnist",
+        "unet_infer", "vit_infer_bf16", "onnx_mnist", "onnx_resnet",
     ):
         run_model(
             args.workload, dev, args.dtype, args.warmup or 2, args.iters or 5,

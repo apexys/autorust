@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CUDA",
+  "workload": "onnx_resnet",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 98.9945,
+  "ms_median": 67.6709,
+  "ms_min": 66.3007,
+  "ms_iqr": 1.4149,
+  "images_per_s": 118.22,
+  "name": "autorust-cuda-onnx_resnet",
+  "variant": "CUDA",
+  "commit": "734867d",
+  "date": "2026-11-11T21:17:01",
+  "notes": ""
+}

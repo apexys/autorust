@@ -36,8 +36,8 @@ MNIST is 1.3x off torch on CUDA and 2x faster on CPU. The benchmark matrix also
 grew beyond the two models: a GEMM sweep (f32/bf16, transposed and batched), a
 memory-bound op set, an AdamW-only step, ResNet-18/50, MobileNetV2, a small
 UNet, an autoregressive prefill/decode pair (GQA, RoPE, KV cache, sampling), a
-bf16 ViT row, the ONNX runner and a frozen-plan comparison (dev-only; see
-`PERFORMANCE.md`).
+bf16 ViT row, the ONNX runner (MNIST and a width-0.25 ResNet-18) and a
+frozen-plan comparison (dev-only; see `PERFORMANCE.md`).
 
 ### Performance
 

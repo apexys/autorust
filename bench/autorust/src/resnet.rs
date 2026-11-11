@@ -187,18 +187,20 @@ pub struct ResNet {
 }
 
 impl ResNet {
-    /// `depth` is 18 or 50.
-    pub fn new(ctx: &Ctx, depth: usize, classes: i64) -> ResNet {
+    /// `depth` is 18 or 50; `width` scales every channel count (1.0 =
+    /// torchvision, 0.25 = the small ONNX asset).
+    pub fn new(ctx: &Ctx, depth: usize, classes: i64, width: f64) -> ResNet {
+        let w = |c: i64| -> i64 { (((c as f64) * width) as i64 / 8 * 8).max(8) };
         let (layers, bottleneck) = match depth {
             18 => (vec![2usize, 2, 2, 2], false),
             50 => (vec![3usize, 4, 6, 3], true),
             other => panic!("ResNet depth {other} not benchmarked"),
         };
-        let stem = Cb::new(ctx, 3, 64, 7, 2, 3, 1);
+        let stem = Cb::new(ctx, 3, w(64), 7, 2, 3, 1);
         let mut stages = Vec::new();
-        let mut cin = 64i64;
+        let mut cin = w(64);
         for (i, &n) in layers.iter().enumerate() {
-            let cout = 64 << i;
+            let cout = w(64 << i);
             let mut blocks = Vec::new();
             for b in 0..n {
                 let stride = if i > 0 && b == 0 { 2 } else { 1 };
@@ -214,7 +216,7 @@ impl ResNet {
         ResNet {
             stem,
             stages,
-            fc: Linear::new(ctx, 512, classes, true),
+            fc: Linear::new(ctx, cin, classes, true),
         }
     }
 

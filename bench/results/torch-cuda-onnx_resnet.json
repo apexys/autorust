@@ -1,0 +1,21 @@
+{
+  "framework": "torch",
+  "version": "2.6.0+cu124",
+  "device": "CUDA",
+  "workload": "onnx_resnet",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 203.1869,
+  "ms_median": 1.2489,
+  "ms_min": 1.2304,
+  "ms_iqr": 0.0143,
+  "images_per_s": 6405.49,
+  "name": "torch-cuda-onnx_resnet",
+  "variant": "cuda",
+  "commit": "734867d",
+  "date": "2026-11-11T21:17:05",
+  "notes": ""
+}

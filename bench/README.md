@@ -25,6 +25,7 @@ Results live in [`results/`](results) as raw JSON plus a generated
 | `llm_prefill` | 6-layer LLaMA-style decoder (GQA 12/4, RoPE, causal mask) | 512 tokens, vocab 32000, f32 | ms/step, token/s |
 | `llm_decode` | one token against a 512-token KV cache, Gumbel-max sampling | batch 1 | ms/step, token/s |
 | `onnx_mnist` | the same MNIST CNN exported to ONNX, run through `OnnxModel` | batch 32, `bench/assets/mnist_bs32.onnx` | ms/step, img/s |
+| `onnx_resnet` | ResNet-18 at width 0.25 exported to ONNX | batch 8, `bench/assets/resnet18w25_bs8.onnx` | ms/step, img/s |
 | `freeze` | `vit_freeze` example: eager JIT replay vs frozen CPU plan | 1 layer, d=192, 64² | per-case ms |
 
 Inputs are **synthetic and device-resident** (`rand` for MNIST, `zeros` for

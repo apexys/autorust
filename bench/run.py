@@ -139,6 +139,10 @@ RUNS = [
     ("autorust-cuda-onnx_mnist", "autorust", "CUDA", "onnx_mnist", 32, 2, 10, ""),
     ("torch-cpu-onnx_mnist", "torch", "cpu", "onnx_mnist", 32, 2, 10, ""),
     ("torch-cuda-onnx_mnist", "torch", "cuda", "onnx_mnist", 32, 2, 10, ""),
+    ("autorust-rust-onnx_resnet", "autorust", "RUST", "onnx_resnet", 8, 2, 5, ""),
+    ("autorust-cuda-onnx_resnet", "autorust", "CUDA", "onnx_resnet", 8, 2, 5, ""),
+    ("torch-cpu-onnx_resnet", "torch", "cpu", "onnx_resnet", 8, 2, 5, ""),
+    ("torch-cuda-onnx_resnet", "torch", "cuda", "onnx_resnet", 8, 2, 5, ""),
     ("autorust-rust-freeze", "autorust", "RUST", "freeze", 1, 2, 5, ""),
 ]
 
