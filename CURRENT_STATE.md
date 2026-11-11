@@ -3880,3 +3880,41 @@ signature/globals disagreement for a kernel created after the split walk
 (§9.36-§9.39).
 
 This supersedes §9.41-§9.43: there is no large "phantom fill" to remove.
+
+### 9.45 Why the 423 ms/step matmul cannot be tiled faster on CPU (2026-11)
+
+The kernel (`r_384_197_8_192_4`, key `a8522231781e4338`) is a fused
+`gelu'(ff1) * Reduce(mask*dY, W2)`. Its dumped source has exactly three loops:
+
+```
+for __gidx0 in gidx0_start..gidx0_end      // CPU "grid": rayon chunks
+  for Lidx2 in 0..384                      // 3072 columns / 8, serial
+    for Ridx0 in 0..192                    // K=768 / 4, 4-wide upcast
+```
+
+`AUTORUST_MM_DEBUG` shows the tiler does recognise it, with
+`m=Some(3072) n=Some(197)` — the FFN axis is M and the *token* axis is N. The
+CPU tiling branch upcasts both axes, but N = **197 is prime**, so its upcast
+falls back to 1 (the port deliberately refuses masked/padded upcasts, since
+vector stores are not lane-wise). The token axis therefore cannot be blocked in
+registers, so every column block re-reads the whole masked activation:
+
+```
+A = [197, 768] = 0.61 MB;  384 column blocks -> 232 MB/layer -> 2.79 GB/step
+at 10-20 GB/s that is 279-139 ms/step of pure A traffic (measured 423 ms)
+```
+
+The packed CPU GEMM does not have this problem because it *packs* B into panels
+and micro-kernels a 6x16 register tile, so both operands are read once; that is
+why it sustains 290-460 GFLOP/s on the same shapes while this kernel runs at
+~27 GFLOP/s.
+
+So the gap is **structural for the generated path on a prime token count**: no
+tiling change can block a 197-row axis without masked/padded vector ops. Closing
+it requires routing the contraction to the packed GEMM — i.e. materialising the
+masked operand and splitting the epilogue (the hoist, §9.36-§9.39).
+
+This is the first *demonstrated* limit for the CPU training row: the 423 ms is
+explained and bounded by A-operand traffic under the current codegen, and the
+only way to go below it is the hoist (or an im2col-style A staging plus the host
+GEMM). State otherwise unchanged.
