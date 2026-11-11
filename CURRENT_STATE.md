@@ -3330,3 +3330,53 @@ guard.
 Measured state unchanged for the eight rows of `bench/results`: CUDA 21.9 /
 14.0 / 69.3 / 96.8 ms and RUST 64.1 / 173.2 / 1163.8 / 1634.2 ms, i.e. six of
 eight within 2x of torch.
+
+### 9.30 Training rows, round 2: what the remaining kernels are (2026-11) — ANALYSIS
+
+Follow-up to §9.29. Two CPU staging attempts were measured and reverted, and the
+CUDA small kernels were identified. Both rows are still above 2x; nothing in
+this round changed the benchmark medians, and the tree is unchanged apart from
+this note.
+
+**CPU: the FFN-backward kernel is fused and no staging path reaches it.**
+`r_384_197_8_192_4` (~310 ms/step) is `Mul(gelu'(ff1_out + bias), Reduce)`:
+the reduce is the masked activation gradient and the store value is the
+nonlinear epilogue. `host_gemm::extract` peels `Cast/Mul/Add` around the reduce
+and stops at `Mul`, so it *does* reach the reduce — but instrumentation shows no
+reduce of that output size is ever passed to it, i.e. the kernel comes from a
+path where the store is an elementwise op over an already-realized reduce and
+`split_store` never offers those nodes to the extractor.
+
+Tried and reverted (both measured, no kernel-list change):
+
+- adding `non_removable` to the §9.21 contraction-sum realizations, so
+  `pm_remove_bufferize` cannot re-inline them (train 1.553-1.627 s, unchanged);
+- (previous round) moving operand staging ahead of the realized/root guards and
+  carrying the mark across `PAD -> WHERE` (unchanged).
+
+The measured CPU step is now ~43% `HostGemm` (393 calls, ~700 ms), ~310 ms the
+fused kernel above, ~120 ms of contiguous copies (`E_147456_4`: 192 copies of a
+589,824-element buffer per step) and the rest generated fragments. Closing it
+needs `extract` to accept a store that is an elementwise op over an *already
+realized* reduce (i.e. hoisting the epilogue into the consumer kernel after
+`split_kernels`), which is a schedule-level change, not another rangeify guard.
+
+**CUDA: two tiny kernels account for a quarter of the step.**
+Dumping the sources identifies the sub-50 µs kernels:
+
+- `E_2` (6,373 launches in 4 steps ≈ 1,600/step, 11 ms/step) is a **two-element
+  counter update**: `data0[0] += 589824` with carry into the high word, i.e. a
+  device-side kernel counter (the increment is the GEMM's element count). It
+  could be accumulated on the host for the same reported value.
+- `E_4608_32_4` (768 launches ≈ 192/step, 15.9 ms/step) is a **full zero-fill**
+  of a 589,824-float (2.4 MB) buffer: `make_float4(0,0,0,0)` over the whole
+  buffer, i.e. a materialised `zeros` for a [768, 768] accumulator that is then
+  overwritten by the first reduction.
+
+Together those are ~27 ms of the 96.8 ms CUDA training step (28%), and they are
+the concrete remaining levers for that row (host-side counter, avoid the
+materialised zero accumulator); the other 39% is the optimizer's per-parameter
+elementwise chains, which need a batched update kernel to shrink.
+
+State unchanged (`bench/results`): CUDA 21.9 / 14.0 / 69.3 / 96.8 ms, RUST
+64.1 / 173.2 / 1163.8 / 1634.2 ms — six of eight rows within 2x of torch.
