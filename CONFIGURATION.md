@@ -220,12 +220,12 @@ All of these are inert unless set; most accept any value.
 | variable | output |
 |---|---|
 | `AUTORUST_PROF` (any value except `0`/empty) | Scheduler phase table; also enabled by `TG_RW_TRACE`/`TG_RW_VISITS`. |
-| `AUTORUST_KPROF` | Per-kernel CUDA time table (synchronises per launch). |
+| `AUTORUST_KPROF` | Per-program kernel time table: `KPROF <name> <secs> <program-key>`. CUDA synchronises per launch (so its timings are profiling-only); host backends (`RUST`/`CC`/`RAYON`) print generated kernels and `HostGemm` calls. |
 | `AUTORUST_KERNEL_INFO` | Registers/shared/local bytes per compiled CUDA kernel. |
 | `FROZEN_PROF` | Per-kernel and host-GEMM counters in a `FrozenRunner` (`report_profile()`). |
 | `AUTORUST_CUBLAS_DEBUG` | Host-GEMM dispatch/descriptor lines. |
 | `AUTORUST_CPU_GEMM_DEBUG` | CPU host-GEMM packing/tile decisions. |
-| `AUTORUST_MM_DEBUG` | Generated matmul tiling decisions. |
+| `AUTORUST_MM_DEBUG` | Generated matmul tiling decisions and `host_gemm::extract` rejection reasons. |
 | `AUTORUST_DEVICE_VERBOSE` | Per-launch `RUST` backend lines (grid, args, buffer count). |
 | `AUTORUST_RUST_DUMP`, `AUTORUST_CC_DUMP` | Print the compiled Rust/C kernel source. |
 | `AUTORUST_ATTN_DEBUG` | One-time line describing the selected fused-attention kernel. |

@@ -8,7 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.1] - 2026-11-11
 
-Performance and correctness release; no API changes.
+Performance and correctness release; no API changes. Net effect on the
+benchmark suite: ViT-B/16 training CUDA 332 -> 96 ms, CPU inference 425 -> 171 ms
+at bs 1 and 1902 -> 1188 ms at bs 8, CPU training 1784 -> 1634 ms; MNIST CUDA
+39 -> 22 ms. Six of the eight bench rows are now within 2x of eager torch
+(`torch.compile` off), and warm cold starts drop from 505/697/1279/6013 ms to
+216/474/760/2498 ms.
 
 ### Performance
 
@@ -45,6 +50,10 @@ Performance and correctness release; no API changes.
 
 ### Fixed
 
+- The graph model (`TransformerBlock::attn`) no longer routes through the
+  op-level FlashAttention port by default: the default `Settings::attention`
+  selects the fused tensor-level kernels, and the 16x-slower op-level port is
+  now only used with `FA=1`. The default follows tinygrad's model and uses SDPA.
 - The runtime cache is keyed by the buffer signature as well as the compiled
   artifact: a cached runtime could be reused for an artifact with different
   slots, launching with an out-of-bounds buffer index.
