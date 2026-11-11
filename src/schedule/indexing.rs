@@ -577,6 +577,15 @@ fn stage_reduce_prologue(ictx: &mut IndexingContext, ctx: &mut UOpCtx, x: UopId)
     if let Some(rm) = ictx.range_map.get(&x).cloned() {
         ictx.range_map.insert(nx.clone(), rm);
     }
+    // The rebuild changes the node id. Carry the realization decision and the
+    // "keep this boundary" mark across, or `pm_remove_bufferize` inlines the
+    // STAGE and the contraction is fused again (it sees only `non_removable`).
+    if let Some(rm) = ictx.realize_map.get(&x).cloned() {
+        ictx.realize_map.insert(nx.clone(), rm);
+    }
+    if ictx.non_removable.contains(&x) {
+        ictx.non_removable.insert(nx.clone());
+    }
     if let Some(rm) = ictx.range_map.get(&body).cloned() {
         ictx.range_map.insert(nb, rm);
     }

@@ -3918,3 +3918,29 @@ This is the first *demonstrated* limit for the CPU training row: the 423 ms is
 explained and bounded by A-operand traffic under the current codegen, and the
 only way to go below it is the hoist (or an im2col-style A staging plus the host
 GEMM). State otherwise unchanged.
+
+### 9.46 A realized reduce keeps its decision across the prologue rebuild (2026-11)
+
+`stage_reduce_prologue` rebuilds the `REDUCE` after staging its operand
+(`x` -> `nx`) and copied only the `range_map` entry. The `realize_map` decision
+and the `non_removable` mark were therefore left on a dead node id, and
+`create_bufferize_and_index_srcs` computed `removable = true` for the new reduce
+— so `pm_remove_bufferize` was free to inline the boundary and re-fuse the
+contraction. Traced with `AUTORUST_STAGE_TRACE`:
+
+```
+[stage-make] reduce ... removable=true  axes=3 out=[1,197,768] nrem=0   (before)
+[stage-make] reduce ... removable=false axes=3 ...             nrem=174 (after)
+```
+
+The fix carries both maps across the rebuild. It is a correctness fix (a node
+rebuild must preserve the realization decision), and it turns 174 reduce STAGEs
+into kept boundaries — but it does **not** materialize the hot kernel: 270 reduce
+STAGEs are created per capture and `r_384_197_8_192_4` (429 ms/step) still runs
+fused, with `HostGemm` unchanged at 131 calls. So the hot reduce is one whose
+STAGE is created by a path that never receives the mark at all (not one whose
+mark is lost), which is consistent with §9.36-§9.39: the contraction is only
+visible after lowering.
+
+Gates: 78/78, clippy, rustdoc. Medians unchanged (RUST train 1.59-1.63 s,
+MNIST 64.3 ms, ViT infer 181.7 ms).
