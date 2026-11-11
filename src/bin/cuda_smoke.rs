@@ -26,7 +26,7 @@ extern "C" __global__ void add_kernel(float *out, const float *a, const float *b
 "#;
     let (major, minor) = ctx.compute_capability().expect("compute capability");
     let arch = format!("sm_{major}{minor}");
-    let ptx = autorust::runtime::nvrtc::compile(
+    let (_, module) = autorust::runtime::nvrtc::compile_validated(
         src,
         &arch,
         &[
@@ -34,13 +34,13 @@ extern "C" __global__ void add_kernel(float *out, const float *a, const float *b
             "/usr/include".to_string(),
             "/opt/cuda/include".to_string(),
         ],
+        |ptx| {
+            let text = String::from_utf8_lossy(ptx).into_owned();
+            ctx.load_module(cudarc::nvrtc::Ptx::from_src(text))
+                .map_err(|e| e.to_string())
+        },
     )
     .expect("nvrtc compile");
-    let module = ctx
-        .load_module(cudarc::nvrtc::Ptx::from_src(
-            String::from_utf8_lossy(&ptx).into_owned(),
-        ))
-        .expect("load_module");
     let f = module.load_function("add_kernel").expect("load_function");
 
     let a = stream.clone_htod(&[1.0f32, 2.0, 3.0, 4.0]).unwrap();

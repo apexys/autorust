@@ -2814,6 +2814,16 @@ Changes:
   sonames. Windows uses the same rules for `nvrtc64_*.dll` / `nvrtc.dll`.
   An explicit override is authoritative; the loader does not silently fall back
   to a different toolkit.
+- **Driver-compatible NVRTC fallback:** `nvrtc::compile_validated` tries every
+  loaded NVRTC newest-first, compiles the probe source with each, and hands the
+  PTX to a caller-supplied validator. The CUDA probe passes `cuModuleLoadData`,
+  so an NVRTC newer than the installed driver (for example a CUDA 13.4 toolkit
+  on a CUDA 13.2 driver) is skipped and the next-oldest installed toolkit is
+  pinned for all later compiles. `CudaInner::open` runs the same validation when
+  CUDA is requested directly without the availability gate. An explicit
+  `AUTORUST_NVRTC_LIB`/`NVRTC_PATH` leaves one candidate, so pinned toolkits
+  keep the old no-fallback behavior. A one-line `autorust: pinned ...` note is
+  printed when a fallback is used.
 - **`nvrtc::compile(src, arch, include_dirs)`** returns `Err(String)` with the
   program log. It pre-checks the device SM against `nvrtcGetSupportedArchs`
   and returns e.g. `NVRTC 12.4 does not support sm_120 (supported: ...)`
@@ -2845,16 +2855,19 @@ Changes:
 Gates: `runtime/libfind.rs` unit tests cover NVRTC/cuBLAS filename parsing and
 version ordering (including rejecting `libcublasLt`); `runtime/nvrtc.rs` tests
 cover SM parsing, a clean missing-library error, unsupported-arch diagnostics,
-and a real trivial-kernel compile when NVRTC is present. Manually:
+a real trivial-kernel compile when NVRTC is present, and that
+`compile_validated` reports every rejected candidate. Manually:
 `AUTORUST_NVRTC_LIB=/nonexistent` disables CUDA, prints the warning and runs
 MNIST on OpenCL with identical accuracy; `AUTORUST_CUBLAS_LIB=/nonexistent`
 keeps CUDA running on generated GEMM kernels; the normal run still opens the
-RTX 3060 (`sm_86`) and emits the same cuBLAS GEMMs. Full suite + clippy +
-rustdoc pass.
+RTX 3060 (`sm_86`) and emits the same cuBLAS GEMMs. On a box whose toolkit is
+newer than the driver (NVRTC 13.4 with a CUDA 13.2 driver), `cargo run --bin
+cuda_smoke` now falls back to the installed NVRTC 12 and passes without
+`AUTORUST_NVRTC_LIB`. Full suite + clippy + rustdoc pass.
 
-Known limits: the driver still has to understand the PTX ISA that the loaded
-NVRTC emits (the probe catches this at selection time); include headers still
-come from `$CUDA_PATH/include` or the three standard locations, so a
+Known limits: the driver still has to understand the final PTX ISA, but the
+probe now retries older installed NVRTCs before disabling CUDA; include headers
+still come from `$CUDA_PATH/include` or the three standard locations, so a
 non-standard toolkit should set `CUDA_PATH`.
 
 ### 9.19 Benchmark round: prime-shape GEMM tiles + attention default (2026-11) — DONE

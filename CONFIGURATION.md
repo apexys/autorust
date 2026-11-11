@@ -173,16 +173,18 @@ NVRTC is loaded at run time and is **independent of the toolkit used to build**
 `CUDA_PATH` / `CUDA_ROOT` / `CONDA_PREFIX`, the multiarch library directories,
 and every `cuda*` toolkit under `/usr/local` and `/opt`, preferring the newest
 `libnvrtc.so[.N]`; it then falls back to bare sonames. A binary built on CUDA 12
-therefore uses a CUDA 13 NVRTC on a colleague's machine (and vice versa) as long
-as the installed *driver* can load the PTX (PTX is forward compatible; an
-NVRTC newer than the driver can emit an ISA the driver rejects, which the probe
-below catches).
+therefore uses a CUDA 13 NVRTC on a colleague's machine (and vice versa). The
+device probe compiles a one-line kernel with each loaded NVRTC newest-first and
+pins the first whose PTX the *driver* accepts, so an NVRTC newer than the driver
+falls back to the next-oldest installed toolkit instead of disabling CUDA.
+Setting `AUTORUST_NVRTC_LIB` / `NVRTC_PATH` pins one library and disables the
+fallback.
 
 Before offering `CUDA` to the scheduler, `ops_cuda::device_available` compiles
 and loads a one-line kernel for the device's SM (cached once per ordinal). If
 NVRTC is missing, too old for the GPU (for example `sm_120` with NVRTC 12.4),
-or the driver rejects the PTX, CUDA reports itself unavailable, prints one
-warning such as
+or no installed NVRTC can produce PTX the driver accepts, CUDA reports itself
+unavailable, prints one warning such as
 
 ```
 autorust: CUDA device 0 disabled, falling back to the next backend: NVRTC cannot build for sm_86: ...

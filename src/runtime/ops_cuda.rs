@@ -144,6 +144,15 @@ impl CudaInner {
         crate::runtime::cublas::probe_current_context();
         let (major, minor) = ctx.compute_capability().unwrap_or((0, 0));
         let arch = format!("sm_{major}{minor}");
+        // Normal device selection already ran `probe_device`; if CUDA was
+        // requested directly, pin a driver-compatible NVRTC here before the
+        // compiler is used for real kernels.
+        if !crate::runtime::nvrtc::has_validated()
+            || !crate::runtime::nvrtc::supports_arch(&arch)
+        {
+            validate_nvrtc(&ctx, &arch)
+                .unwrap_or_else(|e| panic!("TGERR: NVRTC/PTX probe for {arch}: {e}"));
+        }
         ARCH_SM.with(|a| a.set(((major * 10 + minor) as i64).max(0)));
         let device_name = ctx.name().unwrap_or_else(|_| "CUDA".to_string());
         eprintln!("CUDADevice: opening {device_name} ({arch})");
@@ -846,9 +855,20 @@ impl UopRenderer for CudaUopRenderer {
 const PROBE_SRC: &str =
     "extern \"C\" __global__ void autorust_probe(float *out) { out[threadIdx.x] = 1.0f; }";
 
-/// Compile + load a one-line kernel for this device's SM. Catches every
-/// version mismatch that used to abort mid-run: no NVRTC, an NVRTC too old for
-/// the GPU (`sm_120` on CUDA 12.4), or PTX the installed driver cannot load.
+/// Compile + load a one-line kernel for this device's SM, pinning the newest
+/// installed NVRTC whose PTX the driver accepts. Catches every version mismatch
+/// that used to abort mid-run: no NVRTC, an NVRTC too old for the GPU
+/// (`sm_120` on CUDA 12.4), or PTX a toolkit newer than the driver cannot load.
+fn validate_nvrtc(ctx: &std::sync::Arc<CudaContext>, arch: &str) -> Result<(), String> {
+    crate::runtime::nvrtc::compile_validated(PROBE_SRC, arch, &nvrtc_include_dirs(), |ptx| {
+        let text = String::from_utf8_lossy(ptx).into_owned();
+        ctx.load_module(Ptx::from_src(text))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .map(|_| ())
+}
+
 fn probe_device(ordinal: usize) -> Result<(), String> {
     if unsafe { !cudarc::driver::sys::is_culib_present() } {
         return Err("CUDA driver library not found".to_string());
@@ -860,11 +880,7 @@ fn probe_device(ordinal: usize) -> Result<(), String> {
         .compute_capability()
         .map_err(|e| format!("compute capability: {e}"))?;
     let arch = format!("sm_{major}{minor}");
-    let ptx = crate::runtime::nvrtc::compile(PROBE_SRC, &arch, &nvrtc_include_dirs())
-        .map_err(|e| format!("NVRTC cannot build for {arch}: {e}"))?;
-    let text = String::from_utf8_lossy(&ptx).into_owned();
-    ctx.load_module(Ptx::from_src(text))
-        .map_err(|e| format!("CUDA driver rejected NVRTC PTX for {arch}: {e}"))?;
+    validate_nvrtc(&ctx, &arch)?;
     // Same context is still current: probe the other runtime library (cuBLAS)
     // while we are here, so `host_gemm` scheduling sees the real answer.
     crate::runtime::cublas::probe_current_context();

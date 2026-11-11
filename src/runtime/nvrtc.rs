@@ -12,14 +12,17 @@
 //! entry points the compiler needs. Any installed toolkit works: the CUDA
 //! *driver* API (loaded separately by cudarc) is the version-stable ABI, and
 //! PTX is forward compatible, so a kernel compiled by NVRTC 13 runs on a 12
-//! driver as long as the driver understands the emitted PTX ISA. When the
-//! installed NVRTC cannot target the current GPU's SM, [`compile`] returns an
-//! error and the CUDA backend reports itself unavailable instead of panicking,
-//! so device selection falls through to the next backend.
+//! driver as long as the driver understands the emitted PTX ISA. A *newer*
+//! NVRTC can emit an ISA the installed driver rejects; [`compile_validated`]
+//! lets the CUDA probe try every loaded NVRTC newest-first and pin the first
+//! one whose PTX the driver actually loads. When no candidate works, the CUDA
+//! backend reports itself unavailable instead of panicking, so device selection
+//! falls through to the next backend.
 //!
 //! Search order:
 //!
 //! 1. `AUTORUST_NVRTC_LIB` (path or soname) and tinygrad's `NVRTC_PATH`.
+//!    An explicit override is authoritative and disables the fallback.
 //! 2. Every `libnvrtc.so[.N]` found under `LD_LIBRARY_PATH`, `CUDA_HOME` /
 //!    `CUDA_PATH` / `CUDA_ROOT` / `CONDA_PREFIX`, the multiarch library dirs,
 //!    and the `cuda*` toolkits under `/usr/local` and `/opt`.
@@ -32,6 +35,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use libloading::Library;
 
@@ -57,6 +61,8 @@ type FnGetArchs = unsafe extern "C" fn(*mut c_int) -> NvrtcResult;
 /// Bound NVRTC entry points plus the library that owns them.
 struct Api {
     _lib: Library,
+    /// Candidate path/soname, for diagnostics.
+    name: String,
     version: FnVersion,
     error_string: FnErrorString,
     create: FnCreate,
@@ -70,9 +76,24 @@ struct Api {
     get_archs: Option<FnGetArchs>,
 }
 
+/// Every NVRTC that loaded successfully, in search order (newest first).
+fn apis() -> &'static [Api] {
+    static APIS: OnceLock<Vec<Api>> = OnceLock::new();
+    APIS.get_or_init(load_all)
+}
+
+/// Index of the NVRTC that produced driver-compatible PTX, or 0 (newest)
+/// before the CUDA probe has selected one.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Whether [`compile_validated`] has accepted a candidate.
+static VALIDATED: AtomicBool = AtomicBool::new(false);
+
 fn api() -> Option<&'static Api> {
-    static API: OnceLock<Option<Api>> = OnceLock::new();
-    API.get_or_init(load).as_ref()
+    let apis = apis();
+    let index = ACTIVE
+        .load(Ordering::Acquire)
+        .min(apis.len().saturating_sub(1));
+    apis.get(index)
 }
 
 /// Whether an NVRTC library could be loaded.
@@ -82,51 +103,111 @@ pub fn available() -> bool {
 
 /// Runtime NVRTC version (`(major, minor)`), for diagnostics.
 pub fn version() -> Option<(c_int, c_int)> {
-    let api = api()?;
-    let (mut major, mut minor) = (0, 0);
-    // SAFETY: `nvrtcVersion` writes two ints through valid pointers.
-    let rc = unsafe { (api.version)(&mut major, &mut minor) };
-    (rc == 0).then_some((major, minor))
+    api()?.runtime_version()
 }
 
 /// SM numbers this NVRTC can target (`80` for `sm_80`); empty when the
 /// loaded library predates `nvrtcGetSupportedArchs`.
 pub fn supported_sms() -> Vec<c_int> {
+    api().map(Api::archs).unwrap_or_default()
+}
+
+/// Whether the active NVRTC was accepted by [`compile_validated`].
+pub(crate) fn has_validated() -> bool {
+    VALIDATED.load(Ordering::Acquire)
+}
+
+/// Whether the active NVRTC advertises support for `arch`. A library that
+/// predates `nvrtcGetSupportedArchs` is given the benefit of the doubt.
+pub(crate) fn supports_arch(arch: &str) -> bool {
     let Some(api) = api() else {
-        return Vec::new();
+        return false;
     };
-    let (Some(num), Some(get)) = (api.num_archs, api.get_archs) else {
-        return Vec::new();
-    };
-    let mut count: c_int = 0;
-    // SAFETY: `nvrtcGetNumSupportedArchs` only writes the count.
-    if unsafe { num(&mut count) } != 0 || count <= 0 {
-        return Vec::new();
+    let arches = api.archs();
+    match sm_of(arch) {
+        Some(sm) => arches.is_empty() || arches.contains(&sm),
+        None => true,
     }
-    let mut sms = vec![0 as c_int; count as usize];
-    // SAFETY: `nvrtcGetSupportedArchs` fills `count` ints.
-    if unsafe { get(sms.as_mut_ptr()) } != 0 {
-        return Vec::new();
-    }
-    sms
 }
 
 /// Compile `src` to PTX for `arch` (for example `sm_86`), adding one
-/// `-I<dir>` option per include directory.
+/// `-I<dir>` option per include directory, using the active NVRTC.
 pub fn compile(src: &str, arch: &str, include_dirs: &[String]) -> Result<Vec<u8>, String> {
     let Some(api) = api() else {
-        return Err(
-            "libnvrtc not found (install the CUDA NVRTC library or set AUTORUST_NVRTC_LIB)"
-                .to_string(),
-        );
+        return Err(missing_library());
     };
+    compile_with(api, src, arch, include_dirs)
+}
+
+/// Compile with every loaded NVRTC, newest first, and return the first PTX for
+/// which `validate` succeeds. The accepting library becomes the active NVRTC
+/// for all later [`compile`] calls.
+///
+/// The CUDA device probe uses this to reject an NVRTC whose PTX is newer than
+/// the installed driver, then retry with the next-oldest installed toolkit. An
+/// explicit `AUTORUST_NVRTC_LIB` / `NVRTC_PATH` leaves exactly one candidate,
+/// so the fallback is disabled for pinned toolkits.
+pub fn compile_validated<T, F>(
+    src: &str,
+    arch: &str,
+    include_dirs: &[String],
+    mut validate: F,
+) -> Result<(Vec<u8>, T), String>
+where
+    F: FnMut(&[u8]) -> Result<T, String>,
+{
+    let apis = apis();
+    if apis.is_empty() {
+        return Err(missing_library());
+    }
+    let mut failures = Vec::with_capacity(apis.len());
+    for (index, api) in apis.iter().enumerate() {
+        let ptx = match compile_with(api, src, arch, include_dirs) {
+            Ok(ptx) => ptx,
+            Err(e) => {
+                failures.push(format!("{}: {e}", api.label()));
+                continue;
+            }
+        };
+        match validate(&ptx) {
+            Ok(value) => {
+                ACTIVE.store(index, Ordering::Release);
+                VALIDATED.store(true, Ordering::Release);
+                if index > 0 {
+                    eprintln!(
+                        "autorust: pinned {} for {arch}; newer NVRTC candidates were rejected by the driver",
+                        api.label()
+                    );
+                }
+                return Ok((ptx, value));
+            }
+            Err(e) => failures.push(format!("{}: PTX rejected: {e}", api.label())),
+        }
+    }
+    Err(format!(
+        "no installed NVRTC produced driver-compatible PTX for {arch}:\n  {}",
+        failures.join("\n  ")
+    ))
+}
+
+fn missing_library() -> String {
+    "libnvrtc not found (install the CUDA NVRTC library or set AUTORUST_NVRTC_LIB)".to_string()
+}
+
+fn compile_with(
+    api: &Api,
+    src: &str,
+    arch: &str,
+    include_dirs: &[String],
+) -> Result<Vec<u8>, String> {
     // Fail fast with an actionable message when this NVRTC is too old for the
     // GPU, instead of a generic COMPILATION error from the source.
     if let Some(sm) = sm_of(arch) {
-        let arches = supported_sms();
+        let arches = api.archs();
         if !arches.is_empty() && !arches.contains(&sm) {
             let listed: Vec<String> = arches.iter().map(|n| format!("sm_{n}")).collect();
-            let ver = version()
+            let ver = api
+                .runtime_version()
                 .map(|(a, b)| format!("{a}.{b}"))
                 .unwrap_or_else(|| "?".to_string());
             return Err(format!(
@@ -185,6 +266,37 @@ pub fn compile(src: &str, arch: &str, include_dirs: &[String]) -> Result<Vec<u8>
 }
 
 impl Api {
+    fn runtime_version(&self) -> Option<(c_int, c_int)> {
+        let (mut major, mut minor) = (0, 0);
+        // SAFETY: `nvrtcVersion` writes two ints through valid pointers.
+        let rc = unsafe { (self.version)(&mut major, &mut minor) };
+        (rc == 0).then_some((major, minor))
+    }
+
+    fn archs(&self) -> Vec<c_int> {
+        let (Some(num), Some(get)) = (self.num_archs, self.get_archs) else {
+            return Vec::new();
+        };
+        let mut count: c_int = 0;
+        // SAFETY: `nvrtcGetNumSupportedArchs` only writes the count.
+        if unsafe { num(&mut count) } != 0 || count <= 0 {
+            return Vec::new();
+        }
+        let mut sms = vec![0 as c_int; count as usize];
+        // SAFETY: `nvrtcGetSupportedArchs` fills `count` ints.
+        if unsafe { get(sms.as_mut_ptr()) } != 0 {
+            return Vec::new();
+        }
+        sms
+    }
+
+    fn label(&self) -> String {
+        match self.runtime_version() {
+            Some((major, minor)) => format!("{} (NVRTC {major}.{minor})", self.name),
+            None => self.name.clone(),
+        }
+    }
+
     fn error_text(&self, rc: NvrtcResult) -> String {
         // SAFETY: `nvrtcGetErrorString` returns a static NUL-terminated string.
         let ptr = unsafe { (self.error_string)(rc) };
@@ -231,7 +343,8 @@ fn sm_of(arch: &str) -> Option<c_int> {
     arch.strip_prefix("sm_")?.trim_end_matches('a').parse().ok()
 }
 
-fn load() -> Option<Api> {
+fn load_all() -> Vec<Api> {
+    let mut out = Vec::new();
     for candidate in candidates() {
         // SAFETY: loading an arbitrary shared library is inherently unsafe; a
         // failed load is skipped and every symbol is resolved before use.
@@ -239,15 +352,15 @@ fn load() -> Option<Api> {
             Ok(lib) => lib,
             Err(_) => continue,
         };
-        match unsafe { bind(lib) } {
-            Ok(api) => return Some(api),
-            Err(_) => continue,
+        match unsafe { bind(lib, candidate) } {
+            Ok(api) => out.push(api),
+            Err(()) => continue,
         }
     }
-    None
+    out
 }
 
-unsafe fn bind(lib: Library) -> Result<Api, ()> {
+unsafe fn bind(lib: Library, name: String) -> Result<Api, ()> {
     // `get` needs a concrete `T`; spell out each signature at the call site.
     macro_rules! bind_required {
         ($name:literal, $ty:ty) => {{
@@ -279,6 +392,7 @@ unsafe fn bind(lib: Library) -> Result<Api, ()> {
     let num_archs = bind_optional!("nvrtcGetNumSupportedArchs", FnGetArchs);
     let get_archs = bind_optional!("nvrtcGetSupportedArchs", FnGetArchs);
     let api = Api {
+        name,
         version,
         error_string,
         create,
@@ -375,5 +489,25 @@ mod tests {
             &text[..64.min(text.len())]
         );
         assert!(text.contains(".entry probe") || text.contains(".visible .entry probe"));
+    }
+
+    #[test]
+    fn validated_compile_reports_every_rejected_candidate() {
+        if !available() || supported_sms().is_empty() {
+            return;
+        }
+        let Some(sm) = supported_sms().last().copied() else {
+            return;
+        };
+        let arch = format!("sm_{sm}");
+        let err = compile_validated(
+            "extern \"C\" __global__ void probe() {}",
+            &arch,
+            &[],
+            |_| Err::<(), String>("simulated driver rejection".to_string()),
+        )
+        .unwrap_err();
+        assert!(err.contains("driver-compatible PTX"), "{err}");
+        assert!(err.contains("simulated driver rejection"), "{err}");
     }
 }

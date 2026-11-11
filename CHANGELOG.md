@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CUDA NVRTC fallback.** The device probe now tries every installed NVRTC
+  newest-first and pins the first whose PTX the driver actually loads, instead
+  of disabling CUDA when the newest toolkit is newer than the driver. An
+  explicit `AUTORUST_NVRTC_LIB`/`NVRTC_PATH` still pins one library.
+
 ## [0.1.1] - 2026-11-11
 
 Performance and correctness release; no API changes. Net effect on the
