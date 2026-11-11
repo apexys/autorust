@@ -4105,7 +4105,7 @@ protocol as the existing rows (`bench/run.py`, raw JSON in `bench/results/`):
   shapes, transposed-A, transposed-B and batched 8×512³, f32 and bf16, one
   element read back to force completion. This is the control for every model
   row: the f32 GEMM is at parity with cuBLAS on CUDA (7.8-9.4 TFLOP/s at 2048³+
-  vs torch's 7.4-8.5) and the bf16 path is 0.5-0.6x torch (9-14 vs 13-25) with
+  vs torch's 7.4-8.5) and the bf16 path is 0.4-0.9x torch (8-15 vs 13-25 TFLOP/s) with
   tensor cores selected. On CPU the packed GEMM is 0.4-0.6 TFLOP/s vs MKL's
   0.6-1.0; transposed-A is the weak case (0.3 vs 0.7).
 - **Memory-bound ops** (`memops`): add/copy/gelu/softmax/layernorm/sum/amax/
