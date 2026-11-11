@@ -3380,3 +3380,44 @@ elementwise chains, which need a batched update kernel to shrink.
 
 State unchanged (`bench/results`): CUDA 21.9 / 14.0 / 69.3 / 96.8 ms, RUST
 64.1 / 173.2 / 1163.8 / 1634.2 ms — six of eight rows within 2x of torch.
+
+### 9.31 The requested epilogue hoist is unnecessary: the reduce is already split (2026-11)
+
+Implemented the `split_store`-level hoist this round: the ParamArg counter is now
+threaded into `split_kernels` (`CtxVal::Cnt`, seeded from the graph's max slot)
+and `split_store` can rewrite `END(STORE(dest, f(value)))` into a reduce kernel
+plus the store. It is **inert**, and the instrumentation explains why:
+
+```
+Store u719141
+  value = Mul(Reciprocal(Index(Add(Range, Mul(Const, Range)), After(...))), ...)
+  After u719110
+    End u719109
+      Store u719108
+        Reduce u719107      <- the contraction is already its own kernel
+        Index u712508
+```
+
+The rangeify realize path already splits the FFN-backward contraction: the
+reduce is a kernel root inside its own `AFTER`, and the epilogue is a separate
+store. So the "epilogue hoist" that the last rounds targeted does not exist as
+work — the blob at ~310 ms/step is the *reduce kernel itself*, and it is
+generated rather than a host GEMM.
+
+The remaining `host_gemm` rejections were then enumerated: `A operand is Exp2`
+(12/step) and `A operand is Mul` (24/step). Instrumenting the reduce operands
+behind those rejects shows they are the **softmax denominator / layernorm
+variance sums** (`out=[1,12,197]` with `a=Exp2`, `b=Reduce`), not matmuls — so
+they are harmless and cannot move the benchmark. Staging the operands of
+already-realized contractions (which removes the 24 `Mul` rejects) measured
+1.553-1.639 s, i.e. no change, and was reverted.
+
+The open question is therefore narrow and different from the previous plan: the
+~310 ms/step kernel is a *reduce kernel root* whose store value is `Reduce` yet
+which `host_gemm::extract` never analyses (the `[hgd]` probes on a 605,184-element
+reduce never fire). The next step is to instrument `extract`'s call site in
+`split_store` to see whether that kernel's body reaches it at all, rather than
+adding more rangeify staging.
+
+State unchanged: RUST train 1.56-1.64 s (2.5-2.66x), CUDA train 94-100 ms
+(2.15-2.29x); six of eight rows within 2x.
