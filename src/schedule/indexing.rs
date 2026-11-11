@@ -14,7 +14,7 @@ use crate::uop::ops::{Ops, group};
 use crate::uop::range::AxisType;
 use crate::uop::sint::{SInt, SVal};
 use crate::uop::sym::symbolic;
-use crate::uop::upat::{CtxVal, PatternMatcher, RuleFn, UPat, graph_rewrite, r_dev, r_idx};
+use crate::uop::upat::{CtxVal, PatternMatcher, RuleFn, UPat, graph_rewrite, r_ctx, r_dev, r_idx};
 
 /// `ALWAYS_CONTIGUOUS` (indexing.py:24).
 pub fn is_always_contiguous(op: Ops) -> bool {
@@ -787,6 +787,53 @@ fn remove_movement_op_after_rangeify(
     None
 }
 
+/// Add to every kernel-root `END(STORE)` the loop ranges of its store that it
+/// does not end yet.
+///
+/// `create_bufferize_and_index_srcs` ends the store's own out ranges before the
+/// store's sources are rangeified, so a realized interior node (a contraction
+/// staged under an elementwise epilogue) can contribute loop ranges that the
+/// END never sees. `split_store` rejects such an END ("open ranges"), leaving
+/// the kernel unformed; closing them makes the store a proper kernel that the
+/// splitter can callify.
+pub fn close_store_ends() -> PatternMatcher {
+    static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
+    PM.get_or_init(|| {
+        PatternMatcher::new(vec![(
+            UPat::ops1(Ops::End).with_src_any_len(true).named("e"),
+            r_ctx(|ctx, st| {
+                let e = crate::uop::sym::sget(st, "e");
+                let srcs = ctx.srcs(&e).to_vec();
+                if ctx.op_of(&srcs[0]) != Ops::Store {
+                    return None;
+                }
+                let mut ended: Vec<UopId> = srcs[1..].to_vec();
+                let mut changed = false;
+                for r in ctx.ranges(&srcs[0]).to_vec() {
+                    if ctx.op_of(&r) == Ops::Range && !ended.contains(&r) {
+                        ended.push(r);
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return None;
+                }
+                ended.sort_by_key(|r| AxisType::range_axis_id(ctx, r.clone()));
+                let mut new_srcs = vec![srcs[0].clone()];
+                new_srcs.extend(ended);
+                Some(ctx.uop_tag(
+                    Ops::End,
+                    Some(crate::dtype::VOID),
+                    new_srcs,
+                    Arg::None,
+                    ctx.tag_of(&e).clone(),
+                ))
+            }),
+        )])
+    })
+    .clone()
+}
+
 /// `pm_apply_rangeify` (indexing.py:134).
 pub fn pm_apply_rangeify() -> PatternMatcher {
     static PM: crate::uop::upat::PmSlot = crate::uop::upat::PmSlot::new();
@@ -1416,6 +1463,151 @@ fn union_capped<I: Iterator<Item = UopId>>(it: I, cap: usize) -> Vec<UopId> {
     out
 }
 
+fn on_host_device(ctx: &mut UOpCtx, u: UopId) -> bool {
+    matches!(
+        device_of(ctx, u),
+        Some(DeviceSpec::Single(d))
+            if d.starts_with("RUST")
+                || d.starts_with("CC")
+                || d.starts_with("RAYON")
+                || d.starts_with("INTERP")
+                || d.starts_with("CPU")
+    )
+}
+
+/// Realize each *interior* contraction on a host backend when its reduction is
+/// large enough to pay for the extra buffer.
+///
+/// A contraction consumed directly by a store is already its own kernel, and
+/// the host GEMM claims it (including an affine bias/residual/scale epilogue).
+/// An interior one (the FFN expansion under GELU, for instance) is fused into
+/// a larger kernel whose elementwise epilogue blocks the library match, and
+/// the generated matmul runs at roughly a tenth of the packed kernel's rate.
+/// Materializing it makes the contraction a plain GEMM plus a small
+/// elementwise kernel.
+fn realize_interior_contractions(
+    ctx: &mut UOpCtx,
+    order: &[UopId],
+    consumer_map: &HashMap<UopId, Vec<UopId>>,
+    ictx: &mut IndexingContext,
+) {
+    for x in order {
+        if ctx.op_of(x) != Ops::Reduce || ictx.realize_map.contains_key(x) {
+            continue;
+        }
+        let Some(cons) = consumer_map.get(x) else {
+            continue;
+        };
+        // A kernel root (consumed directly by a store/boundary) is left alone.
+        if cons.is_empty()
+            || cons.iter().any(|c| {
+                matches!(
+                    ctx.op_of(c),
+                    Ops::Store | Ops::After | Ops::Call | Ops::Function | Ops::Sink
+                )
+            })
+        {
+            continue;
+        }
+        let (_op, _dt, srcs, arg, _tag) = ctx.snapshot(x);
+        let n_axes = match &arg {
+            Arg::Seq { tuple: true, items } => match items.get(1) {
+                Some(Arg::Int(n)) => *n,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        if n_axes <= 0 || srcs.is_empty() {
+            continue;
+        }
+        let src_shape = ctx
+            .shape(&srcs[0])
+            .ok()
+            .flatten()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+        let k: i128 = src_shape
+            .iter()
+            .take(n_axes as usize)
+            .map(|d| d.clone().as_i128_or_panic())
+            .product();
+        // Attention's contractions (K = head size / token count) are better
+        // fused with their softmax handful of ops.
+        if k < 512 || !on_host_device(ctx, x.clone()) {
+            continue;
+        }
+        // The GEMM operands must be buffers: a non-affine operand (the
+        // layernorm output feeding the FFN, say) is otherwise recomputed inside
+        // the kernel, which keeps the contraction off the library path. Only
+        // split when every operand can be staged; otherwise the reduce would
+        // become a generated GEMM with a fused prologue, which is slower than
+        // leaving the whole kernel fused.
+        let Some((a, b)) = contraction_operands(ctx, x.clone()) else {
+            continue;
+        };
+        // One operand must be a direct buffer (the weight); a weight-gradient
+        // contraction has two activation operands and is better left fused
+        // (staging both would only add copies).
+        let simple = [
+            is_simple_load(ctx, a.clone()),
+            is_simple_load(ctx, b.clone()),
+        ];
+        if simple[0] == simple[1] {
+            // `x * x` (a normalisation variance) is the one useful both-
+            // operand case: splitting the sum materialises the normalised
+            // activation the projections read. Keep it small; a weight-gradient
+            // contraction (big activation operands) only pays for copies.
+            if a != b {
+                continue;
+            }
+            let numel = ctx
+                .shape(&a)
+                .ok()
+                .flatten()
+                .map(|s| {
+                    s.iter()
+                        .map(|d| d.clone().as_i128_or_panic())
+                        .product::<i128>()
+                })
+                .unwrap_or(i128::MAX);
+            if numel > 512_000 {
+                continue;
+            }
+        }
+        let mut stage: Vec<UopId> = Vec::new();
+        let mut ok = true;
+        for (operand, is_simple) in [a, b].into_iter().zip(simple) {
+            if is_simple {
+                continue;
+            }
+            let numel = ctx
+                .shape(&operand)
+                .ok()
+                .flatten()
+                .map(|s| {
+                    s.iter()
+                        .map(|d| d.clone().as_i128_or_panic())
+                        .product::<i128>()
+                })
+                .unwrap_or(i128::MAX);
+            if numel > 8_000_000 {
+                ok = false;
+                break;
+            }
+            stage.push(operand);
+        }
+        if !ok {
+            continue;
+        }
+        ictx.realize_map.insert(x.clone(), None);
+        ictx.non_removable.insert(x.clone());
+        for operand in stage {
+            ictx.realize_map.insert(operand.clone(), None);
+            ictx.non_removable.insert(operand);
+        }
+    }
+}
+
 /// `run_rangeify` — rewrite the SINK into ranged INDEX/STAGE/RANGE form.
 pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool, max_buffers: usize) -> UopId {
     let shared = Rc::new(RefCell::new(IndexingContext::new()));
@@ -1465,6 +1657,10 @@ pub fn run_rangeify(ctx: &mut UOpCtx, tsink: UopId, _debug: bool, max_buffers: u
             }
         }
     }
+
+    // Host backends: the packed CPU GEMM is ~10x the generated matmul, so an
+    // interior contraction with a big reduction is worth its own buffer.
+    realize_interior_contractions(ctx, &tsink_toposort, &consumer_map, &mut shared.borrow_mut());
 
     // explicit rangeify
     let mut ending_ranges: HashMap<UopId, Vec<UopId>> = HashMap::new();

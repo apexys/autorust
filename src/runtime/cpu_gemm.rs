@@ -227,6 +227,33 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
     let t = tile();
     let avx = have_avx2();
     let bsz = g.batch as usize;
+    // Fast path: A row-major (k contiguous), B row-major or a `[n, k]` weight
+    // packed into `[k, n]`. The per-task packing below re-reads B for every
+    // m-block and A for every n-block, which dominates small-M GEMMs (ViT's
+    // 197-row linears).
+    let direct = g.a_k == 1 && (g.b_n == 1 || g.b_k == 1);
+    let pack_b = |b_addr: usize| -> Option<Vec<f32>> {
+        if !direct || g.b_n == 1 {
+            return None;
+        }
+        let mut p = vec![0.0f32; k * n];
+        let b_n = g.b_n as usize;
+        p.par_chunks_mut(n).enumerate().for_each(|(kk, row)| {
+            let src = unsafe { (b_addr as *const f32).offset(kk as isize) };
+            for (j, dst) in row.iter_mut().enumerate() {
+                unsafe { *dst = *src.offset((j * b_n) as isize) };
+            }
+        });
+        Some(p)
+    };
+    // A batched GEMM over the same (unbatched) weight packs it once.
+    let weight = if g.b_b == 0 {
+        let b_head = bases[g.b_slot as usize] as *const f32;
+        pack_b(unsafe { b_head.offset(g.b_off as isize) } as usize)
+    } else {
+        None
+    };
+    let weight_addr = weight.as_ref().map(|p| p.as_ptr() as usize);
     for batch in 0..bsz {
         let base = |slot: i64, off: i64| -> *mut u8 {
             let p = bases[slot as usize] as *mut u8;
@@ -242,29 +269,21 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
         let nb = n.div_ceil(t.nc);
         let tasks = m.div_ceil(t.mc) * nb;
         let need = t.mc * t.kc + t.kc * t.nc;
-        // Fast path: A row-major (k contiguous), B row-major or a `[n, k]`
-        // weight packed once per GEMM. The per-task packing below re-reads B
-        // for every m-block and A for every n-block, which dominates small-M
-        // GEMMs (ViT's 197-row linears).
-        let direct = a_k == 1 && (b_n == 1 || b_k == 1);
-        let packed_b: Option<Vec<f32>> = if direct && b_n != 1 {
-            let mut p = vec![0.0f32; k * n];
-            let baddr = b as usize;
-            p.par_chunks_mut(n).enumerate().for_each(|(kk, row)| {
-                let src = unsafe { (baddr as *const f32).offset(kk as isize) };
-                for (j, dst) in row.iter_mut().enumerate() {
-                    unsafe { *dst = *src.offset(j as isize * b_n) };
-                }
-            });
-            Some(p)
-        } else {
+        // The shared weight pack lives outside the batch loop; a batched B is
+        // packed per batch.
+        let packed_b: Option<Vec<f32>> = if weight_addr.is_some() {
             None
+        } else {
+            pack_b(b as usize)
         };
-        let b_fast_addr = packed_b
-            .as_ref()
-            .map(|p| p.as_ptr() as usize)
+        let b_fast_addr = weight_addr
+            .or_else(|| packed_b.as_ref().map(|p| p.as_ptr() as usize))
             .unwrap_or(b as usize);
-        let b_fast_ks = if packed_b.is_some() { n } else { b_k as usize };
+        let b_fast_ks = if weight_addr.is_some() || packed_b.is_some() {
+            n
+        } else {
+            b_k as usize
+        };
         let (a_addr, b_addr, c_addr) = (a as usize, b as usize, c as usize);
         (0..tasks).into_par_iter().for_each(|task| {
             let mb = task / nb;

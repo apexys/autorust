@@ -3188,3 +3188,60 @@ Generated f32 tensor-core path (ruling it out as a ceiling lever): with
 i.e. the TC attempts are a ~5% *cost* on these shapes, not a headroom. The
 generated f32 matmul ceiling stays at the `GEMM=all`+TF32 measurement (93.4 ms
 = 2.13x torch).
+
+### 9.27 CPU epilogue split: materialize interior contractions (2026-11) — DONE
+
+§9.25/§9.26 left the CPU FFN expansion (`linear` + GELU fused) as one generated
+kernel at ~271 ms/step, against ~296 GFLOP/s for the packed host GEMM on the
+same shape. The blocker was structural: realizing a reduce that sits *inside* a
+consumer's elementwise epilogue produces `AFTER(buf, [END(STORE)])` nodes whose
+END does not close the loop ranges the realization adds, so `split_store`
+declined them ("open ranges") and `create_schedule` asserted on the resulting
+`END(STORE)`.
+
+Two rangeify changes fix that:
+
+- `close_store_ends` (run after `pm_add_buffers`, before `split_kernels`) adds
+  the store's remaining loop ranges to every kernel-root `END(STORE)`. The
+  STORE/END pairs created by `bufferize_to_store` are built from the
+  pre-rewrite value, so a realized interior source can contribute ranges the
+  END never saw; closing them makes the store a proper kernel.
+- `realize_interior_contractions` (run after the consumer map in
+  `run_rangeify`) realizes a contraction only when it is worth it:
+  - host backend, one reduction axis with `K >= 512` (attention's K = 64/197
+    kernels stay fused),
+  - not already a kernel root (a store value is a GEMM already),
+  - exactly one plain-buffer operand (the weight). A weight-gradient
+    contraction has two activation operands and stays fused; splitting those
+    measured ~14% slower on MNIST,
+  - every non-affine operand can be staged (<= 8M elements) — otherwise the
+    reduce would become a generated GEMM with a fused prologue, which is
+    slower than the fused kernel. The one both-operand exception is `x * x`
+    with a small (< 512k) activation, i.e. a normalisation variance, whose
+    split materializes the normalised activation the projections read.
+
+The staged operands are what make the split pay: the FFN expansion's `A` is the
+layer-norm output (not a buffer), so without staging the new GEMM missed the
+library path and was *slower* than the fused kernel (measured: 584 ms vs 425).
+
+Also: a batched CPU host GEMM packs an unbatched weight once per call instead
+of once per batch (`run_raw`), which matters at bs 8 ([1576, 3072] x
+[3072, 768] repacked 8x before).
+
+Medians (`bench/results`, RUST, torch 2.6 without `torch.compile`):
+
+| workload | before | now | torch | ratio |
+|---|---:|---:|---:|---:|
+| ViT infer bs 1 | 425.3 ms | **227.1** | 165.1 | 1.38x |
+| ViT infer bs 8 | 1902.2 ms | **1601.3** | 701.5 | 2.28x |
+| ViT train bs 1 | 1783.8 ms | **1660.7** | 616.3 | 2.69x |
+| MNIST bs 512 | 65.1 ms | **64.7** | 175.9 | 0.37x |
+
+`AUTORUST_KPROF=1` now shows 216 `HostGemm` calls (~95 ms/step) and no
+FFN-expansion kernel at bs 1; the largest remaining kernels are the attention
+QK^T/PV (K = 64/197, fused on purpose). CUDA is unchanged (the pass is
+host-only): MNIST 21.8 (1.67x), ViT infer 14.7/71.6 (1.69x/1.54x), train 96.8
+(2.21x).
+
+Gates: full `cargo test --release` (78 binaries), clippy, rustdoc,
+`--no-default-features`, `cargo publish --dry-run`.

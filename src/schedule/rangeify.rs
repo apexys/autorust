@@ -2160,6 +2160,22 @@ fn get_kernel_graph_once(ctx: &mut UOpCtx, sink: UopId, max_buffers: usize) -> U
         CtxVal::Cnt(std::rc::Rc::new(std::cell::Cell::new(paramarg_start))),
     )
     .unwrap_or_else(|e| panic!("TGERR: stage to store: {e}"));
+    // Close every loop range of each kernel-root store. The STORE/END pairs
+    // created above are built from the pre-rewrite store value, so a realized
+    // interior source (a contraction staged under an elementwise epilogue) can
+    // leave loop ranges that the END never ends; `split_store` then rejects the
+    // END as "open ranges" and the kernel is never formed.
+    let tsink = graph_rewrite(
+        ctx,
+        tsink,
+        &crate::schedule::indexing::close_store_ends(),
+        false,
+        None,
+        false,
+        false,
+        CtxVal::None,
+    )
+    .unwrap_or_else(|e| panic!("TGERR: close store ends: {e}"));
     lap("rng.bufferize", t);
 
     // split into kernels

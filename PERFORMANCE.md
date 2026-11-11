@@ -147,18 +147,21 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   | 197x768x3072 | 65 | 315 | **464** | 613 |
   | 1576x768x768 | 156 | 313 | **375** | 609 |
 
-  MKL still wins the larger shapes by ~1.3-1.6x, but the host GEMM is only
-  ~80-100 ms of a ~420 ms ViT inference step. The measured per-kernel profile
-  (`AUTORUST_KPROF=1`, see CURRENT_STATE §9.25) puts ~271 ms in one generated
-  FFN-expansion kernel (`linear` + GELU fused, ~30 GFLOP/s): the GELU epilogue
-  blocks the host GEMM, which would run that shape at ~296 GFLOP/s. Splitting
-  the epilogue into a GEMM + elementwise pair is the CPU unlock; the two
-  attempts (model-level realize, realize-map) are blocked by prefix
-  re-scheduling and the kernel splitter's END contract respectively (a realized
-  non-root reduce becomes an `END(STORE)` that is never callified, and its
-  ranges stay open — see CURRENT_STATE §9.26). Generated f32 tensor cores are
-  not the lever either: the prime 197 axes are declined and disabling them is
-  ~5% faster on these shapes.
+  MKL still wins the larger shapes by ~1.3-1.6x, and the host GEMM is only
+  ~80-100 ms of the step. The measured per-kernel profile
+  (`AUTORUST_KPROF=1`) put ~271 ms in one generated FFN-expansion kernel
+  (`linear` + GELU fused, ~30 GFLOP/s) whose GELU epilogue blocked the host
+  GEMM. The scheduler now realizes *interior* host-backend contractions
+  (`realize_interior_contractions`, K >= 512, one plain weight operand), stages
+  their non-affine operands, and closes the store ENDs the realization leaves
+  open (`close_store_ends`). The FFN expansion becomes a packed host GEMM
+  (~296 GFLOP/s) plus an elementwise GELU kernel: RUST ViT-B/16 inference
+  425 -> **227 ms** at bs 1 (1.38x torch), 1902 -> 1601 ms at bs 8, and
+  training 1784 -> 1661 ms. Weight-gradient contractions (two activation
+  operands) stay fused; splitting them measured slower. A batched host GEMM
+  also packs its weight once per call instead of once per batch. Generated f32
+  tensor cores are not the lever: the prime 197 axes are declined and disabling
+  them is ~5% faster on these shapes.
 - **Metal → MPS** (`MPSMatrixMultiplication`, f32/f16). Opt-in
   (`AUTORUST_MPS=all`) because simdgroup tensor cores measured faster on an M2.
 
@@ -361,13 +364,13 @@ All step times are milliseconds (lower is better).
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **65.1 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CPU | **64.7 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
 | MNIST CNN train, bs 512 | CUDA | 21.7 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | 425.3 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
+| ViT-B/16 infer, bs 1 | CPU | 227.1 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
 | ViT-B/16 infer, bs 1 | CUDA | 15.9 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1902.2 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
+| ViT-B/16 infer, bs 8 | CPU | 1601.3 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
 | ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 1783.8 ms (RUST) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CPU | 1660.7 ms (RUST) | **243.4 ms** | 616.3 ms | — |
 | ViT-B/16 train, bs 1 | CUDA | 94.2 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
@@ -385,9 +388,10 @@ Reading it:
   pointwise contraction operands (GELU derivative, dropout mask, softmax
   backward) took the step from 332 to 94 ms; the remaining gap is the f32
   backward against cuBLAS/cuDNN (see §9.20-§9.23).
-- **CPU**: autorust's `RUST` backend is 53x/60x faster than tinygrad/candle on
-  MNIST and competitive on ViT inference, but torch's MKL path wins the GEMMs
-  (ViT train CPU: candle 243.4 ms, torch 616.3 ms, autorust 1783.8 ms). tinygrad's
+- **CPU**: autorust's `RUST` backend is 60x/60x faster than tinygrad/candle on
+  MNIST and now lands within 2x of torch on ViT inference at bs 1 (227 vs
+  165 ms); bs 8 is 2.3x and training 2.7x (torch's MKL GEMMs and its own fused
+  attention are the gap). tinygrad's
   `CPU` backend is single-threaded by design. `RAYON` is the typed interpreter
   (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
 

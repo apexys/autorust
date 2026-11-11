@@ -31,5 +31,10 @@ Initial release.
   dropout mask, softmax backward) are staged once, so those backward GEMMs
   become affine and can use the matmul tiler/library GEMM.
 - CPU host GEMM reads a row-major `A` directly and packs a `[n, k]` weight once
-  per GEMM instead of per tile (1.2-1.5x on the larger ViT linears).
+  per GEMM instead of per tile (1.2-1.5x on the larger ViT linears), and a
+  batched GEMM packs an unbatched weight once per call instead of per batch.
+- The scheduler materializes interior host-backend contractions (the FFN
+  expansion under GELU) so the packed CPU GEMM takes the matmul and the
+  epilogue runs as its own kernel: RUST ViT-B/16 inference 425 -> 227 ms at
+  bs 1, 1902 -> 1601 ms at bs 8, training 1784 -> 1661 ms.
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.
