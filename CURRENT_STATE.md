@@ -3465,3 +3465,35 @@ the temp-buffer kernel there.
 Gates: clippy, rustdoc, full suite green; the change is profiler-only, so the
 bench medians are unchanged (CUDA 21.9/15.7/69.2/94.1, RUST
 67.0/170.9/1148.2/1638.5).
+
+### 9.33 Post-lowering epilogue hoist: three concrete blockers (2026-11)
+
+Implemented the hoist where the reduce *is* visible — inside `split_store`, on the
+body returned by `to_define_global` (the `[ext-fused] value=Add exts=[197,3072]`
+probe), with the ParamArg counter threaded through `split_kernels`
+(`CtxVal::Cnt`). It now fires (`[hoist2] fired: ret=End afters_left=0`) but the
+kernel graph is not valid; three distinct blockers, in order:
+
+1. **`buffer without device`** — the temp `BUFFER` needs the store's device in
+   its `ParamArg` (fixed).
+2. **`args=1` vs the kernel's slots** — re-lowering the hoisted body with a
+   *fresh* `LocalAddBufferContext` loses the destination: an already-renumbered
+   `PARAM` is not re-registered by `debuf` (only `BUFFER` nodes are), so the
+   CALL ended up with one arg while the kernel referenced slot 3. Re-using the
+   first pass's `lctx` fixes that (`args=4`), but then:
+3. **`END` inside the `AFTER` is never callified.** The reduce kernel is built
+   *after* `split_kernels` has run, so its `END(STORE)` stays an END (this is the
+   same END-callify contract as §9.26). Wrapping it by calling
+   `split_store_inner` recursively yields a CALL but still hits
+   `index out of bounds: len is 1 but the index is 3` at launch — the per-kernel
+   `debuf` slot numbering and the CALL's arg list do not agree for a kernel
+   created outside the split walk.
+
+All three experiments were reverted; the tree is at `7077cdd` and the benchmark
+medians are unchanged (RUST train 1.56-1.59 s).
+
+The remaining work is therefore explicitly: teach the split walk to *revisit*
+`END(STORE)` nodes created late (a second `split_kernels` fixpoint, as noted in
+§9.26) instead of hand-building the CALL, then the hoist can simply emit the
+`AFTER(buf, [END(STORE(...))])` like `bufferize_to_store` does and let the
+existing machinery callify it.
