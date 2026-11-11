@@ -3728,3 +3728,45 @@ Not delivered:
 So the objective's first clause is met and evidenced; the second is met for six
 of eight rows, and for the two training rows the work is decomposed but not
 reduced. "Whatever is actually achievable" cannot be claimed for those rows.
+
+### 9.41 Fill stores: named, partly removed, and not on the critical path (2026-11)
+
+Used a step-tagged probe (`AUTORUST_STEP_TAG`: a realize counter in
+`engine/prof.rs` plus a print of constant-store kernels in `split_store`) to
+name the producers of the constant-fill kernels.
+
+Findings:
+
+- The stores appear only inside **`assign` realizes** (root op `After`), i.e. the
+  optimizer step, and never in inference — 2 per assign realize.
+- Their values identify the producer: `Float(0.0)`/`Float(1.0)`/`Float(2.0)`/
+  `Float(-1.0)` on weight-sized buffers. The `2.0`/`-1.0` pair is exactly
+  `rand::uniform`'s `full(high-low)`/`full(low)` for the ViT `scaled_uniform`
+  (low = -1, range = 2), and the zeros/ones are the `Tensor::zeros/ones`
+  parameter initialisers (`LayerNorm.weight/bias`, `Linear.bias`).
+- Two contained fixes were implemented and measured:
+  - `rand::uniform` builds its range/low as **scalars** instead of
+    `Tensor::full(shape, ...)` buffers (numerically identical): removes the
+    `2.0`/`-1.0` stores (72 + 72 unique kernels).
+  - `Tensor::zeros_param` builds its leaf as `empty` + `register_initial(zero
+    bytes)` instead of `creation::zeros(...).to_param_ctx()` — this is what its
+    own doc comment already claimed ("no in-graph STORE"); it removes the moment
+    init stores.
+
+  Together they cut *unique* fill kernels from 530 to 130 per run (75%).
+- **Neither changed the wall clock** (RUST train 1.58-1.65 s, unchanged), and the
+  per-step KPROF diff is unchanged too (`E_589824_4` 216 launches /
+  ~228 ms, `E_147456_4` 441 / ~128 ms). The remaining ~130 unique stores are
+  *re-executed ~5x per step*, so the executed-fill count is not the number of
+  stores created: it is dominated by the parameter initialisers still being
+  reachable from the step's realizes.
+
+The `zeros_param` change is kept (it restores the documented "no in-graph
+STORE" contract and is numerically identical); the `uniform` change was reverted
+to stay faithful to tinygrad's `rand.py:158` (`Tensor.full`). Next step on this
+thread: find why the remaining parameter-initialiser stores are reachable from
+an `assign` realize (the assigned value's graph must still reference the
+param's pre-`to_param` chain) and cut that link; that is where the ~350 ms/step
+of fill traffic actually lives.
+
+Gates: 78/78, clippy, rustdoc.

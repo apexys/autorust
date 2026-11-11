@@ -1190,11 +1190,31 @@ impl Tensor {
             // compute device. Staging them on PYTHON means every update kernel
             // reads host memory next to device buffers, which the scheduler
             // rejects (and which forces a host round-trip per step).
+            //
+            // Build the zeroed leaf *directly* (`empty` + `register_initial`)
+            // instead of `creation::zeros(...).to_param_ctx()`: that path
+            // creates a `full` STORE in the graph, and the store is re-executed
+            // by every realize that touches the moment (twice per optimizer
+            // step per parameter — a measurable fill-kernel cost on both CPU and
+            // CUDA). A buffer leaf with zeroed bytes has no store at all.
             let dev = device
                 .map(str::to_string)
                 .unwrap_or_else(creation::default_device);
-            let t = creation::zeros(ctx, &shape.into_shape_vec(), dtype, Some(&dev));
-            t.to_param_ctx(ctx)
+            let shape_vec = shape.into_shape_vec();
+            let dt = creation::metal_lower_f64(
+                &creation::canonicalize_device(Some(&dev)),
+                dtype.unwrap_or_else(crate::dtype::default_float),
+            );
+            let n: i128 = shape_vec
+                .iter()
+                .map(|d| d.clone().as_i128_or_panic())
+                .product::<i128>()
+                .max(0);
+            let itemsize = dt.itemsize();
+            let u = creation::empty(ctx, &shape_vec, dt, &dev);
+            let bytes = vec![0u8; (n as usize) * itemsize];
+            creation::register_initial(ctx, u.clone(), bytes);
+            Tensor::from_uop(ctx, u)
         })
     }
 
