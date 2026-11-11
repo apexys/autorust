@@ -617,13 +617,7 @@ fn prepare_program(
     if crate::helpers::env::get("TG_DUMP_IDX").is_some() {
         crate::codegen::postrange::dump_index_exprs(ctx, sunk.clone(), "SUNK");
     }
-    // 2. ProgramInfo.from_sink
-    let t_pi = crate::engine::prof::enabled().then(std::time::Instant::now);
-    let pi = program_info_from_sink(ctx, sunk.clone());
-    if let Some(t) = t_pi {
-        crate::engine::prof::add("codegen.pi", t.elapsed().as_secs_f64());
-    }
-    // 3. do_linearize: linearize + pm_linearize_cleanups
+    // 2. do_linearize: linearize + pm_linearize_cleanups
     let t_lin = crate::engine::prof::enabled().then(std::time::Instant::now);
     let lst = linearize(ctx, sunk.clone());
     #[cfg(feature = "dump")]
@@ -631,10 +625,14 @@ fn prepare_program(
         crate::codegen::postrange::dump_lst_index_offsets(ctx, &lst, "LINEAR");
     }
     let lst = pm_linearize_cleanups(ctx, lst);
-    // Re-derive the ProgramInfo from the *linear* body: the cleanups can rewrite
-    // nodes (a kernel built after the split walk in particular), and `globals`
-    // must agree with the ELF signature, which is built from `lst`.
+    // 3. ProgramInfo.from_sink, over the *linear* body: `pm_linearize_cleanups`
+    // can rewrite nodes (a kernel built after the split walk in particular), and
+    // `globals` must agree with the ELF signature, which is built from `lst`.
+    let t_pi = crate::engine::prof::enabled().then(std::time::Instant::now);
     let pi = program_info_from_list(ctx, sunk.clone(), &lst);
+    if let Some(t) = t_pi {
+        crate::engine::prof::add("codegen.pi", t.elapsed().as_secs_f64());
+    }
     if let Some(t) = t_lin {
         crate::engine::prof::add("codegen.linearize", t.elapsed().as_secs_f64());
     }

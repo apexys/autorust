@@ -6,6 +6,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-11
+
+Performance and correctness release; no API changes.
+
+### Performance
+
+- **Persistent rendered kernels.** The render result (ProgramInfo, ELF
+  signature, source) is cached under the AST content key plus the codegen
+  settings and a fingerprint of the running binary, so a warm process skips the
+  ~30 codegen pipeline stages per kernel. ViT-B/16 training cold start
+  7.2 s -> 2.5 s; ViT infer bs8 1.26 s -> 0.49 s. `CACHELEVEL=0` disables it.
+- **GPU GEMM tiling.** Both contraction orientations are scored by block
+  threads (with a register/thread trade below one warp), and the direct-conv
+  tile reuses the 5x5 weights across two output rows. ViT-B/16 training CUDA
+  332 -> 216 ms, MNIST bs512 39 -> 22 ms.
+- **Summed gradient contractions** (`dQ@Wq + dK@Wk + dV@Wv`) are materialized
+  per contraction so each reaches the matmul tiler instead of one scalar
+  multi-reduce kernel (ViT training 216 -> 179 ms).
+- **Pointwise contraction operands inside reduce bodies** (GELU derivative,
+  dropout mask, softmax backward) are staged once, making those backward GEMMs
+  affine (179 -> 94 ms).
+- **CPU packed GEMM coverage.** Interior host-backend contractions (the FFN
+  expansion, attention's biased Q/K) are split and their operands staged so the
+  packed CPU GEMM takes the matmul and the epilogue runs as its own kernel.
+  RUST ViT-B/16 inference 425 -> 171 ms at bs 1, 1902 -> 1188 ms at bs 8;
+  training 1784 -> 1634 ms.
+- **CPU host GEMM** reads a row-major `A` directly and packs a `[n, k]` weight
+  once per GEMM (and once per batched call), 315 -> 464 GFLOP/s on
+  197x768x3072.
+- **Fused attention for eval-mode inference**: `ViT::forward_with` /
+  `TransformerBlock::forward_with` dispatch to the FA2 kernels on CUDA/CL/Metal
+  (CPU and training keep SDPA), with the q/k/v projections co-realized and
+  pinned.
+- `AUTORUST_PROF` per-stage codegen timings, `AUTORUST_KPROF` per-program kernel
+  timings for host backends, and `AUTORUST_MM_DEBUG` matmul/`HostGemm`
+  rejection reasons.
+
+### Fixed
+
+- The runtime cache is keyed by the buffer signature as well as the compiled
+  artifact: a cached runtime could be reused for an artifact with different
+  slots, launching with an out-of-bounds buffer index.
+- `ProgramInfo` is derived from the linearized body, the same traversal the ELF
+  signature uses (the linearize cleanups can rewrite nodes).
+- The realize decision and the `non_removable` mark survive the reduce rebuild
+  in `stage_reduce_prologue` (a rebuilt reduce otherwise lost its boundary).
+- Optimizer moments are built as store-free buffer leaves, as
+  `zeros_param`'s contract states (they previously carried a `full` store that
+  every realize re-executed).
+
 ## [0.1.0] - 2026-11-10
 
 Initial release.
@@ -18,25 +68,4 @@ Initial release.
 - Dynamically loaded cuBLAS / CLBlast / MetalPerformanceShaders host GEMM, a
   packed CPU GEMM, and fused FlashAttention kernels (scalar, TF32 and bf16
   tensor cores).
-- GPU GEMM register tiling that keeps prime row extents (e.g. ViT at batch 8)
-  on multi-thread tiles, scores both contraction orientations, and the direct
-  conv tile reuses weights across two spatial rows.
-- Persistent rendered kernels: a warm process skips the codegen pipeline.
-- `ViT::forward_with` / `TransformerBlock::forward_with`: eval-mode inference
-  dispatches to the fused attention kernels.
-- Summed gradient contractions (e.g. `dQ@Wq + dK@Wk + dV@Wv`) are materialized
-  per contraction so each reaches the matmul tiler instead of one scalar
-  multi-reduce kernel.
-- Pointwise contraction operands inside reduce bodies (GELU derivative,
-  dropout mask, softmax backward) are staged once, so those backward GEMMs
-  become affine and can use the matmul tiler/library GEMM.
-- CPU host GEMM reads a row-major `A` directly and packs a `[n, k]` weight once
-  per GEMM instead of per tile (1.2-1.5x on the larger ViT linears), and a
-  batched GEMM packs an unbatched weight once per call instead of per batch.
-- The scheduler materializes interior host-backend contractions (the FFN
-  expansion under GELU) so the packed CPU GEMM takes the matmul and the
-  epilogue runs as its own kernel, and stages the pointwise operands of big
-  contractions (attention's biased Q/K): RUST ViT-B/16 inference 425 -> 173 ms
-  at bs 1 (1.05x torch), 1902 -> 1164 ms at bs 8 (1.66x), training 1784 ->
-  1634 ms.
 - `TinyJit` capture/replay, BEAM search, ONNX import and frozen CPU plans.

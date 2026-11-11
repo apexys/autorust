@@ -300,11 +300,11 @@ ViT-B/16 (`JIT=1`, steady state):
 
 | workload | before | now |
 |---|---|---|
-| forward, `RUST` CPU | 4.1 s | **0.65-0.66 s** |
+| forward, `RUST` CPU | 4.1 s | **0.17 s** |
 | forward, `CC` CPU | — | **0.63 s** |
 | forward, frozen `RUST` plan | — | 0.86 s |
-| forward, CUDA | 166 ms | **13-16 ms** (fused FA2) |
-| training step (fwd+bwd+Adam, CUDA) | ~387 ms | **216 ms** |
+| forward, CUDA | 166 ms | **14 ms** (fused FA2) |
+| training step (fwd+bwd+Adam, CUDA) | ~387 ms | **96 ms** |
 | 512³ f32 GEMM, `RUST` | 27.6 GFLOP/s | **~370 GFLOP/s** |
 
 Clusterfun (DINOv3 ViT-S/16, 448px): CUDA + cuBLAS + fused FA2 **5.6 s** / 128
@@ -356,10 +356,10 @@ training and ViT-B/16 — through autorust, candle, torch and tinygrad on CPU an
 CUDA. Inputs are synthetic and device-resident, the timed region is one
 training/inference step (no data loading, evaluation or logging), and each run
 is a fresh process with warmup. Raw JSON and the generated per-run tables are in
-[`bench/results/`](bench/results); these medians are from commit `75f9bec`
-(autorust rows, re-taken after the codegen, fused-inference and
-contraction-splitting changes in CURRENT_STATE §9.20-§9.21; the CPU rows are
-from `5cf311a`) on the environment above
+[`bench/results/`](bench/results); these medians are from the `v0.1.1` release
+sources (autorust CPU and CUDA rows re-taken together after the codegen,
+packed-GEMM and attention changes in CURRENT_STATE §9.20-§9.49) on the
+environment above
 (the candle runs were re-taken at `82f6408` with the class-token fix; torch is
 eager, no `torch.compile`; autorust uses `Jit`, tinygrad `TinyJit`).
 
@@ -367,14 +367,14 @@ All step times are milliseconds (lower is better).
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **64.1 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
-| MNIST CNN train, bs 512 | CUDA | 21.7 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | **173.2 ms** (RUST) | 229.4 ms | 165.1 ms | 14639.3 ms |
-| ViT-B/16 infer, bs 1 | CUDA | 15.9 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1163.8 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 68.9 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 1634.2 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 94.2 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| MNIST CNN train, bs 512 | CPU | **65.5 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CUDA | 22.2 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| ViT-B/16 infer, bs 1 | CPU | 170.6 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
+| ViT-B/16 infer, bs 1 | CUDA | 14.2 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
+| ViT-B/16 infer, bs 8 | CPU | 1188.0 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
+| ViT-B/16 infer, bs 8 | CUDA | 70.5 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
+| ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CUDA | 95.9 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
