@@ -3831,3 +3831,52 @@ buffer (the pre-renumbering base) rather than the renumbered `ParamArg`, or
 remove the initialiser stores from the step graph before scheduling. State
 unchanged: RUST train 1.56-1.65 s, CUDA train 94-100 ms, six of eight rows
 within 2x.
+
+### 9.44 "Fill traffic" was a kernel-name collision: corrected accounting (2026-11)
+
+Dumped every distinct source block sharing the two hot names in a ViT training
+run:
+
+```
+E_589824_4   82 blocks, 7 distinct signatures
+E_147456_4  157 blocks, 10 distinct signatures
+```
+
+The signatures are *not* just fills:
+
+| signature | what it is |
+|---|---|
+| `= [±1.0, 2.0, 0.0, 1.0]` | the `rand::uniform` / `Tensor::zeros/ones` initialiser fills |
+| `= val0` | a plain contiguous copy |
+| `= (val0*0.9 + val1*0.1)` | the Adam first-moment update |
+| `= (val0*0.999 + val1*val1*0.001)` | the second-moment update |
+| `= val0 + val1*(1/(…sqrt…))` | the parameter update (LAMB/adam path) |
+| `= ((val0*val1)+val2)*0.00065` | a scaled GEMM epilogue (a *matmul*, not a fill) |
+
+So the earlier "~183/350 ms/step of fill traffic" was an artefact of keying on
+the kernel *name*, which only encodes the loop structure: the 216 + 441 launches
+per step include the **necessary optimizer arithmetic**, **copies** and even a
+scaled matmul. The true initialiser-fill share is much smaller than assumed, and
+the `b9a7567` result (400 fewer unique fill kernels, no wall-clock change) is
+consistent with that.
+
+Corrected per-step picture for RUST ViT training (sum 1608 ms, measured 1635):
+
+| item | ms/step |
+|---|---:|
+| the generated matmul `r_384_197_8_192_4` (hoist target) | 423 |
+| packed `HostGemm` | 207 |
+| `E_589824_4` (fills + copies + Adam updates, 82 blocks) | 234 |
+| `r_96_197_8_768_4` (generated matmul) | 173 |
+| `E_147456_4` (fills + copies + updates, 157 blocks) | 136 |
+| other generated kernels | ~440 |
+
+The single lever large enough to reach 2x is the hoist: moving the 423 ms matmul
+(plus the 173 ms sibling) onto the packed GEMM would save ~400-500 ms, taking the
+step to ~1.2 s = 1.95-2.0x. Everything else (optimizer arithmetic ~380 params x
+3 kernels, copies, attention fragments) is inherent work at this model size.
+The hoist is blocked only by the `program_info_from_sink` vs `to_elf`
+signature/globals disagreement for a kernel created after the split walk
+(§9.36-§9.39).
+
+This supersedes §9.41-§9.43: there is no large "phantom fill" to remove.
