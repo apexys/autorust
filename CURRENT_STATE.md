@@ -3630,3 +3630,35 @@ That closes the loop: the CPU hot kernel cannot be split without teaching
 already-materialized operand, or without per-kernel param renumbering. Both are
 scheduler reworks, not one-line changes. Tree at `6c2cbda`; suite green;
 bench medians unchanged (RUST train 1.56-1.64 s, CUDA train 94-100 ms).
+
+### 9.38 Per-kernel renumbering: consistent slots, missing dependencies (2026-11)
+
+Implemented the per-kernel parameter renumbering §9.37 asked for:
+`kernel_body_and_args` walks a lowered body, assigns 0..n-1 to its global
+`PARAM`s **in toposort order** (the same order `program_info_from_sink` uses for
+`globals`), rebuilds the body with renumbered copies, and returns the matching
+argument list. With the split fixpoint and the post-lowering hoist re-enabled,
+the CALL/globals mismatch disappears — but the process **segfaults**:
+
+```
+timeout 300 env DEFAULT_DEVICE=RUST ... autorust-bench
+exit=139 (Segmentation fault)
+```
+
+The renumbered args are the plain buffers, so the inner kernel loses the `AFTER`
+dependency arguments that the first-touch `lctx` map supplies. It therefore runs
+before (or to the wrong extent of) the kernels that fill its inputs, and the
+generated code writes out of bounds. Two variants were tried (DFS first-touch
+order, then toposort order with a slot-indexed argument list); both crash the
+same way, and both were reverted.
+
+The remaining piece is therefore explicit: the hoist must build the inner CALL's
+arguments from the **outer** `LocalAddBufferContext` values (the `AFTER`s that
+carry the dependency), keyed by the buffer each renumbered parameter names —
+`hoist_lowered_epilogue` needs the outer `lctx` passed in. Combined with the
+renumbering that gives both a consistent `globals` and the dependency ordering;
+that is the next change, and it is a signature/plumbing change rather than a new
+pass.
+
+Tree at `5e298ab`; suite green (78/78); bench medians unchanged (RUST train
+1.53-1.64 s, CUDA train 94-100 ms).
