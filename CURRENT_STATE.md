@@ -3662,3 +3662,33 @@ pass.
 
 Tree at `5e298ab`; suite green (78/78); bench medians unchanged (RUST train
 1.53-1.64 s, CUDA train 94-100 ms).
+
+### 9.39 Hoisted kernel: slot/argument invariants do not survive a resumed lowering (2026-11)
+
+Implemented the §9.38 plan: `hoist_lowered_epilogue` takes the outer
+`LocalAddBufferContext`, clones it for the inner kernel (same slot numbering, so
+the dependency `AFTER`s come along as CALL arguments), lowers the reduce body
+with that clone and builds the inner CALL from its map values. Three variants
+were measured, each failing in the runtime rather than the scheduler:
+
+1. cloned map as-is → `index out of bounds: the len is 6 but the index is 7`;
+2. clone with `dg = map.len()` (so `debuf` cannot leave a slot past the list) →
+   same;
+3. additionally fixing `debuf` to assign `slot = map index` (instead of a
+   per-encounter counter, which leaves holes when a buffer is debuf'd twice —
+   impossible in tinygrad, possible in a resumed lowering) → same.
+
+The remaining mismatch is not in `globals` (the executor's `[arg-mismatch]`
+probe does not fire: every `pi.globals` entry is covered) but between the
+**signature** recorded by `to_elf` (which scans the linearized body) and
+`globals` (which `program_info_from_sink` derives from the SINK): the signature
+contains slot 7 while `bufs` has 6 entries, so a PARAM in the linearized body is
+missing from the SINK toposort — a direct consequence of the hoist's unusual
+shape (an `AFTER` wrapping a `CALL` *inside* another kernel's value).
+
+That is the point where this approach stops being a local change: either
+`program_info_from_sink` must include PARAMs reachable through nested `AFTER`s
+(in which case `bufs` grows), or the hoist must not nest a kernel inside a value
+structure the info pass does not fully traverse. Both were left undone rather
+than shipped broken; the tree is at `4aaeb7c` and the benchmark medians are
+unchanged (RUST train 1.53-1.64 s, CUDA train 94-100 ms).
