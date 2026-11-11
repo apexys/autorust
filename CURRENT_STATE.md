@@ -3992,3 +3992,34 @@ Next probe: print inside `runtime_keyed` whether it returned a cached runtime an
 compare the cached runtime's signature with the requested ELF's. Everything else
 was reverted; the tree is at `97544f3` and the medians are unchanged (RUST train
 1.54-1.64 s, CUDA train 94.5 ms).
+
+### 9.49 Runtime cache identity includes the buffer signature (2026-11)
+
+The §9.48 probe (`AUTORUST_SLOT_DEBUG`) finally caught the crash site. For the
+program that panics:
+
+```
+[elf] name=E_3072_197 lib_len=6288 key=3048ba7f24414863 sig=[0,1,2,7] globals=[0,1,2,7]
+[rt-mismatch] bad_slot=7 sig=[0,1,2,7] bufs=6
+```
+
+`pi.globals` and the ELF signature **agree** (`[0,1,2,7]`), so the info/signature
+traversal was never the problem: `bufs` had six entries because the *runtime*
+returned by `dev.runtime_keyed(elf_key, &elf)` was built from a different
+artifact than `cp.elf` — a cached runtime whose signature is `[0,1,2,7]` reused
+for a program whose slots end at 5. `runtime_keyed` keys only on
+`elf_key` (FNV over the compiled bytes), so any key reuse hands back a runtime
+with the wrong signature.
+
+Fix: fold the buffer signature into the runtime identity (`slot`, `dtype.0` per
+entry), so a cached runtime is only ever reused for an artifact with the same
+signature. With the fix the previously crashing hoist runs to completion.
+
+It still does **not** pay off: with the split fixpoint + post-`to_define_global`
+hoist enabled, RUST train is 1743-1763 ms (worse than 1560-1642) and
+`r_384_197_8_192_4` is 531 ms/step with `HostGemm` unchanged at 131 calls — the
+hoist adds an epilogue kernel without turning that contraction into a packed
+GEMM, so it was reverted (the cache fix is kept).
+
+Gates: 78/78, clippy, rustdoc. Medians: RUST train 1.57-1.64 s, CUDA train
+94.5 ms, six of eight rows within 2x.

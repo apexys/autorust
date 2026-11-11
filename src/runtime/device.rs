@@ -330,6 +330,17 @@ impl Compiled {
     /// [`CompiledProg`](crate::engine::realize::CompiledProg)), so a launch does
     /// not re-hash the compiled artifact.
     pub fn runtime_keyed(&self, key: u64, elf: &TinyElf) -> Rc<RefCell<dyn Prog>> {
+        // Fold the buffer signature into the runtime identity. `key` is a hash of
+        // the compiled artifact; a cached runtime built from an artifact with a
+        // different signature would index `bufs` with slots the launching program
+        // does not provide (observed: signature slot 7 against six buffers).
+        let mut key = key;
+        for (slot, dt) in &elf.signature {
+            key = key
+                .wrapping_mul(1099511628211)
+                .wrapping_add(*slot as u64)
+                .wrapping_add((dt.0 as u64) << 32);
+        }
         if let Some(rt) = self.runtime_cache.borrow().get(&key) {
             return rt.clone();
         }
