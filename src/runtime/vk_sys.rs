@@ -74,6 +74,11 @@ impl VkLib {
         .as_ref()
     }
 
+    /// The loader entry (for extension entry points).
+    pub fn entry(&self) -> &ash::Entry {
+        &self._entry
+    }
+
     /// Physical devices with a compute queue (best first).
     pub fn devices(&self) -> Vec<DeviceInfo> {
         let Ok(pds) = (unsafe { self.instance.enumerate_physical_devices() }) else {
@@ -102,6 +107,7 @@ impl VkLib {
                 api: props.api_version.min(self.api),
                 props,
                 caps,
+                coop: unsafe { query_coop(&self._entry, &self.instance, pd) },
             });
         }
         // Discrete > integrated > virtual > CPU, stable by name.
@@ -117,6 +123,26 @@ impl VkLib {
         });
         out
     }
+}
+
+/// A cooperative-matrix ("tensor core") configuration the device supports for
+/// `A[m,k] * B[k,n] + C[m,n]` with 16-bit inputs and an f32 accumulator.
+///
+/// `VK_KHR_cooperative_matrix` has no bf16 component type, so this is the f16
+/// form: bf16 operands would have to be converted to f16 first, which changes
+/// both the exponent range and the mantissa precision. It is therefore used for
+/// `f16` graphs (and any graph whose accumulator dtype is f32), not to silently
+/// reinterpret a bf16 dot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoopShape {
+    /// Tile rows (also the result rows).
+    pub m: u32,
+    /// Tile columns.
+    pub n: u32,
+    /// Contraction depth of one `OpCooperativeMatrixMulAddKHR`.
+    pub k: u32,
+    /// `VkScopeKHR` the matrix must be built in (`3` = `Subgroup`).
+    pub scope: i32,
 }
 
 /// A physical device that can run this backend.
@@ -136,6 +162,50 @@ pub struct DeviceInfo {
     pub props: vk::PhysicalDeviceProperties,
     /// Feature probe result.
     pub caps: Caps,
+    /// The cooperative-matrix configuration to use, when the device has one.
+    pub coop: Option<CoopShape>,
+}
+
+/// The device extension that provides `OpCooperativeMatrix*KHR`.
+const COOPMAT_EXT: &std::ffi::CStr = c"VK_KHR_cooperative_matrix";
+
+/// Find a cooperative-matrix shape: 16-bit A/B, f32 C, subgroup scope.
+///
+/// This is a *capability* probe only — the enumerant must be matched exactly
+/// (the driver accepts only the shapes it reports), which is why the shape is
+/// queried instead of hard-coded.
+unsafe fn query_coop(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    pd: vk::PhysicalDevice,
+) -> Option<CoopShape> {
+    let exts = unsafe { instance.enumerate_device_extension_properties(pd) }.ok()?;
+    let has = exts
+        .iter()
+        .filter_map(|e| e.extension_name_as_c_str().ok())
+        .any(|n| n == COOPMAT_EXT);
+    if !has {
+        return None;
+    }
+    let cm = ash::khr::cooperative_matrix::Instance::new(entry, instance);
+    let props = unsafe { cm.get_physical_device_cooperative_matrix_properties(pd) }.ok()?;
+    props
+        .iter()
+        .filter(|p| {
+            p.a_type == vk::ComponentTypeKHR::FLOAT16
+                && p.b_type == vk::ComponentTypeKHR::FLOAT16
+                && p.c_type == vk::ComponentTypeKHR::FLOAT32
+                && p.result_type == vk::ComponentTypeKHR::FLOAT32
+                && p.scope == vk::ScopeKHR::SUBGROUP
+                && p.saturating_accumulation == vk::FALSE
+        })
+        .max_by_key(|p| (p.m_size * p.n_size, p.k_size))
+        .map(|p| CoopShape {
+            m: p.m_size,
+            n: p.n_size,
+            k: p.k_size,
+            scope: p.scope.as_raw(),
+        })
 }
 
 /// Query the features the renderer would use.
@@ -300,11 +370,22 @@ impl VkDevice {
         let mut create = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_features(&features);
+        let mut coop = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
+            .cooperative_matrix(info.coop.is_some());
+        let ext_ptrs: Vec<*const std::ffi::c_char> = if info.coop.is_some() {
+            vec![COOPMAT_EXT.as_ptr()]
+        } else {
+            Vec::new()
+        };
         if info.api >= vk::API_VERSION_1_1 {
             create = create
                 .push_next(&mut storage16)
                 .push_next(&mut storage8)
-                .push_next(&mut f16i8);
+                .push_next(&mut f16i8)
+                .enabled_extension_names(&ext_ptrs);
+            if info.coop.is_some() {
+                create = create.push_next(&mut coop);
+            }
         }
         let device = unsafe { instance.create_device(info.pd, &create, None) }
             .map_err(|e| format!("vkCreateDevice: {e}"))?;
@@ -686,8 +767,9 @@ impl VkDevice {
         slot
     }
 
-    /// A plain host-visible (mapped) buffer; used for staging.
-    fn alloc_raw_host(&self, size: usize) -> GpuBuffer {
+    /// A plain host-visible (mapped) buffer; used for staging and the raw-module
+    /// diagnostic runner (which reads/writes host-side test data).
+    pub fn alloc_raw_host(&self, size: usize) -> GpuBuffer {
         let size = size.max(4);
         let buf = unsafe {
             self.device.create_buffer(
@@ -785,6 +867,42 @@ impl VkDevice {
         // A single set always forces a flush per dispatch, so batching degrades
         // instead of failing if the pool is ever exhausted.
         panic!("TGERR: vkAllocateDescriptorSets: pool exhausted")
+    }
+
+    /// Copy host bytes into `b`: a `memcpy` for a mapped buffer, a staged
+    /// transfer for device-local memory.
+    pub fn upload(&self, b: &GpuBuffer, src: &[u8]) {
+        match b.ptr {
+            Some(p) => unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), p, src.len())
+            },
+            None => {
+                let mut st = self.staging(src.len());
+                let stage = st.as_mut().expect("staging");
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.as_ptr(), stage.ptr.unwrap(), src.len())
+                };
+                self.copy_buffer(stage, 0, b, 0, src.len() as u64, true);
+            }
+        }
+    }
+
+    /// Copy `b` out to the host (`memcpy` when mapped, staged otherwise).
+    pub fn download(&self, b: &GpuBuffer, dst: &mut [u8]) {
+        match b.ptr {
+            Some(p) => {
+                self.wait_idle();
+                unsafe { std::ptr::copy_nonoverlapping(p, dst.as_mut_ptr(), dst.len()) };
+            }
+            None => {
+                let mut st = self.staging(dst.len());
+                let stage = st.as_mut().expect("staging");
+                self.copy_buffer(b, 0, stage, 0, dst.len() as u64, true);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(stage.ptr.unwrap(), dst.as_mut_ptr(), dst.len())
+                };
+            }
+        }
     }
 
     /// Open the current ring slot's command buffer for recording.

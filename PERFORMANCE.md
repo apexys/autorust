@@ -469,6 +469,47 @@ Reading it:
   body is too big to unroll further, and `TN` (both operands transposed) is the
   worst case.
 
+### Tensor cores (`VK_KHR_cooperative_matrix`)
+
+Vulkan's specialised matrix-multiply syntax works and is worth a lot on this
+device. `VkPhysicalDeviceCooperativeMatrixPropertiesKHR` reports eleven
+configurations for the RTX 3060; the relevant one is `M16 N16 K16`,
+`A=B=bf16`/`f16`, `C=f32`, subgroup scope. `vk_sys` probes it at device
+discovery (`Caps` / `DeviceInfo.coop`, extension and feature enabled only when
+the enumerant is there) and `tests/vk_coopmat.rs` runs a hand-written
+cooperative-matrix GEMM ([`tests/data/coopmat_gemm.spvasm`](tests/data/coopmat_gemm.spvasm))
+against a host reference.
+
+The kernel is deliberately naive: one 32-lane subgroup per output tile, a 16x64
+tile (four `OpCooperativeMatrixMulAddKHR` per A load), no shared-memory staging,
+contraction in steps of 16. Inputs are f16, the accumulator f32, and the result
+matches the f64 reference exactly (relative error 0) at every size:
+
+| GEMM | current `VK` kernel | cooperative matrix | speedup |
+|---|---:|---:|---:|
+| 1024³ | 0.889 ms (3.0 TF/s) | **0.278 ms (7.7 TF/s)** | 3.2x |
+| 2048³ | 4.39 ms (3.9 TF/s) | **1.75 ms (9.8 TF/s)** | 2.5x |
+
+(The "current" column is the bf16 GEMM row from `bench/results`, which is the
+fastest plain-SPIR-V variant on this device; f32 is slower still at
+1.03/4.80 ms.)
+
+So the remaining bf16 GEMM gap to OpenCL (1.39x) is not a limit of Vulkan but of
+*not using* the MMA. What blocks shipping it is integration, not feasibility:
+
+- `renderer/spirv.rs` has no `Wmma` arm yet (`Ops::Wmma` panics), and the
+  scheduler's tensor-core opt (`apply_tc_opt`) is written for the CUDA `wmma`
+  helpers: it hands the renderer a packed tile, whereas
+  `OpCooperativeMatrixLoadKHR` reads straight from a pointer with an explicit
+  stride. Bridging that needs a shared-memory staging layout (load bf16/f16 to
+  `Workgroup`, convert if the source is bf16, `coopMatLoad` from there) plus the
+  tile shape chosen per device (`16x16x16` here, `8x8x8` on lavapipe);
+- the accumulator is f32 while a bf16 `dot` in the graph accumulates in bf16, so
+  enabling it changes results (the same trade-off the CUDA tensor-core path
+  already makes, behind `USE_TC`). bf16 *inputs* are advertised
+  (`VK_COMPONENT_TYPE_BFLOAT16_KHR` in the property list) but `spirv-as` here
+  cannot yet emit `OpTypeBFloat16`, so the verified path is f16 inputs.
+
 ## Cross-framework comparison
 
 [`bench/`](bench/README.md) runs the same two models — `beautiful_mnist` CNN

@@ -1,0 +1,156 @@
+; Cooperative-matrix ("tensor core") GEMM: C[M,N] = A[M,K] * B[K,N] + C[M,N]
+; with 16-bit inputs and an f32 accumulator, for the `VK` backend.
+;
+; Hand-written SPIR-V assembly because `renderer/spirv.rs` does not emit
+; cooperative-matrix instructions yet: this is the feasibility/quality probe for
+; `VK_KHR_cooperative_matrix` (see `tests/vk_coopmat.rs`). It is assembled by
+; `spirv-as` at test time, so it needs no committed binary.
+;
+; Shape: one 32-lane subgroup (LocalSize 32) computes a 16x64 tile of C using
+; four 16x16x16 `OpCooperativeMatrixMulAddKHR`s over one shared A tile (A is
+; loaded once per K step, B four times) — the naive tile-then-multiply mapping,
+; no shared-memory staging. Contracted over K in steps of 16.
+;
+; Binding 0 = A (row-major, stride N), 1 = B (row-major, stride N), 2 = C (f32,
+; stride N). The dispatch is [M/16, N/64, 1] workgroups. `$NK$` is both the row
+; stride and the contraction length, so the kernel assumes N == K.
+;
+; Notes that cost real debugging time:
+;  - `OpTypeCooperativeMatrixKHR`'s last operand is the *Use* (A=0, B=1,
+;    Accumulator=2), so A and B are distinct type declarations even at the same
+;    shape. Passing the K size there makes spirv-val say "Cooperative matrix type
+;    must be A Type".
+;  - `MemoryLayout`/`Matrix Operands` are literals; `Stride` is an id; the
+;    memory-access operand is written `None` (i.e. omitted).
+;  - the loop must carry the accumulator out of the *continue* block, not as a
+;    header phi read after the loop, or the last K step is dropped.
+;  - `CooperativeMatrixKHR` + `Shader` requires the `VulkanMemoryModel`
+;    capability (`OpMemoryModel Logical Vulkan`).
+               OpCapability Shader
+               OpCapability Float16
+               OpCapability StorageBuffer16BitAccess
+               OpCapability CooperativeMatrixKHR
+               OpCapability VulkanMemoryModel
+               OpExtension "SPV_KHR_16bit_storage"
+               OpExtension "SPV_KHR_cooperative_matrix"
+               OpMemoryModel Logical Vulkan
+               OpEntryPoint GLCompute %main "main" %gid %ba %bb %bc
+               OpExecutionMode %main LocalSize 32 1 1
+               OpDecorate %gid BuiltIn WorkgroupId
+               OpDecorate %rt_a ArrayStride 2
+               OpDecorate %rt_b ArrayStride 2
+               OpDecorate %rt_c ArrayStride 4
+               OpMemberDecorate %sa 0 Offset 0
+               OpMemberDecorate %sb 0 Offset 0
+               OpMemberDecorate %sc 0 Offset 0
+               OpDecorate %sa Block
+               OpDecorate %sb Block
+               OpDecorate %sc Block
+               OpDecorate %ba DescriptorSet 0
+               OpDecorate %ba Binding 0
+               OpDecorate %bb DescriptorSet 0
+               OpDecorate %bb Binding 1
+               OpDecorate %bc DescriptorSet 0
+               OpDecorate %bc Binding 2
+       %void = OpTypeVoid
+      %fnty = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+      %bool = OpTypeBool
+       %half = OpTypeFloat 16
+        %f32 = OpTypeFloat 32
+     %v3uint = OpTypeVector %uint 3
+       %u_16 = OpConstant %uint 16
+        %u_0 = OpConstant %uint 0
+      %$NK$ = OpConstant %uint $NK$
+        %u_3 = OpConstant %uint 3
+        %u_0u = OpConstant %uint 0
+        %u_1 = OpConstant %uint 1
+        %u_2 = OpConstant %uint 2
+       %u_64 = OpConstant %uint 64
+       %u_32 = OpConstant %uint 32
+       %u_48 = OpConstant %uint 48
+         %c0 = OpConstant %f32 0
+         %rt_a = OpTypeRuntimeArray %half
+         %rt_b = OpTypeRuntimeArray %half
+         %rt_c = OpTypeRuntimeArray %f32
+           %sa = OpTypeStruct %rt_a
+           %sb = OpTypeStruct %rt_b
+           %sc = OpTypeStruct %rt_c
+      %ptr_sa = OpTypePointer StorageBuffer %sa
+      %ptr_sb = OpTypePointer StorageBuffer %sb
+      %ptr_sc = OpTypePointer StorageBuffer %sc
+      %ptr_h = OpTypePointer StorageBuffer %half
+      %ptr_f = OpTypePointer StorageBuffer %f32
+     %ptr_in = OpTypePointer Input %v3uint
+       %gid = OpVariable %ptr_in Input
+         %ba = OpVariable %ptr_sa StorageBuffer
+         %bb = OpVariable %ptr_sb StorageBuffer
+         %bc = OpVariable %ptr_sc StorageBuffer
+       %a_ty = OpTypeCooperativeMatrixKHR %half %u_3 %u_16 %u_16 %u_0u
+       %b_ty = OpTypeCooperativeMatrixKHR %half %u_3 %u_16 %u_16 %u_1
+       %c_ty = OpTypeCooperativeMatrixKHR %f32 %u_3 %u_16 %u_16 %u_2
+      %main = OpFunction %void None %fnty
+     %entry = OpLabel
+         %wg = OpLoad %v3uint %gid
+        %wgx = OpCompositeExtract %uint %wg 0
+        %wgy = OpCompositeExtract %uint %wg 1
+         %tm = OpIMul %uint %wgx %u_16
+         %tn = OpIMul %uint %wgy %u_64
+      %zero0 = OpCompositeConstruct %c_ty %c0
+      %zero1 = OpCompositeConstruct %c_ty %c0
+      %zero2 = OpCompositeConstruct %c_ty %c0
+      %zero3 = OpCompositeConstruct %c_ty %c0
+               OpBranch %head
+      %head = OpLabel
+         %kk = OpPhi %uint %u_0 %entry %kk2 %body
+        %acc = OpPhi %c_ty %zero0 %entry %c %body
+       %acc1 = OpPhi %c_ty %zero1 %entry %c1 %body
+       %acc2 = OpPhi %c_ty %zero2 %entry %c2 %body
+       %acc3 = OpPhi %c_ty %zero3 %entry %c3 %body
+               OpLoopMerge %done %body None
+               OpBranch %body
+      %body = OpLabel
+     %off_a = OpIMul %uint %tm %$NK$
+    %off_a3 = OpIAdd %uint %off_a %kk
+     %off_b = OpIMul %uint %kk %$NK$
+    %off_b3 = OpIAdd %uint %off_b %tn
+         %pa = OpAccessChain %ptr_h %ba %u_0 %off_a3
+         %pb = OpAccessChain %ptr_h %bb %u_0 %off_b3
+          %a = OpCooperativeMatrixLoadKHR %a_ty %pa %u_0 %$NK$
+          %b = OpCooperativeMatrixLoadKHR %b_ty %pb %u_0 %$NK$
+          %c = OpCooperativeMatrixMulAddKHR %c_ty %a %b %acc
+     %off_b1 = OpIAdd %uint %off_b3 %u_16
+         %pb1 = OpAccessChain %ptr_h %bb %u_0 %off_b1
+         %b1 = OpCooperativeMatrixLoadKHR %b_ty %pb1 %u_0 %$NK$
+         %c1 = OpCooperativeMatrixMulAddKHR %c_ty %a %b1 %acc1
+     %off_b2 = OpIAdd %uint %off_b3 %u_32
+         %pb2 = OpAccessChain %ptr_h %bb %u_0 %off_b2
+         %b2 = OpCooperativeMatrixLoadKHR %b_ty %pb2 %u_0 %$NK$
+         %c2 = OpCooperativeMatrixMulAddKHR %c_ty %a %b2 %acc2
+     %off_b3b = OpIAdd %uint %off_b3 %u_48
+         %pb3 = OpAccessChain %ptr_h %bb %u_0 %off_b3b
+         %b3 = OpCooperativeMatrixLoadKHR %b_ty %pb3 %u_0 %$NK$
+         %c3 = OpCooperativeMatrixMulAddKHR %c_ty %a %b3 %acc3
+       %cout = OpCopyObject %c_ty %c
+      %cout1 = OpCopyObject %c_ty %c1
+      %cout2 = OpCopyObject %c_ty %c2
+      %cout3 = OpCopyObject %c_ty %c3
+        %kk2 = OpIAdd %uint %kk %u_16
+        %cmp = OpULessThan %bool %kk2 %$NK$
+               OpBranchConditional %cmp %head %done
+      %done = OpLabel
+      %off_c = OpIMul %uint %tm %$NK$
+     %off_c2 = OpIAdd %uint %off_c %tn
+         %pc = OpAccessChain %ptr_f %bc %u_0 %off_c2
+               OpCooperativeMatrixStoreKHR %pc %cout %u_0 %$NK$
+     %off_c1 = OpIAdd %uint %off_c2 %u_16
+        %pc1 = OpAccessChain %ptr_f %bc %u_0 %off_c1
+               OpCooperativeMatrixStoreKHR %pc1 %cout1 %u_0 %$NK$
+     %off_c2b = OpIAdd %uint %off_c2 %u_32
+        %pc2 = OpAccessChain %ptr_f %bc %u_0 %off_c2b
+               OpCooperativeMatrixStoreKHR %pc2 %cout2 %u_0 %$NK$
+     %off_c3 = OpIAdd %uint %off_c2 %u_48
+        %pc3 = OpAccessChain %ptr_f %bc %u_0 %off_c3
+               OpCooperativeMatrixStoreKHR %pc3 %cout3 %u_0 %$NK$
+               OpReturn
+               OpFunctionEnd

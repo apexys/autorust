@@ -125,7 +125,10 @@ fn vk_devices() -> Vec<DeviceInfo> {
                 trace(&format!("{}: probe failed: {e}", info.name));
                 continue;
             }
-            trace(&format!("{}: usable, caps {:?}", info.name, info.caps));
+            trace(&format!(
+                "{}: usable, caps {:?}, coopmat {:?}",
+                info.name, info.caps, info.coop
+            ));
             out.push(info);
         }
         *d.borrow_mut() = Some(Rc::new(out.clone()));
@@ -569,24 +572,72 @@ pub fn run_raw_module(
     groups: [u32; 3],
     iters: usize,
 ) -> Option<f64> {
+    let (ms, _) = run_raw_module_io(spv, sizes, &[], groups, iters)?;
+    Some(ms)
+}
+
+/// [`run_raw_module`] with host-side input/output: `fills[i]` preloads buffer `i`
+/// (empty = zeroed), and the device contents are read back afterwards.
+///
+/// This is what lets a hand-written module be checked numerically as well as
+/// timed — the same two things you need before trusting a new instruction path.
+pub fn run_raw_module_io(
+    spv: &[u32],
+    sizes: &[usize],
+    fills: &[&[u8]],
+    groups: [u32; 3],
+    iters: usize,
+) -> Option<(f64, Vec<Vec<u8>>)> {
     let devs = vk_devices();
     let info = devs.first()?;
     let lib = vk_sys::VkLib::get()?;
-    let dev = vk_sys::VkDevice::open(&lib.instance, lib.api, info).ok()?;
-    let pipe = dev.pipeline(spv, sizes.len() as u32).ok()?;
+    let dev = match vk_sys::VkDevice::open(&lib.instance, lib.api, info) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[vk] raw: {e}");
+            return None;
+        }
+    };
+    let pipe = match dev.pipeline(spv, sizes.len() as u32) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[vk] raw pipeline: {e}");
+            return None;
+        }
+    };
     let sets = dev.alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
     let bufs: Vec<vk_sys::GpuBuffer> = sizes
         .iter()
         .map(|s| dev.alloc(*s).expect("vk raw alloc"))
         .collect();
+    for (i, b) in bufs.iter().enumerate() {
+        if let Some(src) = fills.get(i)
+            && !src.is_empty()
+        {
+            assert_eq!(src.len(), b.size, "raw fill {i} size");
+            dev.upload(b, src);
+        }
+    }
     let bound: Vec<(&vk_sys::GpuBuffer, u64, u64)> =
         bufs.iter().map(|b| (b, 0, b.size as u64)).collect();
     let mut samples = Vec::with_capacity(iters);
     for _ in 0..=iters {
         let t = std::time::Instant::now();
-        dev.dispatch(&pipe, &sets, &bound, groups, true, "raw").ok()?;
+        if let Err(e) = dev.dispatch(&pipe, &sets, &bound, groups, true, "raw") {
+            eprintln!("[vk] raw dispatch: {e}");
+            return None;
+        }
         samples.push(t.elapsed().as_secs_f64() * 1e3);
     }
     samples.sort_by(f64::total_cmp);
-    Some(samples[samples.len() / 2])
+    dev.wait_idle();
+    let out = bufs
+        .iter()
+        .map(|b| {
+            let mut v = vec![0u8; b.size];
+            dev.download(b, &mut v);
+            v
+        })
+        .collect();
+    Some((samples[samples.len() / 2], out))
 }

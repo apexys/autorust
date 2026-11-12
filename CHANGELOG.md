@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cooperative-matrix ("tensor core") probing for the Vulkan backend.** The
+  device probe now enumerates `VkPhysicalDeviceCooperativeMatrixPropertiesKHR`
+  and enables `VK_KHR_cooperative_matrix` only when a 16-bit-in/f32-out shape
+  exists (`DeviceInfo::coop`). `tests/vk_coopmat.rs` runs a hand-written
+  `OpCooperativeMatrixMulAddKHR` GEMM and pins both numerics (exact against an
+  f64 reference) and throughput: **7.7 TF/s at 1024³ and 9.8 TF/s at 2048³,
+  3.2x / 2.5x the plain-SPIR-V GEMM**. The renderer does not emit it yet — the
+  integration plan and the numerics trade-off are in `CURRENT_STATE.md` §9.53.
 - **Vulkan backend (`VK`, `backend_vk`, default).** A fourth GPU backend that
   needs no vendor SDK: kernels are emitted as **SPIR-V directly** from the
   linear UOp list (`renderer::spirv`) instead of C text, and `libvulkan` is

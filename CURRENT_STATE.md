@@ -4275,3 +4275,42 @@ for free. The device advertises `VK_KHR_cooperative_matrix` plus
 without a new dependency; it needs a capability probe, the emitter's type/decor
 support, and a WMMA-shaped tile from the scheduler (the CUDA backend's `tc` path
 is the model). Not attempted yet.
+
+
+### 9.53 Cooperative matrices: probed, proven, not yet wired (2026-11)
+
+`VK_KHR_cooperative_matrix` is the answer to the "specialized syntax for matrix
+multiplies" question, and it is a large win. `vk_sys::query_coop` enumerates
+`VkPhysicalDeviceCooperativeMatrixPropertiesKHR` at discovery and keeps the best
+`A=B=16-bit, C=f32, subgroup-scope` shape (`CoopShape` on `DeviceInfo`, also
+printed by `VK_TRACE`); `VkDevice::open` enables the extension and
+`cooperativeMatrix` feature only when such a shape exists, so a device without
+it is unaffected. The RTX 3060 reports `M16 N16 K16` (plus bf16 inputs under
+`VK_COMPONENT_TYPE_BFLOAT16_KHR`), lavapipe `M8 N8 K8`.
+
+`tests/vk_coopmat.rs` assembles
+[`tests/data/coopmat_gemm.spvasm`](tests/data/coopmat_gemm.spvasm) with
+`spirv-as` and runs it through the normal device/pipeline/dispatch path, checking
+numerics against an f64 host reference and asserting a throughput floor. The
+fixture is a 16x64-tile GEMM (four `OpCooperativeMatrixMulAddKHR` per A load,
+f16 in / f32 out, no shared-memory staging): 7.7 TF/s at 1024^3 and 9.8 TF/s at
+2048^3, versus 3.0/3.9 TF/s for the current plain-SPIR-V GEMM (3.2x and 2.5x),
+exact to the last bit at every size.
+
+Emission details worth keeping (they cost a full debugging round each):
+`OpTypeCooperativeMatrixKHR`'s last operand is the *MatrixUse* (A=0, B=1,
+Accumulator=2) — passing K there makes the validator report "Cooperative matrix
+type must be A Type"; `MemoryLayout` and `Matrix Operands` are literals while
+`Stride` is an id and the memory-access operand is omitted; `Shader` +
+`CooperativeMatrixKHR` requires the `VulkanMemoryModel` capability
+(`OpMemoryModel Logical Vulkan`); and the accumulator must be carried out of the
+*continue* block (the same off-by-one-iteration trap as §9.52).
+
+Not shipped yet, deliberately: `renderer/spirv.rs` still has no `Ops::Wmma` arm
+(it panics), and the scheduler's `apply_tc_opt` targets the CUDA `wmma` helpers,
+which hand the renderer a packed tile rather than a pointer + stride. Wiring it
+needs a `Workgroup` staging tile (so bf16 storage can be converted to the MMA's
+component type), a tile shape taken from the probe, and a decision on numerics:
+the cooperative matrix accumulates in f32, while a bf16 `dot` in this graph
+accumulates in bf16, so enabling it for bf16 changes results — the trade-off the
+CUDA tensor-core path already makes behind `USE_TC`.
