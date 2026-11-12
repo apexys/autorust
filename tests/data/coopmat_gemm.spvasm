@@ -1,31 +1,26 @@
-; Cooperative-matrix ("tensor core") GEMM: C[M,N] = A[M,K] * B[K,N] + C[M,N]
-; with 16-bit inputs and an f32 accumulator, for the `VK` backend.
+; Cooperative-matrix ("tensor core") GEMM: C[M,N] = A[M,K] * B[K,N] with 16-bit
+; inputs and an f32 accumulator.
 ;
-; Hand-written SPIR-V assembly because `renderer/spirv.rs` does not emit
-; cooperative-matrix instructions yet: this is the feasibility/quality probe for
-; `VK_KHR_cooperative_matrix` (see `tests/vk_coopmat.rs`). It is assembled by
-; `spirv-as` at test time, so it needs no committed binary.
+; This is the source of truth for `src/runtime/coopmat.rs` (which embeds the
+; assembled words with the shape constants left as sentinels) and the module
+; `tests/vk_coopmat.rs` validates. Assemble with:
 ;
-; Shape: one 32-lane subgroup (LocalSize 32) computes a 16x64 tile of C using
-; four 16x16x16 `OpCooperativeMatrixMulAddKHR`s over one shared A tile (A is
-; loaded once per K step, B four times) — the naive tile-then-multiply mapping,
-; no shared-memory staging. Contracted over K in steps of 16.
+;   sed 's/\$M\$/1576/;s/\$N\$/768/;s/\$K\$/768/;s/\$SA\$/768/' \
+;       tests/data/coopmat_gemm.spvasm > /tmp/g.spvasm
+;   spirv-as --target-env spv1.6 /tmp/g.spvasm -o /tmp/g.spv
 ;
-; Binding 0 = A (row-major, stride N), 1 = B (row-major, stride N), 2 = C (f32,
-; stride N). The dispatch is [M/16, N/64, 1] workgroups. `$NK$` is both the row
-; stride and the contraction length, so the kernel assumes N == K.
+; One 32-lane subgroup per 16x64 output tile: four
+; `OpCooperativeMatrixMulAddKHR` per A load, no shared-memory staging, and the
+; last tile in each direction is clamped to the tensor edge so M/N need not be
+; multiples of the tile. `$SA$` is A's row stride (its own width K), `$N$` is the
+; row stride of B and C, `$K$` the contraction length.
 ;
-; Notes that cost real debugging time:
-;  - `OpTypeCooperativeMatrixKHR`'s last operand is the *Use* (A=0, B=1,
-;    Accumulator=2), so A and B are distinct type declarations even at the same
-;    shape. Passing the K size there makes spirv-val say "Cooperative matrix type
-;    must be A Type".
-;  - `MemoryLayout`/`Matrix Operands` are literals; `Stride` is an id; the
-;    memory-access operand is written `None` (i.e. omitted).
-;  - the loop must carry the accumulator out of the *continue* block, not as a
-;    header phi read after the loop, or the last K step is dropped.
-;  - `CooperativeMatrixKHR` + `Shader` requires the `VulkanMemoryModel`
-;    capability (`OpMemoryModel Logical Vulkan`).
+; Things that cost a debugging round each: `OpTypeCooperativeMatrixKHR`'s last
+; operand is the MatrixUse (A=0, B=1, Accumulator=2), not K; MemoryLayout and
+; Matrix Operands are literals while Stride is an id and the memory-access
+; operand is omitted; Shader + CooperativeMatrixKHR needs the VulkanMemoryModel
+; capability; and the accumulator must be carried out of the continue block or
+; the last K step is dropped.
                OpCapability Shader
                OpCapability Float16
                OpCapability StorageBuffer16BitAccess
@@ -61,7 +56,12 @@
      %v3uint = OpTypeVector %uint 3
        %u_16 = OpConstant %uint 16
         %u_0 = OpConstant %uint 0
-      %$NK$ = OpConstant %uint $NK$
+      %u_N = OpConstant %uint $N$
+      %u_K = OpConstant %uint $K$
+      %u_M = OpConstant %uint $M$
+      %u_SA = OpConstant %uint $SA$
+      %u_16b = OpConstant %uint 16
+      %u_64b = OpConstant %uint 64
         %u_3 = OpConstant %uint 3
         %u_0u = OpConstant %uint 0
         %u_1 = OpConstant %uint 1
@@ -96,6 +96,12 @@
         %wgy = OpCompositeExtract %uint %wg 1
          %tm = OpIMul %uint %wgx %u_16
          %tn = OpIMul %uint %wgy %u_64
+        %mlim = OpISub %uint %u_M %u_16b
+        %mbig = OpUGreaterThan %bool %tm %mlim
+         %tmc = OpSelect %uint %mbig %mlim %tm
+        %nlim = OpISub %uint %u_N %u_64b
+        %nbig = OpUGreaterThan %bool %tn %nlim
+         %tnc = OpSelect %uint %nbig %nlim %tn
       %zero0 = OpCompositeConstruct %c_ty %c0
       %zero1 = OpCompositeConstruct %c_ty %c0
       %zero2 = OpCompositeConstruct %c_ty %c0
@@ -110,47 +116,47 @@
                OpLoopMerge %done %body None
                OpBranch %body
       %body = OpLabel
-     %off_a = OpIMul %uint %tm %$NK$
+     %off_a = OpIMul %uint %tmc %u_SA
     %off_a3 = OpIAdd %uint %off_a %kk
-     %off_b = OpIMul %uint %kk %$NK$
-    %off_b3 = OpIAdd %uint %off_b %tn
+     %off_b = OpIMul %uint %kk %u_N
+    %off_b3 = OpIAdd %uint %off_b %tnc
          %pa = OpAccessChain %ptr_h %ba %u_0 %off_a3
          %pb = OpAccessChain %ptr_h %bb %u_0 %off_b3
-          %a = OpCooperativeMatrixLoadKHR %a_ty %pa %u_0 %$NK$
-          %b = OpCooperativeMatrixLoadKHR %b_ty %pb %u_0 %$NK$
+          %a = OpCooperativeMatrixLoadKHR %a_ty %pa %u_0 %u_SA
+          %b = OpCooperativeMatrixLoadKHR %b_ty %pb %u_0 %u_N
           %c = OpCooperativeMatrixMulAddKHR %c_ty %a %b %acc
      %off_b1 = OpIAdd %uint %off_b3 %u_16
          %pb1 = OpAccessChain %ptr_h %bb %u_0 %off_b1
-         %b1 = OpCooperativeMatrixLoadKHR %b_ty %pb1 %u_0 %$NK$
+         %b1 = OpCooperativeMatrixLoadKHR %b_ty %pb1 %u_0 %u_N
          %c1 = OpCooperativeMatrixMulAddKHR %c_ty %a %b1 %acc1
      %off_b2 = OpIAdd %uint %off_b3 %u_32
          %pb2 = OpAccessChain %ptr_h %bb %u_0 %off_b2
-         %b2 = OpCooperativeMatrixLoadKHR %b_ty %pb2 %u_0 %$NK$
+         %b2 = OpCooperativeMatrixLoadKHR %b_ty %pb2 %u_0 %u_N
          %c2 = OpCooperativeMatrixMulAddKHR %c_ty %a %b2 %acc2
      %off_b3b = OpIAdd %uint %off_b3 %u_48
          %pb3 = OpAccessChain %ptr_h %bb %u_0 %off_b3b
-         %b3 = OpCooperativeMatrixLoadKHR %b_ty %pb3 %u_0 %$NK$
+         %b3 = OpCooperativeMatrixLoadKHR %b_ty %pb3 %u_0 %u_N
          %c3 = OpCooperativeMatrixMulAddKHR %c_ty %a %b3 %acc3
        %cout = OpCopyObject %c_ty %c
       %cout1 = OpCopyObject %c_ty %c1
       %cout2 = OpCopyObject %c_ty %c2
       %cout3 = OpCopyObject %c_ty %c3
         %kk2 = OpIAdd %uint %kk %u_16
-        %cmp = OpULessThan %bool %kk2 %$NK$
+        %cmp = OpULessThan %bool %kk2 %u_K
                OpBranchConditional %cmp %head %done
       %done = OpLabel
-      %off_c = OpIMul %uint %tm %$NK$
-     %off_c2 = OpIAdd %uint %off_c %tn
+      %off_c = OpIMul %uint %tmc %u_N
+     %off_c2 = OpIAdd %uint %off_c %tnc
          %pc = OpAccessChain %ptr_f %bc %u_0 %off_c2
-               OpCooperativeMatrixStoreKHR %pc %cout %u_0 %$NK$
+               OpCooperativeMatrixStoreKHR %pc %cout %u_0 %u_N
      %off_c1 = OpIAdd %uint %off_c2 %u_16
         %pc1 = OpAccessChain %ptr_f %bc %u_0 %off_c1
-               OpCooperativeMatrixStoreKHR %pc1 %cout1 %u_0 %$NK$
+               OpCooperativeMatrixStoreKHR %pc1 %cout1 %u_0 %u_N
      %off_c2b = OpIAdd %uint %off_c2 %u_32
         %pc2 = OpAccessChain %ptr_f %bc %u_0 %off_c2b
-               OpCooperativeMatrixStoreKHR %pc2 %cout2 %u_0 %$NK$
+               OpCooperativeMatrixStoreKHR %pc2 %cout2 %u_0 %u_N
      %off_c3 = OpIAdd %uint %off_c2 %u_48
         %pc3 = OpAccessChain %ptr_f %bc %u_0 %off_c3
-               OpCooperativeMatrixStoreKHR %pc3 %cout3 %u_0 %$NK$
+               OpCooperativeMatrixStoreKHR %pc3 %cout3 %u_0 %u_N
                OpReturn
                OpFunctionEnd

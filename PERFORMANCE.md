@@ -487,8 +487,14 @@ matches the f64 reference exactly (relative error 0) at every size:
 
 | GEMM | current `VK` kernel | cooperative matrix | speedup |
 |---|---:|---:|---:|
-| 1024³ | 0.889 ms (3.0 TF/s) | **0.278 ms (7.7 TF/s)** | 3.2x |
-| 2048³ | 4.39 ms (3.9 TF/s) | **1.75 ms (9.8 TF/s)** | 2.5x |
+| 1024³ | 0.889 ms (3.0 TF/s) | **0.28 ms (7.7 TF/s)** | 3.2x |
+| 2048³ | 4.39 ms (3.9 TF/s) | **1.7 ms (9.8 TF/s)** | 2.6x |
+| ViT projection, 1576x768x768 | 1.03 ms (1.9 TF/s) | **0.22 ms (8.3 TF/s)** | 4.6x |
+| ViT fc1, 1576x3072x768 | 2.32 ms (3.2 TF/s) | **0.68 ms (11.0 TF/s)** | 3.4x |
+
+The ViT rows matter most: at the shapes `vit_infer_bf16` actually runs, the
+generated kernel is at 2-3 TF/s while the cooperative-matrix module reaches
+8-11 TF/s, and the four linears of a ViT block are roughly 70% of the step.
 
 (The "current" column is the bf16 GEMM row from `bench/results`, which is the
 fastest plain-SPIR-V variant on this device; f32 is slower still at

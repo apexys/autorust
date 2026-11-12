@@ -535,8 +535,9 @@ fn factory(name: String) -> DeviceFactory {
         let allocator = LruAllocator::with_backend(Box::new(VkAllocator {
             inner: inner.clone(),
         }));
+        let ctor_inner = inner.clone();
         let ctor: crate::runtime::device::RuntimeCtor = Rc::new(move |elf| {
-            Rc::new(RefCell::new(VkProgram::new(inner.clone(), elf)))
+            Rc::new(RefCell::new(VkProgram::new(ctor_inner.clone(), elf)))
         });
         Compiled::new(&name, renderer, allocator, compiler, ctor)
     })

@@ -20,7 +20,11 @@ use autorust::runtime::vk_sys::CoopShape;
 
 /// Assemble `src` (with `$NK$` substituted) and return the SPIR-V words.
 fn assemble(src: &str, nk: usize, tag: &str) -> Option<Vec<u32>> {
-    let text = src.replace("$NK$", &nk.to_string());
+    let text = src
+        .replace("$M$", &nk.to_string())
+        .replace("$SA$", &nk.to_string())
+        .replace("$N$", &nk.to_string())
+        .replace("$K$", &nk.to_string());
     let dir = std::env::temp_dir().join("autorust-vk-coopmat");
     std::fs::create_dir_all(&dir).ok()?;
     let asm = dir.join(format!("{tag}.spvasm"));

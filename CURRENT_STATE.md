@@ -4306,11 +4306,35 @@ type must be A Type"; `MemoryLayout` and `Matrix Operands` are literals while
 (`OpMemoryModel Logical Vulkan`); and the accumulator must be carried out of the
 *continue* block (the same off-by-one-iteration trap as §9.52).
 
-Not shipped yet, deliberately: `renderer/spirv.rs` still has no `Ops::Wmma` arm
-(it panics), and the scheduler's `apply_tc_opt` targets the CUDA `wmma` helpers,
-which hand the renderer a packed tile rather than a pointer + stride. Wiring it
-needs a `Workgroup` staging tile (so bf16 storage can be converted to the MMA's
-component type), a tile shape taken from the probe, and a decision on numerics:
-the cooperative matrix accumulates in f32, while a bf16 `dot` in this graph
-accumulates in bf16, so enabling it for bf16 changes results — the trade-off the
-CUDA tensor-core path already makes behind `USE_TC`.
+The module is now generic in the shape: `runtime::coopmat` embeds the assembled
+words with *sentinels* for M, N, K and A's row stride and patches them at load
+time (`coopmat::module(m, n, k)`), so one artifact serves every shape. The last
+tile in each direction is clamped to the tensor edge, so M and N need not be
+multiples of 16/64 — which is what the ViT shapes need (M = 8x197 = 1576). At
+those shapes it is 3.4-4.6x the generated kernel: 1576x768x768 in 0.22 vs
+1.03 ms, 1576x3072x768 in 0.68 vs 2.32 ms (8.3-11.0 vs 1.9-3.2 TF/s), and the
+four linears of a ViT block are ~70% of the bf16 step, so this is the change that
+would put `vit_infer_bf16` ahead of OpenCL.
+
+Still not wired into the graph pipeline. Two routes were assessed: the
+scheduler's `Ops::Wmma` arm (what `apply_tc_opt` feeds) hands the renderer the
+CUDA `wmma` *packed register tile*, whose element order comes from
+`element_per_thread` + swizzle; `OpCooperativeMatrixLoadKHR` instead reads from a
+pointer with an explicit stride, so that route needs a `Workgroup` staging tile
+*and* a re-derivation of the swizzle. The library-GEMM seam
+(`schedule::host_gemm`, which already carries explicit strides per dimension) is
+the tractable one: a `GemmDevice::Vk` + `host_exec` that patches
+`coopmat::module` and dispatches it. That wiring was drafted and reverted: for a
+`f16 -> f32` `dot` the descriptor's `extract` rejects the kernel before the
+descriptor is built (the f32-accumulator promotion leaves a `Cast` in the reduce
+that the affine matcher does not accept), so the path never triggered and I would
+not ship an unexercised branch in a shared seam. Remaining work: teach `extract`
+to recognise that reduced-precision-then-promoted matmul (`dtype` 16-bit,
+`c_dtype` f32), re-enable the seam, and extend the module to bf16 storage (either
+a bf16 -> f16 convert pre-pass or a staging tile) for the ViT/GEMM bf16 rows.
+
+Numerics stay unchanged by construction: the module's accumulator *and* result
+are f32, so `coopmat::eligible` only accepts a descriptor whose `c_dtype` is
+f32 — a plain 16-bit `dot` (which accumulates in 16 bits) never takes it. That is
+the conservative choice; the CUDA path's `USE_TC`-gated f32 accumulation for bf16
+is the more aggressive alternative if the bf16 rows are to improve.
