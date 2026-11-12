@@ -512,7 +512,14 @@ device time for the cooperative matrix vs 3.42 ms for the generated kernel
 (2.0x)**, and the result matches the interpreter exactly. A plain 16-bit `dot`
 (which accumulates in 16 bits) never takes it, so its numerics are unchanged.
 
-What is still missing is bf16 storage:
+bf16 storage runs on the same path (`coopmat_handles_bf16_storage`): A and B are
+staged through f16 scratch by two element-wise conversion modules and a bf16
+result is rounded from an f32 scratch, so a bf16 matmul also dispatches exactly
+once and matches the interpreter. It does not yet reach the `bench/` bf16 rows —
+those kernels lower to a reduce body that `host_gemm::extract` does not
+recognise, so they keep the generated kernel (see `CURRENT_STATE.md` §9.53).
+
+What is still missing there:
 
 - `renderer/spirv.rs` has no `Wmma` arm yet (`Ops::Wmma` panics), and the
   scheduler's tensor-core opt (`apply_tc_opt`) is written for the CUDA `wmma`

@@ -239,3 +239,44 @@ fn coopmat_is_used_for_f16_f32_matmul() {
         "a plain f16 dot must not take the f32 accumulator path"
     );
 }
+
+/// bf16 storage on the same path: the module reads f16, so A and B are staged
+/// through f16 scratch (exact for in-range values) and a bf16 result is rounded
+/// from an f32 scratch. Both the bf16-out and the f32-out forms must work.
+#[test]
+fn coopmat_handles_bf16_storage() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::{Ctx, Tensor};
+
+    fn dot(m: i64, n: i64, k: i64, dev: Option<&str>, cdt: Option<dtype::DTypeId>) -> Vec<f64> {
+        let ctx = Ctx::new();
+        let a: Vec<f32> = (0..m * k).map(|i| ((i % 11) as f32 - 5.0) * 0.25).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| ((i % 7) as f32 - 3.0) * 0.5).collect();
+        let at = Tensor::from_slice(&ctx, &a, Some(dtype::BFLOAT16), dev).reshape([m, k]);
+        let bt = Tensor::from_slice(&ctx, &b, Some(dtype::BFLOAT16), dev).reshape([k, n]);
+        let out = at.dot_dtype(&bt, cdt);
+        let mut cache = ProgCache::default();
+        tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache)
+    }
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    for cdt in [Some(dtype::BFLOAT16), Some(dtype::FLOAT32)] {
+        let (m, n, k) = (128i64, 192, 256);
+        let before = autorust::runtime::ops_vk::coop_gemm_count();
+        let got = dot(m, n, k, Some("VK"), cdt);
+        let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+        let want = dot(m, n, k, None, cdt);
+        assert_eq!(used, 1, "expected one coopmat dispatch for c_dtype {cdt:?}");
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= 1e-3 * w.abs().max(1.0),
+                "bf16 coopmat c_dtype {cdt:?} [{i}]: {g} vs {w}"
+            );
+        }
+        println!("bf16 coopmat c_dtype={cdt:?}: one dispatch, matches INTERP");
+    }
+}

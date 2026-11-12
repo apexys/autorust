@@ -34,11 +34,15 @@ use crate::schedule::host_gemm::HostGemm;
 /// The opened device shared by the allocator and every program.
 /// Cache key of a cooperative-matrix pipeline: shape plus the operand dtypes.
 type CoopKey = (usize, usize, usize, DTypeId, DTypeId);
+/// Cache key of an element-wise conversion pipeline: module id plus element count.
+type ConvKey = (u8, usize);
 
 struct VkInner {
     dev: Rc<vk_sys::VkDevice>,
     /// Pipelines for the cooperative-matrix GEMM.
     coop: RefCell<std::collections::HashMap<CoopKey, Rc<vk_sys::GpuPipeline>>>,
+    /// Pipelines for the bf16/f16 conversion modules.
+    conv: RefCell<std::collections::HashMap<ConvKey, Rc<vk_sys::GpuPipeline>>>,
 }
 
 impl VkInner {
@@ -65,6 +69,7 @@ impl VkInner {
         VkInner {
             dev: Rc::new(dev),
             coop: RefCell::new(std::collections::HashMap::new()),
+            conv: RefCell::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -515,26 +520,58 @@ fn coop_shape() -> Option<vk_sys::CoopShape> {
         .then_some(s)
 }
 
-/// Run one `HostGemm` descriptor as a cooperative-matrix kernel.
-///
-/// The library-GEMM seam (`schedule::host_gemm`) has already checked
-/// `coopmat::eligible`, so the layouts are contiguous row-major with an f32
-/// accumulator. Dispatches are recorded into the open command buffer like any
-/// other kernel, so the queue orders them after their producers.
-fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &HostGemm) {
-    let (m, n, k) = (g.m as usize, g.n as usize, g.k as usize);
-    let words = coopmat::module(m, n, k).expect("coopmat: eligible descriptor");
-    let key = (m, n, k, g.dtype, g.c_dtype);
+/// One element-wise conversion module: `bf16 -> f16` or `f32 -> bf16`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Conversion {
+    /// `bf16` to `f16` (both 2-byte elements).
+    Bf16ToF16,
+    /// `f32` (4-byte) to `bf16` (2-byte), round to nearest even.
+    F32ToBf16,
+}
+
+impl Conversion {
+    fn id(self) -> u8 {
+        match self {
+            Conversion::Bf16ToF16 => 0,
+            Conversion::F32ToBf16 => 1,
+        }
+    }
+    fn words(self, n: usize) -> Option<Vec<u32>> {
+        match self {
+            Conversion::Bf16ToF16 => coopmat::convert_bf16_to_f16(n),
+            Conversion::F32ToBf16 => coopmat::convert_f32_to_bf16(n),
+        }
+    }
+}
+
+/// A device buffer plus the window `coop_gemm` binds for it.
+#[derive(Clone, Copy)]
+struct Bind<'a> {
+    buf: &'a vk_sys::GpuBuffer,
+    off: u64,
+    size: u64,
+}
+
+/// Record `n` element conversions from `src` to `dst`.
+fn convert(
+    inner: &VkInner,
+    c: Conversion,
+    n: usize,
+    src: Bind<'_>,
+    dst: Bind<'_>,
+) {
+    let words = c.words(n).expect("coopmat: conversion module");
+    let key = (c.id(), n);
     let pipe = {
-        let mut cache = inner.coop.borrow_mut();
+        let mut cache = inner.conv.borrow_mut();
         if let Some(p) = cache.get(&key) {
             p.clone()
         } else {
             let p = Rc::new(
                 inner
                     .dev
-                    .pipeline(&words, 3)
-                    .unwrap_or_else(|e| panic!("TGERR: VK coopmat pipeline: {e}")),
+                    .pipeline(&words, 2)
+                    .unwrap_or_else(|e| panic!("TGERR: VK convert pipeline: {e}")),
             );
             cache.insert(key, p.clone());
             p
@@ -543,25 +580,129 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     let sets = inner
         .dev
         .alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
-    let bound: Vec<(&vk_sys::GpuBuffer, u64, u64)> = [g.a_slot, g.b_slot, g.c_slot]
-        .iter()
-        .map(|slot| {
-            let o = vk_of(&*bufs[*slot as usize]);
-            (&o.alloc.buf, o.offset as u64, o.size as u64)
-        })
-        .collect();
+    let bound = [(src.buf, src.off, src.size), (dst.buf, dst.off, dst.size)];
+    inner
+        .dev
+        .dispatch(
+            &pipe,
+            &sets,
+            &bound,
+            coopmat::element_grid(n),
+            false,
+            "convert",
+        )
+        .unwrap_or_else(|e| panic!("TGERR: VK convert dispatch: {e}"));
+}
+
+/// Run one `HostGemm` descriptor as a cooperative-matrix kernel.
+///
+/// The library-GEMM seam (`schedule::host_gemm`) has already checked
+/// `coopmat::eligible`, so the layouts are contiguous row-major. The module reads
+/// f16 operands and accumulates in f32, so `bf16` storage is staged through f16
+/// scratch buffers (exact for in-range values: f16 has *more* mantissa bits than
+/// bf16, only a narrower exponent) and a bf16 result is rounded from an f32
+/// scratch. Dispatches are recorded into the open command buffer like any other
+/// kernel, so the queue orders them after their producers.
+fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &HostGemm) {
+    let (m, n, k) = (g.m as usize, g.n as usize, g.k as usize);
+    let dev = &inner.dev;
+    let view = |slot: i64| {
+        let o = vk_of(&*bufs[slot as usize]);
+        Bind {
+            buf: &o.alloc.buf,
+            off: o.offset as u64,
+            size: o.size as u64,
+        }
+    };
+    let (a, b, c) = (view(g.a_slot), view(g.b_slot), view(g.c_slot));
+
+    // bf16 operands cannot be read by the MMA, so convert them once (each element
+    // is read K/16 or so times by the GEMM, so the extra pass is noise).
+    let stage_a = if g.dtype == crate::dtype::BFLOAT16 {
+        Some(dev.alloc(m * k * 2).expect("coopmat: f16 scratch A"))
+    } else {
+        None
+    };
+    let stage_b = if g.dtype == crate::dtype::BFLOAT16 {
+        Some(dev.alloc(k * n * 2).expect("coopmat: f16 scratch B"))
+    } else {
+        None
+    };
+    let (a, b) = if let (Some(sa_buf), Some(sb_buf)) = (stage_a.as_ref(), stage_b.as_ref()) {
+        let sa = Bind {
+            buf: sa_buf,
+            off: 0,
+            size: sa_buf.size as u64,
+        };
+        let sb = Bind {
+            buf: sb_buf,
+            off: 0,
+            size: sb_buf.size as u64,
+        };
+        convert(inner, Conversion::Bf16ToF16, m * k, a, sa);
+        convert(inner, Conversion::Bf16ToF16, k * n, b, sb);
+        (sa, sb)
+    } else {
+        (a, b)
+    };
+
+    // A bf16 result needs an f32 accumulator buffer to land in first.
+    let stage_c = if g.c_dtype == crate::dtype::BFLOAT16 {
+        Some(dev.alloc(m * n * 4).expect("coopmat: f32 scratch C"))
+    } else {
+        None
+    };
+    let out = match stage_c.as_ref() {
+        Some(sc) => Bind {
+            buf: sc,
+            off: 0,
+            size: sc.size as u64,
+        },
+        None => c,
+    };
+
+    let words = coopmat::module(m, n, k).expect("coopmat: eligible descriptor");
+    let key = (m, n, k, g.dtype, g.c_dtype);
+    let pipe = {
+        let mut cache = inner.coop.borrow_mut();
+        if let Some(p) = cache.get(&key) {
+            p.clone()
+        } else {
+            let p = Rc::new(
+                dev.pipeline(&words, 3)
+                    .unwrap_or_else(|e| panic!("TGERR: VK coopmat pipeline: {e}")),
+            );
+            cache.insert(key, p.clone());
+            p
+        }
+    };
+    let sets = dev.alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+    let bound = [(a.buf, a.off, a.size), (b.buf, b.off, b.size), (out.buf, out.off, out.size)];
     COOP_GEMMS.with(|c| c.set(c.get() + 1));
     let groups = coopmat::grid(m, n);
     if trace_on() {
-        trace(&format!("coopmat {m}x{n}x{k} groups={groups:?}"));
+        trace(&format!("coopmat {m}x{n}x{k} groups={groups:?} {:?}", g.dtype));
     }
-    inner
-        .dev
-        .dispatch(&pipe, &sets, &bound, groups, false, "coopmat")
+    dev.dispatch(&pipe, &sets, &bound, groups, false, "coopmat")
         .unwrap_or_else(|e| panic!("TGERR: VK coopmat dispatch: {e}"));
+
+    if g.c_dtype == crate::dtype::BFLOAT16 {
+        convert(inner, Conversion::F32ToBf16, m * n, out, c);
+    }
+    // The scratch buffers are released here; `VkDevice::free` defers the actual
+    // destruction to the next idle point, so pending work stays valid.
+    if let Some(s) = stage_a.as_ref() {
+        dev.free(s);
+    }
+    if let Some(s) = stage_b.as_ref() {
+        dev.free(s);
+    }
+    if let Some(s) = stage_c.as_ref() {
+        dev.free(s);
+    }
 }
 
-/// Number of usable Vulkan devices.
+/// Number of usable Vulkan devices./// Number of usable Vulkan devices.
 pub fn device_count() -> usize {
     vk_devices().len()
 }

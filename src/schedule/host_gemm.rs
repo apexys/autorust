@@ -727,10 +727,11 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
     let mul_dt = ctx.dt_of(&mul);
-    // Metal's MPS path and the Vulkan cooperative-matrix module both take f16
-    // inputs and accumulate (and store) in f32.
+    // Metal's MPS path takes f16 inputs and accumulates (and stores) in f32; the
+    // Vulkan cooperative-matrix module does the same for f16 *and* bf16 inputs.
     let mixed_f16_f32 = matches!(kind, GemmDevice::Metal | GemmDevice::Vk)
-        && mul_dt == crate::dtype::FLOAT16
+        && (mul_dt == crate::dtype::FLOAT16
+            || (kind == GemmDevice::Vk && mul_dt == crate::dtype::BFLOAT16))
         && red_dt == crate::dtype::FLOAT32
         && c_dt == crate::dtype::FLOAT32;
     if (mul_dt != red_dt || mul_dt != c_dt) && !mixed_f16_f32 {
@@ -1043,11 +1044,25 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // accept the descriptor (f16 operands, f32 accumulate, contiguous row-major,
     // no epilogue) or the kernel must keep its generated form.
     #[cfg(feature = "backend_vk")]
-    if kind == GemmDevice::Vk && !crate::runtime::coopmat::eligible(&desc) {
-        if crate::helpers::env::get("VK_TRACE").is_some() {
-            eprintln!("[vk] coopmat declined: {desc:?}");
+    if kind == GemmDevice::Vk {
+        // A plain bf16 dot accumulates in bf16 in the graph, while the MMA
+        // accumulates in f32, so that case is a numerics change and rides the
+        // same switch as the CUDA tensor-core path (`USE_TC`, on by default).
+        let bf16_accum = desc.dtype == crate::dtype::BFLOAT16
+            && desc.c_dtype == crate::dtype::BFLOAT16;
+        let tc_on = ctx.settings.tensor_cores
+            && !matches!(
+                crate::helpers::env::get("USE_TC").as_deref(),
+                Some("0") | Some("false")
+            );
+        if !crate::runtime::coopmat::eligible(&desc) || (bf16_accum && !tc_on) {
+            if crate::helpers::env::get("VK_TRACE").is_some() {
+                eprintln!(
+                    "[vk] coopmat declined (bf16_accum={bf16_accum} tc={tc_on}): {desc:?}"
+                );
+            }
+            return None;
         }
-        return None;
     }
     Some(desc)
 }

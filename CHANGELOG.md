@@ -13,9 +13,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`AUTORUST_VK_GEMM`) and runs one `OpCooperativeMatrixMulAddKHR` kernel
   (`runtime::coopmat`, shapes patched at load time) instead of the generated
   reduce loop: **2.0x the device speed at 2048³** (1.71 vs 3.42 ms) and exact
-  against the interpreter. Plain 16-bit matmuls (16-bit accumulate) keep the
-  generated kernel, so their numerics are unchanged. bf16 storage is not covered
-  yet — see `CURRENT_STATE.md` §9.53.
+  against the interpreter. `bf16` storage runs on the same path through two
+  element-wise conversion modules (bf16 -> f16 for the operands, f32 -> bf16 for
+  the result), gated by `USE_TC` where the graph's 16-bit accumulation would
+  otherwise change. Plain 16-bit matmuls that the matcher does not describe keep
+  the generated kernel, so their numerics are unchanged.
 - **Cooperative-matrix ("tensor core") probing for the Vulkan backend.** The
   device probe now enumerates `VkPhysicalDeviceCooperativeMatrixPropertiesKHR`
   and enables `VK_KHR_cooperative_matrix` only when a 16-bit-in/f32-out shape

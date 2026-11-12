@@ -4331,6 +4331,21 @@ end-to-end behaviour: one dispatch, exact numerics, and a plain f16 `dot` *not*
 taking the path. Measured at 2048^3 f16/f32 in the pipeline: 1.71 vs 3.42 ms of
 device time (2.0x).
 
+**bf16 storage works on the same path** (`coopmat_handles_bf16_storage`): the
+module reads f16, so `bf16` A/B are staged through f16 scratch buffers by two
+element-wise conversion modules (`coopmat::convert_bf16_to_f16`, exact for
+in-range values — f16 has more mantissa than bf16, only a narrower exponent) and
+a bf16 result is rounded from an f32 scratch (`convert_f32_to_bf16`). Both the
+bf16-out and f32-out forms dispatch once and match INTERP. The bf16, f32-out form
+also unlocked the mixed-precision gate for bf16 multiplies.
+
+That is not yet visible in the benchmarks: `bench/run.py`'s bf16 rows (and the
+ViT's `Linear` layers) lower to a kernel that `extract` does not describe — the
+reduce body there is neither `MUL` nor `MULACC` after peeling, so no descriptor is
+built and the generated kernel runs. Localising that is the remaining step; the
+executor, both conversion modules and the eligibility filter are written and
+tested, so it is a matcher change, not new machinery.
+
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
 f16 parameters must be seeded through `from_slice`. Separate bug, not touched.
