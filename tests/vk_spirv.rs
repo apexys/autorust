@@ -186,3 +186,27 @@ fn probe_module_validates() {
     };
     validate("probe", &m);
 }
+
+/// bf16 (a 16-bit storage pattern widened to f32) exercises the narrow-integer
+/// path: loads are `u16` vectors widened to 32-bit registers, and lane extracts
+/// must use the *register* type, not the storage type (a `ushort` extract from a
+/// `v4uint` is invalid SPIR-V that some drivers silently accept).
+#[test]
+fn renders_bf16_matmul_and_round_trip() {
+    let ctx = Ctx::new();
+    let data: Vec<f32> = (0..(2 * 64 * 64)).map(|i| (i % 13) as f32 * 0.25).collect();
+    let a = Tensor::from_slice(&ctx, &data, None, Some("INTERP"))
+        .reshape([2, 64, 64])
+        .cast(autorust::dtype::BFLOAT16);
+    let b = Tensor::from_slice(&ctx, &data, None, Some("INTERP"))
+        .reshape([2, 64, 64])
+        .cast(autorust::dtype::BFLOAT16);
+    let m = a.dot(&b);
+    let w = m.add(&b).mul(2.0);
+    let out = w.cast(autorust::dtype::FLOAT32);
+    let k = {
+        let mut c = ctx.borrow_mut();
+        render_roots(&mut c, vec![out.uop().clone()])
+    };
+    check("bf16", k);
+}

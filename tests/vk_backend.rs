@@ -182,3 +182,43 @@ fn vk_f16_round_trip() {
     });
     check("f16", &got, &want);
 }
+
+/// A bf16 matmul with an f32 accumulator: registers/casts/widening must keep the
+/// value correct (the first cut of the register-array promotion dropped the
+/// loop-carried accumulator, which a render-only test cannot see).
+#[test]
+fn vk_bf16_matmul_matches_interp() {
+    if !have_vk() {
+        return;
+    }
+    let ctx = Ctx::new();
+    let n = 64i64;
+    let data: Vec<f32> = (0..(n * n)).map(|i| ((i % 17) as f32 - 8.0) * 0.125).collect();
+    let d2 = data.clone();
+    let (got, want) = both(&ctx, Some("VK"), move |c, d| {
+        let a = Tensor::from_slice(c, &d2, None, d).reshape([n, n]).cast(dtype::BFLOAT16);
+        let b = Tensor::from_slice(c, &data, None, d).reshape([n, n]).cast(dtype::BFLOAT16);
+        a.dot(&b).cast(dtype::FLOAT32)
+    });
+    check("bf16_matmul", &got, &want);
+}
+
+/// A loop-carried accumulator must survive the *last* iteration. The Vulkan
+/// emitter promotes register-array accumulators to `OpPhi`s, and the loop exit
+/// branch is taken from the continue block, so reading the header phi after the
+/// loop silently dropped the final chunk (a 64-element sum returned 24).
+#[test]
+fn vk_reduce_covers_the_last_chunk() {
+    if !have_vk() {
+        return;
+    }
+    let ctx = Ctx::new();
+    for n in [16i64, 64, 128, 1024] {
+        let data: Vec<f32> = (0..n).map(|i| (i + 1) as f32).collect();
+        let d2 = data.clone();
+        let (got, want) = both(&ctx, Some("VK"), move |c, d| {
+            Tensor::from_slice(c, &d2, None, d).sum(Some(&[0usize]), false, None)
+        });
+        check(&format!("sum{n}"), &got, &want);
+    }
+}

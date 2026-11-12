@@ -122,6 +122,7 @@ mod op {
     pub const MEMBER_DECORATE: u16 = 72;
 
     pub const VECTOR_EXTRACT_DYNAMIC: u16 = 77;
+    pub const COPY_OBJECT: u16 = 83;
     pub const COMPOSITE_CONSTRUCT: u16 = 80;
     pub const COMPOSITE_EXTRACT: u16 = 81;
 
@@ -526,6 +527,11 @@ struct LoopFrame {
     end: u32,
 }
 
+/// One loop-carried register element: the `FUNCTION` variable and element it
+/// lives in, the header `OpPhi`, the id carrying the value out of the continue
+/// block, its category and its SPIR-V type.
+type LoopReg = (u32, i64, u32, u32, Cat, u32);
+
 /// Emits one SPIR-V compute module from a linear UOp list.
 struct Emitter<'a> {
     ctx: &'a mut UOpCtx,
@@ -549,6 +555,16 @@ struct Emitter<'a> {
     known: HashMap<u32, i64>,
     /// How many times each uop is referenced (for FMA contraction).
     uses: HashMap<UopId, u32>,
+    /// `BUFFER` uops whose every access is a constant index and whose stores are
+    /// not inside an `IF`, so their elements can live in SSA registers instead of
+    /// `Function` memory.
+    promotable: HashMap<UopId, bool>,
+    /// Register-resident element values: `(variable, element) -> SSA id`.
+    regs: HashMap<(u32, i64), u32>,
+    /// `RANGE` uop -> the `(array, element)` pairs stored in its body.
+    loop_writes: HashMap<UopId, Vec<(UopId, i64)>>,
+    /// Elements carried around each open loop.
+    loop_regs: Vec<Vec<LoopReg>>,
     /// `(slot, cat, lanes)` -> `(variable, byte stride)`
     binding_map: HashMap<(i64, Cat, u32), (u32, u32)>,
     bindings: Vec<i64>,
@@ -694,7 +710,7 @@ impl<'a> Emitter<'a> {
             bits: 16,
             signed: false,
         };
-        let narrow = self.narrow_to(hi, n16);
+        let narrow = self.narrow_to(hi, n16, lanes);
         self.to_reg(narrow, n16, lanes)
     }
 
@@ -894,7 +910,7 @@ impl<'a> Emitter<'a> {
         };
         let bits = mask_bits(bits, cat);
         let id = self.const_splat(cat, lanes, bits);
-        V::Val(id, cat, lanes)
+        V::Val(id, reg_cat(cat), lanes)
     }
 
     fn ptr(&self, u: &UopId) -> PtrVal {
@@ -966,7 +982,7 @@ impl<'a> Emitter<'a> {
         }
         let narrow = is_narrow_int(to);
         let ty = if narrow {
-            self.cat_ty(to)
+            self.storage_ty(to, lanes)
         } else {
             self.val_ty(to, lanes)
         };
@@ -1024,28 +1040,26 @@ impl<'a> Emitter<'a> {
     }
 
     /// Bit reinterpretation (`Ops::Bitcast`).
+    ///
+    /// Values live in register form, so a bitcast between two narrow integer
+    /// types (e.g. `bf16` -> `u16`) is the identity: both sides are the same
+    /// 16-bit pattern zero-extended into a 32-bit register.
     fn bitcast_val(&mut self, id: u32, from: Cat, to: Cat, lanes: u32) -> u32 {
-        if from == to {
+        let (fr, tr) = (reg_cat(from), reg_cat(to));
+        if fr == tr {
             return id;
         }
         if from.bits() != to.bits() {
             panic!("TGERR: SPIR-V bitcast of unequal widths ({from:?} -> {to:?})");
         }
-        if from == Cat::Bool {
+        if fr == Cat::Bool {
             let ty = self.val_ty(to, lanes);
             let one = self.const_splat(to, lanes, Self::one_bits(to));
             let zero = self.const_splat(to, lanes, 0);
             return self.d(op::SELECT, ty, &[id, one, zero]);
         }
-        if to == Cat::Bool {
-            return self.as_bool(
-                id,
-                Cat::Int {
-                    bits: 8,
-                    signed: false,
-                },
-                lanes,
-            );
+        if tr == Cat::Bool {
+            return self.as_bool(id, reg_cat(from), lanes);
         }
         let ty = self.val_ty(to, lanes);
         self.d(op::BITCAST, ty, &[id])
@@ -1193,12 +1207,13 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Truncate a register value to the `cat` storage width.
-    fn narrow_to(&mut self, v: u32, cat: Cat) -> u32 {
+    /// Truncate a register value to the `cat` storage width (per lane when
+    /// `lanes > 1`).
+    fn narrow_to(&mut self, v: u32, cat: Cat, lanes: u32) -> u32 {
         if !is_narrow_int(cat) {
             return v;
         }
-        let ty = self.cat_ty(cat);
+        let ty = self.storage_ty(cat, lanes);
         let o = if cat.is_signed() {
             op::S_CONVERT
         } else {
@@ -1212,6 +1227,13 @@ impl<'a> Emitter<'a> {
     fn load_ptr(&mut self, p: PtrVal, cat: Cat, lanes: u32) -> u32 {
         let lanes = lanes.max(1);
         let scat = storage_cat(cat);
+        if lanes == 1
+            && !is_narrow_int(scat)
+            && let Some((var, k)) = self.promoted_elem(&p)
+            && let Some(v) = self.regs.get(&(var, k)).copied()
+        {
+            return v;
+        }
         let raw = self.load_raw(p, scat, lanes);
         let reg = self.to_reg(raw, scat, lanes);
         if cat == Cat::Bool {
@@ -1285,6 +1307,14 @@ impl<'a> Emitter<'a> {
     /// Store `(cat, lanes)` through `p`. `val` is a register value.
     fn store_ptr(&mut self, p: PtrVal, cat: Cat, lanes: u32, val: u32) {
         let lanes = lanes.max(1);
+        if lanes == 1
+            && cat != Cat::Bool
+            && !is_narrow_int(cat)
+            && let Some((var, k)) = self.promoted_elem(&p)
+        {
+            self.regs.insert((var, k), val);
+            return;
+        }
         // `bool` is stored as a byte: convert the mask to 0/1 in register form.
         let (cat, val) = match cat {
             Cat::Bool => {
@@ -1296,18 +1326,24 @@ impl<'a> Emitter<'a> {
             }
             other => (other, val),
         };
-        // Narrow the register value to the storage width.
+        // Narrow the register value to the storage width. A vector of 8/16-bit
+        // elements cannot be built with `OpCompositeConstruct` (Vulkan forbids
+        // composites of those types), so the narrowed lanes are assembled in
+        // register width and converted once.
         let val = if lanes == 1 {
-            self.narrow_to(val, cat)
+            self.narrow_to(val, cat, 1)
         } else if is_narrow_int(cat) {
             let lane_ty = self.val_ty(reg_cat(cat), 1);
             let mut parts = Vec::with_capacity(lanes as usize);
             for l in 0..lanes {
                 let ex = self.d(op::COMPOSITE_EXTRACT, lane_ty, &[val, l]);
-                parts.push(self.narrow_to(ex, cat));
+                let nar = self.narrow_to(ex, cat, 1);
+                parts.push(self.to_reg(nar, cat, 1));
             }
-            let ty = self.storage_ty(cat, lanes);
-            self.d(op::COMPOSITE_CONSTRUCT, ty, &parts)
+            let vty = self.val_ty(reg_cat(cat), lanes);
+            let wide = self.d(op::COMPOSITE_CONSTRUCT, vty, &parts);
+            let sty = self.storage_ty(cat, lanes);
+            self.d(op::U_CONVERT, sty, &[wide])
         } else {
             val
         };
@@ -1484,6 +1520,8 @@ impl<'a> Emitter<'a> {
         let zero = self.const_bits(cat, 0);
         let iv_next = self.id();
         let phi = self.d(op::PHI, vty, &[zero, pred, iv_next, cont]);
+        let carried = self.open_loop_regs(range, pred, cont);
+        self.loop_regs.push(carried);
         self.e(op::LOOP_MERGE, &[merge, cont, 0]);
         self.end_block(op::BRANCH, &[body_l]);
         self.start_block(body_l);
@@ -1508,6 +1546,7 @@ impl<'a> Emitter<'a> {
         }
         self.end_block(op::BRANCH, &[cont]);
         self.start_block(cont);
+        self.close_loop_regs();
         let step = self.const_bits(cat, Self::UNROLL as u64);
         self.d_at(iv_next, op::I_ADD, vty, &[phi, step]);
         let bty = self.bool_ty();
@@ -1519,6 +1558,201 @@ impl<'a> Emitter<'a> {
         self.end_block(op::BRANCH_CONDITIONAL, &[cmp, hdr, merge]);
         self.start_block(merge);
         let _ = end;
+    }
+
+    /// Walk the pointer chain of `u` down to the `BUFFER` uop it started from.
+    fn buffer_root(&self, u: &UopId) -> Option<UopId> {
+        let mut cur = u.clone();
+        for _ in 0..64 {
+            let i = self.info.get(&cur)?;
+            match i.op {
+                Ops::Buffer => return Some(cur),
+                Ops::Param => return None,
+                Ops::Index | Ops::Shrink | Ops::Cast | Ops::Bitcast | Ops::After => {
+                    cur = i.srcs.first()?.clone();
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// A constant-index pointer chain: `(array uop, element index)`.
+    fn const_elem(&mut self, ptr: &UopId) -> Option<(UopId, i64)> {
+        let mut cur = ptr.clone();
+        let mut off = 0i64;
+        for _ in 0..64 {
+            let i = self.info.get(&cur)?;
+            match i.op {
+                Ops::Buffer => {
+                    let size = dtype_size(i.dt) as i64;
+                    return Some((cur.clone(), off / size));
+                }
+                Ops::Index | Ops::Shrink => {
+                    let idx = i.srcs.get(1)?;
+                    let Ok(crate::uop::sint::SVal::I(v)) = self.ctx.ssimplify(idx.clone()) else {
+                        return None;
+                    };
+                    let base = self.info.get(&i.srcs[0])?;
+                    off += v as i64 * dtype_size(base.dt) as i64;
+                    cur = i.srcs[0].clone();
+                }
+                Ops::Cast | Ops::Bitcast | Ops::After => cur = i.srcs[0].clone(),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Decide which register arrays can live in SSA (see `promotable`) and record
+    /// each loop's body span.
+    fn scan_buffers(&mut self, lst: &[UopId]) {
+        let mut idx_const: HashMap<UopId, bool> = HashMap::new();
+        let mut store_in_if: HashMap<UopId, bool> = HashMap::new();
+        let mut if_depth = 0i64;
+        let mut ranges: Vec<(UopId, usize)> = Vec::new();
+        for (i, u) in lst.iter().enumerate() {
+            let Some(info) = self.info.get(u).map(|i| (i.op, i.srcs.clone())) else { continue };
+            let info = Info { op: info.0, dt: dtype::VOID, srcs: info.1, numel: 1, addrspace: None };
+            match info.op {
+                Ops::If => if_depth += 1,
+                Ops::Endif => if_depth -= 1,
+                Ops::Range => {
+                    ranges.push((u.clone(), i));
+                    self.loop_writes.entry(u.clone()).or_default();
+                }
+                Ops::End => {
+                    ranges.pop();
+                }
+                Ops::Index | Ops::Shrink => {
+                    if let Some(root) = self.buffer_root(&info.srcs[0]) {
+                        let k = info
+                            .srcs
+                            .get(1)
+                            .map(|s| {
+                                matches!(
+                                    self.ctx.ssimplify(s.clone()),
+                                    Ok(crate::uop::sint::SVal::I(_))
+                                )
+                            })
+                            .unwrap_or(true);
+                        let e = idx_const.entry(root).or_insert(true);
+                        *e = *e && k;
+                    }
+                }
+                Ops::Store => {
+                    if if_depth > 0
+                        && let Some(root) = self.buffer_root(&info.srcs[0])
+                    {
+                        store_in_if.insert(root, true);
+                    }
+                    if let Some((buf, k)) = self.const_elem(&info.srcs[0])
+                        && let Some((r, _)) = ranges.last()
+                    {
+                        self.loop_writes
+                            .entry(r.clone())
+                            .or_default()
+                            .push((buf, k));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Buffers that are never indexed (or only with constants) and never
+        // stored inside a conditional can be promoted.
+        let bufs: Vec<UopId> = lst
+            .iter()
+            .filter(|u| self.info.get(u).map(|i| i.op) == Some(Ops::Buffer))
+            .cloned()
+            .collect();
+        for b in bufs {
+            let ok = *idx_const.get(&b).unwrap_or(&true) && !store_in_if.contains_key(&b);
+            let local = self
+                .info
+                .get(&b)
+                .map(|i| i.addrspace == Some(dtype::AddrSpace::Local))
+                .unwrap_or(true);
+            self.promotable.insert(b, ok && !local);
+        }
+    }
+
+    /// The promoted element `(variable, element)` of a local pointer, if the
+    /// pointer is a constant-index access into a promotable register array.
+    fn promoted_elem(&self, p: &PtrVal) -> Option<(u32, i64)> {
+        let Root::Local { var, stride, sc, .. } = p.root else {
+            return None;
+        };
+        if sc != storage::FUNCTION {
+            return None;
+        }
+        let Off::C(off) = p.off else { return None };
+        Some((var, off / stride.max(1) as i64))
+    }
+
+    /// Emit the loop-carried `OpPhi`s for register elements written in `range`'s
+    /// body. Must run right after the loop's other `OpPhi`s (SPIR-V requires all
+    /// phis at the top of the header block).
+    fn open_loop_regs(
+        &mut self,
+        range: &UopId,
+        pred: u32,
+        cont: u32,
+    ) -> Vec<LoopReg> {
+        let mut out = Vec::new();
+        let writes = self.loop_writes.get(range).cloned().unwrap_or_default();
+        let mut seen: Vec<(u32, i64)> = Vec::new();
+        for (buf, k) in writes {
+            if !self.promotable.get(&buf).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some((var, scalar)) = self.local_var.get(&buf.id()).copied() else {
+                continue;
+            };
+            let cat = cat_of(self.info[&buf].dt, &self.caps);
+            if is_narrow_int(cat) || seen.contains(&(var, k)) {
+                continue;
+            }
+            seen.push((var, k));
+            let ty = self.cat_ty(cat);
+            let pre = match self.regs.get(&(var, k)).copied() {
+                Some(v) => v,
+                None if scalar => self.d(op::LOAD, ty, &[var]),
+                None => {
+                    let ptr_ty = self.ty(TyKey::Ptr(storage::FUNCTION, ty));
+                    let kidx = self.const_bits(
+                        Cat::Int {
+                            bits: 32,
+                            signed: false,
+                        },
+                        k as u64,
+                    );
+                    let ptr = self.access_chain(var, ptr_ty, kidx, false);
+                    self.d(op::LOAD, ty, &[ptr])
+                }
+            };
+            let next = self.id();
+            let phi = self.d(op::PHI, ty, &[pre, pred, next, cont]);
+            self.regs.insert((var, k), phi);
+            out.push((var, k, phi, next, cat, ty));
+        }
+        out
+    }
+
+    /// Close a loop's register phis: the value at the end of the body becomes the
+    /// back-edge operand, and after the loop the phi is the element's value.
+    fn close_loop_regs(&mut self) {
+        let Some(carried) = self.loop_regs.pop() else {
+            return;
+        };
+        for (var, k, phi, next, _cat, ty) in carried {
+            let cur = self.regs.get(&(var, k)).copied().unwrap_or(phi);
+            self.d_at(next, op::COPY_OBJECT, ty, &[cur]);
+            // After the loop the element's value is the one carried out of the
+            // *continue* block, not the header phi: the exit branch is taken from
+            // the continue block, so the header is not re-entered and its phi
+            // still holds the previous iteration's value (off by one iteration).
+            self.regs.insert((var, k), next);
+        }
     }
 
     fn step(&mut self, u: &UopId) {
@@ -1591,7 +1825,7 @@ impl<'a> Emitter<'a> {
                 let ty = self.val_ty(cat, lanes.max(ids.len() as u32));
                 let id = self.d(op::COMPOSITE_CONSTRUCT, ty, &ids);
                 self.vals
-                    .insert(u.clone(), V::Val(id, cat, ids.len() as u32));
+                    .insert(u.clone(), V::Val(id, reg_cat(cat), ids.len() as u32));
             }
             Ops::Index | Ops::Shrink => {
                 match self.vals.get(&srcs[0]).copied() {
@@ -1674,7 +1908,7 @@ impl<'a> Emitter<'a> {
                     let (tcat, tlanes) = self.cat_lanes(u);
                     let id = self.widen(id, fcat, flanes, tlanes);
                     let out = self.bitcast_val(id, fcat, tcat, tlanes);
-                    self.vals.insert(u.clone(), V::Val(out, tcat, tlanes));
+                    self.vals.insert(u.clone(), V::Val(out, reg_cat(tcat), tlanes));
                 }
             }
             Ops::Load => {
@@ -1702,7 +1936,7 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.load_ptr(p, cat, lanes)
                 };
-                self.vals.insert(u.clone(), V::Val(id, cat, lanes));
+                self.vals.insert(u.clone(), V::Val(id, reg_cat(cat), lanes));
             }
             Ops::Store => {
                 let p = self.ptr(&srcs[0]);
@@ -1788,6 +2022,8 @@ impl<'a> Emitter<'a> {
                     let phi = self.d(op::PHI, vty, &[zero, pred, iv_next, cont]);
                     Some((phi, cat, iv_next))
                 };
+                let carried = self.open_loop_regs(u, pred, cont);
+                self.loop_regs.push(carried);
                 self.e(op::LOOP_MERGE, &[merge, cont, 0]);
                 self.end_block(op::BRANCH, &[body]);
                 self.start_block(body);
@@ -1808,17 +2044,19 @@ impl<'a> Emitter<'a> {
                     .loops
                     .pop()
                     .unwrap_or_else(|| panic!("TGERR: SPIR-V END without a RANGE"));
+                // Close the body unconditionally and finish the loop in the
+                // continue block: a phi's operand must be defined in the block it
+                // is the parent of (or a block dominating it), and putting the
+                // loop-carried copies there keeps that trivially true.
+                self.end_block(op::BRANCH, &[f.cont]);
+                self.start_block(f.cont);
+                self.close_loop_regs();
                 let cond = if srcs.len() >= 3 {
                     let (g, gcat, glanes) = self.value(&srcs[2]);
                     Some(self.as_bool(g, gcat, glanes))
                 } else {
                     None
                 };
-                match cond {
-                    Some(c) => self.end_block(op::BRANCH_CONDITIONAL, &[c, f.cont, f.merge]),
-                    None => self.end_block(op::BRANCH, &[f.cont]),
-                }
-                self.start_block(f.cont);
                 match f.iv {
                     Some((phi, cat)) => {
                         let one = self.const_bits(cat, 1);
@@ -1830,9 +2068,18 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.d(op::U_LESS_THAN, bty, &[f.iv_next, f.end])
                         };
-                        self.end_block(op::BRANCH_CONDITIONAL, &[cmp, f.header, f.merge]);
+                        let cont = match cond {
+                            Some(c) => self.d(op::BITWISE_AND, bty, &[cmp, c]),
+                            None => cmp,
+                        };
+                        self.end_block(op::BRANCH_CONDITIONAL, &[cont, f.header, f.merge]);
                     }
-                    None => self.end_block(op::BRANCH, &[f.header]),
+                    None => match cond {
+                        Some(c) => {
+                            self.end_block(op::BRANCH_CONDITIONAL, &[c, f.header, f.merge])
+                        }
+                        None => self.end_block(op::BRANCH, &[f.header]),
+                    },
                 }
                 self.start_block(f.merge);
             }
@@ -1873,13 +2120,12 @@ impl<'a> Emitter<'a> {
         op: Ops,
         dt: DTypeId,
         srcs: &[UopId],
-        numel: u32,
+        _numel: u32,
         _addrspace: Option<dtype::AddrSpace>,
     ) {
         let _ = dt;
         let (rcat, rlanes) = self.result_cat(op, srcs);
         let lanes = rlanes.max(1);
-        let _ = numel;
         // Operands converted to the result category and lane count.
         let mut ops: Vec<u32> = Vec::with_capacity(srcs.len());
         for s in srcs {
@@ -1928,7 +2174,7 @@ impl<'a> Emitter<'a> {
                 // C compilers do implicitly for `acc + a*b` (and is what the
                 // OpenCL/CUDA backends get). Without it the GEMM spends two
                 // instructions per MAC.
-                if rcat.is_float() {
+                if rcat.is_float() && crate::helpers::env::get("VK_NO_FMA").is_none() {
                     if let Some(id) = self.try_fma(&srcs[0], &srcs[1], rcat, lanes) {
                         id
                     } else if let Some(id) = self.try_fma(&srcs[1], &srcs[0], rcat, lanes) {
@@ -2170,6 +2416,7 @@ impl<'a> Emitter<'a> {
                 *self.uses.entry(s).or_insert(0) += 1;
             }
         }
+        self.scan_buffers(lst);
         // The kernel name (and the workgroup size) come from the SINK.
         let mut name = "kernel".to_string();
         for u in lst {
@@ -2491,6 +2738,10 @@ pub fn render(ctx: &mut UOpCtx, lst: &[UopId], caps: Caps) -> VkModule {
         const_cache: HashMap::new(),
         known: HashMap::new(),
         uses: HashMap::new(),
+        promotable: HashMap::new(),
+        regs: HashMap::new(),
+        loop_writes: HashMap::new(),
+        loop_regs: Vec::new(),
         binding_map: HashMap::new(),
         bindings: Vec::new(),
         uses_16: false,
