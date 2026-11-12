@@ -617,8 +617,10 @@ fn convert(
 }
 
 /// Record a `rows x cols` bf16 -> row-major f16 staging pass.
+#[allow(clippy::too_many_arguments)]
 fn stage(
     inner: &VkInner,
+    kind: coopmat::Stage,
     rows: usize,
     cols: usize,
     in_rs: usize,
@@ -626,7 +628,12 @@ fn stage(
     src: Bind<'_>,
     dst: Bind<'_>,
 ) {
-    let words = coopmat::stage_bf16(rows, cols, in_rs, in_cs).expect("coopmat: staging module");
+    let words = match kind {
+        coopmat::Stage::Bf16 => coopmat::stage_bf16(rows, cols, in_rs, in_cs),
+        coopmat::Stage::F32 => coopmat::stage_f32(rows, cols, in_rs, in_cs),
+        coopmat::Stage::Direct => return,
+    }
+    .expect("coopmat: staging module");
     let key = (2, rows, cols, in_rs, in_cs);
     let pipe = {
         let mut cache = inner.conv.borrow_mut();
@@ -669,14 +676,20 @@ fn stage(
 /// Record the fused bias + round epilogue over an `m x n` f32 accumulator.
 fn epilogue(
     inner: &VkInner,
+    bias_f32: bool,
     n: usize,
     count: usize,
     src: Bind<'_>,
     bias: Bind<'_>,
     dst: Bind<'_>,
 ) {
-    let words = coopmat::epilogue_bf16(n, count).expect("coopmat: epilogue module");
-    let key = (3, n, count, 0, 0);
+    let words = if bias_f32 {
+        coopmat::epilogue_f32(n, count)
+    } else {
+        coopmat::epilogue_bf16(n, count)
+    }
+    .expect("coopmat: epilogue module");
+    let key = (3, n, count, bias_f32 as usize, 0);
     let pipe = {
         let mut cache = inner.conv.borrow_mut();
         if let Some(p) = cache.get(&key) {
@@ -737,9 +750,9 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         }
     };
     // The bias vector is 2 bytes per element, so its element offset scales.
-    let view_elem2 = |slot: i64, off: i64| {
+    let view_elem = |slot: i64, off: i64, elem_bytes: u64| {
         let mut b = view(slot);
-        b.off += (off as u64) * 2;
+        b.off += (off as u64) * elem_bytes;
         b
     };
     let (a, b, c) = (view(g.a_slot), view(g.b_slot), view(g.c_slot));
@@ -749,36 +762,42 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     // f16 (the pass also transposes a column-major operand, which is what the
     // ViT's `Linear` weight and the TN/NT GEMM shapes are). Each element is read
     // K/16 or so times by the GEMM, so the extra pass is noise.
-    let stage_a = if g.dtype == crate::dtype::BFLOAT16 {
+    // Stage whatever is not already f16 into a packed f16 tile (the pass also
+    // transposes a column-major operand).
+    let needs_a = plan.stage_a != coopmat::Stage::Direct;
+    let needs_b = plan.stage_b != coopmat::Stage::Direct;
+    let stage_a = if needs_a {
         Some(inner.scratch(0, m * k * 2))
     } else {
         None
     };
-    let stage_b = if g.dtype == crate::dtype::BFLOAT16 {
+    let stage_b = if needs_b {
         Some(inner.scratch(1, k * n * 2))
     } else {
         None
     };
-    let (a, b) = if let (Some(sa_buf), Some(sb_buf)) = (stage_a.as_ref(), stage_b.as_ref()) {
-        let sa = Bind {
-            buf: sa_buf,
-            off: 0,
-            size: sa_buf.size as u64,
-        };
-        let sb = Bind {
-            buf: sb_buf,
-            off: 0,
-            size: sb_buf.size as u64,
-        };
-        stage(inner, m, k, plan.sa1, plan.sa2, a, sa);
-        stage(inner, k, n, plan.sb1, plan.sb2, b, sb);
-        (sa, sb)
-    } else {
-        (a, b)
+    let (a, b) = match (stage_a.as_ref(), stage_b.as_ref()) {
+        (Some(sa_buf), Some(sb_buf)) => {
+            let sa = Bind {
+                buf: sa_buf,
+                off: 0,
+                size: sa_buf.size as u64,
+            };
+            let sb = Bind {
+                buf: sb_buf,
+                off: 0,
+                size: sb_buf.size as u64,
+            };
+            stage(inner, plan.stage_a, m, k, plan.sa1, plan.sa2, a, sa);
+            stage(inner, plan.stage_b, k, n, plan.sb1, plan.sb2, b, sb);
+            (sa, sb)
+        }
+        _ => (a, b),
     };
 
-    // A bf16 result needs an f32 accumulator buffer to land in first.
-    let stage_c = if g.c_dtype == crate::dtype::BFLOAT16 {
+    // A bf16 result, or any epilogue, needs the f32 accumulator in a scratch
+    // buffer first.
+    let stage_c = if g.c_dtype == crate::dtype::BFLOAT16 || g.bias_slot >= 0 {
         Some(inner.scratch(2, m * n * 4))
     } else {
         None
@@ -829,13 +848,11 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     dev.dispatch(&pipe, &sets, &bound, groups, false, "coopmat")
         .unwrap_or_else(|e| panic!("TGERR: VK coopmat dispatch: {e}"));
 
-    if g.c_dtype == crate::dtype::BFLOAT16 {
-        if g.bias_slot >= 0 {
-            let bias = view_elem2(g.bias_slot, g.bias_off);
-            epilogue(inner, n, m * n, out, bias, c);
-        } else {
-            convert(inner, Conversion::F32ToBf16, m * n, out, c);
-        }
+    if g.bias_slot >= 0 {
+        let bias = view_elem(g.bias_slot, g.bias_off, if plan.bias_f32 { 4 } else { 2 });
+        epilogue(inner, plan.bias_f32, n, m * n, out, bias, c);
+    } else if g.c_dtype == crate::dtype::BFLOAT16 {
+        convert(inner, Conversion::F32ToBf16, m * n, out, c);
     }
 }
 

@@ -4398,11 +4398,18 @@ ViT gap is **not** a missing tensor-core path; it is the quality of the generate
 f32 x bf16 GEMM kernel (the same 15-uop bf16-round idiom that the OpenCL C compiler
 folds and the driver does not).
 
-Two ways forward, both deliberate: (a) improve the emitted idiom for that kernel,
-or (b) stage the f32 activation to f16 behind `USE_TC` (the switch the CUDA
-tensor-core path already uses for a numerics change), which would be one more
-conversion module (`f32 -> f16`, contiguous) plus a `plan`/`coop_gemm` branch, and
-would put the projections on the MMA (f16 x f16 -> f32) at ~1e-3 relative error.
+Option (b) was then half-built and is **gated off** until it is finished: the
+plumbing exists — `HostGemm` now carries `a_dtype`/`b_dtype`/`bias_dtype` (defaulting
+to `dtype`/`c_dtype`, so old descriptors still parse), `extract` accepts a mixed
+16/32-bit operand pair and a bias in a different dtype for a Vulkan descriptor,
+`coopmat::Stage` distinguishes `Direct`/`Bf16`/`F32` per operand, and both new
+modules (`coopmat::stage_f32`, `epilogue_f32`) assemble and validate — but the
+**epilogue matrix is incomplete**: the ViT needs *bf16 bias + f32 result*, while the
+two kernels I have are bf16-bias→bf16-result and f32-bias→f32-result, so the
+dispatch wrote 2-byte values into the f32 output (measured relative error 6.5). A
+per-result-dtype epilogue pair (bias widened, result written in `c_dtype`) is the
+remaining piece; until then `plan` rejects `Stage::F32` and the projections keep
+their generated kernel, so `vit_infer_bf16` stays at 154 ms.
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so

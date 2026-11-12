@@ -522,8 +522,10 @@ within the machine's noise (0.98–1.25 ms across runs). `vit_infer_bf16` is unc
 its projections are `f32 activations x bf16 weights -> f32` (`ab-dtype a=f32
 b=bf16 mul=f32 red=f32 c=f32`), which a 16-bit MMA cannot compute without rounding
 the activations to f16. The gap is the generated kernel for that dtype mix (the
-bf16-round idiom the OpenCL C compiler folds); closing it means either emitting a
-better idiom or staging f32 activations to f16 behind `USE_TC` — see
+bf16-round idiom the OpenCL C compiler folds). Staging f32 activations to f16 is
+plumbed (`HostGemm::a_dtype`/`b_dtype`/`bias_dtype`, `coopmat::Stage`, and validated
+`stage_f32`/`epilogue_f32` modules) but gated off: the epilogue needs a
+bf16-bias→f32-result variant, which is the remaining piece — see
 `CURRENT_STATE.md` §9.53.
 
 What is still missing there:

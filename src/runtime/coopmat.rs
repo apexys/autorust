@@ -137,6 +137,18 @@ pub const N_TILE: usize = 64;
 /// Contraction depth of one `OpCooperativeMatrixMulAddKHR`.
 pub const K_TILE: usize = 16;
 
+/// How an operand reaches the MMA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Already f16: bound directly.
+    Direct,
+    /// bf16: staged (exact for in-range values).
+    Bf16,
+    /// f32: staged by rounding to f16 — only behind `USE_TC`, since it loses
+    /// mantissa bits the graph keeps.
+    F32,
+}
+
 /// A GEMM the module can run: shapes plus each operand's offset strides and
 /// `MemoryLayoutKHR`.
 ///
@@ -169,6 +181,14 @@ pub struct Plan {
     pub slb: usize,
     /// C's row stride (the result is stored row-major).
     pub sc: usize,
+    /// How each operand is staged.
+    pub stage_a: Stage,
+    /// How B is staged.
+    pub stage_b: Stage,
+    /// Whether the epilogue adds a per-column bias.
+    pub bias: bool,
+    /// Whether that bias is f32 (otherwise bf16).
+    pub bias_f32: bool,
 }
 
 /// Derive the plan for a library-GEMM descriptor, or `None` when the module
@@ -182,7 +202,34 @@ pub struct Plan {
 /// GEMM shapes are); the result is row-major.
 pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
     use crate::dtype;
-    let dt_ok = g.dtype == dtype::FLOAT16 || g.dtype == dtype::BFLOAT16;
+    // A mixed-precision `Linear` (f32 activations against 16-bit weights, f32
+    // accumulate) can also take the MMA, but only by rounding f32 to f16, so it
+    // rides `USE_TC` — the same switch the CUDA tensor-core path uses for a
+    // numerics change.
+    let tc_on = crate::helpers::env::get("USE_TC")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true);
+    let stage_of = |dt: crate::dtype::DTypeId| match dt {
+        d if d == dtype::FLOAT16 => Some(Stage::Direct),
+        d if d == dtype::BFLOAT16 => Some(Stage::Bf16),
+        d if d == dtype::FLOAT32 => Some(Stage::F32),
+        _ => None,
+    };
+    let (stage_a, stage_b) = match (stage_of(g.a_dtype), stage_of(g.b_dtype)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return None,
+    };
+    // `Stage::F32` staging exists and is validated in isolation, but the
+    // epilogue matrix is not complete yet: a bf16 bias with an f32 result (the
+    // shape a mixed-precision `Linear` has) still needs its own kernel, so that
+    // combination keeps the generated kernel rather than write the wrong width.
+    let _ = tc_on;
+    if stage_a == Stage::F32 || stage_b == Stage::F32 {
+        return None;
+    }
+    // The MMA itself reads 16-bit operands; anything above was staged.
+    let dt_ok = stage_a != Stage::Direct || stage_b != Stage::Direct
+        || (g.dtype == dtype::FLOAT16 || g.dtype == dtype::BFLOAT16);
     let c_ok = g.c_dtype == dtype::FLOAT32
         || (g.c_dtype == dtype::BFLOAT16 && g.dtype == dtype::BFLOAT16);
     if !dt_ok
@@ -201,18 +248,20 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
     // A per-column bias rides the f32->bf16 epilogue, so it needs a bf16 result
     // (which is what a mixed-precision `Linear` has). A scale/residual epilogue
     // would need another pass and stays generated.
-    if g.bias_slot >= 0 && (g.c_dtype != dtype::BFLOAT16 || g.bias_off < 0) {
+    if g.bias_slot >= 0 && g.bias_off < 0 {
         return None;
     }
+    let bias_f32 = g.bias_dtype == dtype::FLOAT32;
     // A is [m, k]; row-major has the k axis contiguous, column-major the m axis.
     // The leading dimension may exceed the tight size (a strided view).
-    // A transposed operand is rewritten to row-major f16 by the staging pass, but
-    // that path still returns the untransposed result (see CURRENT_STATE 9.53), so
-    // only row-major operands are accepted; everything else stays generated.
-    let staged = g.dtype == dtype::BFLOAT16;
+    // A transposed operand is rewritten to row-major f16 by the staging pass, so
+    // it needs one of the converting stages (f16 operands would need a plain copy
+    // kernel, which does not exist).
+    let staged_a = stage_a != Stage::Direct;
+    let staged_b = stage_b != Stage::Direct;
     let (sa1, sa2, la, sla) = if g.a_k == 1 && g.a_m >= g.k {
         (g.a_m, 1, ROW_MAJOR, g.a_m)
-    } else if staged && g.a_m == 1 && g.a_k >= g.m {
+    } else if staged_a && g.a_m == 1 && g.a_k >= g.m {
         (1, g.a_k, COL_MAJOR, g.a_k)
     } else {
         return None;
@@ -220,7 +269,7 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
     // B is [k, n].
     let (sb1, sb2, lb, slb) = if g.b_n == 1 && g.b_k >= g.n {
         (g.b_k, 1, ROW_MAJOR, g.b_k)
-    } else if staged && g.b_k == 1 && g.b_n >= g.k {
+    } else if staged_b && g.b_k == 1 && g.b_n >= g.k {
         (1, g.b_n, COL_MAJOR, g.b_n)
     } else {
         return None;
@@ -238,6 +287,10 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         lb,
         slb: slb as usize,
         sc: g.c_m as usize,
+        stage_a,
+        stage_b,
+        bias: g.bias_slot >= 0,
+        bias_f32,
     };
     // No size cutoff: the MMA wins from ~1 G MACs up (2048^3 2.78 vs 2.93 ms,
     // 4096^3 17.9 vs 23.2 vs OpenCL) and the smallest shapes are within the
@@ -307,6 +360,10 @@ mod tests {
             lb: ROW_MAJOR,
             slb: 3072,
             sc: 3072,
+            stage_a: Stage::Bf16,
+            stage_b: Stage::Bf16,
+            bias: false,
+            bias_f32: false,
         })
         .expect("patch");
         assert_eq!(w[0], 0x0723_0203, "SPIR-V magic");
@@ -339,6 +396,10 @@ mod tests {
             lb: ROW_MAJOR,
             slb: 768,
             sc: 768,
+            stage_a: Stage::Bf16,
+            stage_b: Stage::Bf16,
+            bias: false,
+            bias_f32: false,
         };
         // The patcher itself accepts any plan; the tiling rules live in `plan`,
         // which needs a descriptor, so check the module's structural invariants.
@@ -613,6 +674,143 @@ pub fn epilogue_bf16(n: usize, count: usize) -> Option<Vec<u32>> {
     for (sent, val) in [
         (SENTINEL_EPI_N, n),
         (SENTINEL_EPI_COUNT, count),
+    ] {
+        let mut hits = out.iter_mut().filter(|w| **w == sent);
+        let first = hits.next()?;
+        if hits.next().is_some() {
+            return None;
+        }
+        *first = val as u32;
+    }
+    Some(out)
+}
+
+/// Sentinel values of the `f32 -> f16` staging module.
+const SENTINEL_F32_COLS: u32 = 168430111;
+const SENTINEL_F32_COUNT: u32 = 168430112;
+const SENTINEL_F32_RS: u32 = 168430113;
+const SENTINEL_F32_CS: u32 = 168430114;
+
+/// `f32 -> f16` with a strided read and a contiguous row-major write: stages an
+/// f32 operand (the activations of a mixed-precision `Linear`) for the MMA.
+/// This rounds f32 to f16, so it is only used behind `USE_TC`.
+pub const STAGE_F32: &[u32] = &[
+    0x07230203, 0x00010600, 0x00070000, 0x00000031, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
+    0x00000009, 0x00020011, 0x00001151, 0x0007000a, 0x5f565053, 0x5f52484b, 0x69623631, 0x74735f74,
+    0x6761726f, 0x00000065, 0x0003000e, 0x00000000, 0x00000001, 0x0009000f, 0x00000005, 0x00000001,
+    0x6e69616d, 0x00000000, 0x00000002, 0x00000003, 0x00000004, 0x00000005, 0x00060010, 0x00000001,
+    0x00000011, 0x00000040, 0x00000001, 0x00000001, 0x00040047, 0x00000002, 0x0000000b, 0x0000001a,
+    0x00040047, 0x00000003, 0x0000000b, 0x0000001b, 0x00040047, 0x00000006, 0x00000006, 0x00000004,
+    0x00040047, 0x00000007, 0x00000006, 0x00000002, 0x00050048, 0x00000008, 0x00000000, 0x00000023,
+    0x00000000, 0x00050048, 0x00000009, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00000008,
+    0x00000002, 0x00030047, 0x00000009, 0x00000002, 0x00040047, 0x00000004, 0x00000022, 0x00000000,
+    0x00040047, 0x00000004, 0x00000021, 0x00000000, 0x00040047, 0x00000005, 0x00000022, 0x00000000,
+    0x00040047, 0x00000005, 0x00000021, 0x00000001, 0x00020013, 0x0000000a, 0x00030021, 0x0000000b,
+    0x0000000a, 0x00040015, 0x0000000c, 0x00000020, 0x00000000, 0x00020014, 0x0000000d, 0x00040015,
+    0x0000000e, 0x00000010, 0x00000000, 0x00030016, 0x0000000f, 0x00000010, 0x00030016, 0x00000010,
+    0x00000020, 0x00040017, 0x00000011, 0x0000000c, 0x00000003, 0x0004002b, 0x0000000c, 0x00000012,
+    0x00000040, 0x0004002b, 0x0000000c, 0x00000013, 0x00000000, 0x0004002b, 0x0000000c, 0x00000014,
+    0x00000010, 0x0004002b, 0x0000000c, 0x00000015, 0x0a0a0a1f, 0x0004002b, 0x0000000c, 0x00000016,
+    0x0a0a0a20, 0x0004002b, 0x0000000c, 0x00000017, 0x0a0a0a21, 0x0004002b, 0x0000000c, 0x00000018,
+    0x0a0a0a22, 0x0003001d, 0x00000006, 0x00000010, 0x0003001d, 0x00000007, 0x0000000f, 0x0003001e,
+    0x00000008, 0x00000006, 0x0003001e, 0x00000009, 0x00000007, 0x00040020, 0x00000019, 0x0000000c,
+    0x00000008, 0x00040020, 0x0000001a, 0x0000000c, 0x00000009, 0x00040020, 0x0000001b, 0x0000000c,
+    0x00000010, 0x00040020, 0x0000001c, 0x0000000c, 0x0000000f, 0x00040020, 0x0000001d, 0x00000001,
+    0x00000011, 0x0004003b, 0x0000001d, 0x00000002, 0x00000001, 0x0004003b, 0x0000001d, 0x00000003,
+    0x00000001, 0x0004003b, 0x00000019, 0x00000004, 0x0000000c, 0x0004003b, 0x0000001a, 0x00000005,
+    0x0000000c, 0x00050036, 0x0000000a, 0x00000001, 0x00000000, 0x0000000b, 0x000200f8, 0x0000001e,
+    0x0004003d, 0x00000011, 0x0000001f, 0x00000002, 0x00050051, 0x0000000c, 0x00000020, 0x0000001f,
+    0x00000000, 0x0004003d, 0x00000011, 0x00000021, 0x00000003, 0x00050051, 0x0000000c, 0x00000022,
+    0x00000021, 0x00000000, 0x00050084, 0x0000000c, 0x00000023, 0x00000020, 0x00000012, 0x00050080,
+    0x0000000c, 0x00000024, 0x00000023, 0x00000022, 0x000500b0, 0x0000000d, 0x00000025, 0x00000024,
+    0x00000016, 0x000300f7, 0x00000026, 0x00000000, 0x000400fa, 0x00000025, 0x00000027, 0x00000026,
+    0x000200f8, 0x00000027, 0x00050086, 0x0000000c, 0x00000028, 0x00000024, 0x00000015, 0x00050089,
+    0x0000000c, 0x00000029, 0x00000024, 0x00000015, 0x00050084, 0x0000000c, 0x0000002a, 0x00000028,
+    0x00000017, 0x00050084, 0x0000000c, 0x0000002b, 0x00000029, 0x00000018, 0x00050080, 0x0000000c,
+    0x0000002c, 0x0000002a, 0x0000002b, 0x00060041, 0x0000001b, 0x0000002d, 0x00000004, 0x00000013,
+    0x0000002c, 0x0004003d, 0x00000010, 0x0000002e, 0x0000002d, 0x00040073, 0x0000000f, 0x0000002f,
+    0x0000002e, 0x00060041, 0x0000001c, 0x00000030, 0x00000005, 0x00000013, 0x00000024, 0x0003003e,
+    0x00000030, 0x0000002f, 0x000200f9, 0x00000026, 0x000200f8, 0x00000026, 0x000100fd, 0x00010038,
+];
+
+/// The `f32 -> f16` staging module for a `rows x cols` matrix at
+/// `r * in_rs + c * in_cs`.
+pub fn stage_f32(rows: usize, cols: usize, in_rs: usize, in_cs: usize) -> Option<Vec<u32>> {
+    let count = rows.checked_mul(cols)?;
+    if count == 0 || cols == 0 {
+        return None;
+    }
+    let mut out = STAGE_F32.to_vec();
+    for (sent, val) in [
+        (SENTINEL_F32_COLS, cols),
+        (SENTINEL_F32_COUNT, count),
+        (SENTINEL_F32_RS, in_rs),
+        (SENTINEL_F32_CS, in_cs),
+    ] {
+        let mut hits = out.iter_mut().filter(|w| **w == sent);
+        let first = hits.next()?;
+        if hits.next().is_some() {
+            return None;
+        }
+        *first = val as u32;
+    }
+    Some(out)
+}
+
+/// Sentinel values of the f32 bias epilogue.
+const SENTINEL_EPI32_N: u32 = 168430121;
+const SENTINEL_EPI32_COUNT: u32 = 168430122;
+
+/// `out[i] = in[i] + bias[i % n]` in f32: the bias epilogue when the result (and
+/// the bias) are f32.
+pub const EPILOGUE_F32: &[u32] = &[
+    0x07230203, 0x00010600, 0x00070000, 0x0000002e, 0x00000000, 0x00020011, 0x00000001, 0x0003000e,
+    0x00000000, 0x00000001, 0x000a000f, 0x00000005, 0x00000001, 0x6e69616d, 0x00000000, 0x00000002,
+    0x00000003, 0x00000004, 0x00000005, 0x00000006, 0x00060010, 0x00000001, 0x00000011, 0x00000040,
+    0x00000001, 0x00000001, 0x00040047, 0x00000002, 0x0000000b, 0x0000001a, 0x00040047, 0x00000003,
+    0x0000000b, 0x0000001b, 0x00040047, 0x00000007, 0x00000006, 0x00000004, 0x00040047, 0x00000008,
+    0x00000006, 0x00000004, 0x00040047, 0x00000009, 0x00000006, 0x00000004, 0x00050048, 0x0000000a,
+    0x00000000, 0x00000023, 0x00000000, 0x00050048, 0x0000000b, 0x00000000, 0x00000023, 0x00000000,
+    0x00050048, 0x0000000c, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x0000000a, 0x00000002,
+    0x00030047, 0x0000000b, 0x00000002, 0x00030047, 0x0000000c, 0x00000002, 0x00040047, 0x00000004,
+    0x00000022, 0x00000000, 0x00040047, 0x00000004, 0x00000021, 0x00000000, 0x00040047, 0x00000005,
+    0x00000022, 0x00000000, 0x00040047, 0x00000005, 0x00000021, 0x00000001, 0x00040047, 0x00000006,
+    0x00000022, 0x00000000, 0x00040047, 0x00000006, 0x00000021, 0x00000002, 0x00020013, 0x0000000d,
+    0x00030021, 0x0000000e, 0x0000000d, 0x00040015, 0x0000000f, 0x00000020, 0x00000000, 0x00020014,
+    0x00000010, 0x00030016, 0x00000011, 0x00000020, 0x00040017, 0x00000012, 0x0000000f, 0x00000003,
+    0x0004002b, 0x0000000f, 0x00000013, 0x00000040, 0x0004002b, 0x0000000f, 0x00000014, 0x00000000,
+    0x0004002b, 0x0000000f, 0x00000015, 0x0a0a0a29, 0x0004002b, 0x0000000f, 0x00000016, 0x0a0a0a2a,
+    0x0003001d, 0x00000007, 0x00000011, 0x0003001d, 0x00000008, 0x00000011, 0x0003001d, 0x00000009,
+    0x00000011, 0x0003001e, 0x0000000a, 0x00000007, 0x0003001e, 0x0000000b, 0x00000008, 0x0003001e,
+    0x0000000c, 0x00000009, 0x00040020, 0x00000017, 0x0000000c, 0x0000000a, 0x00040020, 0x00000018,
+    0x0000000c, 0x0000000b, 0x00040020, 0x00000019, 0x0000000c, 0x0000000c, 0x00040020, 0x0000001a,
+    0x0000000c, 0x00000011, 0x00040020, 0x0000001b, 0x0000000c, 0x00000011, 0x00040020, 0x0000001c,
+    0x00000001, 0x00000012, 0x0004003b, 0x0000001c, 0x00000002, 0x00000001, 0x0004003b, 0x0000001c,
+    0x00000003, 0x00000001, 0x0004003b, 0x00000017, 0x00000004, 0x0000000c, 0x0004003b, 0x00000018,
+    0x00000005, 0x0000000c, 0x0004003b, 0x00000019, 0x00000006, 0x0000000c, 0x00050036, 0x0000000d,
+    0x00000001, 0x00000000, 0x0000000e, 0x000200f8, 0x0000001d, 0x0004003d, 0x00000012, 0x0000001e,
+    0x00000002, 0x00050051, 0x0000000f, 0x0000001f, 0x0000001e, 0x00000000, 0x0004003d, 0x00000012,
+    0x00000020, 0x00000003, 0x00050051, 0x0000000f, 0x00000021, 0x00000020, 0x00000000, 0x00050084,
+    0x0000000f, 0x00000022, 0x0000001f, 0x00000013, 0x00050080, 0x0000000f, 0x00000023, 0x00000022,
+    0x00000021, 0x000500b0, 0x00000010, 0x00000024, 0x00000023, 0x00000016, 0x000300f7, 0x00000025,
+    0x00000000, 0x000400fa, 0x00000024, 0x00000026, 0x00000025, 0x000200f8, 0x00000026, 0x00050089,
+    0x0000000f, 0x00000027, 0x00000023, 0x00000015, 0x00060041, 0x0000001a, 0x00000028, 0x00000004,
+    0x00000014, 0x00000023, 0x0004003d, 0x00000011, 0x00000029, 0x00000028, 0x00060041, 0x0000001b,
+    0x0000002a, 0x00000005, 0x00000014, 0x00000027, 0x0004003d, 0x00000011, 0x0000002b, 0x0000002a,
+    0x00050081, 0x00000011, 0x0000002c, 0x00000029, 0x0000002b, 0x00060041, 0x0000001b, 0x0000002d,
+    0x00000006, 0x00000014, 0x00000023, 0x0003003e, 0x0000002d, 0x0000002c, 0x000200f9, 0x00000025,
+    0x000200f8, 0x00000025, 0x000100fd, 0x00010038,
+];
+
+/// The f32 bias epilogue module for an `m x n` result.
+pub fn epilogue_f32(n: usize, count: usize) -> Option<Vec<u32>> {
+    if n == 0 || count == 0 {
+        return None;
+    }
+    let mut out = EPILOGUE_F32.to_vec();
+    for (sent, val) in [
+        (SENTINEL_EPI32_N, n),
+        (SENTINEL_EPI32_COUNT, count),
     ] {
         let mut hits = out.iter_mut().filter(|w| **w == sent);
         let first = hits.next()?;
