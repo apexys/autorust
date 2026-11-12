@@ -4655,6 +4655,26 @@ with an instruction stream that no longer differs in any way the disassembly sho
 1.6x is therefore in the driver's own scheduling/register allocation for this
 module rather than in what we emit, which is where this line of work stops.
 
+**f32 GEMM TN: the gap is one kernel, and it is not ALU.** `CL_TIME`'s kernel names
+attribute the whole TN row to a single kernel, `r_64_16_4_16_8_8_512_4`:
+**7.60 ms on VK against 4.65 on CL (1.63x)** — the same kernel both backends
+schedule. Diffing the OpenCL C source against our module: CL's inner loop issues 16
+`float4` loads then 256 FMAs (NVCC contracts `(a*b)+(c*d)+…` into `1 FMUL + 3 FMA`
+per accumulator); we issue the same 16 `v4float` loads and the same 192 `Fma`, plus
+256 `OpFMul` and 64 `OpFAdd` that SPIR-V forbids the driver from contracting.
+
+Explicit contraction in the emitter (`try_fma`, which existed but emitted the `OpFMul`
+*as well* as the `OpFma`, leaving a dead multiply) was fixed so the multiply is never
+emitted. A clean stash-based A/B on that kernel: **7.600 ms before, 7.594 after** —
+no change, because the driver already removes the dead multiply. So the arithmetic
+difference is not what costs 1.63x: with identical loads, identical access pattern,
+identical `LocalSize` and a now-dead-code-free module, this kernel is memory/scheduling
+bound and the residual is the driver's SASS scheduling for our SPIR-V.
+
+That closes the fourth and last emitter hypothesis for these rows (nested unroll:
+kept, worth 1.5 ms; `elem_index` scale cancellation: neutral; `off_add` constant
+folding: 5 % worse; FMA contraction: neutral).
+
 **The rest of the MobileNet / prefill shortfall is accepted, with the evidence behind it.** The
 comparison the next-step plan asked for was done on the *same* kernels both
 backends schedule, by dumping the OpenCL C source (`TG_DUMP_SRC=1`) next to our

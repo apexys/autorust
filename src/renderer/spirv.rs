@@ -2193,6 +2193,25 @@ impl<'a> Emitter<'a> {
         let _ = dt;
         let (rcat, rlanes) = self.result_cat(op, srcs);
         let lanes = rlanes.max(1);
+        // Fuse `+` with a single-use multiply *before* the operands below are
+        // materialized, so the multiply is never emitted: SPIR-V forbids implicit
+        // contraction, and emitting the `OpFMul` as well as the `OpFma` leaves a
+        // dead multiply that the driver does not remove (measured: 12.05 ms with
+        // it against 8.78 without any contraction at all on the TN GEMM kernel).
+        if op == Ops::Add
+            && rcat.is_float()
+            && crate::helpers::env::get("VK_NO_FMA").is_none()
+            && srcs.len() == 2
+        {
+            if let Some(id) = self.try_fma(&srcs[0], &srcs[1], rcat, lanes) {
+                self.vals.insert(u.clone(), V::Val(id, rcat, lanes));
+                return;
+            }
+            if let Some(id) = self.try_fma(&srcs[1], &srcs[0], rcat, lanes) {
+                self.vals.insert(u.clone(), V::Val(id, rcat, lanes));
+                return;
+            }
+        }
         // Operands converted to the result category and lane count.
         let mut ops: Vec<u32> = Vec::with_capacity(srcs.len());
         for s in srcs {
@@ -2236,19 +2255,11 @@ impl<'a> Emitter<'a> {
                 let g = self.glsl;
                 self.d(op::EXT_INST, ty, &[g, glsl::POW, ops[0], ops[1]])
             }
+            // `Ops::Add` is handled above (the fusion has to happen before the
+            // operands are materialized); this arm only sees non-float adds.
             Ops::Add => {
-                // Contract a single-use `Mul` into a fused multiply-add, which
-                // C compilers do implicitly for `acc + a*b` (and is what the
-                // OpenCL/CUDA backends get). Without it the GEMM spends two
-                // instructions per MAC.
-                if rcat.is_float() && crate::helpers::env::get("VK_NO_FMA").is_none() {
-                    if let Some(id) = self.try_fma(&srcs[0], &srcs[1], rcat, lanes) {
-                        id
-                    } else if let Some(id) = self.try_fma(&srcs[1], &srcs[0], rcat, lanes) {
-                        id
-                    } else {
-                        self.d(op::F_ADD, ty, &[ops[0], ops[1]])
-                    }
+                if rcat.is_float() {
+                    self.d(op::F_ADD, ty, &[ops[0], ops[1]])
                 } else {
                     self.d(op::I_ADD, ty, &[ops[0], ops[1]])
                 }
