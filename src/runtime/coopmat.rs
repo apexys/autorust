@@ -204,7 +204,7 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
     // A transposed operand is rewritten to row-major f16 by the staging pass, but
     // that path still returns the untransposed result (see CURRENT_STATE 9.53), so
     // only row-major operands are accepted; everything else stays generated.
-    let staged = false;
+    let staged = g.dtype == dtype::BFLOAT16;
     let (sa1, sa2, la, sla) = if g.a_k == 1 && g.a_m >= g.k {
         (g.a_m, 1, ROW_MAJOR, g.a_m)
     } else if staged && g.a_m == 1 && g.a_k >= g.m {
@@ -234,7 +234,14 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         slb: slb as usize,
         sc: g.c_m as usize,
     };
-    (p.m >= M_TILE && p.n >= N_TILE && p.k >= K_TILE && p.k.is_multiple_of(K_TILE)).then_some(p)
+    // Measured cutoff (RTX 3060, bf16): below ~2 G MACs the three extra
+    // dispatches (stage A, stage B, round C) and their traffic cost more than the
+    // MMA saves (1024^3 0.78 -> 0.97 ms against OpenCL), while everything larger
+    // wins (2048^3 2.93 -> 2.78, 4096^3 23.2 -> 17.9, NT 3.49 -> 2.60 ms).
+    let macs = (p.m as u128) * (p.n as u128) * (p.k as u128);
+    let large = macs >= 2_000_000_000;
+    (large && p.m >= M_TILE && p.n >= N_TILE && p.k >= K_TILE && p.k.is_multiple_of(K_TILE))
+        .then_some(p)
 }
 
 /// Whether a library-GEMM descriptor can run as [`module`].

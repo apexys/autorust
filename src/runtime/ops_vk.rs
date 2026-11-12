@@ -34,8 +34,10 @@ use crate::schedule::host_gemm::HostGemm;
 /// The opened device shared by the allocator and every program.
 /// Cache key of a cooperative-matrix pipeline: shape plus the operand dtypes.
 type CoopKey = (usize, usize, usize, DTypeId, DTypeId);
-/// Cache key of an element-wise conversion pipeline: module id plus element count.
-type ConvKey = (u8, usize);
+/// Cache key of an element-wise conversion pipeline: module id plus every value
+/// the module is patched with (shape *and* strides — keying on the element count
+/// alone made a transposed staging pass reuse the row-major kernel).
+type ConvKey = (u8, usize, usize, usize, usize);
 
 struct VkInner {
     dev: Rc<vk_sys::VkDevice>,
@@ -43,6 +45,10 @@ struct VkInner {
     coop: RefCell<std::collections::HashMap<CoopKey, Rc<vk_sys::GpuPipeline>>>,
     /// Pipelines for the bf16/f16 conversion modules.
     conv: RefCell<std::collections::HashMap<ConvKey, Rc<vk_sys::GpuPipeline>>>,
+    /// Reused scratch for the cooperative-matrix staging (A, B, C). Allocating
+    /// tens of megabytes through `vkAllocateMemory` on every GEMM dominated the
+    /// call, so the buffers grow in place instead.
+    scratch: RefCell<std::collections::HashMap<u8, vk_sys::GpuBuffer>>,
 }
 
 impl VkInner {
@@ -70,6 +76,7 @@ impl VkInner {
             dev: Rc::new(dev),
             coop: RefCell::new(std::collections::HashMap::new()),
             conv: RefCell::new(std::collections::HashMap::new()),
+            scratch: RefCell::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -540,6 +547,25 @@ impl Conversion {
     }
 }
 
+impl VkInner {
+    /// A scratch buffer of at least `size` bytes for `slot` (0 = A, 1 = B,
+    /// 2 = C), reused across calls.
+    fn scratch(&self, slot: u8, size: usize) -> vk_sys::GpuBuffer {
+        let mut pool = self.scratch.borrow_mut();
+        if let Some(b) = pool.get(&slot)
+            && b.size >= size
+        {
+            return b.clone();
+        }
+        let b = self
+            .dev
+            .alloc(size)
+            .unwrap_or_else(|| panic!("TGERR: VK coopmat scratch {size} bytes"));
+        pool.insert(slot, b.clone());
+        b
+    }
+}
+
 /// A device buffer plus the window `coop_gemm` binds for it.
 #[derive(Clone, Copy)]
 struct Bind<'a> {
@@ -557,7 +583,7 @@ fn convert(
     dst: Bind<'_>,
 ) {
     let words = c.words(n).expect("coopmat: conversion module");
-    let key = (c.id(), n);
+    let key = (c.id(), n, 0, 0, 0);
     let pipe = {
         let mut cache = inner.conv.borrow_mut();
         if let Some(p) = cache.get(&key) {
@@ -601,7 +627,7 @@ fn stage(
     dst: Bind<'_>,
 ) {
     let words = coopmat::stage_bf16(rows, cols, in_rs, in_cs).expect("coopmat: staging module");
-    let key = (2, rows * cols + cols);
+    let key = (2, rows, cols, in_rs, in_cs);
     let pipe = {
         let mut cache = inner.conv.borrow_mut();
         if let Some(p) = cache.get(&key) {
@@ -668,12 +694,12 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     // ViT's `Linear` weight and the TN/NT GEMM shapes are). Each element is read
     // K/16 or so times by the GEMM, so the extra pass is noise.
     let stage_a = if g.dtype == crate::dtype::BFLOAT16 {
-        Some(dev.alloc(m * k * 2).expect("coopmat: f16 scratch A"))
+        Some(inner.scratch(0, m * k * 2))
     } else {
         None
     };
     let stage_b = if g.dtype == crate::dtype::BFLOAT16 {
-        Some(dev.alloc(k * n * 2).expect("coopmat: f16 scratch B"))
+        Some(inner.scratch(1, k * n * 2))
     } else {
         None
     };
@@ -697,7 +723,7 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
 
     // A bf16 result needs an f32 accumulator buffer to land in first.
     let stage_c = if g.c_dtype == crate::dtype::BFLOAT16 {
-        Some(dev.alloc(m * n * 4).expect("coopmat: f32 scratch C"))
+        Some(inner.scratch(2, m * n * 4))
     } else {
         None
     };
@@ -749,17 +775,6 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
 
     if g.c_dtype == crate::dtype::BFLOAT16 {
         convert(inner, Conversion::F32ToBf16, m * n, out, c);
-    }
-    // The scratch buffers are released here; `VkDevice::free` defers the actual
-    // destruction to the next idle point, so pending work stays valid.
-    if let Some(s) = stage_a.as_ref() {
-        dev.free(s);
-    }
-    if let Some(s) = stage_b.as_ref() {
-        dev.free(s);
-    }
-    if let Some(s) = stage_c.as_ref() {
-        dev.free(s);
     }
 }
 

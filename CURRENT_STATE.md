@@ -4351,30 +4351,33 @@ the graph itself asks for f32 accumulation there, the numerics are faithful
 That uncovered the real blocker: every contraction in the benchmarks presents one
 **transposed** operand (`a_m == 1`, or `b_k == 1`, i.e. `ColumnMajorKHR` — the
 ViT's `Linear` weight is stored `[out, in]` and used as `x @ w.T`, and the `TN`/
-`NT` GEMM shapes are the same). Three things were built for it:
+`NT` GEMM shapes are the same). It is solved by **staging**: `Plan` carries, per
+operand, the two offset strides plus the `MemoryLayoutKHR`, and
+`coopmat::stage_bf16` reads a strided bf16 operand and writes contiguous row-major
+f16, so the GEMM itself stays row-major. Two bugs on the way, both found by
+reading the staged buffer back:
 
-- `Plan` now carries, per operand, the two offset strides (`row_stride *
-  i + col_stride * j`, so row-major is `(S, 1)` and column-major `(1, S)`), the
-  `MemoryLayoutKHR` and the coop-matrix load stride; the module patches all of
-  them (12 sentinels, each verified to occur exactly once);
-- a **staging module** (`coopmat::stage_bf16`) that reads a strided bf16 operand
-  and writes contiguous row-major f16, so a transposed operand never needs a
-  column-major coop-matrix load at all;
-- `coop_gemm` stages bf16 A and B through it and then dispatches the GEMM with a
-  row-major plan.
+- the staging pipeline cache was keyed by `rows*cols + cols`, which is identical
+  for a row-major and a transposed operand of the same shape, so the second case
+  ran the *first* case's kernel (a verbatim copy) while the trace still printed
+  the right strides. The key now covers every patched constant;
+- the scratch buffers were allocated with `vkAllocateMemory` on every call (32 MB
+  for a 2048^3 GEMM), which cost ~1.6 ms of the 4.4 ms; they are pooled per use
+  (A/B/C) and grown in place.
 
-Row-major bf16 staging is verified exact (`vtk_coopmat::coopmat_handles_bf16_storage`,
-`grader_rel = 0`). **The transposed case is not working yet**: with `rs=1 cs=256`
-the staging pass runs (the trace shows the right strides and element count) and the
-GEMM then reads row-major, yet the result equals the *untransposed* reading
-(`C[0,0] = -1.75` where the interpreter says `2.125`, i.e. exactly
-`sum_k A[0,k]*b[k*192]` instead of `b[k]`). So either the staged buffer is not the
-one bound, or the staging kernel writes elsewhere; the identifier-level plumbing
-was checked and looks right, so the next step is to read the staged buffer back
-(one dispatch + `download`) in a test and diff it against the expected transpose.
-`plan` therefore still accepts **only row-major** operands (`let staged = false`),
-so a transposed contraction keeps its generated kernel rather than risk a wrong
-answer.
+All four operand-layout combinations now dispatch once and match the interpreter
+exactly, and the bf16 GEMM row moved for the first time (`bench`, VK vs CL):
+2048^3 **2.78 vs 2.93 ms**, 4096^3 **17.9 vs 23.2**, NT 2048^3 **2.60 vs 3.49**,
+1024x1024x4096 **1.86 vs 2.23**, 4096x1024x1024 **1.66 vs 1.73**, TN 2048^3 3.01
+vs 2.97 (parity), 1024^3 1.25 vs 0.80 (behind — the three staging dispatches do
+not amortise, so `plan` now requires >= 2 G MACs; the batched-8x512^3 row is a
+batched descriptor and stays generated).
+
+`vit_infer_bf16` is **unchanged** (154 ms): its `Linear` layers have a **bias**, and
+`plan` requires `bias_slot < 0`, so no descriptor is built for them. The epilogue
+is the remaining step — add the per-column bias add after the f32 accumulator
+(and consider whether the 2 G-MAC cutoff should stay, since the ViT's projections
+are 0.9 G MACs and were 4.6x faster in the fixture before staging existed).
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
