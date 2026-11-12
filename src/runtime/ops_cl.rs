@@ -449,6 +449,9 @@ pub struct ClProgram {
     program: Program,
     inner: Rc<ClInner>,
     signature: Vec<(i64, DTypeId)>,
+    /// Kernel name, so `CL_TIME` output can be attributed to a kernel (the
+    /// counterpart of the Vulkan backend's named `[vk] gpu` lines).
+    name: String,
 }
 
 impl ClProgram {
@@ -471,6 +474,7 @@ impl ClProgram {
             kernel,
             program,
             signature: obj.signature.clone(),
+            name: obj.name.clone(),
         }
     }
 }
@@ -532,7 +536,7 @@ impl Prog for ClProgram {
             let end = check(ev.profiling_command_end(), "event end");
             let secs = end.saturating_sub(start) as f64 * 1e-9;
             if timed {
-                eprintln!("[cl] gpu {:.3} ms", secs * 1e3);
+                eprintln!("[cl] gpu {} {:.3} ms", self.name, secs * 1e3);
             }
             return Some(secs);
         }

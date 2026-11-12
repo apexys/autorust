@@ -4618,7 +4618,34 @@ for 9 FMAs). What is left in those rows is NVCC's OpenCL frontend compiling the
 same uops better than its SPIR-V frontend — the same asymmetry documented for the
 bf16 round-to-bf16 idiom in §9.52 — not something the renderer can reach.
 
-**The MobileNet / prefill shortfall is accepted, with the evidence behind it.** The
+**Per-kernel attribution found a real win.** `CL_TIME` used to print timings with no
+kernel identity, so the MobileNet gap looked diffuse. It now prints the kernel name
+(like `VK_TIME`), and joining the two rankings gives:
+
+```text
+kernel                        VK      CL    delta
+r_4_20_8_16_4_320_49        11.596   6.680   +4.916     <- 38% of the gap
+r_240_7_7_32_4_3_3           8.606   6.697   +1.909
+r_32_5_49_8_4_144_4          3.228   1.896   +1.332
+r_384_7_7_32_2_2_3_3        10.228   9.070   +1.158
+```
+
+The top kernel is the 7x7 mean + layernorm head, and it was the one place our 8x
+unroll *hurt* (11.83 ms unrolled vs 10.30 rolled, with `CACHELEVEL=0`). The reason
+is specific: unrolling a **nested** loop multiplies live state across both levels
+while the outer iterations already supply the load parallelism. `unroll_end` now
+requires a top-level loop, which took that kernel to 10.30 ms, MobileNetV2 from
+1.13x to 1.09x and MNIST CNN train from 1.07x to 1.01x, with the ViT unmoved (its
+attention loops are top-level).
+
+What remains on that kernel (10.30 vs CL's 6.68) is address arithmetic: we emit
+`(i*stride)*4 >> 2` per load — five times per iteration — where the OpenCL C source
+computes one base index and folds `+320/+640/+960` into the load offsets. Cancelling
+the `*4 >> 2` round trip in `elem_index` (carrying the applied power-of-two scale on
+`Off::Id`) is the concrete next step there; it is central to the offset machinery,
+so it wants its own session.
+
+**The rest of the MobileNet / prefill shortfall is accepted, with the evidence behind it.** The
 comparison the next-step plan asked for was done on the *same* kernels both
 backends schedule, by dumping the OpenCL C source (`TG_DUMP_SRC=1`) next to our
 `VK_DUMP_SPV=1` module:

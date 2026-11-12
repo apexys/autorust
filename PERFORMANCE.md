@@ -396,28 +396,38 @@ several gaps):
 
 | workload | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| MNIST CNN train, bs 512 | 21.8 | **20.4** | 1.07x |
+| MNIST CNN train, bs 512 | 21.1 | **21.0** | 1.01x |
 | ViT-B/16 infer, bs 1 | 30.0 | **28.8** | 1.04x |
 | ViT-B/16 infer, bs 8 | **116.6** | 179.5 | 0.65x |
 | ViT-B/16 infer, bf16, bs 8 | 113.4 | **90.9** | 1.25x |
 | ResNet-18 infer, bs 32 | **319.7** | 376.3 | 0.85x |
 | ResNet-18 train, bs 32 | 451.5 | **450.0** | 1.00x |
 | ResNet-50 infer, bs 32 | 100.4 | **99.5** | 1.01x |
-| MobileNetV2 infer, bs 32 | 62.8 | **55.7** | 1.13x |
+| MobileNetV2 infer, bs 32 | 61.4 | **56.1** | 1.09x |
 | UNet infer, 64² | **16.4** | 19.0 | 0.86x |
-| LLM prefill, 512 tok | 422.3 | **392.5** | 1.08x |
+| LLM prefill, 512 tok | 421.7 | **394.3** | 1.07x |
 | LLM decode, 1 tok | **19.8** | 21.4 | 0.93x |
 | ONNX MNIST, bs 32 | **11.0** | 11.6 | 0.95x |
 | ONNX ResNet-18 (w=0.25), bs 8 | 72.4 | **68.6** | 1.06x |
 | AdamW, 100M params | **94.5** | 96.3 | 0.98x |
 
-**VK is at or ahead on 6 of 14 rows and within 1.06x on 10 of 14.** Four rows are
-more than 6 % behind, and this is the accepted shortfall rather than a to-do list:
+**VK is at or ahead on 6 of 14 rows and within 1.06x on 10 of 14.** Attributing the
+CL side per kernel (the OpenCL timing output now carries the kernel name, matching
+the Vulkan one) showed *where* the difference lives instead of leaving it diffuse:
+on MobileNetV2 a single kernel, `r_4_20_8_16_4_320_49` (7x7 mean + layernorm head),
+was 11.83 vs 6.68 ms — 38 % of the whole scenario's gap — and it was the one kernel
+where our 8x unroll hurt. Unrolling a *nested* loop multiplies live state across
+both levels while the outer iterations already supply the load parallelism, so the
+unroller now skips loops that are not top-level: that kernel 11.83 -> 10.30 ms,
+MobileNetV2 1.13x -> 1.09x and MNIST CNN train 1.07x -> 1.01x, with ViT bf16
+unmoved (113.9 ms) — the attention loops it relies on are top-level.
+
+Three rows are still more than 6 % behind:
 
 - **ViT-B/16 bf16, 1.25x** — by decision. The model keeps f32 attention
   activations, so its attention is an f32 x f32 contraction that the 16-bit MMA
   cannot take (`CURRENT_STATE.md` §9.53). Solving it is a numerics change.
-- **MobileNetV2, 1.13x** and **LLM prefill, 1.08x** — NVCC frontend quality. Both
+- **MobileNetV2, 1.09x** and **LLM prefill, 1.07x** — NVCC frontend quality. Both
   backends pick the *same* kernels from the same scheduler (verified by name on
   both: `r_32_9_196_64_24_4`, `r_4_20_8_16_4_320_49`, `r_384_7_7_32_2_2_3_3`,
   `r_64_16_4_16_8_8_512_4`), and diffing our SPIR-V against the OpenCL C source

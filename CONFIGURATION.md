@@ -165,7 +165,8 @@ parallel.
 | `AUTORUST_NVRTC_LIB` | path/soname | first `libnvrtc.so*` found on the loader path | Force a specific NVRTC library. When set, no other NVRTC is tried. `NVRTC_PATH` is accepted as a tinygrad-compatible alias. |
 | `AUTORUST_CL_LIB` | path | `libOpenCL.so` | Load a specific OpenCL library (test/deployment override). |
 | `VK_TRACE` | any | unset | Print the Vulkan device probe (caps, accepted/skipped devices), each allocation and each dispatch. |
-| `VK_TIME` | any | unset | Print the GPU time of each dispatch and of device→host readbacks. |
+| `VK_TIME` | any | unset | Print the GPU time of each dispatch (with its kernel name) and of device→host readbacks. |
+| `CL_TIME` | any | unset | The OpenCL counterpart of `VK_TIME`: per-kernel event time, also with the kernel name, so the two backends can be ranked kernel by kernel. |
 | `VK_SYNC` | any | unset | Wait after every dispatch (attributes a GPU fault to one kernel). |
 | `VK_DUMP_SPV` | directory | unset | Write every rendered SPIR-V module to `<dir>/<kernel>.spv` (feed to `spirv-dis`/`spirv-val`). |
 | `VK_NO_UNROLL` | any | unset | Render every loop rolled, i.e. the shape of the OpenCL C source before NVCC's own unroller runs. Used to check whether our 8x unroll helps a given kernel (it is neutral on the MobileNet convs). |
