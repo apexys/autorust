@@ -4618,6 +4618,30 @@ for 9 FMAs). What is left in those rows is NVCC's OpenCL frontend compiling the
 same uops better than its SPIR-V frontend — the same asymmetry documented for the
 bf16 round-to-bf16 idiom in §9.52 — not something the renderer can reach.
 
+**The MobileNet / prefill shortfall is accepted, with the evidence behind it.** The
+comparison the next-step plan asked for was done on the *same* kernels both
+backends schedule, by dumping the OpenCL C source (`TG_DUMP_SRC=1`) next to our
+`VK_DUMP_SPV=1` module:
+
+- `r_384_7_7_32_2_2_3_3` (depthwise 3x3): CL is 9 predicated scalar taps with no
+  loop; ours is the same 22 scalar loads with the same `%` index guards and no
+  loop;
+- `r_4_20_8_16_4_320_49` (7x7 mean + layernorm head): CL has 5 `float4` loads and a
+  `float buf1[4]` accumulator over a 320-deep loop; ours has the corresponding 4
+  `v4float` loads plus the same scalars, with the accumulator promoted to `OpPhi`s;
+- `r_32_9_196_64_24_4`: CL loads the weights as one `float4` per iteration over a
+  24-deep loop; we do the same and additionally unroll 8x — and
+  `VK_NO_UNROLL=1` changes MobileNet by under 1 %, so the unroll is neither the
+  cause nor a fix;
+- `f32 TN 2048³`: identical `v4float` loads, `ArrayStride 16`, `>> 4` index, and
+  op histogram (16 vector loads, 192 `Fma`, 256 `FMul`) on both backends.
+
+So there is no emitter-level difference to change. The residual is NVCC compiling
+identical uops better through its OpenCL frontend than through its SPIR-V frontend
+(the same asymmetry recorded for the bf16 round-to-bf16 idiom in §9.52), and the
+shortfall is reported as accepted rather than as "near parity": see the best-of-3
+table in `PERFORMANCE.md`.
+
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
 is codegen quality on the same kernels — the depthwise convs are already fully

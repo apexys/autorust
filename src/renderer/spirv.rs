@@ -1442,6 +1442,11 @@ impl<'a> Emitter<'a> {
     /// The index of the `END` matching the `RANGE` at `u`, when that loop
     /// should be unrolled.
     fn unroll_end(&mut self, u: &UopId, lst: &[UopId]) -> Option<usize> {
+        // Debug knob: `VK_NO_UNROLL=1` renders every loop rolled, which is what
+        // the OpenCL C source looks like before NVCC's own unroller sees it.
+        if crate::helpers::env::get("VK_NO_UNROLL").is_some() {
+            return None;
+        }
         let info = self.info.get(u)?;
         if info.op != Ops::Range || info.dt == dtype::VOID {
             return None;

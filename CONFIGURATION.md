@@ -168,6 +168,7 @@ parallel.
 | `VK_TIME` | any | unset | Print the GPU time of each dispatch and of device→host readbacks. |
 | `VK_SYNC` | any | unset | Wait after every dispatch (attributes a GPU fault to one kernel). |
 | `VK_DUMP_SPV` | directory | unset | Write every rendered SPIR-V module to `<dir>/<kernel>.spv` (feed to `spirv-dis`/`spirv-val`). |
+| `VK_NO_UNROLL` | any | unset | Render every loop rolled, i.e. the shape of the OpenCL C source before NVCC's own unroller runs. Used to check whether our 8x unroll helps a given kernel (it is neutral on the MobileNet convs). |
 | `VK_NO_ROBUST` | any | unset | Disable `robustBufferAccess` (debug: A/B a suspected OOB access). |
 | `AUTORUST_CUBLAS_LIB` | path/soname | newest `libcublas.so*` found on the loader path | Force a specific cuBLAS library. When set, no other cuBLAS is tried. |
 | `AUTORUST_CLBLAST_LIB` | path | `libclblast.so.1`, `.dylib`, `clblast.dll` | Override the CLBlast library. |

@@ -390,26 +390,46 @@ Design points worth knowing:
 Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 (ms; lower is better), `bench/run.py --only 'autorust-(vk|cl)-'`:
 
+All fourteen rows, **best of three processes** (each the median of five
+iterations; this machine drifts ±5-7 % between processes, which is the size of
+several gaps):
+
 | workload | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| MNIST CNN train, bs 512 | 23.4 | **22.4** | 1.04x |
-| ViT-B/16 infer, bs 1 | **30.4** | 30.9 | 0.98x |
-| ViT-B/16 infer, bs 8 | **117.3** | 180.3 | 0.65x |
-| ViT-B/16 infer, bf16, bs 8 | 113.9 | **96.1** | 1.19x |
-| ResNet-18 infer, bs 32 | **320.3** | 377.4 | 0.85x |
-| ResNet-18 train, bs 32 | 453.6 | **450.9** | 1.01x |
-| ResNet-50 infer, bs 32 | 101.8 | **100.0** | 1.02x |
-| MobileNetV2 infer, bs 32 | 62.2 | **56.8** | 1.09x |
-| UNet infer, 64² | **18.1** | 22.2 | 0.81x |
-| LLM prefill, 512 tok | 427.1 | **398.2** | 1.07x |
-| LLM decode, 1 tok | **19.8** | 22.1 | 0.89x |
-| ONNX MNIST, bs 32 | 11.7 | **11.6** | 1.00x |
-| ONNX ResNet-18 (w=0.25), bs 8 | 70.4 | **69.5** | 1.01x |
-| AdamW, 100M params | **94.2** | 96.4 | 0.98x |
+| MNIST CNN train, bs 512 | 21.8 | **20.4** | 1.07x |
+| ViT-B/16 infer, bs 1 | 30.0 | **28.8** | 1.04x |
+| ViT-B/16 infer, bs 8 | **116.6** | 179.5 | 0.65x |
+| ViT-B/16 infer, bf16, bs 8 | 113.4 | **90.9** | 1.25x |
+| ResNet-18 infer, bs 32 | **319.7** | 376.3 | 0.85x |
+| ResNet-18 train, bs 32 | 451.5 | **450.0** | 1.00x |
+| ResNet-50 infer, bs 32 | 100.4 | **99.5** | 1.01x |
+| MobileNetV2 infer, bs 32 | 62.8 | **55.7** | 1.13x |
+| UNet infer, 64² | **16.4** | 19.0 | 0.86x |
+| LLM prefill, 512 tok | 422.3 | **392.5** | 1.08x |
+| LLM decode, 1 tok | **19.8** | 21.4 | 0.93x |
+| ONNX MNIST, bs 32 | **11.0** | 11.6 | 0.95x |
+| ONNX ResNet-18 (w=0.25), bs 8 | 72.4 | **68.6** | 1.06x |
+| AdamW, 100M params | **94.5** | 96.3 | 0.98x |
 
-**VK is at or ahead of OpenCL on 6 of 14 rows, within 1.06x on 11 of 14 and within
-1.20x on all 14.** The largest remaining gap is ViT-B/16 bf16 at 1.19x (fused
-attention), then MobileNetV2 1.09x (conv codegen) and LLM prefill 1.07x.
+**VK is at or ahead on 6 of 14 rows and within 1.06x on 10 of 14.** Four rows are
+more than 6 % behind, and this is the accepted shortfall rather than a to-do list:
+
+- **ViT-B/16 bf16, 1.25x** — by decision. The model keeps f32 attention
+  activations, so its attention is an f32 x f32 contraction that the 16-bit MMA
+  cannot take (`CURRENT_STATE.md` §9.53). Solving it is a numerics change.
+- **MobileNetV2, 1.13x** and **LLM prefill, 1.08x** — NVCC frontend quality. Both
+  backends pick the *same* kernels from the same scheduler (verified by name on
+  both: `r_32_9_196_64_24_4`, `r_4_20_8_16_4_320_49`, `r_384_7_7_32_2_2_3_3`,
+  `r_64_16_4_16_8_8_512_4`), and diffing our SPIR-V against the OpenCL C source
+  the same scheduler emits shows no structural difference to exploit: the conv body
+  is the same 9 predicated scalar taps, the pooling head the same `buf1[4]`
+  accumulator with 5 `float4` against our 4 `v4float` plus the matching scalars,
+  and our vector loads carry `ArrayStride 16` with an `>> 4` index, so alignment is
+  right. Disabling our 8x unroll (`VK_NO_UNROLL=1`) changes MobileNet by under 1 %,
+  so it is not the unroller either. What is left is the driver compiling identical
+  uops better through its OpenCL frontend than its SPIR-V one.
+- **MNIST CNN train, 1.07x** — a train step where the backward pass' scatter-adds
+  dominate; not investigated beyond the same check (same kernels both sides).
 
 The rows inside a few percent are dominated by this machine's drift, so they are
 also reported best-of-three processes (min over three, each the median of five
