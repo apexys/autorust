@@ -515,9 +515,11 @@ device time for the cooperative matrix vs 3.42 ms for the generated kernel
 bf16 storage runs on the same path (`coopmat_handles_bf16_storage`): A and B are
 staged through f16 scratch by two element-wise conversion modules and a bf16
 result is rounded from an f32 scratch, so a bf16 matmul also dispatches exactly
-once and matches the interpreter. It does not yet reach the `bench/` bf16 rows —
-those kernels lower to a reduce body that `host_gemm::extract` does not
-recognise, so they keep the generated kernel (see `CURRENT_STATE.md` §9.53).
+once and matches the interpreter. The matcher now recognises their reduced-precision form (16-bit multiply, f32
+reduce, 16-bit store), but the `bench/` GEMM shapes and the ViT's `Linear` layers
+all present one operand transposed, and the column-major `MemoryLayoutKHR` variant
+is not enabled yet (it dispatches with wrong numbers; see `CURRENT_STATE.md`
+§9.53), so those rows still run the generated kernel.
 
 What is still missing there:
 

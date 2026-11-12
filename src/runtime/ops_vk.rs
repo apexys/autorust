@@ -661,7 +661,8 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         None => c,
     };
 
-    let words = coopmat::module(m, n, k).expect("coopmat: eligible descriptor");
+    let plan = coopmat::plan(g).expect("coopmat: eligible descriptor");
+    let words = coopmat::module(plan).expect("coopmat: module");
     let key = (m, n, k, g.dtype, g.c_dtype);
     let pipe = {
         let mut cache = inner.coop.borrow_mut();

@@ -720,6 +720,26 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: mul"); }
     let mul = unwrap(ctx, rsrcs[0].clone());
     if ctx.op_of(&mul) != Ops::Mul {
+        if crate::helpers::env::get("VK_TRACE").is_some() {
+            let mut cur = rsrcs[0].clone();
+            for depth in 0..4 {
+                let op = ctx.op_of(&cur);
+                let dt = ctx.dt_of(&cur);
+                let kids: Vec<String> = ctx
+                    .srcs(&cur)
+                    .iter()
+                    .map(|k| format!("{:?}/{:?}", ctx.op_of(k), ctx.dt_of(k)))
+                    .collect();
+                let arg = format!("{:?}", ctx.arg_of(&cur));
+                let arg: String = arg.chars().take(90).collect();
+                eprintln!("[vk] hg body[{depth}] {op:?} dt={dt:?} kids=[{}] arg={arg}", kids.join(", "));
+                let ks = ctx.srcs(&cur).to_vec();
+                if ks.is_empty() {
+                    break;
+                }
+                cur = ks[0].clone();
+            }
+        }
         return None;
     }
     let msrcs = ctx.srcs(&mul).to_vec();
@@ -727,13 +747,17 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
     let mul_dt = ctx.dt_of(&mul);
-    // Metal's MPS path takes f16 inputs and accumulates (and stores) in f32; the
-    // Vulkan cooperative-matrix module does the same for f16 *and* bf16 inputs.
+    // A reduced-precision GEMM whose *reduce* is f32 is the scheduler's
+    // "promote the multiply to the f32 accumulator" form, which is exactly what
+    // the cooperative matrix computes. Metal's MPS path only takes the
+    // f16-in/f32-out variant; the Vulkan module also takes a 16-bit result (it
+    // rounds the f32 accumulator) and bf16 inputs.
     let mixed_f16_f32 = matches!(kind, GemmDevice::Metal | GemmDevice::Vk)
         && (mul_dt == crate::dtype::FLOAT16
             || (kind == GemmDevice::Vk && mul_dt == crate::dtype::BFLOAT16))
         && red_dt == crate::dtype::FLOAT32
-        && c_dt == crate::dtype::FLOAT32;
+        && (c_dt == crate::dtype::FLOAT32
+            || (kind == GemmDevice::Vk && c_dt == mul_dt));
     if (mul_dt != red_dt || mul_dt != c_dt) && !mixed_f16_f32 {
         return None;
     }
@@ -1048,8 +1072,8 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         // A plain bf16 dot accumulates in bf16 in the graph, while the MMA
         // accumulates in f32, so that case is a numerics change and rides the
         // same switch as the CUDA tensor-core path (`USE_TC`, on by default).
-        let bf16_accum = desc.dtype == crate::dtype::BFLOAT16
-            && desc.c_dtype == crate::dtype::BFLOAT16;
+        let bf16_accum =
+            desc.c_dtype == crate::dtype::BFLOAT16 && red_dt == crate::dtype::BFLOAT16;
         let tc_on = ctx.settings.tensor_cores
             && !matches!(
                 crate::helpers::env::get("USE_TC").as_deref(),

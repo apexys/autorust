@@ -4339,12 +4339,25 @@ a bf16 result is rounded from an f32 scratch (`convert_f32_to_bf16`). Both the
 bf16-out and f32-out forms dispatch once and match INTERP. The bf16, f32-out form
 also unlocked the mixed-precision gate for bf16 multiplies.
 
-That is not yet visible in the benchmarks: `bench/run.py`'s bf16 rows (and the
-ViT's `Linear` layers) lower to a kernel that `extract` does not describe — the
-reduce body there is neither `MUL` nor `MULACC` after peeling, so no descriptor is
-built and the generated kernel runs. Localising that is the remaining step; the
-executor, both conversion modules and the eligibility filter are written and
-tested, so it is a matcher change, not new machinery.
+The reason the bf16 rows stayed put was a **dtype mismatch in the matcher**: a
+reduced-precision GEMM lowers to a 16-bit multiply with an **f32 reduce** and a
+16-bit store (`mul=bf16 red=f32 c=bf16`, "promote the multiply to the f32
+accumulator"), which the gate rejected because it only allowed `mul == red == c`
+or Metal's f16/f32 form. Fixed: for a Vulkan descriptor, `mul` 16-bit with an f32
+reduce now qualifies for either a 32-bit or a matching 16-bit result — and since
+the graph itself asks for f32 accumulation there, the numerics are faithful
+(`USE_TC` only gates a graph whose review dtype is 16-bit).
+
+With that, the bench's bf16 GEMM descriptors *are* built, and the blocker is now
+the **operand layout**: the `bench/` GEMM shapes and the ViT's `Linear` layers
+all present one operator transposed (`a_m == 1` for A, or `b_k == 1` for B), i.e.
+`ColumnMajorKHR`. `Plan` carries a per-operand stride and `MemoryLayoutKHR` and
+the module takes sentinels for both, but a column-major B dispatches with wrong
+numbers (relative error 4.6 against the interpreter), so that layout is disabled
+in `plan` until the KHR stride convention is pinned down. The cheap way to finish
+it is to transpose while staging (the bf16 -> f16 pass already reads and rewrites
+every operand, so it can write row-major f16 and leave the GEMM itself
+row-major-only).
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
