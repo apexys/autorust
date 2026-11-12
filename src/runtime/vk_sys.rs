@@ -940,6 +940,14 @@ impl VkDevice {
         }
     }
 
+    /// How long to wait for a ring slot's fence before declaring the device hung.
+    ///
+    /// `u64::MAX` turns a lost device into a process that never returns; a finite
+    /// bound turns it into an error that says so. The longest kernel measured here
+    /// is a 4096^3 GEMM at ~40 ms, so a minute is three orders of magnitude of
+    /// headroom.
+    const FENCE_TIMEOUT_NS: u64 = 60 * 1_000_000_000;
+
     /// Open the current ring slot's command buffer for recording.
     fn begin_batch(&self) -> Result<(), String> {
         let dev = &self.device;
@@ -947,8 +955,13 @@ impl VkDevice {
         let fence = self.fences[slot];
         let cmd = self.cmds[slot];
         unsafe {
-            dev.wait_for_fences(&[fence], true, u64::MAX)
-                .map_err(|e| format!("vkWaitForFences: {e}"))?;
+            dev.wait_for_fences(&[fence], true, Self::FENCE_TIMEOUT_NS)
+                .map_err(|e| {
+                    format!(
+                        "vkWaitForFences: {e} (the device is lost or a kernel has hung; \
+                         rerun with VK_SYNC=1 to attribute it)"
+                    )
+                })?;
             dev.reset_fences(&[fence])
                 .map_err(|e| format!("vkResetFences: {e}"))?;
         }

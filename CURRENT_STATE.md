@@ -4481,6 +4481,16 @@ GEMM and was silently f16 arithmetic. Staging now only joins a contraction that 
 matmul keeps the generated kernel (4.65 vs OpenCL's 4.42 ms at 2048³). This is the
 line between "the graph already chose f16/bf16 storage" and "we chose it for it".
 
+A rare failure worth recording: `tests/vk_coopmat.rs` lost the Vulkan device once in
+~19 parallel runs (`cargo test` starts its 8 tests together, each with its own
+`VkDevice`), after which `vkCreateDevice` for a later test returned
+`VK_ERROR_DEVICE_LOST` and one run hung. It did not reproduce in 8 runs at either
+the pre-unroll commit or this one, and 0/8 + 0/6 + a full 83/83 suite afterwards
+were clean, so it is not attributable to the emitter change — but an unbounded
+`vkWaitForFences(u64::MAX)` turns a lost device into a process that never returns,
+so the wait is now bounded at 60 s and reports "the device is lost or a kernel has
+hung; rerun with `VK_SYNC=1` to attribute it" instead.
+
 One trap worth naming: `unroll_loop` receives the matching **`END`** uop alongside
 the range, and the peel has to simplify the `RANGE`'s *source* (`range.srcs[0]`),
 not that `END`. Simplifying the wrong one yields "no remainder" and the unrolled

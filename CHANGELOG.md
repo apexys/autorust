@@ -20,6 +20,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the generated kernel, so their numerics are unchanged. The bias **and the
   residual** of a transformer block are fused into that epilogue (`x + linear(x)`
   is one MMA dispatch), which took `vit_infer_bf16` from 155 to 132 ms.
+- **Bounded fence waits (Vulkan).** `vkWaitForFences` used `u64::MAX`, so a lost
+  device or a hung kernel hung the process instead of failing. It now times out
+  after 60 s with an error naming the cause and pointing at `VK_SYNC=1`.
 - **Loop unrolling for non-divisible trip counts (Vulkan).** The emitter only
   unrolled loops whose extent was a multiple of 8, which excluded the attention
   loops (197) and most conv tails; the driver's SPIR-V frontend does not unroll on
