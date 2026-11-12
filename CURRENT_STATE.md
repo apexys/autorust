@@ -4473,6 +4473,13 @@ which idles the device first. Measured: ONNX-MNIST **15.5 -> 11.6 ms** (VK is no
 *ahead* of CL's 12.1), ONNX ResNet-0.25 **82.6 -> 73.5** (1.02x, was 1.23x).
 MobileNet is unaffected (it is GPU-bound) — see below.
 
+**MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
+(196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
+is codegen quality on the same kernels — the depthwise convs are already fully
+promoted to registers (0 `Function` variables in
+`r_384_7_7_32_2_2_3_3`), so what is left is the SPIR-V/OpenCL-C difference for
+identical uops, not a structural win.
+
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
 f16 parameters must be seeded through `from_slice`. Separate bug, not touched.

@@ -233,7 +233,14 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         (Some(a), Some(b)) => (a, b),
         _ => return None,
     };
-    // Staging f32 to f16 rounds the activations, so it rides `USE_TC`.
+    // Staging f32 to f16 rounds it, so it is only ever done to *join* a
+    // contraction that is already reduced-precision (a mixed-precision `Linear`:
+    // f32 activations against 16-bit weights). A plain f32 matmul stays a plain
+    // f32 matmul — demoting both operands would silently turn `x.dot(w)` into f16
+    // arithmetic (it measured 1.8x faster, and wrong).
+    if stage_a == Stage::F32 && stage_b == Stage::F32 {
+        return None;
+    }
     if (stage_a == Stage::F32 || stage_b == Stage::F32) && !tc_on {
         return None;
     }

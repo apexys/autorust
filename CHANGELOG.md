@@ -17,7 +17,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   element-wise conversion modules (bf16 -> f16 for the operands, f32 -> bf16 for
   the result), gated by `USE_TC` where the graph's 16-bit accumulation would
   otherwise change. Plain 16-bit matmuls that the matcher does not describe keep
-  the generated kernel, so their numerics are unchanged.
+  the generated kernel, so their numerics are unchanged. The bias **and the
+  residual** of a transformer block are fused into that epilogue (`x + linear(x)`
+  is one MMA dispatch), which took `vit_infer_bf16` from 155 to 132 ms.
+- **Device-buffer reuse for the Vulkan backend.** The engine's buffer cache is
+  bypassed by every backend's `_free`, so a schedule re-allocated one
+  `vkCreateBuffer`+`vkAllocateMemory` per kernel per step (~0.25 ms each).
+  `VkDevice` now reuses freed buffers by size: ONNX-MNIST **15.5 -> 11.6 ms**
+  (now level with OpenCL's 12.0) and ONNX ResNet-0.25 **82.6 -> 73.5 ms**
+  (1.02x, was 1.23x).
 - **Cooperative-matrix ("tensor core") probing for the Vulkan backend.** The
   device probe now enumerates `VkPhysicalDeviceCooperativeMatrixPropertiesKHR`
   and enables `VK_KHR_cooperative_matrix` only when a 16-bit-in/f32-out shape

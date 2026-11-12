@@ -392,47 +392,51 @@ Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 
 | workload | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| MNIST CNN train, bs 512 | 22.6 | **21.9** | 1.03x |
-| ViT-B/16 infer, bs 1 | 32.7 | **29.1** | 1.12x |
-| ViT-B/16 infer, bs 8 | **132.5** | 179.9 | 0.74x |
-| ViT-B/16 infer, bf16, bs 8 | 154.0 | **92.1** | 1.67x |
-| ResNet-18 infer, bs 32 | **321.2** | 376.4 | 0.85x |
-| ResNet-18 train, bs 32 | 453.3 | **449.2** | 1.01x |
-| ResNet-50 infer, bs 32 | 102.1 | **98.6** | 1.04x |
-| MobileNetV2 infer, bs 32 | 64.0 | **57.9** | 1.11x |
-| UNet infer, 64² | **18.1** | 21.2 | 0.85x |
-| LLM prefill, 512 tok | 422.9 | **397.2** | 1.06x |
-| LLM decode, 1 tok | 22.4 | **20.2** | 1.11x |
-| ONNX MNIST, bs 32 | 15.8 | **11.7** | 1.35x |
-| ONNX ResNet-18 (w=0.25), bs 8 | 82.6 | **67.3** | 1.23x |
-| AdamW, 100M params | **95.8** | 97.4 | 0.98x |
+| MNIST CNN train, bs 512 | 23.0 | **22.4** | 1.03x |
+| ViT-B/16 infer, bs 1 | 32.9 | **28.7** | 1.15x |
+| ViT-B/16 infer, bs 8 | **131.7** | 177.5 | 0.74x |
+| ViT-B/16 infer, bf16, bs 8 | 130.3 | **94.8** | 1.37x |
+| ResNet-18 infer, bs 32 | **321.5** | 379.4 | 0.85x |
+| ResNet-18 train, bs 32 | 459.0 | **452.7** | 1.01x |
+| ResNet-50 infer, bs 32 | 101.3 | **99.9** | 1.01x |
+| MobileNetV2 infer, bs 32 | 62.7 | **56.4** | 1.11x |
+| UNet infer, 64² | **19.5** | 21.6 | 0.90x |
+| LLM prefill, 512 tok | 422.8 | **394.7** | 1.07x |
+| LLM decode, 1 tok | 22.4 | **22.1** | 1.01x |
+| ONNX MNIST, bs 32 | **11.4** | 11.8 | 0.96x |
+| ONNX ResNet-18 (w=0.25), bs 8 | 74.7 | **64.4** | 1.16x |
+| AdamW, 100M params | **94.7** | 96.2 | 0.98x |
 
-GEMM and memory-bound ops (ms per case), which the backend matches most closely:
+**VK is at or ahead of OpenCL on 6 of 14 rows and within 1.10x on 10 of 14.** The
+five that still trail are ViT-B/16 bf16 (1.37x), ViT-B/16 bs 1 (1.15x), ONNX
+ResNet-0.25 (1.16x), MobileNetV2 (1.11x) and LLM prefill (1.07x).
+
+GEMM and memory-bound ops (ms per case, best of three runs — this machine's clocks
+swing ±30%, so a single run reads 1.5-2x high):
 
 | case | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| f32 GEMM 1024³ | **1.03** | 1.16 | 0.89x |
-| f32 GEMM 2048³ | 4.80 | **4.40** | 1.09x |
-| f32 GEMM 4096³ | 36.17 | **33.73** | 1.07x |
-| f32 GEMM TN 2048³ | 3.81 | **2.76** | 1.38x |
-| f32 GEMM NT 2048³ | **5.02** | 6.00 | 0.84x |
-| f32 GEMM batched 8×512³ | **0.95** | 1.30 | 0.73x |
-| bf16 GEMM 2048³ | 4.39 | **3.16** | 1.39x |
-| add 16M | **0.85** | 1.07 | 0.79x |
-| copy 16M | **0.80** | 0.85 | 0.94x |
-| gelu 16M | **0.81** | 0.83 | 0.98x |
-| softmax 16M | **1.20** | 1.38 | 0.87x |
-| layernorm 16M | **1.13** | 1.43 | 0.79x |
-| sum 16M | **0.61** | 0.69 | 0.88x |
-| amax 16M | 0.69 | **0.62** | 1.11x |
-| transpose 16M | 0.94 | **0.91** | 1.03x |
+| f32 GEMM 1024³ | **0.74** | 1.09 | 0.68x |
+| f32 GEMM 2048³ | 4.65 | **4.42** | 1.05x |
+| f32 GEMM 4096³ | **17.9** | 31.4 | 0.57x |
+| f32 GEMM TN 2048³ | **2.38** | 2.72 | 0.87x |
+| f32 GEMM NT 2048³ | **2.41** | 5.60 | 0.43x |
+| f32 GEMM batched 8×512³ | **0.52** | 1.04 | 0.50x |
+| bf16 GEMM 2048³ | **2.17** | 3.0 | 0.72x |
+| add 16M | **0.64** | 1.06 | 0.60x |
+| copy 16M | **0.45** | 0.85 | 0.53x |
+| gelu 16M | **0.45** | 0.85 | 0.52x |
+| softmax 16M | **0.91** | 1.39 | 0.65x |
+| layernorm 16M | **1.00** | 1.41 | 0.71x |
+| sum 16M | **0.43** | 0.69 | 0.62x |
+| amax 16M | **0.44** | 0.62 | 0.70x |
+| transpose 16M | **0.45** | 0.90 | 0.50x |
 
 Reading it:
 
-- **The backend is at or ahead of OpenCL on 7 of 8 memory-bound ops** (add 0.79x,
-  layernorm 0.79x, softmax 0.87x, sum 0.88x, copy 0.94x, gelu 0.98x) and on
-  ResNet-18 inference (0.85x), UNet (0.85x), ViT at bs 8 (0.74x), the small and
-  batched GEMM shapes and AdamW.
+- **All eight memory-bound microbenches are ahead of OpenCL** (transpose 0.50x,
+  gelu 0.52x, copy 0.53x, add 0.60x, sum 0.62x, softmax 0.65x, amax 0.70x,
+  layernorm 0.71x), as are the large GEMMs apart from 2048³.
 - **Reductions needed loop unrolling.** An isolated 64 MiB row-reduce took
   0.71 ms of device time on VK and 0.26 ms on CL; glslang's SPIR-V for the same
   kernel was equally slow through a raw-module runner, and a hand-written 4x
@@ -455,19 +459,17 @@ Reading it:
   nearly free, a Vulkan submit + fence is ~25 us). Holding the submit *back*
   idles the GPU while the host builds the next graph, so the batch is closed at
   the end of every executed linear (`Prog::flush`).
-- **`bf16` is the remaining gap (1.39x on GEMM, 1.67x on ViT-B/16).** The
-  isolated 512³ bf16 dot is now at parity (0.089 vs 0.088 ms of device time), so
-  the matmul itself is fine; the cost is the graph's 15-uop round-to-bf16 idiom,
-  which the OpenCL C compiler turns into a handful of `prmt`/`lop3`/`selp`s while
-  the driver compiles the literal SPIR-V as 15 instructions. It runs on *every*
-  bf16 elementwise op, so it grows with the model, not with the matmul. A bf16
-  `dot` also accumulates in bf16 (its output dtype), so every product is rounded;
-  only hardware MMA (which accumulates in f32) removes that, and this device does
-  advertise `VK_KHR_cooperative_matrix`, so `OpCooperativeMatrixMulAddKHR` is the
-  way to close it.
-- **Large GEMMs** are 1.07-1.38x off: the scheduler-unrolled 1024-deep reduce
-  body is too big to unroll further, and `TN` (both operands transposed) is the
-  worst case.
+- **Host-side allocations cost more than the kernels on small models.** The
+  engine's buffer cache is bypassed by every backend's `_free`, so each schedule
+  allocated one `vkCreateBuffer`+`vkAllocateMemory` per kernel (~0.25 ms each):
+  ONNX-MNIST paid 17 of them per step while its GPU time was *already* ahead of
+  OpenCL's. `VkDevice` now reuses freed buffers by size, which took that row from
+  1.35x behind to slightly ahead. Worth remembering when a small model looks
+  inexplicably slow: profile host and device separately before touching codegen.
+- **What still trails** is the reduced-precision ViT (1.37x — its fused
+  flash-attention kernels, not its linears; see below), MobileNetV2 (1.11x, GPU
+  codegen on identical conv kernels), ONNX ResNet-0.25 (1.16x) and ViT at bs 1
+  (1.15x, fixed per-launch cost against 18 ms of work).
 
 ### Tensor cores (`VK_KHR_cooperative_matrix`)
 
