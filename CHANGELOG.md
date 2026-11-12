@@ -20,6 +20,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the generated kernel, so their numerics are unchanged. The bias **and the
   residual** of a transformer block are fused into that epilogue (`x + linear(x)`
   is one MMA dispatch), which took `vit_infer_bf16` from 155 to 132 ms.
+- **Loop unrolling for non-divisible trip counts (Vulkan).** The emitter only
+  unrolled loops whose extent was a multiple of 8, which excluded the attention
+  loops (197) and most conv tails; the driver's SPIR-V frontend does not unroll on
+  its own. It now runs `ext / 8` full chunks and emits the leftover iterations as
+  straight-line copies (same load order, same accumulator order, so identical
+  numerics): `vit_infer_bf16` **130 -> 113 ms**, ViT bs 8 130 -> 116,
+  UNet 19.5 -> 17.8, LLM decode now ahead of OpenCL.
 - **Device-buffer reuse for the Vulkan backend.** The engine's buffer cache is
   bypassed by every backend's `_free`, so a schedule re-allocated one
   `vkCreateBuffer`+`vkAllocateMemory` per kernel per step (~0.25 ms each).

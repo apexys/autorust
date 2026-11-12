@@ -4481,6 +4481,25 @@ GEMM and was silently f16 arithmetic. Staging now only joins a contraction that 
 matmul keeps the generated kernel (4.65 vs OpenCL's 4.42 ms at 2048³). This is the
 line between "the graph already chose f16/bf16 storage" and "we chose it for it".
 
+**The unroller skipped every loop whose extent was not a multiple of 8.** The
+attention loop (197) and most conv tails fell into that hole, and the driver's
+SPIR-V frontend does not unroll on its own (the OpenCL frontend does — that is the
+3x measured on the reduce). `unroll_end` now accepts any constant trip count:
+`unroll_loop` runs `ext / 8` full chunks with the bound rounded *down*, then emits
+the leftover `ext % 8` iterations as straight-line body copies in the merge block.
+No extra loop and no per-copy predicate, so the order of the loads and of the
+loop-carried accumulator is unchanged and the numerics are identical (pinned by
+`vk_backend`, `vk_spirv` and the VK `backend_harness`). The loop's value for the
+range uop is saved and restored around the tail so nothing outside the loop sees
+the peel.
+
+That is the single largest kernel-side win since the register promotion:
+`vit_infer_bf16` 130 -> 113 ms, ViT bs 8 130 -> 116 ms, UNet 19.5 -> 17.8,
+LLM decode 22.4 -> 20.4 (now ahead of CL), ONNX ResNet 74.7 -> 70.4. Large f32
+GEMM is unaffected (`r_128_32_4_16_8_8_1024_4`'s only loop has an 820-uop body, so
+it stays rolled) — verified by stashing the change and re-measuring 4096³
+(35.9 vs 35.8 ms).
+
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
 is codegen quality on the same kernels — the depthwise convs are already fully

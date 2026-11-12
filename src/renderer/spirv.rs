@@ -1446,12 +1446,15 @@ impl<'a> Emitter<'a> {
         if info.op != Ops::Range || info.dt == dtype::VOID {
             return None;
         }
-        // Constant trip count, divisible by the factor.
+        // Constant trip count. A remainder is fine: `unroll_loop` runs
+        // `ext / UNROLL` full chunks and then emits the leftover iterations as
+        // straight-line copies, which keeps the order of loads and of the
+        // loop-carried accumulator identical.
         let Ok(crate::uop::sint::SVal::I(ext)) = self.ctx.ssimplify(info.srcs[0].clone()) else {
             return None;
         };
         let ext = ext as i64;
-        if ext < (2 * Self::UNROLL) as i64 || ext % Self::UNROLL as i64 != 0 {
+        if ext < (2 * Self::UNROLL) as i64 {
             return None;
         }
         // Find the matching END (nested RANGE/IF depth).
@@ -1550,13 +1553,55 @@ impl<'a> Emitter<'a> {
         let step = self.const_bits(cat, Self::UNROLL as u64);
         self.d_at(iv_next, op::I_ADD, vty, &[phi, step]);
         let bty = self.bool_ty();
+        // The loop covers whole chunks only; a trailing partial chunk would read
+        // past the extent, so it is emitted below instead.
+        let bound = match self.ctx.ssimplify(end.clone()) {
+            Ok(crate::uop::sint::SVal::I(ext)) => {
+                let rem = ext as i64 % Self::UNROLL as i64;
+                if rem == 0 {
+                    None
+                } else {
+                    Some((ext as i64 - rem, rem))
+                }
+            }
+            _ => None,
+        };
+        let limit = match bound {
+            Some((lim, _)) => self.const_bits(cat, lim as u64),
+            None => end_v,
+        };
         let cmp = if cat.is_signed() {
-            self.d(op::S_LESS_THAN, bty, &[iv_next, end_v])
+            self.d(op::S_LESS_THAN, bty, &[iv_next, limit])
         } else {
-            self.d(op::U_LESS_THAN, bty, &[iv_next, end_v])
+            self.d(op::U_LESS_THAN, bty, &[iv_next, limit])
         };
         self.end_block(op::BRANCH_CONDITIONAL, &[cmp, hdr, merge]);
         self.start_block(merge);
+        // The leftover iterations, in order, as straight-line body copies. The
+        // loop-carried registers already hold the value carried out of the
+        // continue block, so these continue from it exactly like another chunk.
+        if let Some((lim, rem)) = bound {
+            let prev = self.vals.insert(range.clone(), V::Val(limit, cat, 1));
+            for k in 0..rem {
+                // Re-emit the body at iteration `lim + k`. The range's id is
+                // re-mapped to a constant so nested uses/indexing see the value.
+                let kc = self.const_bits(cat, (lim + k) as u64);
+                self.vals.insert(range.clone(), V::Val(kc, cat, 1));
+                for u in body {
+                    self.step(u);
+                }
+            }
+            // Restore what the loop head left behind, so anything outside the
+            // loop sees the same value it would have without the peel.
+            match prev {
+                Some(v) => {
+                    self.vals.insert(range.clone(), v);
+                }
+                None => {
+                    self.vals.remove(range);
+                }
+            }
+        }
         let _ = end;
     }
 

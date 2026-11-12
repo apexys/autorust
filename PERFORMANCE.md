@@ -392,52 +392,51 @@ Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 
 | workload | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| MNIST CNN train, bs 512 | 23.0 | **22.4** | 1.03x |
-| ViT-B/16 infer, bs 1 | 32.9 | **28.7** | 1.15x |
-| ViT-B/16 infer, bs 8 | **131.7** | 177.5 | 0.74x |
-| ViT-B/16 infer, bf16, bs 8 | 130.3 | **94.8** | 1.37x |
-| ResNet-18 infer, bs 32 | **321.5** | 379.4 | 0.85x |
-| ResNet-18 train, bs 32 | 459.0 | **452.7** | 1.01x |
-| ResNet-50 infer, bs 32 | 101.3 | **99.9** | 1.01x |
-| MobileNetV2 infer, bs 32 | 62.7 | **56.4** | 1.11x |
-| UNet infer, 64² | **19.5** | 21.6 | 0.90x |
-| LLM prefill, 512 tok | 422.8 | **394.7** | 1.07x |
-| LLM decode, 1 tok | 22.4 | **22.1** | 1.01x |
-| ONNX MNIST, bs 32 | **11.4** | 11.8 | 0.96x |
-| ONNX ResNet-18 (w=0.25), bs 8 | 74.7 | **64.4** | 1.16x |
-| AdamW, 100M params | **94.7** | 96.2 | 0.98x |
+| MNIST CNN train, bs 512 | 22.3 | **22.2** | 1.01x |
+| ViT-B/16 infer, bs 1 | **29.8** | 30.9 | 0.97x |
+| ViT-B/16 infer, bs 8 | **116.4** | 177.9 | 0.65x |
+| ViT-B/16 infer, bf16, bs 8 | 113.4 | **92.5** | 1.23x |
+| ResNet-18 infer, bs 32 | **319.9** | 374.5 | 0.85x |
+| ResNet-18 train, bs 32 | 450.8 | **449.9** | 1.00x |
+| ResNet-50 infer, bs 32 | 100.3 | **100.0** | 1.00x |
+| MobileNetV2 infer, bs 32 | 61.5 | **55.5** | 1.11x |
+| UNet infer, 64² | **17.8** | 20.9 | 0.85x |
+| LLM prefill, 512 tok | 420.4 | **396.9** | 1.06x |
+| LLM decode, 1 tok | 20.4 | **20.1** | 1.01x |
+| ONNX MNIST, bs 32 | **11.2** | 11.4 | 0.98x |
+| ONNX ResNet-18 (w=0.25), bs 8 | 70.4 | **70.3** | 1.00x |
+| AdamW, 100M params | **94.9** | 97.0 | 0.98x |
 
-**VK is at or ahead of OpenCL on 5 of 14 rows** (ViT-B/16 bs 8, ResNet-18 infer,
-UNet, ONNX MNIST, AdamW) **and within 1.10x on 10 of 14.** The four that still
-trail by more are ViT-B/16 bf16 (1.37x), ONNX ResNet-0.25 (1.16x), ViT-B/16 at
-bs 1 (1.15x) and MobileNetV2 (1.11x).
+**VK is at or ahead of OpenCL on 6 of 14 rows and within 1.06x on 12 of 14.** Only
+two rows trail by more than 10%: ViT-B/16 bf16 (1.23x, fused attention) and
+MobileNetV2 (1.11x, conv codegen).
 
-GEMM and memory-bound ops (ms per case, best of three runs — this machine's clocks
-swing ±30%, so a single run reads 1.5-2x high):
+GEMM and memory-bound ops (ms per case, best of two runs — this machine's clocks
+swing ±30%, so a single run can read 1.5-2x high):
 
 | case | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| f32 GEMM 1024³ | **0.74** | 1.09 | 0.68x |
-| f32 GEMM 2048³ | 4.65 | **4.42** | 1.05x |
-| f32 GEMM 4096³ | **17.9** | 31.4 | 0.57x |
-| f32 GEMM TN 2048³ | **2.38** | 2.72 | 0.87x |
-| f32 GEMM NT 2048³ | **2.41** | 5.60 | 0.43x |
-| f32 GEMM batched 8×512³ | **0.52** | 1.04 | 0.50x |
+| f32 GEMM 1024³ | **0.70** | 1.08 | 0.64x |
+| f32 GEMM 2048³ | 4.66 | **4.39** | 1.06x |
+| f32 GEMM 4096³ | 35.8 | **31.1** | 1.15x |
+| f32 GEMM TN 2048³ | 3.55 | **2.71** | 1.31x |
+| f32 GEMM NT 2048³ | **4.57** | 5.98 | 0.76x |
+| f32 GEMM batched 8×512³ | **0.60** | 1.07 | 0.56x |
 | bf16 GEMM 2048³ | **2.17** | 3.0 | 0.72x |
-| add 16M | **0.64** | 1.06 | 0.60x |
-| copy 16M | **0.45** | 0.85 | 0.53x |
-| gelu 16M | **0.45** | 0.85 | 0.52x |
-| softmax 16M | **0.91** | 1.39 | 0.65x |
-| layernorm 16M | **1.00** | 1.41 | 0.71x |
-| sum 16M | **0.43** | 0.69 | 0.62x |
-| amax 16M | **0.44** | 0.62 | 0.70x |
-| transpose 16M | **0.45** | 0.90 | 0.50x |
+| add 16M | **0.64** | 1.05 | 0.60x |
+| copy 16M | **0.44** | 0.84 | 0.52x |
+| gelu 16M | **0.45** | 0.84 | 0.53x |
+| softmax 16M | **0.89** | 1.39 | 0.64x |
+| layernorm 16M | **0.90** | 1.43 | 0.63x |
+| sum 16M | **0.44** | 0.71 | 0.63x |
+| amax 16M | **0.45** | 0.63 | 0.71x |
+| transpose 16M | **0.45** | 0.91 | 0.49x |
 
 Reading it:
 
-- **All eight memory-bound microbenches are ahead of OpenCL** (transpose 0.50x,
-  gelu 0.52x, copy 0.53x, add 0.60x, sum 0.62x, softmax 0.65x, amax 0.70x,
-  layernorm 0.71x), as are the large GEMMs apart from 2048³.
+- **All eight memory-bound microbenches are ahead of OpenCL** (transpose 0.49x,
+  gelu 0.53x, copy 0.52x, add 0.60x, sum 0.63x, softmax 0.64x, layernorm 0.63x,
+  amax 0.71x), as are the transposed and batched GEMM shapes.
 - **Reductions needed loop unrolling.** An isolated 64 MiB row-reduce took
   0.71 ms of device time on VK and 0.26 ms on CL; glslang's SPIR-V for the same
   kernel was equally slow through a raw-module runner, and a hand-written 4x
@@ -445,6 +444,14 @@ Reading it:
   loops, while its OpenCL compiler does, and the extra loads in flight are what
   makes a strided reduce reach bandwidth. `renderer::spirv` unrolls small
   constant-trip-count loops 8x.
+- **The unroller only fired on extents divisible by 8**, which excluded the
+  attention loops (197) and most of the conv tails. It now runs
+  `ext / 8` full chunks and emits the leftover iterations as **straight-line
+  copies** — no extra loop, no per-copy predicate, and the order of loads and of
+  the loop-carried accumulator is unchanged, so the numerics are identical.
+  That is worth a lot: `vit_infer_bf16` 130 -> 113 ms (1.37x -> 1.23x), ViT bs 8
+  130 -> 116 ms, UNet 19.5 -> 17.8 ms, LLM decode 22.4 -> 20.4 ms (now ahead of
+  OpenCL), ONNX ResNet 74.7 -> 70.4 ms.
 - **Register arrays must be promoted to `OpPhi`s, and the carry has to come from
   the continue block.** A 64-float accumulator in `Function` storage is not
   promoted by the driver, so the inner loop round-trips through scratch (a
@@ -467,10 +474,10 @@ Reading it:
   OpenCL's. `VkDevice` now reuses freed buffers by size, which took that row from
   1.35x behind to slightly ahead. Worth remembering when a small model looks
   inexplicably slow: profile host and device separately before touching codegen.
-- **What still trails** is the reduced-precision ViT (1.37x — its fused
-  flash-attention kernels, not its linears; see below), MobileNetV2 (1.11x, GPU
-  codegen on identical conv kernels), ONNX ResNet-0.25 (1.16x) and ViT at bs 1
-  (1.15x, fixed per-launch cost against 18 ms of work).
+- **What still trails** is the reduced-precision ViT (1.23x — its fused
+  softmax+matmul attention kernels, not its linears; see below) and MobileNetV2
+  (1.11x, GPU codegen on identical conv kernels). Everything else is at parity or
+  ahead.
 
 ### Tensor cores (`VK_KHR_cooperative_matrix`)
 
