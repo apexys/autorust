@@ -4433,13 +4433,25 @@ batch stride, and a shared B staged once (`b_b == 0`). Three bugs had to go:
   cached with the pipeline, which is also what makes them safe: a set is
   referenced by a pending submission, so it must live as long as the pipeline.
 
-`vit_infer_bf16` is still behind, but it now uses the tensor cores: **147 vs CL's
-92 ms** (was 154). The gain is small because each slice is a 197x768 tile — three
-dispatches (stage, MMA, epilogue) for 156 workgroups of 16x64 — so the batched
-projections are launch-bound rather than MMA-bound. And 11 of the 48 projections
-carry a residual, which `plan` still rejects (no residual epilogue variant). Those
-two are the remaining ViT items; the f32 x bf16 x f32 bf16-bias path itself is
-verified exact (`coopmat_handles_a_batched_dot`).
+A contiguous batch is staged and converted **once** rather than per slice
+(`a_b == m * a_m`, `c_b == m * c_m`), which took `vit_infer_bf16` from 154 to
+**144 ms** against CL's 92. Profiling the step by kernel kind (`VK_TIME=1`,
+summed over one run) shows why that is where it stops:
+
+| kind | dispatches | GPU time |
+|---|---:|---:|
+| generated `r_*` (reduce/GEMM) | 544 | **530 ms** |
+| cooperative matrix | 1152 | 35 ms |
+| stage | 288 | 6.5 ms |
+| epilogue | 144 | 4.9 ms |
+| other (elementwise/copies) | 6289 | 26 ms |
+
+So the tensor-core path is ~7% of the ViT's GPU time and the **generated kernels
+are 85%**: the projections now run on the MMA, and what is left is the *attention*
+matmuls (per-head, per-batch 197x197x64 tiles), the 11 projections with a residual,
+and a few thousand small elementwise kernels. Optimising the projections further
+cannot close a 1.57x gap — the attention path is where the time is, and its tiles
+(K = 64, 96 slices of 197x197) are the next thing to put on the MMA.
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so

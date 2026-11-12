@@ -764,10 +764,22 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
 
     // Operands that are not already f16 are staged into packed f16 tiles inside
     // the per-batch loop below (the pass also transposes a column-major operand).
+    let plan = coopmat::plan(g).expect("coopmat: eligible descriptor");
+    let nb = g.batch as usize;
+    let a_slice = m * k;
+    let c_slice = m * n;
+    // A batch slice starts exactly one slice after the previous one when the
+    // tensor is contiguous — then the whole tensor can be staged (and the whole
+    // result converted) in *one* dispatch instead of one per slice.
+    let a_packed = nb == 1 || g.a_b == m as i64 * plan.sa1 as i64;
+    let c_packed = nb == 1 || g.c_b == m as i64 * plan.sc as i64;
     let need_a = plan.stage_a != coopmat::Stage::Direct;
     let need_b = plan.stage_b != coopmat::Stage::Direct;
+    let need_scratch =
+        g.c_dtype == crate::dtype::BFLOAT16 || plan.epilogue != coopmat::Epilogue::None;
+
     let pack_a = if need_a {
-        Some(inner.scratch(0, m * k * 2))
+        Some(inner.scratch(0, if a_packed { nb } else { 1 } * a_slice * 2))
     } else {
         None
     };
@@ -776,44 +788,25 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     } else {
         None
     };
-    let (pa, pb) = match (pack_a.as_ref(), pack_b.as_ref()) {
-        (Some(pa), Some(pb)) => (
-            Bind {
-                buf: pa,
-                off: 0,
-                size: pa.size as u64,
-            },
-            Bind {
-                buf: pb,
-                off: 0,
-                size: pb.size as u64,
-            },
-        ),
-        // Only reachable when neither operand needs staging, in which case the
-        // original buffers are bound directly.
-        _ => (a, b),
-    };
-    let a_final = if need_a { pa } else { a };
-    let b_final = if need_b { pb } else { b };
-
-    // A bf16 result, or any epilogue, needs the f32 accumulator in a scratch
-    // buffer first.
-    let stage_c = if g.c_dtype == crate::dtype::BFLOAT16 || plan.epilogue != coopmat::Epilogue::None
-    {
-        Some(inner.scratch(2, m * n * 4))
+    fn bind_whole(b: &vk_sys::GpuBuffer) -> Bind<'_> {
+        Bind {
+            buf: b,
+            off: 0,
+            size: b.size as u64,
+        }
+    }
+    let pa = pack_a.as_ref().map(bind_whole);
+    let pb = pack_b.as_ref().map(bind_whole);
+    let scratch_c = if need_scratch {
+        Some(inner.scratch(2, if c_packed { nb } else { 1 } * c_slice * 4))
     } else {
         None
     };
-    let out = match stage_c.as_ref() {
-        Some(sc) => Bind {
-            buf: sc,
-            off: 0,
-            size: sc.size as u64,
-        },
-        None => c,
-    };
+    let pc = scratch_c.as_ref().map(bind_whole);
+    let elem_a: u64 = if g.a_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
+    let elem_b: u64 = if g.b_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
+    let elem_c: u64 = if g.c_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
 
-    let plan = coopmat::plan(g).expect("coopmat: eligible descriptor");
     let dense = coopmat::Plan {
         sa1: k,
         sa2: 1,
@@ -826,9 +819,6 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         ..plan
     };
     let words = coopmat::module(dense).expect("coopmat: module");
-    let elem_a: u64 = if g.a_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
-    let elem_b: u64 = if g.b_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
-    let elem_c: u64 = if g.c_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
     let key = (m, n, k, g.dtype, g.c_dtype);
     let (pipe, sets) = {
         let mut cache = inner.coop.borrow_mut();
@@ -844,30 +834,35 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
             (p, sets)
         }
     };
-    COOP_GEMMS.with(|c| c.set(c.get() + 1));
     let groups = coopmat::grid(m, n);
     if trace_on() {
         trace(&format!(
-            "coopmat {m}x{n}x{k} batch={} groups={groups:?} {:?}",
-            g.batch, g.dtype
+            "coopmat {m}x{n}x{k} batch={nb} packed={a_packed}/{c_packed} groups={groups:?} {:?}",
+            g.dtype
         ));
     }
-    // A strided batch is one dispatch per slice, with staging, the GEMM and the
-    // epilogue interleaved so a single set of scratch buffers stays valid.
+
+    // Stage B once: it is either shared across the batch or packed.
     if need_b && g.b_b == 0 {
-        stage(inner, plan.stage_b, k, n, plan.sb1, plan.sb2, b, pb);
+        stage(inner, plan.stage_b, k, n, plan.sb1, plan.sb2, b, pb.unwrap());
     }
-    for bi in 0..g.batch {
+    // Stage A once when the batch is contiguous, otherwise per slice below.
+    if need_a && a_packed {
+        stage(inner, plan.stage_a, nb * m, k, plan.sa1, plan.sa2, a, pa.unwrap());
+    }
+
+    for bi in 0..nb as i64 {
+        let biu = bi as usize;
         let off_a = (g.a_b * bi) as u64 * elem_a;
         let off_b = (g.b_b * bi) as u64 * elem_b;
         let off_c = (g.c_b * bi) as u64 * elem_c;
-        if need_a {
+        if need_a && !a_packed {
             let src = Bind {
                 off: a.off + off_a,
                 size: a.size.saturating_sub(off_a),
                 ..a
             };
-            stage(inner, plan.stage_a, m, k, plan.sa1, plan.sa2, src, pa);
+            stage(inner, plan.stage_a, m, k, plan.sa1, plan.sa2, src, pa.unwrap());
         }
         if need_b && g.b_b != 0 {
             let src = Bind {
@@ -875,51 +870,98 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
                 size: b.size.saturating_sub(off_b),
                 ..b
             };
-            stage(inner, plan.stage_b, k, n, plan.sb1, plan.sb2, src, pb);
+            stage(inner, plan.stage_b, k, n, plan.sb1, plan.sb2, src, pb.unwrap());
         }
-        // The accumulator target moves with the batch — unless it is the shared
-        // scratch, which holds one slice at a time (so it is never offset).
-        let off_acc = if stage_c.is_some() { 0 } else { off_c };
+        let a_final = match pa {
+            Some(pa) => Bind {
+                off: if a_packed {
+                    (biu * a_slice) as u64 * 2
+                } else {
+                    0
+                },
+                ..pa
+            },
+            None => Bind {
+                off: a.off + off_a,
+                size: a.size.saturating_sub(off_a),
+                ..a
+            },
+        };
+        let b_final = pb.unwrap_or(Bind {
+            off: b.off + off_b,
+            size: b.size.saturating_sub(off_b),
+            ..b
+        });
+        // Where the MMA writes this slice's accumulator.
+        let (acc, acc_off) = match pc {
+            Some(pc) => {
+                let off = if c_packed {
+                    (biu * c_slice) as u64 * 4
+                } else {
+                    0
+                };
+                (pc, off)
+            }
+            None => (c, off_c),
+        };
         let bound = [
             (a_final.buf, a_final.off, a_final.size),
             (b_final.buf, b_final.off, b_final.size),
-            (
-                out.buf,
-                out.off + off_acc,
-                out.size.saturating_sub(off_acc),
-            ),
+            (acc.buf, acc.off + acc_off, acc.size.saturating_sub(acc_off)),
         ];
         COOP_GEMMS.with(|c| c.set(c.get() + 1));
         dev.dispatch(&pipe, &sets, &bound, groups, false, "coopmat")
             .unwrap_or_else(|e| panic!("TGERR: VK coopmat dispatch: {e}"));
-        // The epilogue (or the narrowing round) reads this slice's accumulator
-        // and writes this slice's result.
-        let slice_in = Bind {
-            off: out.off + off_acc,
-            size: out.size.saturating_sub(off_acc),
-            ..out
-        };
-        let slice_out = Bind {
-            off: c.off + off_c,
-            size: c.size.saturating_sub(off_c),
+        // A packed batch is converted once after the loop.
+        if !c_packed {
+            let slice_in = Bind {
+                off: acc.off + acc_off,
+                size: acc.size.saturating_sub(acc_off),
+                ..acc
+            };
+            let slice_out = Bind {
+                off: c.off + off_c,
+                size: c.size.saturating_sub(off_c),
+                ..c
+            };
+            match plan.epilogue {
+                coopmat::Epilogue::None => {
+                    if g.c_dtype == crate::dtype::BFLOAT16 {
+                        convert(inner, Conversion::F32ToBf16, c_slice, slice_in, slice_out);
+                    }
+                }
+                kind => {
+                    let elem = if g.bias_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
+                    let bias = view_elem(g.bias_slot, g.bias_off, elem);
+                    epilogue(inner, kind, n, c_slice, slice_in, bias, slice_out);
+                }
+            }
+        }
+    }
+    // One conversion for the whole packed batch.
+    if c_packed && let Some(pc) = pc {
+        let count = nb * c_slice;
+        let dst = Bind {
+            off: c.off,
+            size: c.size,
             ..c
         };
         match plan.epilogue {
             coopmat::Epilogue::None => {
                 if g.c_dtype == crate::dtype::BFLOAT16 {
-                    convert(inner, Conversion::F32ToBf16, m * n, slice_in, slice_out);
+                    convert(inner, Conversion::F32ToBf16, count, pc, dst);
                 }
             }
             kind => {
                 let elem = if g.bias_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
                 let bias = view_elem(g.bias_slot, g.bias_off, elem);
-                epilogue(inner, kind, n, m * n, slice_in, bias, slice_out);
+                epilogue(inner, kind, n, count, pc, bias, dst);
             }
         }
     }
 }
 
-/// Number of usable Vulkan devices./// Number of usable Vulkan devices.
+/// Number of usable Vulkan devices.
 pub fn device_count() -> usize {
     vk_devices().len()
 }
