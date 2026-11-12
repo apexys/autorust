@@ -760,7 +760,6 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         b
     };
     let (a, b, c) = (view(g.a_slot), view(g.b_slot), view(g.c_slot));
-    let plan = coopmat::plan(g).expect("coopmat: eligible descriptor");
 
     // Operands that are not already f16 are staged into packed f16 tiles inside
     // the per-batch loop below (the pass also transposes a column-major operand).
