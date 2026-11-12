@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "resnet50_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 448.728,
+  "ms_median": 100.3741,
+  "ms_min": 98.9849,
+  "ms_iqr": 0.496,
+  "images_per_s": 318.81,
+  "name": "autorust-cl-resnet50_infer",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:19",
+  "notes": ""
+}

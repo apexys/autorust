@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "onnx_resnet",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 107.4768,
+  "ms_median": 80.1407,
+  "ms_min": 78.5446,
+  "ms_iqr": 2.4087,
+  "images_per_s": 99.82,
+  "name": "autorust-vk-onnx_resnet",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:46:01",
+  "notes": ""
+}

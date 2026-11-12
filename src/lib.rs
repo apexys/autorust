@@ -41,12 +41,13 @@
 //! # Features
 //!
 //! Default: `backend_rayon` + `backend_rust` + `backend_clang` +
-//! `backend_cl` + `backend_metal` + `backend_cuda` + `freeze`. All GPU backends
-//! are dynamically loaded at run time, so no vendor SDK is needed at build
-//! time; Metal links the OS frameworks on macOS only, and CUDA exists only on
-//! Linux/Windows (its dependency is target-gated there). `--no-default-features`
-//! is std-only (plus `nanoserde`). See `Cargo.toml` and the README for the full
-//! table.
+//! `backend_cl` + `backend_vk` + `backend_metal` + `backend_cuda` + `freeze`.
+//! All GPU backends are dynamically loaded at run time, so no vendor SDK is
+//! needed at build time: `VK` emits SPIR-V directly and uses `ash` only for the
+//! bindings (`libvulkan` is `dlopen`ed), Metal links the OS frameworks on macOS
+//! only, and CUDA exists only on Linux/Windows (its dependency is target-gated
+//! there). `--no-default-features` is std-only (plus `nanoserde`). See
+//! `Cargo.toml` and the README for the full table.
 //!
 //! # Threading and panics
 //!

@@ -28,6 +28,10 @@ Results live in [`results/`](results) as raw JSON plus a generated
 | `onnx_resnet` | ResNet-18 at width 0.25 exported to ONNX | batch 8, `bench/assets/resnet18w25_bs8.onnx` | ms/step, img/s |
 | `freeze` | `vit_freeze` example: eager JIT replay vs frozen CPU plan | 1 layer, d=192, 64² | per-case ms |
 
+`VK` (Vulkan) and `CL` (OpenCL) rows cover the same workloads as the `RUST`/
+`CUDA` ones, without clBLAST on the CL side, so the two GPU APIs can be compared
+directly; `PERFORMANCE.md` has the summary and the known gaps.
+
 Inputs are **synthetic and device-resident** (`rand` for MNIST, `zeros` for
 ViT), with fixed labels; the timed region is one training/inference step and
 contains no data loading, evaluation or logging. This keeps the comparison
@@ -65,6 +69,9 @@ about the framework, not the data pipeline. The MNIST model itself is the
   `bench/.venv/bin/python bench/tools/export_onnx.py`.
 - `freeze` runs `target/release/examples/vit_freeze`
   (`cargo build --release --example vit_freeze`); it is autorust-only.
+- `VK` rows need a Vulkan loader and a compute device (the backend is only
+  registered when one is usable); `VK:1` selects the second device, e.g. the
+  llvmpipe software driver.
 - Not included: `torch.compile`, `@function` transforms, multi-GPU, and
   tinygrad/candle for the new conv/LLM rows (their bench drivers only cover the
   original workloads and GEMM). They are candidates for a follow-up.

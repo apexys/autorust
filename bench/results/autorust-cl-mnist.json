@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "mnist_train",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 3,
+  "iters": 10,
+  "ms_cold": 187.9668,
+  "ms_median": 21.8442,
+  "ms_min": 20.3342,
+  "ms_iqr": 1.3382,
+  "images_per_s": 23438.72,
+  "name": "autorust-cl-mnist",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:42:37",
+  "notes": ""
+}

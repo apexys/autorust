@@ -1,0 +1,63 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 51.3889,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 1.0937,
+      "tflops": 1.9635
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 4.6991,
+      "tflops": 3.656
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 30.1735,
+      "tflops": 4.555
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 2.7551,
+      "tflops": 3.1179
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 2.3319,
+      "tflops": 3.6837
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 2.9709,
+      "tflops": 5.7828
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 6.3209,
+      "tflops": 2.7179
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 1.0438,
+      "tflops": 2.0573
+    }
+  ],
+  "name": "autorust-cl-gemm",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:44:02",
+  "notes": ""
+}

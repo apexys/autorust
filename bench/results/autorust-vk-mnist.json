@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "mnist_train",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 3,
+  "iters": 10,
+  "ms_cold": 132.7367,
+  "ms_median": 23.7991,
+  "ms_min": 21.8723,
+  "ms_iqr": 2.3905,
+  "images_per_s": 21513.46,
+  "name": "autorust-vk-mnist",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:42:35",
+  "notes": ""
+}

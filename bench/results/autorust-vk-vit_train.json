@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "vit_train",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 3065.7203,
+  "ms_median": 197.7855,
+  "ms_min": 182.4348,
+  "ms_iqr": 7.5784,
+  "images_per_s": 5.06,
+  "name": "autorust-vk-vit_train",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:58:06",
+  "notes": ""
+}

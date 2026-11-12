@@ -1,0 +1,28 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "optim",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 0.0,
+  "ms_median": 96.2572,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "adamw 100000000 params, 32 tensors",
+      "ms": 96.2572,
+      "gbs": 29.0887
+    }
+  ],
+  "name": "autorust-cl-optim",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:44:29",
+  "notes": ""
+}

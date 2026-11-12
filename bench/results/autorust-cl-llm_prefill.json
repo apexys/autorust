@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "llm_prefill",
+  "batch": 512,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 393.8167,
+  "ms_min": 393.8167,
+  "ms_iqr": 0.0,
+  "images_per_s": 1300.1,
+  "name": "autorust-cl-llm_prefill",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:43",
+  "notes": ""
+}

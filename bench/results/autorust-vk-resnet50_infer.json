@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "resnet50_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 1321.1473,
+  "ms_median": 124.1998,
+  "ms_min": 124.0803,
+  "ms_iqr": 1.8799,
+  "images_per_s": 257.65,
+  "name": "autorust-vk-resnet50_infer",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:11",
+  "notes": ""
+}

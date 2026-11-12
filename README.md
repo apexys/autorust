@@ -1,14 +1,14 @@
 # autorust
 
 A multi-backend GPU-compute / ML framework!
-Train and infer on CUDA, OpenCL, Metal or CPU!
+Train and infer on CUDA, Vulkan, OpenCL, Metal or CPU!
 Inspired and based on tinygrad!
 
 It includes:
 - A `Tensor` type for dynamic multi-dimension, multi-datatype arrays
 - A `nn` library of common ML layers (Linear, Conv, LSTMCell, ...) and Optimizers (Adam, SGD, LARS, ...)
 - A dynamic graph compiler/scheduler (adapted from tinygrad's) with codegen
-- GPU backends for CUDA, OpenCL and Metal
+- GPU backends for CUDA, Vulkan, OpenCL and Metal (Vulkan emits SPIR-V directly)
 - "Just-in-time" CPU backends for Rust and C-compilers and an interpreted RAYON backend
 - AOT CPU compilation (embed ML models as Rust code with a build script)
 - Accelerated GEMM and fused FlashAttention kernels (including TF32/bf16
@@ -45,7 +45,9 @@ serialization) is the only mandatory dependency. `rayon` + `bytemuck` power the
 `RAYON` backend and the packed CPU GEMM; the `RUST`, `CC`, `CL` and `CUDA`
 backends use `libloading` for the libraries they generate or load at run time.
 `CUDA` also uses `cudarc`, dynamically loaded, so no CUDA toolkit is needed on
-the build machine, and `METAL` uses the `objc2` crates.
+the build machine, `METAL` uses the `objc2` crates, and `VK` uses [`ash`](https://crates.io/crates/ash)
+purely for its bindings (its `loaded` feature `dlopen`s `libvulkan` at run
+time, so nothing links against the loader).
 
 If you want to use the `RUST` backend, you need `rustc` installed, same with a c compiler for the `CC` backend. Both fall back to the multithreaded `RAYON` backend if not available.
 
@@ -56,8 +58,7 @@ several applications at the GEOMAR Helmholtz Centre for Ocean Research right
 now. The ergonomics are fine, but I am still looking at a few places where they
 could be improved. Scheduling is single-threaded for now and could be faster
 (kernel compilation is parallel where the backend allows it). There's also a
-lot of optimization potential in the backends (and I'd like to add a Vulkan
-one). ONNX is relatively incomplete and I'd like to add an exporter as well.
+lot of optimization potential in the backends. ONNX is relatively incomplete and I'd like to add an exporter as well.
 
 ## Performance
 
@@ -113,6 +114,13 @@ The bench also isolates the pieces the two models hide:
 | ViT-B/16 train, bf16 | CUDA | 84.3 ms | **20.9 ms** | f32 was 95.9 vs 43.8 |
 | MNIST infer via ONNX, bs 32 | CUDA | 10.9 ms | **0.35 ms** | runner reschedules per call |
 | ResNet-18 (w=0.25) via ONNX, bs 8 | CUDA | 67.7 ms | **1.25 ms** | same, larger graph |
+
+Vulkan (`VK`) runs the same kernels as OpenCL: MNIST train 23.8 vs 21.8 ms,
+ViT-B/16 infer at bs 8 **135.7 vs 178.4 ms**, f32 GEMM at parity up to 2048³,
+AdamW 96.1 vs 96.3 ms. The remaining gaps are `LOCAL`-memory reductions
+(softmax/layernorm), decode-heavy graphs (one command buffer per kernel) and
+bf16 inference; see
+[`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#vulkan-vk).
 
 Per-case tables (GEMM shapes, each memory op, both optimizer devices, the
 frozen-plan comparison) are in

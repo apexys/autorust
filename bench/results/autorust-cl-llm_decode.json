@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "llm_decode",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 0.0,
+  "ms_median": 20.1818,
+  "ms_min": 20.1818,
+  "ms_iqr": 0.0,
+  "images_per_s": 49.55,
+  "name": "autorust-cl-llm_decode",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:53",
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "resnet18_train",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 1024.7228,
+  "ms_median": 459.7996,
+  "ms_min": 459.6437,
+  "ms_iqr": 0.0565,
+  "images_per_s": 69.6,
+  "name": "autorust-vk-resnet18_train",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:44:52",
+  "notes": ""
+}

@@ -24,6 +24,7 @@ Device selection is process-wide, like tinygrad's `Device.DEFAULT`; see
 | `backend_rust` | yes | Native CPU backend (`RUST`): Rust kernel source → `rustc` cdylib → loaded with `libloading`. |
 | `backend_clang` | yes | Native CPU backend (`CC`): C kernel source → `$CC` (clang/gcc) shared library. |
 | `backend_cl` | yes | OpenCL backend (`CL`), dynamically loaded at run time. |
+| `backend_vk` | yes | Vulkan backend (`VK`): SPIR-V emitted directly, `libvulkan` loaded at run time via `ash` (bindings only). |
 | `backend_metal` | yes | Metal backend (`METAL`), macOS only; links the OS frameworks, no Xcode needed. |
 | `backend_cuda` | yes (Linux/Windows) | CUDA backend, via `cudarc` (driver + NVRTC, dynamically loaded). Target-gated: macOS builds never see the dependency. |
 | `freeze` | yes | Capture/emit frozen CPU plans (`autorust::freeze`, see [`FREEZE.md`](FREEZE.md)); implies `backend_rust`. |
@@ -105,8 +106,8 @@ environment variables, or mutate `ctx.borrow_mut().settings`.
 
 | variable | values | default | effect |
 |---|---|---|---|
-| `DEFAULT_DEVICE` | device name, `auto` | first available (CUDA → METAL → CL → RUST → CC → RAYON → INTERP) | Device used when a constructor gets no explicit device. `auto` runs `select_fastest_device()` lazily. |
-| `CUDA_DEVICE`, `CL_DEVICE` | ordinal | `0` | Index appended to the priority-picked name (`CUDA:1`); index 0 stays the bare name. |
+| `DEFAULT_DEVICE` | device name, `auto` | first available (CUDA → METAL → CL → VK → RUST → CC → RAYON → INTERP) | Device used when a constructor gets no explicit device. `auto` runs `select_fastest_device()` lazily. |
+| `CUDA_DEVICE`, `CL_DEVICE`, `VK_DEVICE` | ordinal | `0` | Index appended to the priority-picked name (`CUDA:1`, `VK:1`); index 0 stays the bare name. |
 | `AUTORUST_AUTOTUNE_DEVICES` | comma-separated names | all candidates | Restrict `select_fastest_device()` / `DEFAULT_DEVICE=auto` to these. |
 | `AUTORUST_AUTOTUNE_QUIET` | any | unset | Suppress the autotune summary and per-device failure lines. |
 | `AUTORUST_AUTOTUNE_TRACE` | any | unset | Print the per-case timing samples. |
@@ -163,6 +164,11 @@ parallel.
 | `AUTORUST_COMPILE_THREADS` | integer | `8` | NVRTC workers per kernel batch on CUDA (`1` = serial). NVRTC gains flatten after a handful of workers. |
 | `AUTORUST_NVRTC_LIB` | path/soname | first `libnvrtc.so*` found on the loader path | Force a specific NVRTC library. When set, no other NVRTC is tried. `NVRTC_PATH` is accepted as a tinygrad-compatible alias. |
 | `AUTORUST_CL_LIB` | path | `libOpenCL.so` | Load a specific OpenCL library (test/deployment override). |
+| `VK_TRACE` | any | unset | Print the Vulkan device probe (caps, accepted/skipped devices), each allocation and each dispatch. |
+| `VK_TIME` | any | unset | Print the GPU time of each dispatch and of device→host readbacks. |
+| `VK_SYNC` | any | unset | Wait after every dispatch (attributes a GPU fault to one kernel). |
+| `VK_DUMP_SPV` | directory | unset | Write every rendered SPIR-V module to `<dir>/<kernel>.spv` (feed to `spirv-dis`/`spirv-val`). |
+| `VK_NO_ROBUST` | any | unset | Disable `robustBufferAccess` (debug: A/B a suspected OOB access). |
 | `AUTORUST_CUBLAS_LIB` | path/soname | newest `libcublas.so*` found on the loader path | Force a specific cuBLAS library. When set, no other cuBLAS is tried. |
 | `AUTORUST_CLBLAST_LIB` | path | `libclblast.so.1`, `.dylib`, `clblast.dll` | Override the CLBlast library. |
 

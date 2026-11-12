@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "llm_decode",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 0.0,
+  "ms_median": 34.0838,
+  "ms_min": 34.0838,
+  "ms_iqr": 0.0,
+  "images_per_s": 29.34,
+  "name": "autorust-vk-llm_decode",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:48",
+  "notes": ""
+}

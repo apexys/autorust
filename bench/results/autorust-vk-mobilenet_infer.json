@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "mobilenet_infer",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 376.2765,
+  "ms_median": 62.5073,
+  "ms_min": 61.1993,
+  "ms_iqr": 1.0742,
+  "images_per_s": 511.94,
+  "name": "autorust-vk-mobilenet_infer",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:25",
+  "notes": ""
+}

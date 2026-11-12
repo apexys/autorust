@@ -4160,3 +4160,66 @@ Rows live in `bench/run.py`; `bench/report.py` renders the microbenches as
 per-case tables (their JSON carries a `cases` array). tinygrad/candle drivers
 only cover the original workloads plus GEMM, so the other new rows are
 autorust+torch; noted in `bench/README.md`.
+
+### 9.52 A Vulkan backend that emits SPIR-V directly (2026-11)
+
+There is no tinygrad Vulkan target, so this backend has no oracle: it reuses the
+existing seams (`OpaqueT`/`BackendAllocator`/`Comp`/`Prog`/`UopRenderer` +
+`register_device`) and the C-style renderer's linear-UOp walk, re-encoded as a
+SPIR-V module (`renderer/spirv.rs`). `ash` supplies the bindings only: its
+`loaded` feature `dlopen`s `libvulkan`, so nothing links against the loader and
+`--no-default-features` stays std-only+`nanoserde`.
+
+Emission details that are easy to get wrong, each found by a real failure:
+
+- **No pointer casts in SPIR-V.** A `float4` view of a buffer becomes a second
+  descriptor binding (`RuntimeArray<vec4<float>>` over the same `VkBuffer`), so
+  a buffer *slot* may appear several times in the binding table. The table is
+  part of the rendered payload (`vk1 <n> <slots...> <local size>` + base64
+  words) because `TinyElf.signature` is generated generically from the PARAM
+  list and cannot express duplicates.
+- **Narrow integers are 32-bit in registers.** Vulkan rejects `OpConstant` of
+  8/16-bit integer types and restricts 8/16-bit arithmetic, so loads
+  zero/sign-extend, stores truncate, and narrowing casts wrap to the dtype and
+  widen again. `bool` buffers are byte arrays (`OpTypeBool` has no storage
+  size), converted at the boundary. `bf16` is a 16-bit pattern widened to f32 by
+  `extra::pm_manual_bf16_cast`, exactly as the OpenCL renderer does.
+- **`Function` storage must live in the first block**, workgroup arrays may be
+  module scope; `OpVariable`s are therefore pre-scanned and emitted in the entry
+  block.
+- **Structured control flow.** `RANGE`/`END` become `OpPhi` + `OpLoopMerge`
+  loops with the increment in the continue block; the gated `END` is a branch to
+  the merge block (`break`). `IF`/`ENDIF` are `OpSelectionMerge` regions; a
+  gated `LOAD` (`gate ? access : var`) is a selection plus a `Phi` instead of a
+  variable. Both were validated against `spirv-val --target-env vulkan1.1`
+  (`tests/vk_spirv.rs` renders real scheduled kernels and validates them).
+- **A command-buffer ring is not optional.** Re-recording one command buffer
+  while the previous submission is pending is undefined and segfaults lavapipe;
+  four slots with one fence each, reset only after that slot's fence signals,
+  fixed it. Descriptor sets follow the same ring.
+- **Deferred buffer destruction.** Vulkan forbids destroying a `VkBuffer` a
+  pending submission references. MNIST training frees and reallocates
+  intermediates every step; destroying eagerly lost the device on NVIDIA.
+  Destruction is queued and drained at the next idle point (`wait_idle`), while
+  the queue's ordering already makes *reuse* of a just-freed buffer safe.
+- **64-bit index arithmetic.** The cross-entropy/getitem graphs use `INT64`
+  offsets; emitting `OpIMul %int %long %int` mixed widths (accepted by
+  `spirv-val`, miscompiled by llvmpipe into an out-of-bounds write, i.e. SIGFPE
+  in lavapipe and a lost device on NVIDIA) is fixed by carrying the index width
+  in `Off` and widening both sides.
+- **Device facts matter.** The scheduler's tiling depends on
+  `global_max`/`local_max`/`shared_max`; these now come from
+  `VkPhysicalDeviceLimits`. Host-visible memory must also be chosen by size:
+  tensors are `DEVICE_LOCAL` (VRAM) and only small allocations use the BAR
+  window, with staged copies otherwise. Staging in the BAR window is much
+  *slower* for readback than system memory (404 ms vs 64 ms for 16 MB).
+
+Measured against `CL` on the same machine (`bench/run.py --only
+'autorust-(vk|cl)-'`, 138-row matrix): MNIST train 23.8 vs 21.8 ms, ViT infer
+bs 8 **135.7 vs 178.4 ms**, ResNet-18 infer 404 vs 376, LLM prefill 461 vs 394,
+AdamW 96.1 vs 96.3, f32 GEMM parity up to 2048³ (and better on TN/NT),
+elementwise `add`/`gelu` and `transpose` ahead. The gaps are `LOCAL`-memory
+reductions (`softmax`/`layernorm`, per-lane local accesses because SPIR-V cannot
+cast a local pointer to a vector pointer), decode-heavy graphs (~300 kernels per
+token, one command buffer each) and bf16 ViT inference. Those, plus a native
+f16/tensor-core `OpCooperativeMatrixMulAddKHR` path, are the follow-ups.

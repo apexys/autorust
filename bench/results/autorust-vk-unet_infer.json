@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "unet_infer",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 368.4142,
+  "ms_median": 24.8324,
+  "ms_min": 23.0161,
+  "ms_iqr": 1.4188,
+  "images_per_s": 161.08,
+  "name": "autorust-vk-unet_infer",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:32",
+  "notes": ""
+}

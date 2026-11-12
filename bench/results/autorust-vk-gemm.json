@@ -1,0 +1,63 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 60.3103,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 1.1664,
+      "tflops": 1.8411
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 4.8687,
+      "tflops": 3.5286
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 38.2588,
+      "tflops": 3.5923
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 2.5881,
+      "tflops": 3.319
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 3.5684,
+      "tflops": 2.4072
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 3.896,
+      "tflops": 4.4096
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 4.8597,
+      "tflops": 3.5352
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 1.1042,
+      "tflops": 1.9449
+    }
+  ],
+  "name": "autorust-vk-gemm",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:43:59",
+  "notes": ""
+}

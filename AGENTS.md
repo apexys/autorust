@@ -88,9 +88,11 @@ Run from this directory (`autorust/`):
   `../tinygrad/.venv/bin/python py/dump_golden.py` after editing either side.
 
 Feature flags: all backends and `freeze` are **default** — `backend_cl`
-(OpenCL), `backend_metal` (Apple Metal, macOS-only), `backend_cuda` (CUDA,
-Linux/Windows only; its dependency and code are target-gated), `freeze` (AOT
-plans), and `backend_rayon`/`backend_rust`/`backend_clang` (CPU). The Python
+(OpenCL), `backend_vk` (Vulkan, SPIR-V emitted directly; `ash` bindings only,
+`libvulkan` loaded at run time), `backend_metal` (Apple Metal, macOS-only),
+`backend_cuda` (CUDA, Linux/Windows only; its dependency and code are
+target-gated), `freeze` (AOT plans), and
+`backend_rayon`/`backend_rust`/`backend_clang` (CPU). The Python
 bridge is a separate, unpublished crate (`py/bridge`, `cargo build -p
 autorust-bridge`); the library publishes no C ABI and no `cdylib`. `trace`/`dump`
 are debug-only, off by default.

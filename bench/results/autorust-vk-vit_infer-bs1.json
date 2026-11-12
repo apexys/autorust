@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "vit_infer",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 406.1512,
+  "ms_median": 35.8918,
+  "ms_min": 31.7944,
+  "ms_iqr": 1.3795,
+  "images_per_s": 27.86,
+  "name": "autorust-vk-vit_infer-bs1",
+  "variant": "VK",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:42:48",
+  "notes": ""
+}

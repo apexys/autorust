@@ -1,0 +1,58 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "memops",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 4,
+  "iters": 20,
+  "ms_cold": 0.0,
+  "ms_median": 8.074,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "add 16777216",
+      "ms": 1.0668,
+      "gbs": 188.7119
+    },
+    {
+      "case": "copy 16777216",
+      "ms": 0.8421,
+      "gbs": 159.3775
+    },
+    {
+      "case": "gelu 16777216",
+      "ms": 0.9143,
+      "gbs": 146.8009
+    },
+    {
+      "case": "softmax 16777216",
+      "ms": 1.4814,
+      "gbs": 90.6002
+    },
+    {
+      "case": "layernorm 16777216",
+      "ms": 1.4468,
+      "gbs": 92.7704
+    },
+    {
+      "case": "sum 16777216",
+      "ms": 0.7144,
+      "gbs": 93.9345
+    },
+    {
+      "case": "amax 16777216",
+      "ms": 0.6517,
+      "gbs": 102.973
+    },
+    {
+      "case": "transpose 16777216",
+      "ms": 0.9563,
+      "gbs": 140.344
+    }
+  ]
+}

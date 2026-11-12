@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Vulkan backend (`VK`, `backend_vk`, default).** A fourth GPU backend that
+  needs no vendor SDK: kernels are emitted as **SPIR-V directly** from the
+  linear UOp list (`renderer::spirv`) instead of C text, and `libvulkan` is
+  loaded at run time through `ash`'s `loaded` feature (bindings only; nothing
+  links against the loader). Machines without a loader, a compute device, or
+  `storageBuffer8BitAccess` simply do not register `VK`, like a box without
+  CUDA. Supports f32/f16/bf16 (bf16 as a 16-bit storage pattern widened to f32),
+  all integer widths, vectors, local memory + barriers, and `VK:N` device
+  selection. The same scheduler/tuning is reused, so performance lands within
+  ~20% of the OpenCL backend on most workloads (faster on elementwise, `add`,
+  `gelu`, TN/NT GEMM and AdamW; slower on `LOCAL`-memory reductions and on
+  decode-heavy graphs, which pay one command buffer per kernel — see
+  `PERFORMANCE.md`).
 - **Backend memory reporting.** `Compiled::memory_info()` returns
   `MemoryInfo { total, free }`, implemented through
   `BackendAllocator::memory_info()`: CUDA uses `cuMemGetInfo_v2`, OpenCL reports

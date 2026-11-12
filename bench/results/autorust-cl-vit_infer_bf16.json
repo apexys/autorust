@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "vit_infer_bf16",
+  "batch": 8,
+  "dtype": "bf16",
+  "jit": true,
+  "warmup": 1,
+  "iters": 3,
+  "ms_cold": 740.3313,
+  "ms_median": 91.8081,
+  "ms_min": 91.4011,
+  "ms_iqr": 1.9076,
+  "images_per_s": 87.14,
+  "name": "autorust-cl-vit_infer_bf16",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:58:22",
+  "notes": ""
+}

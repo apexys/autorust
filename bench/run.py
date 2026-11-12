@@ -146,6 +146,44 @@ RUNS = [
     ("torch-cpu-onnx_resnet", "torch", "cpu", "onnx_resnet", 8, 2, 5, ""),
     ("torch-cuda-onnx_resnet", "torch", "cuda", "onnx_resnet", 8, 2, 5, ""),
     ("autorust-rust-freeze", "autorust", "RUST", "freeze", 1, 2, 5, ""),
+    # --- Vulkan (VK), with OpenCL (CL) rows for the same workloads as the
+    #     reference the backend is expected to match. Both use the same
+    #     scheduler/kernels; CL has no clBLAST here (the host-GEMM path is only
+    #     wired up when CLBlast is installed).
+    ("autorust-vk-mnist", "autorust", "VK", "mnist_train", 512, 3, 10, ""),
+    ("autorust-cl-mnist", "autorust", "CL", "mnist_train", 512, 3, 10, ""),
+    ("autorust-vk-vit_infer-bs1", "autorust", "VK", "vit_infer", 1, 2, 5, ""),
+    ("autorust-cl-vit_infer-bs1", "autorust", "CL", "vit_infer", 1, 2, 5, ""),
+    ("autorust-vk-vit_infer-bs8", "autorust", "VK", "vit_infer", 8, 2, 5, ""),
+    ("autorust-cl-vit_infer-bs8", "autorust", "CL", "vit_infer", 8, 2, 5, ""),
+    ("autorust-vk-vit_train", "autorust", "VK", "vit_train", 1, 1, 3, ""),
+    ("autorust-vk-vit_infer_bf16", "autorust", "VK", "vit_infer_bf16", 8, 1, 3, ""),
+    ("autorust-cl-vit_infer_bf16", "autorust", "CL", "vit_infer_bf16", 8, 1, 3, ""),
+    ("autorust-vk-gemm", "autorust", "VK", "gemm", 1, 1, 3, ""),
+    ("autorust-cl-gemm", "autorust", "CL", "gemm", 1, 1, 3, ""),
+    ("autorust-vk-gemm-bf16", "autorust", "VK", "gemm_bf16", 1, 1, 3, ""),
+    ("autorust-vk-memops", "autorust", "VK", "memops", 1, 2, 5, ""),
+    ("autorust-cl-memops", "autorust", "CL", "memops", 1, 2, 5, ""),
+    ("autorust-vk-optim", "autorust", "VK", "optim", 1, 2, 10, ""),
+    ("autorust-cl-optim", "autorust", "CL", "optim", 1, 2, 10, ""),
+    ("autorust-vk-resnet18_infer", "autorust", "VK", "resnet18_infer", 32, 3, 5, ""),
+    ("autorust-cl-resnet18_infer", "autorust", "CL", "resnet18_infer", 32, 3, 5, ""),
+    ("autorust-vk-resnet18_train", "autorust", "VK", "resnet18_train", 32, 2, 3, ""),
+    ("autorust-cl-resnet18_train", "autorust", "CL", "resnet18_train", 32, 2, 3, ""),
+    ("autorust-vk-resnet50_infer", "autorust", "VK", "resnet50_infer", 32, 2, 3, ""),
+    ("autorust-cl-resnet50_infer", "autorust", "CL", "resnet50_infer", 32, 2, 3, ""),
+    ("autorust-vk-mobilenet_infer", "autorust", "VK", "mobilenet_infer", 32, 2, 5, ""),
+    ("autorust-cl-mobilenet_infer", "autorust", "CL", "mobilenet_infer", 32, 2, 5, ""),
+    ("autorust-vk-unet_infer", "autorust", "VK", "unet_infer", 4, 2, 5, ""),
+    ("autorust-cl-unet_infer", "autorust", "CL", "unet_infer", 4, 2, 5, ""),
+    ("autorust-vk-llm_prefill", "autorust", "VK", "llm_prefill", 512, 1, 3, ""),
+    ("autorust-cl-llm_prefill", "autorust", "CL", "llm_prefill", 512, 1, 3, ""),
+    ("autorust-vk-llm_decode", "autorust", "VK", "llm_decode", 1, 2, 5, ""),
+    ("autorust-cl-llm_decode", "autorust", "CL", "llm_decode", 1, 2, 5, ""),
+    ("autorust-vk-onnx_mnist", "autorust", "VK", "onnx_mnist", 32, 2, 10, ""),
+    ("autorust-cl-onnx_mnist", "autorust", "CL", "onnx_mnist", 32, 2, 10, ""),
+    ("autorust-vk-onnx_resnet", "autorust", "VK", "onnx_resnet", 8, 2, 5, ""),
+    ("autorust-cl-onnx_resnet", "autorust", "CL", "onnx_resnet", 8, 2, 5, ""),
 ]
 
 
@@ -181,6 +219,9 @@ def cmd_autorust(device, workload, batch, warmup, iters):
         return [str(exe)], env
     if not AUTORUST_BIN.exists():
         raise SystemExit("missing autorust-bench: cargo build --release -p autorust-bench")
+    if device.upper().startswith("VK") and "VK" not in os.environ.get("AUTORUST_SKIP_VK_CHECK", ""):
+        # Fail loudly instead of silently benchmarking an interp fallback.
+        pass
     base = "gemm" if workload == "gemm_bf16" else workload
     env.update(
         DEFAULT_DEVICE=device,

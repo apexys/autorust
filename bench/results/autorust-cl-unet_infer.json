@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "unet_infer",
+  "batch": 4,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 5,
+  "ms_cold": 368.2486,
+  "ms_median": 20.4792,
+  "ms_min": 18.9507,
+  "ms_iqr": 1.9941,
+  "images_per_s": 195.32,
+  "name": "autorust-cl-unet_infer",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:34",
+  "notes": ""
+}

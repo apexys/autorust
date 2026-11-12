@@ -1,0 +1,21 @@
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "CL",
+  "workload": "onnx_mnist",
+  "batch": 32,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 2,
+  "iters": 10,
+  "ms_cold": 28.5021,
+  "ms_median": 12.0051,
+  "ms_min": 11.132,
+  "ms_iqr": 1.0658,
+  "images_per_s": 2665.54,
+  "name": "autorust-cl-onnx_mnist",
+  "variant": "CL",
+  "commit": "b91fe2f",
+  "date": "2026-11-12T07:45:56",
+  "notes": ""
+}
