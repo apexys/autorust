@@ -4418,12 +4418,28 @@ Also fixed while wiring it: `coop_gemm` staged from the *scratch* buffer instead
 the operand (the tuple had already been shadowed), which corrupted the packed
 tiles — that is why the mixed probe wrote the wrong width earlier.
 
-`plan` still requires `batch == 1`. The ViT's projections are `batch = 8` (the
-activations are `[8, 197, 768]` and `fold_batches` folds the leading axis), and the
-per-slice dispatch loop that now exists loses the device on its *staging* dispatch
-at that shape, so the batch offsets are still wrong somewhere — the next thing to
-pin down (and the residual epilogue: 11 of the 48 projections also carry a
-`res_slot`).
+**Batched (`batch > 1`) contractions now run on the MMA too**, and exact: one
+dispatch per strided slice, with the accumulator and result windows following the
+batch stride, and a shared B staged once (`b_b == 0`). Three bugs had to go:
+
+- a shifted binding advertised the *whole* buffer as its range, so
+  `offset + range` exceeded the buffer and the driver lost the device — ranges are
+  now clamped to what remains;
+- the shared f32 accumulator scratch was offset by the *tensor's* batch stride
+  (it holds one slice), which ran off it;
+- the staging/convert/epilogue helpers allocated `SETS_PER_PROGRAM` descriptor
+  sets on **every** dispatch (never freed), so a batched model exhausted the
+  descriptor pool (`vkAllocateDescriptorSets: pool exhausted`). The sets are now
+  cached with the pipeline, which is also what makes them safe: a set is
+  referenced by a pending submission, so it must live as long as the pipeline.
+
+`vit_infer_bf16` is still behind, but it now uses the tensor cores: **147 vs CL's
+92 ms** (was 154). The gain is small because each slice is a 197x768 tile — three
+dispatches (stage, MMA, epilogue) for 156 workgroups of 16x64 — so the batched
+projections are launch-bound rather than MMA-bound. And 11 of the 48 projections
+carry a residual, which `plan` still rejects (no residual epilogue variant). Those
+two are the remaining ViT items; the f32 x bf16 x f32 bf16-bias path itself is
+verified exact (`coopmat_handles_a_batched_dot`).
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so

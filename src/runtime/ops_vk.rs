@@ -38,13 +38,16 @@ type CoopKey = (usize, usize, usize, DTypeId, DTypeId);
 /// the module is patched with (shape *and* strides — keying on the element count
 /// alone made a transposed staging pass reuse the row-major kernel).
 type ConvKey = (u8, usize, usize, usize, usize);
+/// A compiled module plus the descriptor sets it dispatches with (the sets are
+/// referenced by pending submissions, so they live as long as the pipeline).
+type CachedPipe = (Rc<vk_sys::GpuPipeline>, Vec<ash::vk::DescriptorSet>);
 
 struct VkInner {
     dev: Rc<vk_sys::VkDevice>,
-    /// Pipelines for the cooperative-matrix GEMM.
-    coop: RefCell<std::collections::HashMap<CoopKey, Rc<vk_sys::GpuPipeline>>>,
-    /// Pipelines for the bf16/f16 conversion modules.
-    conv: RefCell<std::collections::HashMap<ConvKey, Rc<vk_sys::GpuPipeline>>>,
+    /// Pipelines for the cooperative-matrix GEMM, with their descriptor sets.
+    coop: RefCell<std::collections::HashMap<CoopKey, CachedPipe>>,
+    /// Pipelines for the conversion/staging/epilogue modules, with their sets.
+    conv: RefCell<std::collections::HashMap<ConvKey, CachedPipe>>,
     /// Reused scratch for the cooperative-matrix staging (A, B, C). Allocating
     /// tens of megabytes through `vkAllocateMemory` on every GEMM dominated the
     /// call, so the buffers grow in place instead.
@@ -584,7 +587,7 @@ fn convert(
 ) {
     let words = c.words(n).expect("coopmat: conversion module");
     let key = (c.id(), n, 0, 0, 0);
-    let pipe = {
+    let (pipe, sets) = {
         let mut cache = inner.conv.borrow_mut();
         if let Some(p) = cache.get(&key) {
             p.clone()
@@ -595,13 +598,13 @@ fn convert(
                     .pipeline(&words, 2)
                     .unwrap_or_else(|e| panic!("TGERR: VK convert pipeline: {e}")),
             );
-            cache.insert(key, p.clone());
-            p
+            let sets = inner
+                .dev
+                .alloc_sets(p.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+            cache.insert(key, (p.clone(), sets.clone()));
+            (p, sets)
         }
     };
-    let sets = inner
-        .dev
-        .alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
     let bound = [(src.buf, src.off, src.size), (dst.buf, dst.off, dst.size)];
     inner
         .dev
@@ -635,7 +638,7 @@ fn stage(
     }
     .expect("coopmat: staging module");
     let key = (2, rows, cols, in_rs, in_cs);
-    let pipe = {
+    let (pipe, sets) = {
         let mut cache = inner.conv.borrow_mut();
         if let Some(p) = cache.get(&key) {
             p.clone()
@@ -646,13 +649,13 @@ fn stage(
                     .pipeline(&words, 2)
                     .unwrap_or_else(|e| panic!("TGERR: VK stage pipeline: {e}")),
             );
-            cache.insert(key, p.clone());
-            p
+            let sets = inner
+                .dev
+                .alloc_sets(p.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+            cache.insert(key, (p.clone(), sets.clone()));
+            (p, sets)
         }
     };
-    let sets = inner
-        .dev
-        .alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
     if trace_on() {
         trace(&format!(
             "stage {rows}x{cols} rs={in_rs} cs={in_cs} count={}",
@@ -691,7 +694,7 @@ fn epilogue(
     }
     .expect("coopmat: epilogue module");
     let key = (3, n, count, kind as usize, 0);
-    let pipe = {
+    let (pipe, sets) = {
         let mut cache = inner.conv.borrow_mut();
         if let Some(p) = cache.get(&key) {
             p.clone()
@@ -702,13 +705,13 @@ fn epilogue(
                     .pipeline(&words, 3)
                     .unwrap_or_else(|e| panic!("TGERR: VK epilogue pipeline: {e}")),
             );
-            cache.insert(key, p.clone());
-            p
+            let sets = inner
+                .dev
+                .alloc_sets(p.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+            cache.insert(key, (p.clone(), sets.clone()));
+            (p, sets)
         }
     };
-    let sets = inner
-        .dev
-        .alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
     let bound = [
         (src.buf, src.off, src.size),
         (bias.buf, bias.off, bias.size),
@@ -827,7 +830,7 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     let elem_b: u64 = if g.b_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
     let elem_c: u64 = if g.c_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
     let key = (m, n, k, g.dtype, g.c_dtype);
-    let pipe = {
+    let (pipe, sets) = {
         let mut cache = inner.coop.borrow_mut();
         if let Some(p) = cache.get(&key) {
             p.clone()
@@ -836,11 +839,11 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
                 dev.pipeline(&words, 3)
                     .unwrap_or_else(|e| panic!("TGERR: VK coopmat pipeline: {e}")),
             );
-            cache.insert(key, p.clone());
-            p
+            let sets = dev.alloc_sets(p.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+            cache.insert(key, (p.clone(), sets.clone()));
+            (p, sets)
         }
     };
-    let sets = dev.alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
     COOP_GEMMS.with(|c| c.set(c.get() + 1));
     let groups = coopmat::grid(m, n);
     if trace_on() {
@@ -851,6 +854,9 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     }
     // A strided batch is one dispatch per slice, with staging, the GEMM and the
     // epilogue interleaved so a single set of scratch buffers stays valid.
+    if need_b && g.b_b == 0 {
+        stage(inner, plan.stage_b, k, n, plan.sb1, plan.sb2, b, pb);
+    }
     for bi in 0..g.batch {
         let off_a = (g.a_b * bi) as u64 * elem_a;
         let off_b = (g.b_b * bi) as u64 * elem_b;
@@ -858,21 +864,30 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         if need_a {
             let src = Bind {
                 off: a.off + off_a,
+                size: a.size.saturating_sub(off_a),
                 ..a
             };
             stage(inner, plan.stage_a, m, k, plan.sa1, plan.sa2, src, pa);
         }
-        if need_b {
+        if need_b && g.b_b != 0 {
             let src = Bind {
                 off: b.off + off_b,
+                size: b.size.saturating_sub(off_b),
                 ..b
             };
             stage(inner, plan.stage_b, k, n, plan.sb1, plan.sb2, src, pb);
         }
+        // The accumulator target moves with the batch — unless it is the shared
+        // scratch, which holds one slice at a time (so it is never offset).
+        let off_acc = if stage_c.is_some() { 0 } else { off_c };
         let bound = [
             (a_final.buf, a_final.off, a_final.size),
             (b_final.buf, b_final.off, b_final.size),
-            (out.buf, out.off, out.size),
+            (
+                out.buf,
+                out.off + off_acc,
+                out.size.saturating_sub(off_acc),
+            ),
         ];
         COOP_GEMMS.with(|c| c.set(c.get() + 1));
         dev.dispatch(&pipe, &sets, &bound, groups, false, "coopmat")
@@ -880,11 +895,13 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         // The epilogue (or the narrowing round) reads this slice's accumulator
         // and writes this slice's result.
         let slice_in = Bind {
-            off: out.off + off_c,
+            off: out.off + off_acc,
+            size: out.size.saturating_sub(off_acc),
             ..out
         };
         let slice_out = Bind {
             off: c.off + off_c,
+            size: c.size.saturating_sub(off_c),
             ..c
         };
         match plan.epilogue {

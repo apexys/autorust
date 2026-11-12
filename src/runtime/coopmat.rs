@@ -241,11 +241,7 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         || (g.c_dtype == dtype::BFLOAT16 && g.dtype == dtype::BFLOAT16);
     if !dt_ok
         || !c_ok
-        // Batched (batch > 1) contractions keep the generated kernel: the
-        // per-slice loop exists, but with `batch = 8` (the ViT's projections) the
-        // staging dispatch loses the device, so the batch offsets are still
-        // wrong somewhere. That is the next thing to pin down.
-        || g.batch != 1
+        || g.batch < 1
         || g.alpha != 1.0
         || g.scale_slot >= 0
         || g.res_slot >= 0

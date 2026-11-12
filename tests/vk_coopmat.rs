@@ -393,3 +393,45 @@ fn coopmat_handles_mixed_precision_linear() {
     }
     println!("mixed-precision Linear {m}x{n}x{k}: coopmat={used} (USE_TC={tc_on}), matches INTERP");
 }
+
+/// A strided batched contraction (`batch` folded from the leading axis) runs one
+/// cooperative-matrix dispatch per slice, with the accumulator and result
+/// windows following the batch stride — the shape the ViT's projections have.
+#[test]
+fn coopmat_handles_a_batched_dot() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::{Ctx, Tensor};
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    let (b, m, n, k) = (8i64, 32i64, 64i64, 96i64);
+    let ctx = Ctx::new();
+    let x: Vec<f32> = (0..b * m * k).map(|i| ((i % 11) as f32 - 5.0) * 0.25).collect();
+    let w: Vec<f32> = (0..n * k).map(|i| ((i % 7) as f32 - 3.0) * 0.5).collect();
+    let run = |dev: Option<&str>| {
+        let xt = Tensor::from_slice(&ctx, &x, Some(dtype::FLOAT32), dev).reshape([b, m, k]);
+        // `Linear`: the weight is [n, k] and used transposed, which is a
+        // column-major B for the MMA.
+        let wt = Tensor::from_slice(&ctx, &w, Some(dtype::BFLOAT16), dev)
+            .reshape([n, k])
+            .transpose(0, 1);
+        let out = xt.dot(&wt);
+        let mut cache = ProgCache::default();
+        tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache)
+    };
+    let before = autorust::runtime::ops_vk::coop_gemm_count();
+    let got = run(Some("VK"));
+    let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+    let want = run(None);
+    assert!(used > 0, "coopmat not used for a batched dot");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 2e-3 * w.abs().max(1.0),
+            "batched dot [{i}]: {g} vs {w}"
+        );
+    }
+    println!("batched dot {b}x{m}x{n}x{k}: {used} coopmat dispatch(es), matches INTERP");
+}
