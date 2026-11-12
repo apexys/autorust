@@ -186,6 +186,11 @@ fn vk_f16_round_trip() {
 /// A bf16 matmul with an f32 accumulator: registers/casts/widening must keep the
 /// value correct (the first cut of the register-array promotion dropped the
 /// loop-carried accumulator, which a render-only test cannot see).
+///
+/// A bf16 `dot` may run on the cooperative matrix, which accumulates in f32 while
+/// the interpreter rounds every partial sum to bf16 — so the tolerance is a few
+/// 1e-3 relative, not exact. The bug this pins was a dropped K step, which is
+/// orders of magnitude larger.
 #[test]
 fn vk_bf16_matmul_matches_interp() {
     if !have_vk() {
@@ -200,7 +205,13 @@ fn vk_bf16_matmul_matches_interp() {
         let b = Tensor::from_slice(c, &data, None, d).reshape([n, n]).cast(dtype::BFLOAT16);
         a.dot(&b).cast(dtype::FLOAT32)
     });
-    check("bf16_matmul", &got, &want);
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 1e-2 * w.abs().max(1.0),
+            "bf16_matmul[{i}]: VK {g} vs INTERP {w}"
+        );
+    }
 }
 
 /// A loop-carried accumulator must survive the *last* iteration. The Vulkan
