@@ -521,6 +521,8 @@ fn ensure_builtins() {
             super::ops_rayon::register();
             #[cfg(feature = "backend_cl")]
             super::ops_cl::register();
+            #[cfg(feature = "backend_vk")]
+            super::ops_vk::register();
             #[cfg(all(feature = "backend_metal", target_os = "macos"))]
             super::ops_metal::register();
             #[cfg(feature = "backend_clang")]

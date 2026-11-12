@@ -107,6 +107,9 @@ pub struct Settings {
     /// `CL_DEVICE`: like [`Self::cuda_device`] for the enumerated OpenCL
     /// devices (GPUs first, then the platform default; index 0 = `"CL"`).
     pub cl_device: usize,
+    /// `VK_DEVICE`: like [`Self::cuda_device`] for the enumerated Vulkan
+    /// devices (discrete first; index 0 = `"VK"`).
+    pub vk_device: usize,
     /// Double-buffer K/V tiles with `cp.async` in the fused attention kernels.
     ///
     /// On by default (`AUTORUST_ASYNC=0` disables). Used by the bf16 kernel,
@@ -133,6 +136,7 @@ impl Default for Settings {
             device: None,
             cuda_device: 0,
             cl_device: 0,
+            vk_device: 0,
             async_pipeline: true,
         }
     }
@@ -222,6 +226,7 @@ impl Settings {
         let device = env("DEFAULT_DEVICE").filter(|d| !d.is_empty());
         let cuda_device = env("CUDA_DEVICE").and_then(|v| v.parse().ok()).unwrap_or(0);
         let cl_device = env("CL_DEVICE").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let vk_device = env("VK_DEVICE").and_then(|v| v.parse().ok()).unwrap_or(0);
         let async_pipeline = !matches!(env("AUTORUST_ASYNC").as_deref(), Some("0") | Some("false"));
         Settings {
             attention,
@@ -236,6 +241,7 @@ impl Settings {
             device,
             cuda_device,
             cl_device,
+            vk_device,
             async_pipeline,
         }
     }

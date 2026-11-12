@@ -428,12 +428,34 @@ pub fn pick_device_with_metal(
     rust_available: bool,
     cc_available: bool,
 ) -> &'static str {
+    pick_device_with_gpus(
+        metal_available,
+        cuda_available,
+        false,
+        cl_available,
+        rust_available,
+        cc_available,
+    )
+}
+
+/// [`pick_device_with_metal`] with a Vulkan candidate (VK sits after the vendor
+/// GPU API, so an existing machine keeps picking CL/CUDA by default).
+pub fn pick_device_with_gpus(
+    metal_available: bool,
+    cuda_available: bool,
+    vk_available: bool,
+    cl_available: bool,
+    rust_available: bool,
+    cc_available: bool,
+) -> &'static str {
     if cuda_available {
         "CUDA"
     } else if metal_available {
         "METAL"
     } else if cl_available {
         "CL"
+    } else if vk_available {
+        "VK"
     } else if rust_available {
         "RUST"
     } else if cc_available {
@@ -494,6 +516,10 @@ pub fn pick_available_device() -> String {
     let cl = crate::runtime::ops_cl::available();
     #[cfg(not(feature = "backend_cl"))]
     let cl = false;
+    #[cfg(feature = "backend_vk")]
+    let vk = crate::runtime::ops_vk::available();
+    #[cfg(not(feature = "backend_vk"))]
+    let vk = false;
     #[cfg(feature = "backend_rust")]
     let rust = crate::runtime::ops_rust::available();
     #[cfg(not(feature = "backend_rust"))]
@@ -502,7 +528,7 @@ pub fn pick_available_device() -> String {
     let cc = crate::runtime::ops_clang::available();
     #[cfg(not(feature = "backend_clang"))]
     let cc = false;
-    let picked = pick_device_with_metal(metal, cuda, cl, rust, cc);
+    let picked = pick_device_with_gpus(metal, cuda, vk, cl, rust, cc);
     // A CL device that cannot build a kernel does not hide a working sibling.
     #[cfg(feature = "backend_cl")]
     if picked == "CL"
@@ -529,7 +555,7 @@ fn resolve_default_device() -> String {
     }
 }
 
-/// Apply `CUDA_DEVICE` / `CL_DEVICE` to a bare backend name. Index 0 is the
+/// Apply `CUDA_DEVICE` / `CL_DEVICE` / `VK_DEVICE` to a bare backend name. Index 0 is the
 /// canonical name, so only `N > 0` appends `:N`; an out-of-range request is
 /// reported and ignored rather than failing at the first kernel.
 fn prefer_device_index(dev: String) -> String {
@@ -540,6 +566,7 @@ fn prefer_device_index(dev: String) -> String {
     let index = match dev.as_str() {
         "CUDA" => settings.cuda_device,
         "CL" => settings.cl_device,
+        "VK" => settings.vk_device,
         _ => return dev,
     };
     if index == 0 {
@@ -553,6 +580,8 @@ fn prefer_device_index(dev: String) -> String {
         "CUDA" => crate::runtime::ops_cuda::device_count(),
         #[cfg(feature = "backend_cl")]
         "CL" => crate::runtime::ops_cl::device_count(),
+        #[cfg(feature = "backend_vk")]
+        "VK" => crate::runtime::ops_vk::device_count(),
         _ => usize::MAX,
     };
     if index >= count {

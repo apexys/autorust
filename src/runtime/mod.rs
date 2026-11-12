@@ -71,6 +71,10 @@ pub mod ops_interp;
 pub mod ops_metal;
 #[cfg(feature = "backend_rayon")]
 pub mod ops_rayon;
+#[cfg(feature = "backend_vk")]
+pub mod ops_vk;
+#[cfg(feature = "backend_vk")]
+pub mod vk_sys;
 #[cfg(feature = "backend_rust")]
 pub mod ops_rust;
 #[cfg(feature = "backend_rayon")]

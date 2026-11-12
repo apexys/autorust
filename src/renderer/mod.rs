@@ -4,6 +4,8 @@
 
 pub mod cstyle;
 pub mod expr;
+#[cfg(feature = "backend_vk")]
+pub mod spirv;
 pub mod extra;
 pub mod tc;
 

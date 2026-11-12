@@ -47,6 +47,10 @@ required-features = ["backend_cuda"]
 name = "metal_smoke"
 required-features = ["backend_metal"]
 
+[[bin]]
+name = "vk_smoke"
+required-features = ["backend_vk"]
+
 [features]
 # `ops_interp` is always compiled (the faithful reference interpreter). The
 # default set adds the multithreaded CPU backend (`RAYON`), the dynamically
@@ -62,6 +66,7 @@ default = [
     "backend_cl",
     "backend_metal",
     "backend_cuda",
+    "backend_vk",
     "freeze",
 ]
 # Multithreaded CPU backend (device "RAYON"), parallelized with `rayon`.
@@ -89,6 +94,10 @@ backend_rust = ["dep:libloading", "dep:rayon"]
 # Native CPU C backend: render C kernels, compile with `$CC` (clang or gcc),
 # and load the shared library with `libloading`.
 backend_clang = ["dep:libloading", "dep:rayon"]
+# Vulkan backend (device "VK"), dynamically loaded through `ash` (its `loaded`
+# feature dlopens `libvulkan` at run time; nothing links against the loader at
+# build time). Shaders are emitted as SPIR-V directly by `renderer::spirv`.
+backend_vk = ["dep:ash"]
 # Capture a realized schedule and emit a self-contained Rust plan (AOT).
 freeze = ["dep:rayon", "backend_rust"]
 # Debug knobs, compiled out by default so hot paths never call getenv.
@@ -97,6 +106,7 @@ freeze = ["dep:rayon", "backend_rust"]
 #          and the TG_M5_STAGES pipeline truncation.
 trace = []
 dump = []
+ash = ["dep:ash"]
 
 [[example]]
 name = "rayon_bench"
@@ -119,6 +129,9 @@ bytemuck = { version = "1", optional = true }
 # Runtime loading of the `rustc`-built kernel cdylibs (`backend_rust`),
 # portable C shared libraries (`backend_clang`), and `libOpenCL` (`backend_cl`).
 libloading = { version = "0.9", optional = true }
+# `loaded` (dlopen at run time) + `std`; no `linked`, so nothing links
+# against libvulkan at build time.
+ash = { version = "0.38.0", default-features = false, features = ["loaded", "std"], optional = true }
 
 # CUDA driver + NVRTC, dynamically loaded (`dynamic-loading`) so no CUDA libs are
 # needed at build time. `driver`/`nvrtc` only; no cublas/curand/runtime.
