@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cooperative-matrix GEMM for the Vulkan backend (f16 in, f32 out).** The
+  library-GEMM seam recognises an f16 matmul with an f32 accumulator
+  (`AUTORUST_VK_GEMM`) and runs one `OpCooperativeMatrixMulAddKHR` kernel
+  (`runtime::coopmat`, shapes patched at load time) instead of the generated
+  reduce loop: **2.0x the device speed at 2048³** (1.71 vs 3.42 ms) and exact
+  against the interpreter. Plain 16-bit matmuls (16-bit accumulate) keep the
+  generated kernel, so their numerics are unchanged. bf16 storage is not covered
+  yet — see `CURRENT_STATE.md` §9.53.
 - **Cooperative-matrix ("tensor core") probing for the Vulkan backend.** The
   device probe now enumerates `VkPhysicalDeviceCooperativeMatrixPropertiesKHR`
   and enables `VK_KHR_cooperative_matrix` only when a 16-bit-in/f32-out shape

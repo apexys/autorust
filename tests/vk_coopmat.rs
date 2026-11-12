@@ -176,3 +176,66 @@ fn coopmat_probe_is_consistent() {
         }
     }
 }
+
+/// End to end through the pipeline: an f16 matmul that asks for an f32
+/// accumulator must become one cooperative-matrix dispatch (the library-GEMM
+/// seam), match INTERP exactly, and be much faster than the generated kernel.
+/// A plain f16 dot (16-bit accumulation) must *not* take it: the module
+/// accumulates in f32, so that would change results.
+#[test]
+fn coopmat_is_used_for_f16_f32_matmul() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::{Ctx, Tensor};
+
+    fn dot(
+        m: i64,
+        n: i64,
+        k: i64,
+        dev: Option<&str>,
+        cdt: Option<dtype::DTypeId>,
+    ) -> (Vec<f64>, f64) {
+        let ctx = Ctx::new();
+        let a: Vec<f32> = (0..m * k).map(|i| ((i % 11) as f32 - 5.0) * 0.25).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| ((i % 7) as f32 - 3.0) * 0.5).collect();
+        let at = Tensor::from_slice(&ctx, &a, Some(dtype::FLOAT16), dev).reshape([m, k]);
+        let bt = Tensor::from_slice(&ctx, &b, Some(dtype::FLOAT16), dev).reshape([k, n]);
+        let out = at.dot_dtype(&bt, cdt);
+        let mut cache = ProgCache::default();
+        let t = std::time::Instant::now();
+        let v = tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache);
+        (v, t.elapsed().as_secs_f64() * 1e3)
+    }
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    // A shape the module handles: rows need not be a multiple of the tile (the
+    // kernel clamps its last tile), only K must be a multiple of 16.
+    let (m, n, k) = (128i64, 192, 256);
+    let before = autorust::runtime::ops_vk::coop_gemm_count();
+    let (got, ms) = dot(m, n, k, Some("VK"), Some(dtype::FLOAT32));
+    let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+    let (want, _) = dot(m, n, k, None, Some(dtype::FLOAT32));
+    assert_eq!(used, 1, "expected one coopmat dispatch (incl. none for the cast)");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 1e-4 * w.abs().max(1.0),
+            "coopmat[{i}]: {g} vs {w}"
+        );
+    }
+    // `ms` covers the whole realize (scheduling + kernels + readback), so it is a
+    // smoke number; the module's device rate is measured in
+    // `coopmat_gemm_matches_reference`.
+    println!("coopmat pipeline {m}x{n}x{k}: {ms:.3} ms end to end");
+
+    // A 16-bit dot must stay on the generated kernel.
+    let before = autorust::runtime::ops_vk::coop_gemm_count();
+    let _ = dot(m, n, k, Some("VK"), None);
+    assert_eq!(
+        autorust::runtime::ops_vk::coop_gemm_count(),
+        before,
+        "a plain f16 dot must not take the f32 accumulator path"
+    );
+}

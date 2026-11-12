@@ -4316,7 +4316,26 @@ those shapes it is 3.4-4.6x the generated kernel: 1576x768x768 in 0.22 vs
 four linears of a ViT block are ~70% of the bf16 step, so this is the change that
 would put `vit_infer_bf16` ahead of OpenCL.
 
-Still not wired into the graph pipeline. Two routes were assessed: the
+Wired for f16/f32, not yet for bf16. The library-GEMM seam now has a
+`GemmDevice::Vk` (policy `AUTORUST_VK_GEMM`), `library_ready`/`library_available`
+consult `ops_vk::coop_gemm_available()` (the probed MMA shape), `extract` builds
+a descriptor for a 16-bit multiply with an f32 reduce/store, `coopmat::eligible`
+filters it down to the contiguous row-major case the module supports, and the VK
+device installs a `host_exec` that patches `coopmat::module` and dispatches it
+(pipelines cached by shape). Two things had to change for the descriptor to
+exist at all: the mixed-precision gate (`mul_dt == FLOAT16 && red_dt == c_dt ==
+FLOAT32`) was Metal-only and now includes VK, and the "clean multiples of 4 stay
+generated" heuristic (measured for cuBLAS) no longer applies to VK — it excluded
+exactly the shapes where the module wins. `tests/vk_coopmat.rs` pins the
+end-to-end behaviour: one dispatch, exact numerics, and a plain f16 `dot` *not*
+taking the path. Measured at 2048^3 f16/f32 in the pipeline: 1.71 vs 3.42 ms of
+device time (2.0x).
+
+Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
+kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
+f16 parameters must be seeded through `from_slice`. Separate bug, not touched.
+
+Still not wired into the graph pipeline: the
 scheduler's `Ops::Wmma` arm (what `apply_tc_opt` feeds) hands the renderer the
 CUDA `wmma` *packed register tile*, whose element order comes from
 `element_per_thread` + swizzle; `OpCooperativeMatrixLoadKHR` instead reads from a

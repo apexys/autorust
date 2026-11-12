@@ -184,7 +184,7 @@ impl HostGemm {
             Arg::Float(v) => *v as f32,
             _ => 1.0,
         };
-        Some(HostGemm {
+        let desc = HostGemm {
             a_slot: i("a_slot"),
             b_slot: i("b_slot"),
             c_slot: i("c_slot"),
@@ -232,7 +232,8 @@ impl HostGemm {
                 -1
             },
             res_off: i("res_off"),
-        })
+        };
+        Some(desc)
     }
 }
 
@@ -418,6 +419,7 @@ fn library_ready(ctx: &UOpCtx, kind: GemmDevice) -> bool {
         GemmDevice::Cuda => "cuda",
         GemmDevice::Cl => "cl",
         GemmDevice::Metal => "metal",
+        GemmDevice::Vk => "vk",
         GemmDevice::Cpu => "cpu",
     };
     if ctx.settings.library_gemm_for(backend) == crate::settings::LibraryGemm::Never {
@@ -478,6 +480,16 @@ fn library_ready(ctx: &UOpCtx, kind: GemmDevice) -> bool {
                 false
             }
         }
+        GemmDevice::Vk => {
+            #[cfg(feature = "backend_vk")]
+            {
+                crate::runtime::ops_vk::coop_gemm_available()
+            }
+            #[cfg(not(feature = "backend_vk"))]
+            {
+                false
+            }
+        }
     }
 }
 
@@ -512,6 +524,10 @@ pub fn library_available(settings: &crate::settings::Settings) -> bool {
     if crate::runtime::ops_metal::mps_available() {
         return true;
     }
+    #[cfg(feature = "backend_vk")]
+    if crate::runtime::ops_vk::coop_gemm_available() {
+        return true;
+    }
     false
 }
 
@@ -522,6 +538,7 @@ enum GemmDevice {
     Cuda,
     Cl,
     Metal,
+    Vk,
 }
 
 fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
@@ -541,6 +558,9 @@ fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
             }
             if s.starts_with("METAL") {
                 return Some(GemmDevice::Metal);
+            }
+            if s.starts_with("VK") {
+                return Some(GemmDevice::Vk);
             }
             // `CC`/`CLANG` only exist as compiled backends with the feature;
             // without it the name falls back to the interpreter, which has no
@@ -580,7 +600,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     } else {
         store.clone()
     };
-    if ctx.op_of(&st0) != Ops::Store || !has_reduce(ctx, &ctx.srcs(&st0)[1].clone()) {
+    if ctx.op_of(&st0) != Ops::Store {
+        return None;
+    }
+    if !has_reduce(ctx, &ctx.srcs(&st0)[1].clone()) {
         return None;
     }
     let kind = gemm_device(ctx, &store)?;
@@ -597,6 +620,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
     let dst_ptr = ctx.srcs(&st)[0].clone();
+    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: c-affine"); }
     let (c_off0, c_map) = affine(ctx, &index_offset(ctx, &dst_ptr))?;
     if c_map.len() < 2 {
         return None;
@@ -679,18 +703,21 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             _ => break,
         }
     }
+    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: value-reduce"); }
     value = unwrap(ctx, value);
     if ctx.op_of(&value) != Ops::Reduce {
         return None;
     }
     let reduce = value;
     let red_dt = ctx.dt_of(&reduce);
+    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: rsrcs"); }
     let rsrcs = ctx.srcs(&reduce).to_vec();
     if rsrcs.len() != 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
         return None;
     }
     let red_k = range_key(ctx, &rsrcs[1])?;
 
+    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: mul"); }
     let mul = unwrap(ctx, rsrcs[0].clone());
     if ctx.op_of(&mul) != Ops::Mul {
         return None;
@@ -700,8 +727,9 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return None;
     }
     let mul_dt = ctx.dt_of(&mul);
-    // Metal f16 inputs may accumulate into (and store) f32.
-    let mixed_f16_f32 = kind == GemmDevice::Metal
+    // Metal's MPS path and the Vulkan cooperative-matrix module both take f16
+    // inputs and accumulate (and store) in f32.
+    let mixed_f16_f32 = matches!(kind, GemmDevice::Metal | GemmDevice::Vk)
         && mul_dt == crate::dtype::FLOAT16
         && red_dt == crate::dtype::FLOAT32
         && c_dt == crate::dtype::FLOAT32;
@@ -748,6 +776,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             return None;
         }
     };
+    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: a-affine"); }
     let (a_off0, a_map) = affine(ctx, &index_offset(ctx, &a_idx))?;
     let (b_off0, b_map) = affine(ctx, &index_offset(ctx, &b_idx))?;
     let (a_slot, a_dt, a_base) = base_of(ctx, &a_idx)?;
@@ -757,6 +786,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // The library GEMM reads the operand buffers with the contraction dtype.
     // A casted staging buffer (e.g. f32 -> f16 `from_slice`) must stay on the
     // generated kernel.
+    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: ab-dtype"); }
     if a_dt != mul_dt || b_dt != mul_dt {
         return None;
     }
@@ -896,6 +926,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             return None;
         }
     }
+    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: fold-batches"); }
     let (batch_count, a_b, b_b, c_b) = fold_batches(&mut batch)?;
 
     // Kernel-only measurements (2026-11, RTX 3060) show cuBLAS winning f32 at
@@ -911,6 +942,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         GemmDevice::Cuda => "cuda",
         GemmDevice::Cl => "cl",
         GemmDevice::Metal => "metal",
+        GemmDevice::Vk => "vk",
         GemmDevice::Cpu => "cpu",
     };
     let policy = ctx.settings.library_gemm_for(backend);
@@ -961,6 +993,11 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         {
             return None;
         }
+    } else if kind == GemmDevice::Vk {
+        // The cooperative-matrix module is 2.6-4.6x the generated kernel at these
+        // shapes, so the historical "clean multiples of 4 stay generated" rule
+        // (measured for cuBLAS/CLBlast) does not apply; `coopmat::eligible` is
+        // the filter.
     } else if !force && !cuda_f32 && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
         return None;
     }
@@ -972,7 +1009,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
              off=[{a_off},{b_off},{c_off}] slots=[{a_slot},{b_slot},{c_slot}]"
         );
     }
-    Some(HostGemm {
+    let desc = HostGemm {
         a_slot,
         b_slot,
         c_slot,
@@ -1001,7 +1038,18 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         scale_off,
         res_slot,
         res_off,
-    })
+    };
+    // The cooperative-matrix module is the only VK library GEMM, so it has to
+    // accept the descriptor (f16 operands, f32 accumulate, contiguous row-major,
+    // no epilogue) or the kernel must keep its generated form.
+    #[cfg(feature = "backend_vk")]
+    if kind == GemmDevice::Vk && !crate::runtime::coopmat::eligible(&desc) {
+        if crate::helpers::env::get("VK_TRACE").is_some() {
+            eprintln!("[vk] coopmat declined: {desc:?}");
+        }
+        return None;
+    }
+    Some(desc)
 }
 
 fn reduce_op(ctx: &UOpCtx, reduce: &UopId) -> Option<Ops> {

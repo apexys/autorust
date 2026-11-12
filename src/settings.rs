@@ -38,6 +38,8 @@ pub struct LibraryGemmPolicy {
     pub metal: LibraryGemm,
     /// Native CPU backends (packed kernel).
     pub cpu: LibraryGemm,
+    /// Vulkan (`VK`): a cooperative-matrix ("tensor core") GEMM.
+    pub vk: LibraryGemm,
 }
 
 impl LibraryGemmPolicy {
@@ -48,6 +50,7 @@ impl LibraryGemmPolicy {
             cl: p,
             metal: p,
             cpu: p,
+            vk: p,
         }
     }
 }
@@ -174,6 +177,9 @@ impl Settings {
         if let Some(v) = env("AUTORUST_CPU_GEMM") {
             library_gemm.cpu = parse(Some(&v));
         }
+        if let Some(v) = env("AUTORUST_VK_GEMM") {
+            library_gemm.vk = parse(Some(&v));
+        }
         let attention = match env("AUTORUST_ATTN").as_deref() {
             Some("sdpa") | Some("0") => AttentionKind::Sdpa,
             Some("sage") => AttentionKind::Sage,
@@ -264,6 +270,7 @@ impl Settings {
             "cuda" => self.library_gemm.cuda,
             "cl" => self.library_gemm.cl,
             "metal" => self.library_gemm.metal,
+            "vk" => self.library_gemm.vk,
             _ => self.library_gemm.cpu,
         }
     }
@@ -275,6 +282,7 @@ impl Settings {
             || p.cl != LibraryGemm::Never
             || p.metal != LibraryGemm::Never
             || p.cpu != LibraryGemm::Never
+            || p.vk != LibraryGemm::Never
     }
 
     /// Builder: BEAM width.

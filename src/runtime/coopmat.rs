@@ -146,6 +146,32 @@ pub fn module(m: usize, n: usize, k: usize) -> Option<Vec<u32>> {
     Some(out)
 }
 
+/// Whether a library-GEMM descriptor can run as [`module`].
+///
+/// The module takes f16 operands and accumulates in f32, so the graph must have
+/// asked for an f32 dot: a plain 16-bit dot (which accumulates in 16 bits) never
+/// takes this path, so the numerics of such a graph are unchanged. It also needs
+/// contiguous row-major tensors whose row strides are their own widths, no
+/// epilogue (`alpha`/bias/batch), and a shape that tiles.
+pub fn eligible(g: &crate::schedule::host_gemm::HostGemm) -> bool {
+    use crate::dtype;
+    g.dtype == dtype::FLOAT16
+        && g.c_dtype == dtype::FLOAT32
+        && g.batch == 1
+        && g.alpha == 1.0
+        && g.bias_slot < 0
+        && g.a_k == 1
+        && g.b_n == 1
+        && g.c_n == 1
+        && g.a_m == g.k
+        && g.b_k == g.n
+        && g.c_m == g.n
+        && g.a_off >= 0
+        && g.b_off >= 0
+        && g.c_off >= 0
+        && module(g.m as usize, g.n as usize, g.k as usize).is_some()
+}
+
 /// Workgroup count for [`module`] over an `m x n` output tile grid.
 pub fn grid(m: usize, n: usize) -> [u32; 3] {
     [

@@ -25,13 +25,20 @@ use crate::runtime::device::{
     BackendAllocator, Comp, Compiled, DeviceFactory, LruAllocator, MemoryInfo, Prog, TinyElf,
     register_device_family, register_device_with_limit,
 };
+use crate::runtime::coopmat;
 use crate::runtime::vk_sys::{self, DeviceInfo, GpuBuffer};
+use crate::schedule::host_gemm::HostGemm;
 
 // ---------------- device inner ----------------
 
 /// The opened device shared by the allocator and every program.
+/// Cache key of a cooperative-matrix pipeline: shape plus the operand dtypes.
+type CoopKey = (usize, usize, usize, DTypeId, DTypeId);
+
 struct VkInner {
     dev: Rc<vk_sys::VkDevice>,
+    /// Pipelines for the cooperative-matrix GEMM.
+    coop: RefCell<std::collections::HashMap<CoopKey, Rc<vk_sys::GpuPipeline>>>,
 }
 
 impl VkInner {
@@ -55,7 +62,10 @@ impl VkInner {
             )
         });
         eprintln!("VKDevice: opening {}", dev.describe());
-        VkInner { dev: Rc::new(dev) }
+        VkInner {
+            dev: Rc::new(dev),
+            coop: RefCell::new(std::collections::HashMap::new()),
+        }
     }
 }
 
@@ -478,6 +488,79 @@ pub fn available() -> bool {
     !vk_devices().is_empty()
 }
 
+/// Whether this device can run the cooperative-matrix GEMM
+/// (`runtime::coopmat`): the extension must be present and the advertised MMA
+/// shape must cover the module's tile.
+pub fn coop_gemm_available() -> bool {
+    coop_shape().is_some()
+}
+
+/// Number of cooperative-matrix GEMM dispatches since process start (diagnostics
+/// and tests: proves the library-GEMM seam took the tensor-core path).
+pub fn coop_gemm_count() -> usize {
+    COOP_GEMMS.with(|c| c.get())
+}
+
+thread_local! {
+    static COOP_GEMMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The cooperative-matrix shape of the first usable device, when the module's
+/// 16x16x16 f16 -> f32 tile is among the advertised ones.
+fn coop_shape() -> Option<vk_sys::CoopShape> {
+    let s = vk_devices().first()?.coop?;
+    (s.m as usize >= coopmat::M_TILE
+        && s.n as usize >= coopmat::M_TILE
+        && s.k as usize >= coopmat::K_TILE)
+        .then_some(s)
+}
+
+/// Run one `HostGemm` descriptor as a cooperative-matrix kernel.
+///
+/// The library-GEMM seam (`schedule::host_gemm`) has already checked
+/// `coopmat::eligible`, so the layouts are contiguous row-major with an f32
+/// accumulator. Dispatches are recorded into the open command buffer like any
+/// other kernel, so the queue orders them after their producers.
+fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &HostGemm) {
+    let (m, n, k) = (g.m as usize, g.n as usize, g.k as usize);
+    let words = coopmat::module(m, n, k).expect("coopmat: eligible descriptor");
+    let key = (m, n, k, g.dtype, g.c_dtype);
+    let pipe = {
+        let mut cache = inner.coop.borrow_mut();
+        if let Some(p) = cache.get(&key) {
+            p.clone()
+        } else {
+            let p = Rc::new(
+                inner
+                    .dev
+                    .pipeline(&words, 3)
+                    .unwrap_or_else(|e| panic!("TGERR: VK coopmat pipeline: {e}")),
+            );
+            cache.insert(key, p.clone());
+            p
+        }
+    };
+    let sets = inner
+        .dev
+        .alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+    let bound: Vec<(&vk_sys::GpuBuffer, u64, u64)> = [g.a_slot, g.b_slot, g.c_slot]
+        .iter()
+        .map(|slot| {
+            let o = vk_of(&*bufs[*slot as usize]);
+            (&o.alloc.buf, o.offset as u64, o.size as u64)
+        })
+        .collect();
+    COOP_GEMMS.with(|c| c.set(c.get() + 1));
+    let groups = coopmat::grid(m, n);
+    if trace_on() {
+        trace(&format!("coopmat {m}x{n}x{k} groups={groups:?}"));
+    }
+    inner
+        .dev
+        .dispatch(&pipe, &sets, &bound, groups, false, "coopmat")
+        .unwrap_or_else(|e| panic!("TGERR: VK coopmat dispatch: {e}"));
+}
+
 /// Number of usable Vulkan devices.
 pub fn device_count() -> usize {
     vk_devices().len()
@@ -539,7 +622,20 @@ fn factory(name: String) -> DeviceFactory {
         let ctor: crate::runtime::device::RuntimeCtor = Rc::new(move |elf| {
             Rc::new(RefCell::new(VkProgram::new(ctor_inner.clone(), elf)))
         });
-        Compiled::new(&name, renderer, allocator, compiler, ctor)
+        let compiled = Compiled::new(&name, renderer, allocator, compiler, ctor);
+        if coop_gemm_available() {
+            // The library-GEMM seam (`schedule::host_gemm`): a kernel that is
+            // exactly a contiguous f16 matmul with an f32 accumulator becomes one
+            // cooperative-matrix dispatch instead of a generated reduce loop.
+            let he_inner = inner.clone();
+            let f: Box<crate::runtime::device::HostExec> = Box::new(move |bufs, desc| {
+                let g = HostGemm::from_arg(&crate::uop::arg::Arg::Data(desc.clone()))
+                    .unwrap_or_else(|| panic!("TGERR: bad HostGemm descriptor"));
+                coop_gemm(&he_inner, bufs, &g);
+            });
+            compiled.host_exec.replace(Some(f));
+        }
+        compiled
     })
 }
 

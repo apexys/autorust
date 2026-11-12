@@ -501,7 +501,18 @@ fastest plain-SPIR-V variant on this device; f32 is slower still at
 1.03/4.80 ms.)
 
 So the remaining bf16 GEMM gap to OpenCL (1.39x) is not a limit of Vulkan but of
-*not using* the MMA. What blocks shipping it is integration, not feasibility:
+*not using* the MMA.
+
+The path is now live for **f16 operands with an f32 accumulator**: the library
+GEMM seam (`schedule::host_gemm`) recognises that contraction
+(`GemmDevice::Vk`, `AUTORUST_VK_GEMM`), patches `runtime::coopmat` to the shape
+and dispatches one cooperative-matrix kernel instead of the generated reduce
+loop. Measured in the pipeline with `VK_TIME=1` at 2048³ f16/f32: **1.71 ms of
+device time for the cooperative matrix vs 3.42 ms for the generated kernel
+(2.0x)**, and the result matches the interpreter exactly. A plain 16-bit `dot`
+(which accumulates in 16 bits) never takes it, so its numerics are unchanged.
+
+What is still missing is bf16 storage:
 
 - `renderer/spirv.rs` has no `Wmma` arm yet (`Ops::Wmma` panics), and the
   scheduler's tensor-core opt (`apply_tc_opt`) is written for the CUDA `wmma`
