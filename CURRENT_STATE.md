@@ -4655,6 +4655,13 @@ with an instruction stream that no longer differs in any way the disassembly sho
 1.6x is therefore in the driver's own scheduling/register allocation for this
 module rather than in what we emit, which is where this line of work stops.
 
+**Status accepted (2026-11).** After the four refuted hypotheses below, the four
+lagging rows (ViT-B/16 bf16 1.25x by decision, MobileNetV2 1.09x, LLM prefill 1.07x,
+f32 GEMM TN 1.26x) are the accepted end state: 10 of 14 rows are within 1.06x and 6
+are at or ahead, and the remaining difference is in the driver's scheduling of
+identical kernels rather than in the emitter. Recorded here and in
+`PERFORMANCE.md` so the port is not read as "almost done".
+
 **f32 GEMM TN: the gap is one kernel, and it is not ALU.** `CL_TIME`'s kernel names
 attribute the whole TN row to a single kernel, `r_64_16_4_16_8_8_512_4`:
 **7.60 ms on VK against 4.65 on CL (1.63x)** — the same kernel both backends

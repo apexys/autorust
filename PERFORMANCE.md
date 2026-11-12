@@ -390,6 +390,15 @@ Design points worth knowing:
 Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 (ms; lower is better), `bench/run.py --only 'autorust-(vk|cl)-'`:
 
+**Status (accepted):** the bar "match or surpass OpenCL without clBLAST" is met on
+**10 of 14 rows within 1.06x, 6 at or ahead**, and *not* met on four rows — ViT-B/16
+bf16 1.25x (kept f32 by decision), MobileNetV2 1.09x, LLM prefill 1.07x and f32
+GEMM TN 1.26x. Those four were pursued to the point where every emitter-level
+explanation had been tested and refuted (see "Reading it" below and
+`CURRENT_STATE.md` §9.53): the kernels are the same on both backends, and the
+residual lives in the driver's SASS scheduling for our SPIR-V rather than in what we
+emit. This is the accepted end state of the Vulkan port, not a to-do list.
+
 All fourteen rows, **best of three processes** (each the median of five
 iterations; this machine drifts ±5-7 % between processes, which is the size of
 several gaps):
