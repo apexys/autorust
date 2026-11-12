@@ -826,7 +826,10 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     // A batch slice starts exactly one slice after the previous one when the
     // tensor is contiguous — then the whole tensor can be staged (and the whole
     // result converted) in *one* dispatch instead of one per slice.
-    let a_packed = nb == 1 || g.a_b == m as i64 * plan.sa1 as i64;
+    // A split batch (`batch_inner > 1`) is by definition not contiguous across
+    // slices, even when the outer stride happens to look like `m * sa1`.
+    let a_packed =
+        nb == 1 || (g.batch_inner == 1 && g.a_b == m as i64 * plan.sa1 as i64);
     let c_packed = nb == 1 || g.c_b == m as i64 * plan.sc as i64;
     let need_a = plan.stage_a != coopmat::Stage::Direct;
     let need_b = plan.stage_b != coopmat::Stage::Direct;
@@ -908,8 +911,17 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
 
     for bi in 0..nb as i64 {
         let biu = bi as usize;
-        let off_a = (g.a_b * bi) as u64 * elem_a;
-        let off_b = (g.b_b * bi) as u64 * elem_b;
+        // Two batch axes (attention's `(batch, head)`) whose strides do not
+        // collapse in the operands: the host splits the slice counter instead.
+        let slice_off = |p: i64, inner: i64, outer: i64, inner_stride: i64| -> i64 {
+            if inner > 1 {
+                (p / inner) * outer + (p % inner) * inner_stride
+            } else {
+                outer * p
+            }
+        };
+        let off_a = slice_off(bi, g.batch_inner, g.a_b, g.a_bi) as u64 * elem_a;
+        let off_b = slice_off(bi, g.batch_inner, g.b_b, g.b_bi) as u64 * elem_b;
         let off_c = (g.c_b * bi) as u64 * elem_c;
         if need_a && !a_packed {
             let src = Bind {

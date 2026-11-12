@@ -9,13 +9,13 @@
   "warmup": 2,
   "iters": 5,
   "ms_cold": 0.0,
-  "ms_median": 19.7557,
-  "ms_min": 19.7557,
+  "ms_median": 21.012,
+  "ms_min": 21.012,
   "ms_iqr": 0.0,
-  "images_per_s": 50.62,
+  "images_per_s": 47.59,
   "name": "autorust-vk-llm_decode",
   "variant": "VK",
-  "commit": "45acbac",
-  "date": "2026-11-12T16:03:20",
+  "commit": "60c23e0",
+  "date": "2026-11-12T17:35:23",
   "notes": ""
 }

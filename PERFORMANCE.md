@@ -484,9 +484,10 @@ Reading it:
   still rejected inside `host_gemm::extract`, for a reason that is now pinned: its
   `A` operand's index contains a `Floormod` (a split fused axis from the
   `[8, 12, 197, 64]` view) and `affine()` only reads `Add`/`Sub`/`Mul`-by-constant.
-  Closing it needs axis splitting **plus** a split batch axis in the descriptor
-  (the `(batch, head)` pair is interleaved with `seq`, so it is not a single
-  strided axis: `32·3 ≠ 6144`), not an epilogue — see `CURRENT_STATE.md` §9.53.
+  A two-batch-axis descriptor now exists and takes it in bf16
+  (`coopmat_handles_a_two_axis_batch`), but the ViT's own attention is
+  **f32 × f32**, which the no-demotion rule keeps off a 16-bit MMA; the 3.1x was
+  measured on bf16 operands and does not transfer — see `CURRENT_STATE.md` §9.53.
 
 ### Tensor cores (`VK_KHR_cooperative_matrix`)
 

@@ -529,3 +529,59 @@ fn coopmat_handles_the_attention_score_matmul() {
     }
     println!("Q@K^T {b}x{m}x{n}x{k}: {used} coopmat dispatch(es), matches INTERP");
 }
+
+/// A contraction with **two** batch axes whose strides do not collapse in the
+/// operands: attention's `(batch, head)`. `Q`/`K` are stored `[b, s, h, d]` and
+/// viewed as `[b, h, s, d]`, so in the operands the head axis has stride `d` and
+/// the batch axis `s*h*d`, while `d*h != s*h*d`. `C` *is* contiguous over the
+/// pair, so the descriptor keeps one slice counter plus two strides and the host
+/// splits the counter (`p / h`, `p % h`).
+///
+/// Before the split batch existed this graph kept its generated kernel because
+/// `fold_batches` requires `stride_outer == stride_inner * extent_inner`.
+#[test]
+fn coopmat_handles_a_two_axis_batch() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::{Ctx, Tensor};
+
+    fn run(dev: Option<&str>, b: i64, s: i64, h: i64, d: i64) -> Vec<f64> {
+        let ctx = Ctx::new();
+        let q: Vec<f32> = (0..b * s * h * d).map(|i| ((i % 11) as f32 - 5.0) * 0.05).collect();
+        let k: Vec<f32> = (0..b * s * h * d).map(|i| ((i % 7) as f32 - 3.0) * 0.05).collect();
+        let qt = Tensor::from_slice(&ctx, &q, Some(dtype::BFLOAT16), dev)
+            .reshape([b, s, h, d])
+            .permute(&[0, 2, 1, 3]);
+        let kt = Tensor::from_slice(&ctx, &k, Some(dtype::BFLOAT16), dev)
+            .reshape([b, s, h, d])
+            .permute(&[0, 2, 1, 3]);
+        // scores[b,h,i,j] = sum_d Q[b,h,i,d] * K[b,h,j,d]
+        let scores = qt.dot_dtype(&kt.permute(&[0, 1, 3, 2]), Some(dtype::FLOAT32));
+        let mut cache = ProgCache::default();
+        tensor_values(&mut ctx.raw(), scores.uop(), &mut BufTable::default(), &mut cache)
+    }
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    // The ViT's own geometry, and a small one that keeps the test fast.
+    for (b, s, h, d) in [(4i64, 64i64, 3i64, 32i64), (2, 197, 12, 64)] {
+        let before = autorust::runtime::ops_vk::coop_gemm_count();
+        let got = run(Some("VK"), b, s, h, d);
+        let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+        let want = run(None, b, s, h, d);
+        assert_eq!(
+            used,
+            (b * h) as usize,
+            "one dispatch per (batch, head) slice for {b}x{s}x{h}x{d}"
+        );
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= 1e-3 * w.abs().max(1.0),
+                "two-axis batch [{i}] ({b}x{s}x{h}x{d}): {g} vs {w}"
+            );
+        }
+        println!("two-axis batch {b}x{s}x{h}x{d}: {used} coopmat dispatch(es), matches INTERP");
+    }
+}

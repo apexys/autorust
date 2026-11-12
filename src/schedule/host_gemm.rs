@@ -61,10 +61,23 @@ pub struct HostGemm {
     pub c_n: i64,
     /// Number of strided batches (>= 1).
     pub batch: i64,
-    /// Batch stride in `A` (0 when shared).
+    /// Outer batch stride in `A` (0 when shared).
+    ///
+    /// A contraction can have **two** batch axes (attention is the canonical case:
+    /// `(batch, head)`), and their strides need not collapse into one in an
+    /// operand — the ViT's `[b, h, s, d]` view has `head` stride 32 and `batch`
+    /// stride 6144, while `32 * 3 != 6144`. C is contiguous over the pair, so the
+    /// descriptor keeps one slice counter and two strides per operand:
+    /// `off = (p / batch_inner) * a_b + (p % batch_inner) * a_bi`.
     pub a_b: i64,
-    /// Batch stride in `B` (0 when shared).
+    /// Inner batch stride in `A`.
+    pub a_bi: i64,
+    /// Inner batch extent (`1` when the pair collapses to one axis).
+    pub batch_inner: i64,
+    /// Outer batch stride in `B` (0 when shared).
     pub b_b: i64,
+    /// Inner batch stride in `B`.
+    pub b_bi: i64,
     /// Batch stride in `C`.
     pub c_b: i64,
     /// Storage dtype of `A`/`B` (the multiplication dtype).
@@ -162,7 +175,10 @@ impl HostGemm {
                 ("c_n".into(), int(self.c_n)),
                 ("batch".into(), int(self.batch)),
                 ("a_b".into(), int(self.a_b)),
+                ("a_bi".into(), int(self.a_bi)),
+                ("batch_inner".into(), int(self.batch_inner)),
                 ("b_b".into(), int(self.b_b)),
+                ("b_bi".into(), int(self.b_bi)),
                 ("c_b".into(), int(self.c_b)),
                 ("dtype".into(), int(self.dtype.0 as i64)),
                 ("a_dtype".into(), int(self.a_dtype.0 as i64)),
@@ -212,7 +228,14 @@ impl HostGemm {
             c_n: i("c_n"),
             batch: i("batch").max(1),
             a_b: i("a_b"),
+            a_bi: i("a_bi"),
+            batch_inner: if d.fields.iter().any(|(n, _)| n == "batch_inner") {
+                i("batch_inner").max(1)
+            } else {
+                1
+            },
             b_b: i("b_b"),
+            b_bi: i("b_bi"),
             c_b: i("c_b"),
             dtype: DTypeId(i("dtype") as u16),
             a_dtype: if d.fields.iter().any(|(n, _)| n == "a_dtype") {
@@ -997,7 +1020,28 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         }
     }
     if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: fold-batches"); }
-    let (batch_count, a_b, b_b, c_b) = fold_batches(&mut batch)?;
+    // Two batch axes (attention's `(batch, head)`) need not collapse into one
+    // strided axis per operand: the ViT's `[b, h, s, d]` view has head stride 32
+    // and batch stride 6144 while `32 * 3 != 6144`. C *is* contiguous over the
+    // pair, so keep one slice counter and two strides per operand and let the
+    // host split the counter (`p / inner`, `p % inner`) — exact by construction.
+    batch.sort_by_key(|(_, _, _, _, c)| *c);
+    // Only the Vulkan executor implements the split counter (`a_bi`/`batch_inner`);
+    // cuBLAS, CLBlast and the CPU kernel read `a_b`/`b_b` alone, so for them a
+    // non-contiguous pair must keep the generated kernel.
+    let (batch_count, a_b, b_b, c_b, batch_inner, a_bi, b_bi) = if kind == GemmDevice::Vk
+        && batch.len() == 2
+        && batch[1].4 == batch[0].4.saturating_mul(batch[0].1)
+        && batch[0].1 > 1
+    {
+        let (_, e0, a0, b0, c0) = batch[0];
+        let (_, e1, a1, b1, _c1) = batch[1];
+        // C is contiguous over the pair, so its slice stride is the *inner* one.
+        (e0.saturating_mul(e1), a1, b1, c0, e0, a0, b0)
+    } else {
+        let (n, ab, bb, cb) = fold_batches(&mut batch)?;
+        (n, ab, bb, cb, 1, ab, bb)
+    };
 
     // Kernel-only measurements (2026-11, RTX 3060) show cuBLAS winning f32 at
     // the square and batch-8 projection shapes and tying/winning elsewhere;
@@ -1097,7 +1141,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         c_n,
         batch: batch_count,
         a_b,
+        a_bi,
+        batch_inner,
         b_b,
+        b_bi,
         c_b,
         dtype: ctx.dt_of(&mul),
         a_dtype: a_dt,

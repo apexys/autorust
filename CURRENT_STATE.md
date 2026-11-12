@@ -4557,35 +4557,47 @@ finds a `Mul`, the dtype gate passes, `affine(B)`, `base_of(A/B)`, `n_candidates
 `range_extent(n/m/k)`, the `m_candidates` and `c_n`/`c_m` checks all pass, and the
 extras loop is never reached.
 
-Axis splitting alone is **not enough**, and the arithmetic says why. The natural
-view is `Div(p, h) * s1 + Mod(p, h) * s2` for the fused `(batch, head)` axis `p`;
-that collapses to a single strided axis `p` only when `s2 * h == s1`. For the ViT
-slice measured here `s2 = 32` and `h = 3` give 96, while `s1 = 6144`, so the
-operand is a genuinely 4-D strided view — the `(batch, head)` pair is interleaved
-with `seq`, not contiguous in it. `affine()` returning a two-key map would then be
-*rejected* by the existing strictness check ("A and B must not iterate any other
-range we ignored", which requires every A/B axis to appear in C), because C stores
-that axis **fused** (`Mul(p, ...)`, no `Mod`) — and that check is what makes the
-current design safe, so it must not be relaxed.
+The descriptor gap is **two batch axes, not a split axis**, and it is now fixed.
 
-What would actually work, and is entirely local:
+Dumping the real ViT scores kernel (which is *not* the synthetic shape used for the
+3.1x probe) shows no `Mod`/`Div` at all — every index is affine. What C and the
+operands disagree about is the batch space:
 
-1. `affine()` learns `Mod`/`Div` of a single range as synthetic axes (mint a key
-   from the uop id plus a sentinel axis type; record `ext(c)` / `ext(x)/c`), which
-   is what makes A's index readable at all;
-2. `HostGemm` gains a *split* batch axis for A — `(head_extent, hi_stride,
-   lo_stride)` — and the executor's `for bi in 0..batch` loop computes
-   `off_a = ((p / h) * s1 + (p % h) * s2) * elem` instead of `a_b * p`. The kernel
-   module needs no change: the host just binds a different window per slice, which
-   is what it already does for `a_b`;
-3. `plan` accepts the pair only when *both* `Div` and `Mod` of the same range with
-   the same divisor are present, so the offsets are exact by construction.
+```text
+batch = [(head, extent 3, a=32, c=4096), (batch, extent 4, a=6144, c=12288)]
+C contiguous over the pair (12288 = 4096*3)
+A not:  32*3 = 96 != 6144        <- seq sits between head and batch in memory
+```
 
-A reproducer for (1)+(3) is cheap and is the gate to write first: a `[b, s, h, d]`
-tensor permuted to `[b, h, s, d]` and contracted to scores matches INTERP on the
-generated kernel today (`coopmat` count 0), so the test can assert "coopmat takes
-it and the numbers are unchanged" once the descriptor exists — at b=4, s=64, h=3,
-d=32 it reproduces the fused-axis index without needing the ViT.
+`fold_batches` requires `stride_outer == stride_inner * extent_inner` for *every*
+operand, so a `(batch, head)` pair whose head stride is `d` and batch stride is
+`s*h*d` could never be expressed and every such kernel stayed generated. The
+descriptor now keeps one slice counter with **two strides per operand**
+(`a_b`/`a_bi` + `batch_inner`, ditto for B), and `coop_gemm` splits the counter:
+`off = (p / inner) * a_b + (p % inner) * a_bi`. Exact by construction — the host
+computes the window it already binds — and `coopmat_handles_a_two_axis_batch` pins
+it at the ViT's own geometry (2x197x12x64, one dispatch per `(batch, head)` slice,
+exact against INTERP).
+
+The acceptance is **Vulkan-only** on purpose: cuBLAS, CLBlast and the CPU kernel
+read `a_b`/`b_b` alone, so handing them a non-contiguous pair would be a wrong
+answer. `nn_attention::sdpa_matches_tinygrad` caught exactly that when the check
+was first left backend-agnostic (23.30 vs 26.90 on CUDA), which is a good argument
+for keeping those differential tests around.
+
+**And that is where it stops for the ViT, for a numerics reason rather than a
+matcher one.** The scores descriptor is now built (the trace prints it in full:
+`m: 197 n: 197 k: 64 batch: 96 a_b: 151296 a_bi: 64 batch_inner: 12 alpha: 0.125`)
+and `plan` rejects it because **both operands are f32**
+(`a_dtype/b_dtype/c_dtype = FLOAT32`): the model casts parameters to bf16 but keeps
+activations f32, so its attention is an f32 x f32 contraction. That is exactly the
+case the no-demotion rule refuses to send to a 16-bit MMA, and the 3.1x measured
+earlier was on *bf16* operands — it does not transfer. Closing the ViT row
+therefore needs one of two decisions, not more matcher work: keep attention
+activations in bf16 (a model-level choice, `vit_dtype::cast` today only casts
+parameters), or allow f32 -> f16 staging for this contraction behind `USE_TC` (a
+numerics change that would also have to be visible in the benchmark's dtype
+label).
 
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
