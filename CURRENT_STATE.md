@@ -4638,12 +4638,22 @@ requires a top-level loop, which took that kernel to 10.30 ms, MobileNetV2 from
 1.13x to 1.09x and MNIST CNN train from 1.07x to 1.01x, with the ViT unmoved (its
 attention loops are top-level).
 
-What remains on that kernel (10.30 vs CL's 6.68) is address arithmetic: we emit
-`(i*stride)*4 >> 2` per load — five times per iteration — where the OpenCL C source
-computes one base index and folds `+320/+640/+960` into the load offsets. Cancelling
-the `*4 >> 2` round trip in `elem_index` (carrying the applied power-of-two scale on
-`Off::Id`) is the concrete next step there; it is central to the offset machinery,
-so it wants its own session.
+What remains on that kernel (**10.7 vs CL's 6.66 ms, 1.6x**) is *not* instruction
+count, and that took three experiments to establish:
+
+| hypothesis | change | result |
+|---|---|---|
+| our 8x unroll hurts a nested loop | skip loops at nest depth > 0 | **kept**: 11.83 -> 10.30 ms |
+| `(x*stride)*4 >> 2` per load | carry the power-of-two scale on `Off` and cancel it in `elem_index` | shifts 45 -> 10 in the module, **no timing change** |
+| the four column loads rebuild their index | fold constants into the deferred scale in `off_add` (`x*k + c*k == (x+c)*k`) | inner body 44 -> 39 lines, 6 `IMul` -> 1, 5 shifts -> 0, **5 % slower** |
+
+Both arithmetic changes were reverted: they are exact and shrink the emitted body
+but move no time, which says the driver already folds that arithmetic. With the
+unroll fix kept, the kernel sits at 10.66-10.93 ms across runs against CL's 6.66,
+with an instruction stream that no longer differs in any way the disassembly shows
+(same 5 loads, same 4 FMA, same accumulator phis, same `LocalSize`). The remaining
+1.6x is therefore in the driver's own scheduling/register allocation for this
+module rather than in what we emit, which is where this line of work stops.
 
 **The rest of the MobileNet / prefill shortfall is accepted, with the evidence behind it.** The
 comparison the next-step plan asked for was done on the *same* kernels both
