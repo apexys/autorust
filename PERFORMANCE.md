@@ -435,9 +435,14 @@ Three rows are still more than 6 % behind:
   is the same 9 predicated scalar taps, the pooling head the same `buf1[4]`
   accumulator with 5 `float4` against our 4 `v4float` plus the matching scalars,
   and our vector loads carry `ArrayStride 16` with an `>> 4` index, so alignment is
-  right. Disabling our 8x unroll (`VK_NO_UNROLL=1`) changes MobileNet by under 1 %,
-  so it is not the unroller either. What is left is the driver compiling identical
-  uops better through its OpenCL frontend than its SPIR-V one.
+  right. The 1.6x that remains on the pooling kernel (10.7 vs CL's 6.66 ms) is not
+  instruction count either, which took three experiments to establish: the nested
+  unroll was worth 1.5 ms (fixed above); cancelling the `(x*stride)*4 >> 2` round
+  trip in `elem_index` removed 35 shifts from the module with no timing change; and
+  folding constants into that deferred scale took the inner body from 44 to 39
+  lines, 6 `OpIMul` to 1 and 5 shifts to 0 while making it 5 % *slower*. Both
+  arithmetic changes were reverted, so the driver already folds that arithmetic and
+  what is left is its own scheduling/register allocation for this module.
 - **MNIST CNN train, 1.07x** — a train step where the backward pass' scatter-adds
   dominate; not investigated beyond the same check (same kernels both sides).
 
