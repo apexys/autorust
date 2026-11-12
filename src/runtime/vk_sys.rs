@@ -315,6 +315,16 @@ pub struct VkDevice {
     pub slot: std::cell::Cell<usize>,
     /// Whether work is queued that the host has not waited for.
     pub in_flight: std::cell::Cell<bool>,
+    /// Freed buffers parked by size for reuse.
+    ///
+    /// `vkCreateBuffer` + `vkAllocateMemory` cost ~0.25 ms each on this driver
+    /// and a schedule allocates roughly one buffer per kernel, so ONNX-MNIST was
+    /// paying 17 device allocations (4 ms) per 15 ms step. The queue is in-order,
+    /// so a buffer freed after its last reader is safe to hand to a later
+    /// dispatch; host writes go through `copyin`, which idles the device first.
+    reuse: std::cell::RefCell<std::collections::HashMap<usize, Vec<GpuBuffer>>>,
+    /// Bytes currently parked in `reuse`.
+    reuse_bytes: std::cell::Cell<usize>,
     /// Reused host-visible buffer for device-local transfers.
     pub staging: std::cell::RefCell<Option<GpuBuffer>>,
     /// Buffers whose last reference was dropped while work may still be in
@@ -481,6 +491,8 @@ impl VkDevice {
             recording: std::cell::Cell::new(false),
             batch: std::cell::Cell::new(0),
             batch_names: std::cell::RefCell::new(vec![Vec::new(); 4]),
+            reuse: std::cell::RefCell::new(std::collections::HashMap::new()),
+            reuse_bytes: std::cell::Cell::new(0),
             next_id: std::cell::Cell::new(1),
         })
     }
@@ -554,6 +566,15 @@ impl VkDevice {
     /// reading it from a shader costs an order of magnitude.
     pub fn alloc(&self, size: usize) -> Option<GpuBuffer> {
         let size = size.max(4);
+        if let Some(b) = self
+            .reuse
+            .borrow_mut()
+            .get_mut(&size)
+            .and_then(|v| v.pop())
+        {
+            self.reuse_bytes.set(self.reuse_bytes.get().saturating_sub(size));
+            return Some(b);
+        }
         let small = size <= (1 << 20);
         let buf = unsafe {
             self.device.create_buffer(
@@ -635,6 +656,16 @@ impl VkDevice {
     /// (and loses the device). Deferring until nothing is in flight keeps the
     /// common "free intermediate, allocate the next one" loop valid.
     pub fn free(&self, b: &GpuBuffer) {
+        const MAX_REUSE: usize = 512 << 20;
+        if self.reuse_bytes.get() + b.size <= MAX_REUSE {
+            self.reuse_bytes.set(self.reuse_bytes.get() + b.size);
+            self.reuse
+                .borrow_mut()
+                .entry(b.size)
+                .or_default()
+                .push(b.clone());
+            return;
+        }
         self.graveyard.borrow_mut().push(b.clone());
         // Bound the graveyard for long GPU-only loops that never read back.
         if !self.in_flight.get() || self.graveyard.borrow().len() > 512 {
@@ -873,9 +904,13 @@ impl VkDevice {
     /// transfer for device-local memory.
     pub fn upload(&self, b: &GpuBuffer, src: &[u8]) {
         match b.ptr {
-            Some(p) => unsafe {
-                std::ptr::copy_nonoverlapping(src.as_ptr(), p, src.len())
-            },
+            Some(p) => {
+                // The buffer may have been reused while a dispatch still reads it
+                // (host-visible buffers are written directly, not through the
+                // ordered queue), so the device has to be idle first.
+                self.wait_idle();
+                unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), p, src.len()) }
+            }
             None => {
                 let mut st = self.staging(src.len());
                 let stage = st.as_mut().expect("staging");

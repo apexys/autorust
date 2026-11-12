@@ -4458,6 +4458,21 @@ and a few thousand small elementwise kernels. Optimising the projections further
 cannot close a 1.57x gap — the attention path is where the time is, and its tiles
 (K = 64, 96 slices of 197x197) are the next thing to put on the MMA.
 
+**Buffer reuse (2026-11).** ONNX-MNIST was 1.35x behind OpenCL with *identical*
+per-kernel GPU time (2.66 vs 2.79 ms) — the step was host-bound. Profiling the
+phases showed `to_list`'s realize was 14 ms of a 15.5 ms step, and the host side of
+`dispatch` only 4 us per kernel, so it was not submission. Counting
+`vkCreateBuffer`+`vkAllocateMemory` found the real cost: **17 device allocations
+per step** (~0.25 ms each on this driver), because the engine's `LruAllocator`
+cache is bypassed — every backend's `_free` just drops the opaque, so the
+`LruAllocator::free` path is dead. `VkDevice` now parks freed buffers in a
+size-keyed pool (bounded at 512 MB) and hands them to the next allocation of the
+same size; the queue is in-order, so a later dispatch that writes a reused buffer
+is ordered after everything that read it, and host writes go through `copyin`,
+which idles the device first. Measured: ONNX-MNIST **15.5 -> 11.6 ms** (VK is now
+*ahead* of CL's 12.1), ONNX ResNet-0.25 **82.6 -> 73.5** (1.02x, was 1.23x).
+MobileNet is unaffected (it is GPU-bound) — see below.
+
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
 f16 parameters must be seeded through `from_slice`. Separate bug, not touched.

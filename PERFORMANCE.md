@@ -518,30 +518,23 @@ result is rounded from an f32 scratch, so a bf16 matmul also dispatches exactly
 once and matches the interpreter. bf16 GEMM rows now run on the MMA (staging handles a transposed operand) and
 **beat OpenCL on 6 of 8 shapes** — 2048³ 2.78 vs 2.93 ms, 4096³ 17.9 vs 23.2,
 NT 2048³ 2.60 vs 3.49, 1024×1024×4096 1.86 vs 2.23 — with TN at parity; 1024³ is
-within the machine's noise (0.98–1.25 ms across runs). `vit_infer_bf16` is unchanged (155 vs 92 ms), and it is **not** a tensor-core gap:
-its projections are `f32 activations x bf16 weights -> f32` (`ab-dtype a=f32
-b=bf16 mul=f32 red=f32 c=f32`), which a 16-bit MMA cannot compute without rounding
-the activations to f16. The gap is the generated kernel for that dtype mix (the
-bf16-round idiom the OpenCL C compiler folds). Staging f32 activations to f16 is
-plumbed (`HostGemm::a_dtype`/`b_dtype`/`bias_dtype`, `coopmat::Stage`, and validated
-`stage_f32`/`epilogue_f32` modules) but gated off: the epilogue needs a
-bf16-bias→f32-result variant, which is the remaining piece — see
-`CURRENT_STATE.md` §9.53.
+within the machine's noise (0.98–1.25 ms across runs). `vit_infer_bf16` is
+**132 vs 92 ms**: its projections do run on the MMA (mixed-precision f32 x bf16,
+staged to f16 behind `USE_TC`, with the bias *and* the residual fused into the
+epilogue), which took it from 155 to 132 ms. What remains is not the projections
+but the fused flash-attention kernels (`r_197_24_2_16_4_8_192_4` carries 32 `Exp`
+and 384 `FMul` in one module), which the library-GEMM seam cannot take because
+they are not plain matmuls — see `CURRENT_STATE.md` §9.53.
 
-What is still missing there:
-
-- `renderer/spirv.rs` has no `Wmma` arm yet (`Ops::Wmma` panics), and the
-  scheduler's tensor-core opt (`apply_tc_opt`) is written for the CUDA `wmma`
-  helpers: it hands the renderer a packed tile, whereas
-  `OpCooperativeMatrixLoadKHR` reads straight from a pointer with an explicit
-  stride. Bridging that needs a shared-memory staging layout (load bf16/f16 to
-  `Workgroup`, convert if the source is bf16, `coopMatLoad` from there) plus the
-  tile shape chosen per device (`16x16x16` here, `8x8x8` on lavapipe);
-- the accumulator is f32 while a bf16 `dot` in the graph accumulates in bf16, so
-  enabling it changes results (the same trade-off the CUDA tensor-core path
-  already makes, behind `USE_TC`). bf16 *inputs* are advertised
-  (`VK_COMPONENT_TYPE_BFLOAT16_KHR` in the property list) but `spirv-as` here
-  cannot yet emit `OpTypeBFloat16`, so the verified path is f16 inputs.
+The remaining tensor-core work is the *scheduler* seam rather than the module:
+`renderer/spirv.rs` has no `Wmma` arm (`Ops::Wmma` panics) and `apply_tc_opt` hands
+the renderer the CUDA `wmma` packed tile, whereas `OpCooperativeMatrixLoadKHR`
+reads from a pointer with an explicit stride. That is what the fused attention
+kernels would need. Numerics: the module accumulates in f32, so a graph that
+accumulates in 16 bits only takes the path behind `USE_TC` (the same trade-off the
+CUDA tensor-core path makes); a graph that already asks for f32 accumulation (the
+ViT's mixed-precision `Linear`) takes it unconditionally, since the f32 staging
+there only rounds the f16-representable activations.
 
 ## Cross-framework comparison
 
