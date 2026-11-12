@@ -4370,8 +4370,9 @@ exactly, and the bf16 GEMM row moved for the first time (`bench`, VK vs CL):
 2048^3 **2.78 vs 2.93 ms**, 4096^3 **17.9 vs 23.2**, NT 2048^3 **2.60 vs 3.49**,
 1024x1024x4096 **1.86 vs 2.23**, 4096x1024x1024 **1.66 vs 1.73**, TN 2048^3 3.01
 vs 2.97 (parity), 1024^3 1.25 vs 0.80 (behind — the three staging dispatches do
-not amortise, so `plan` now requires >= 2 G MACs; the batched-8x512^3 row is a
-batched descriptor and stays generated).
+not amortise, so but re-measuring 1024^3 with the cutoff in place gave 1.25 ms (worse than the
+0.98 ms the MMA took), i.e. the machine's +-30% noise, so there is **no size
+cutoff**; the batched-8x512^3 row is a batched descriptor and stays generated).
 
 `vit_infer_bf16` is **unchanged** (154 ms): its `Linear` layers have a **bias**, and
 `plan` requires `bias_slot < 0`, so no descriptor is built for them. The epilogue

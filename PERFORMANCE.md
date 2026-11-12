@@ -517,9 +517,8 @@ staged through f16 scratch by two element-wise conversion modules and a bf16
 result is rounded from an f32 scratch, so a bf16 matmul also dispatches exactly
 once and matches the interpreter. bf16 GEMM rows now run on the MMA (staging handles a transposed operand) and
 **beat OpenCL on 6 of 8 shapes** — 2048³ 2.78 vs 2.93 ms, 4096³ 17.9 vs 23.2,
-NT 2048³ 2.60 vs 3.49, 1024×1024×4096 1.86 vs 2.23 — with TN at parity and the
-smallest shape behind (`plan` requires ≥ 2 G MACs because the three staging
-dispatches do not amortise below that). `vit_infer_bf16` is unchanged: its
+NT 2048³ 2.60 vs 3.49, 1024×1024×4096 1.86 vs 2.23 — with TN at parity; 1024³ is
+within the machine's noise (0.98–1.25 ms across runs). `vit_infer_bf16` is unchanged: its
 `Linear` layers carry a bias, which the descriptor filter rejects; the bias
 epilogue is the remaining step (`CURRENT_STATE.md` §9.53).
 

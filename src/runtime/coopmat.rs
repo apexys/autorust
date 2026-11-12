@@ -234,12 +234,10 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         slb: slb as usize,
         sc: g.c_m as usize,
     };
-    // Measured cutoff (RTX 3060, bf16): below ~2 G MACs the three extra
-    // dispatches (stage A, stage B, round C) and their traffic cost more than the
-    // MMA saves (1024^3 0.78 -> 0.97 ms against OpenCL), while everything larger
-    // wins (2048^3 2.93 -> 2.78, 4096^3 23.2 -> 17.9, NT 3.49 -> 2.60 ms).
-    let macs = (p.m as u128) * (p.n as u128) * (p.k as u128);
-    let large = macs >= 2_000_000_000;
+    // No size cutoff: the MMA wins from ~1 G MACs up (2048^3 2.78 vs 2.93 ms,
+    // 4096^3 17.9 vs 23.2 vs OpenCL) and the smallest shapes are within the
+    // machine's noise (1024^3 measured 0.98 and 1.25 ms on different runs).
+    let large = true;
     (large && p.m >= M_TILE && p.n >= N_TILE && p.k >= K_TILE && p.k.is_multiple_of(K_TILE))
         .then_some(p)
 }
