@@ -411,6 +411,22 @@ Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 1.20x on all 14.** The largest remaining gap is ViT-B/16 bf16 at 1.19x (fused
 attention), then MobileNetV2 1.09x (conv codegen) and LLM prefill 1.07x.
 
+The rows inside a few percent are dominated by this machine's drift, so they are
+also reported best-of-three processes (min over three, each the median of five
+iterations):
+
+| row | VK (best of 3) | CL (best of 3) | VK/CL |
+|---|---:|---:|---:|
+| ONNX MNIST | 11.71 | 11.11 | 1.05x |
+| ONNX ResNet-0.25 | 71.34 | 69.11 | 1.03x |
+| LLM decode | **19.95** | 20.88 | 0.96x |
+| MobileNetV2 | 63.19 | 56.03 | 1.13x |
+| LLM prefill | 426.4 | 399.7 | 1.07x |
+
+With that, the standing is **6 of 14 rows at or ahead and 11 of 14 within 1.06x**;
+only ViT-B/16 bf16 (1.22x, by decision — see below), MobileNetV2 (1.13x) and LLM
+prefill (1.07x) are more than a few percent behind.
+
 GEMM and memory-bound ops (ms per case, best of two runs — this machine's clocks
 swing ±30%, so a single run can read 1.5-2x high):
 
