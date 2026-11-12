@@ -523,8 +523,6 @@ fn coop_shape() -> Option<vk_sys::CoopShape> {
 /// One element-wise conversion module: `bf16 -> f16` or `f32 -> bf16`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Conversion {
-    /// `bf16` to `f16` (both 2-byte elements).
-    Bf16ToF16,
     /// `f32` (4-byte) to `bf16` (2-byte), round to nearest even.
     F32ToBf16,
 }
@@ -532,13 +530,11 @@ enum Conversion {
 impl Conversion {
     fn id(self) -> u8 {
         match self {
-            Conversion::Bf16ToF16 => 0,
             Conversion::F32ToBf16 => 1,
         }
     }
     fn words(self, n: usize) -> Option<Vec<u32>> {
         match self {
-            Conversion::Bf16ToF16 => coopmat::convert_bf16_to_f16(n),
             Conversion::F32ToBf16 => coopmat::convert_f32_to_bf16(n),
         }
     }
@@ -594,6 +590,56 @@ fn convert(
         .unwrap_or_else(|e| panic!("TGERR: VK convert dispatch: {e}"));
 }
 
+/// Record a `rows x cols` bf16 -> row-major f16 staging pass.
+fn stage(
+    inner: &VkInner,
+    rows: usize,
+    cols: usize,
+    in_rs: usize,
+    in_cs: usize,
+    src: Bind<'_>,
+    dst: Bind<'_>,
+) {
+    let words = coopmat::stage_bf16(rows, cols, in_rs, in_cs).expect("coopmat: staging module");
+    let key = (2, rows * cols + cols);
+    let pipe = {
+        let mut cache = inner.conv.borrow_mut();
+        if let Some(p) = cache.get(&key) {
+            p.clone()
+        } else {
+            let p = Rc::new(
+                inner
+                    .dev
+                    .pipeline(&words, 2)
+                    .unwrap_or_else(|e| panic!("TGERR: VK stage pipeline: {e}")),
+            );
+            cache.insert(key, p.clone());
+            p
+        }
+    };
+    let sets = inner
+        .dev
+        .alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+    if trace_on() {
+        trace(&format!(
+            "stage {rows}x{cols} rs={in_rs} cs={in_cs} count={}",
+            rows * cols
+        ));
+    }
+    let bound = [(src.buf, src.off, src.size), (dst.buf, dst.off, dst.size)];
+    inner
+        .dev
+        .dispatch(
+            &pipe,
+            &sets,
+            &bound,
+            coopmat::element_grid(rows * cols),
+            false,
+            "stage",
+        )
+        .unwrap_or_else(|e| panic!("TGERR: VK stage dispatch: {e}"));
+}
+
 /// Run one `HostGemm` descriptor as a cooperative-matrix kernel.
 ///
 /// The library-GEMM seam (`schedule::host_gemm`) has already checked
@@ -615,9 +661,12 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         }
     };
     let (a, b, c) = (view(g.a_slot), view(g.b_slot), view(g.c_slot));
+    let plan = coopmat::plan(g).expect("coopmat: eligible descriptor");
 
-    // bf16 operands cannot be read by the MMA, so convert them once (each element
-    // is read K/16 or so times by the GEMM, so the extra pass is noise).
+    // bf16 operands cannot be read by the MMA, so stage them once as row-major
+    // f16 (the pass also transposes a column-major operand, which is what the
+    // ViT's `Linear` weight and the TN/NT GEMM shapes are). Each element is read
+    // K/16 or so times by the GEMM, so the extra pass is noise.
     let stage_a = if g.dtype == crate::dtype::BFLOAT16 {
         Some(dev.alloc(m * k * 2).expect("coopmat: f16 scratch A"))
     } else {
@@ -639,8 +688,8 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
             off: 0,
             size: sb_buf.size as u64,
         };
-        convert(inner, Conversion::Bf16ToF16, m * k, a, sa);
-        convert(inner, Conversion::Bf16ToF16, k * n, b, sb);
+        stage(inner, m, k, plan.sa1, plan.sa2, a, sa);
+        stage(inner, k, n, plan.sb1, plan.sb2, b, sb);
         (sa, sb)
     } else {
         (a, b)
@@ -662,7 +711,18 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
     };
 
     let plan = coopmat::plan(g).expect("coopmat: eligible descriptor");
-    let words = coopmat::module(plan).expect("coopmat: module");
+    let dense = coopmat::Plan {
+        sa1: k,
+        sa2: 1,
+        la: 0,
+        sla: k,
+        sb1: n,
+        sb2: 1,
+        lb: 0,
+        slb: n,
+        ..plan
+    };
+    let words = coopmat::module(dense).expect("coopmat: module");
     let key = (m, n, k, g.dtype, g.c_dtype);
     let pipe = {
         let mut cache = inner.coop.borrow_mut();

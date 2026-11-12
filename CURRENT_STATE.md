@@ -4346,18 +4346,35 @@ accumulator"), which the gate rejected because it only allowed `mul == red == c`
 or Metal's f16/f32 form. Fixed: for a Vulkan descriptor, `mul` 16-bit with an f32
 reduce now qualifies for either a 32-bit or a matching 16-bit result — and since
 the graph itself asks for f32 accumulation there, the numerics are faithful
-(`USE_TC` only gates a graph whose review dtype is 16-bit).
+(`USE_TC` only gates a graph whose reduce dtype is 16-bit).
 
-With that, the bench's bf16 GEMM descriptors *are* built, and the blocker is now
-the **operand layout**: the `bench/` GEMM shapes and the ViT's `Linear` layers
-all present one operator transposed (`a_m == 1` for A, or `b_k == 1` for B), i.e.
-`ColumnMajorKHR`. `Plan` carries a per-operand stride and `MemoryLayoutKHR` and
-the module takes sentinels for both, but a column-major B dispatches with wrong
-numbers (relative error 4.6 against the interpreter), so that layout is disabled
-in `plan` until the KHR stride convention is pinned down. The cheap way to finish
-it is to transpose while staging (the bf16 -> f16 pass already reads and rewrites
-every operand, so it can write row-major f16 and leave the GEMM itself
-row-major-only).
+That uncovered the real blocker: every contraction in the benchmarks presents one
+**transposed** operand (`a_m == 1`, or `b_k == 1`, i.e. `ColumnMajorKHR` — the
+ViT's `Linear` weight is stored `[out, in]` and used as `x @ w.T`, and the `TN`/
+`NT` GEMM shapes are the same). Three things were built for it:
+
+- `Plan` now carries, per operand, the two offset strides (`row_stride *
+  i + col_stride * j`, so row-major is `(S, 1)` and column-major `(1, S)`), the
+  `MemoryLayoutKHR` and the coop-matrix load stride; the module patches all of
+  them (12 sentinels, each verified to occur exactly once);
+- a **staging module** (`coopmat::stage_bf16`) that reads a strided bf16 operand
+  and writes contiguous row-major f16, so a transposed operand never needs a
+  column-major coop-matrix load at all;
+- `coop_gemm` stages bf16 A and B through it and then dispatches the GEMM with a
+  row-major plan.
+
+Row-major bf16 staging is verified exact (`vtk_coopmat::coopmat_handles_bf16_storage`,
+`grader_rel = 0`). **The transposed case is not working yet**: with `rs=1 cs=256`
+the staging pass runs (the trace shows the right strides and element count) and the
+GEMM then reads row-major, yet the result equals the *untransposed* reading
+(`C[0,0] = -1.75` where the interpreter says `2.125`, i.e. exactly
+`sum_k A[0,k]*b[k*192]` instead of `b[k]`). So either the staged buffer is not the
+one bound, or the staging kernel writes elsewhere; the identifier-level plumbing
+was checked and looks right, so the next step is to read the staged buffer back
+(one dispatch + `download`) in a test and diff it against the expected transpose.
+`plan` therefore still accepts **only row-major** operands (`let staged = false`),
+so a transposed contraction keeps its generated kernel rather than risk a wrong
+answer.
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
