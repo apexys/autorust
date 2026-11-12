@@ -518,10 +518,13 @@ result is rounded from an f32 scratch, so a bf16 matmul also dispatches exactly
 once and matches the interpreter. bf16 GEMM rows now run on the MMA (staging handles a transposed operand) and
 **beat OpenCL on 6 of 8 shapes** — 2048³ 2.78 vs 2.93 ms, 4096³ 17.9 vs 23.2,
 NT 2048³ 2.60 vs 3.49, 1024×1024×4096 1.86 vs 2.23 — with TN at parity; 1024³ is
-within the machine's noise (0.98–1.25 ms across runs). `vit_infer_bf16` is unchanged (155 vs 92 ms): the bias
-epilogue now exists and a biased `Linear` does use the MMA, but the ViT's
-projections still produce no descriptor at all, so the matcher bails on that graph
-before the device filter — see `CURRENT_STATE.md` §9.53.
+within the machine's noise (0.98–1.25 ms across runs). `vit_infer_bf16` is unchanged (155 vs 92 ms), and it is **not** a tensor-core gap:
+its projections are `f32 activations x bf16 weights -> f32` (`ab-dtype a=f32
+b=bf16 mul=f32 red=f32 c=f32`), which a 16-bit MMA cannot compute without rounding
+the activations to f16. The gap is the generated kernel for that dtype mix (the
+bf16-round idiom the OpenCL C compiler folds); closing it means either emitting a
+better idiom or staging f32 activations to f16 behind `USE_TC` — see
+`CURRENT_STATE.md` §9.53.
 
 What is still missing there:
 

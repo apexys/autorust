@@ -4381,15 +4381,28 @@ bias[i % n])`), and `plan` accepts a `bias_slot` when the result is bf16
 pins it: a `Linear` (transposed weight *and* bias) dispatches through the MMA and
 matches INTERP.
 
-`vit_infer_bf16` is **still 155 ms vs CL's 92**: with the bias accepted, the ViT's
-projections still produce no descriptor — tracing `extract` for that workload
-shows it never reaches the device filter (no "declined" line), so it bails inside
-the matcher on that graph (the shapes are fine: 1576x768x768 etc., all row-major
-one-transposed-operand forms that the bench's GEMM rows use successfully). The
-instrumentation used to localise it was reverted with the file, so the next step is
-to re-add the per-`return` tags around `extract` for the ViT graph specifically and
-fix whatever it reports — the same method that found the dtype gate and the
-staging cache-key bugs.
+`vit_infer_bf16` is **still 155 ms vs CL's 92**, and the reason is now pinned: the
+per-`return` instrumentation in `extract` (re-added and run against that workload)
+shows its projection kernels bail at the operand-dtype check, 49 times, with
+
+```text
+ab-dtype a=f32 b=bf16 mul=f32 red=f32 c=f32
+```
+
+i.e. the ViT runs **f32 activations against bf16 weights with f32 accumulation** —
+not a 16-bit contraction at all. A cooperative matrix has 16-bit (or f32) component
+types and nothing in between, so this contraction cannot use the MMA without
+rounding the activations to f16 (11 mantissa bits against f32's 24) — a real
+precision loss, not the exact bf16 storage conversion the staging pass does. So the
+ViT gap is **not** a missing tensor-core path; it is the quality of the generated
+f32 x bf16 GEMM kernel (the same 15-uop bf16-round idiom that the OpenCL C compiler
+folds and the driver does not).
+
+Two ways forward, both deliberate: (a) improve the emitted idiom for that kernel,
+or (b) stage the f32 activation to f16 behind `USE_TC` (the switch the CUDA
+tensor-core path already uses for a numerics change), which would be one more
+conversion module (`f32 -> f16`, contiguous) plus a `plan`/`coop_gemm` branch, and
+would put the projections on the MMA (f16 x f16 -> f32) at ~1e-3 relative error.
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so
