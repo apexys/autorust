@@ -185,10 +185,21 @@ pub struct Plan {
     pub stage_a: Stage,
     /// How B is staged.
     pub stage_b: Stage,
-    /// Whether the epilogue adds a per-column bias.
-    pub bias: bool,
-    /// Whether that bias is f32 (otherwise bf16).
-    pub bias_f32: bool,
+    /// The fused epilogue (bias add and/or narrowing) after the accumulator.
+    pub epilogue: Epilogue,
+}
+
+/// What runs after the cooperative-matrix accumulator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Epilogue {
+    /// The f32 accumulator is the result: nothing to do.
+    None,
+    /// bf16 bias, bf16 result: add, then round.
+    BiasBf16OutBf16,
+    /// bf16 bias, f32 result: widen the bias, add, keep f32.
+    BiasBf16OutF32,
+    /// f32 bias, f32 result: add.
+    BiasF32OutF32,
 }
 
 /// Derive the plan for a library-GEMM descriptor, or `None` when the module
@@ -219,12 +230,8 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         (Some(a), Some(b)) => (a, b),
         _ => return None,
     };
-    // `Stage::F32` staging exists and is validated in isolation, but the
-    // epilogue matrix is not complete yet: a bf16 bias with an f32 result (the
-    // shape a mixed-precision `Linear` has) still needs its own kernel, so that
-    // combination keeps the generated kernel rather than write the wrong width.
-    let _ = tc_on;
-    if stage_a == Stage::F32 || stage_b == Stage::F32 {
+    // Staging f32 to f16 rounds the activations, so it rides `USE_TC`.
+    if (stage_a == Stage::F32 || stage_b == Stage::F32) && !tc_on {
         return None;
     }
     // The MMA itself reads 16-bit operands; anything above was staged.
@@ -234,6 +241,10 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         || (g.c_dtype == dtype::BFLOAT16 && g.dtype == dtype::BFLOAT16);
     if !dt_ok
         || !c_ok
+        // Batched (batch > 1) contractions keep the generated kernel: the
+        // per-slice loop exists, but with `batch = 8` (the ViT's projections) the
+        // staging dispatch loses the device, so the batch offsets are still
+        // wrong somewhere. That is the next thing to pin down.
         || g.batch != 1
         || g.alpha != 1.0
         || g.scale_slot >= 0
@@ -251,7 +262,17 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
     if g.bias_slot >= 0 && g.bias_off < 0 {
         return None;
     }
-    let bias_f32 = g.bias_dtype == dtype::FLOAT32;
+    let epilogue = if g.bias_slot < 0 {
+        Epilogue::None
+    } else {
+        match (g.bias_dtype == dtype::FLOAT32, g.c_dtype == dtype::BFLOAT16) {
+            (false, true) => Epilogue::BiasBf16OutBf16,
+            (false, false) => Epilogue::BiasBf16OutF32,
+            (true, false) => Epilogue::BiasF32OutF32,
+            // An f32 bias into a bf16 result has no kernel yet.
+            (true, true) => return None,
+        }
+    };
     // A is [m, k]; row-major has the k axis contiguous, column-major the m axis.
     // The leading dimension may exceed the tight size (a strided view).
     // A transposed operand is rewritten to row-major f16 by the staging pass, so
@@ -289,8 +310,7 @@ pub fn plan(g: &crate::schedule::host_gemm::HostGemm) -> Option<Plan> {
         sc: g.c_m as usize,
         stage_a,
         stage_b,
-        bias: g.bias_slot >= 0,
-        bias_f32,
+        epilogue,
     };
     // No size cutoff: the MMA wins from ~1 G MACs up (2048^3 2.78 vs 2.93 ms,
     // 4096^3 17.9 vs 23.2 vs OpenCL) and the smallest shapes are within the
@@ -362,8 +382,7 @@ mod tests {
             sc: 3072,
             stage_a: Stage::Bf16,
             stage_b: Stage::Bf16,
-            bias: false,
-            bias_f32: false,
+            epilogue: Epilogue::None,
         })
         .expect("patch");
         assert_eq!(w[0], 0x0723_0203, "SPIR-V magic");
@@ -398,8 +417,7 @@ mod tests {
             sc: 768,
             stage_a: Stage::Bf16,
             stage_b: Stage::Bf16,
-            bias: false,
-            bias_f32: false,
+            epilogue: Epilogue::None,
         };
         // The patcher itself accepts any plan; the tiling rules live in `plan`,
         // which needs a descriptor, so check the module's structural invariants.
@@ -811,6 +829,76 @@ pub fn epilogue_f32(n: usize, count: usize) -> Option<Vec<u32>> {
     for (sent, val) in [
         (SENTINEL_EPI32_N, n),
         (SENTINEL_EPI32_COUNT, count),
+    ] {
+        let mut hits = out.iter_mut().filter(|w| **w == sent);
+        let first = hits.next()?;
+        if hits.next().is_some() {
+            return None;
+        }
+        *first = val as u32;
+    }
+    Some(out)
+}
+
+/// Sentinel values of the bf16-bias / f32-result epilogue.
+const SENTINEL_EPIM_N: u32 = 168430131;
+const SENTINEL_EPIM_COUNT: u32 = 168430132;
+
+/// `out[i] = in[i] + f32(bias[i % n])` with an f32 result: a mixed-precision
+/// `Linear` has a 16-bit bias but keeps the activation dtype.
+pub const EPILOGUE_BF16_BIAS_F32: &[u32] = &[
+    0x07230203, 0x00010600, 0x00070000, 0x00000035, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
+    0x00001151, 0x0007000a, 0x5f565053, 0x5f52484b, 0x69623631, 0x74735f74, 0x6761726f, 0x00000065,
+    0x0003000e, 0x00000000, 0x00000001, 0x000a000f, 0x00000005, 0x00000001, 0x6e69616d, 0x00000000,
+    0x00000002, 0x00000003, 0x00000004, 0x00000005, 0x00000006, 0x00060010, 0x00000001, 0x00000011,
+    0x00000040, 0x00000001, 0x00000001, 0x00040047, 0x00000002, 0x0000000b, 0x0000001a, 0x00040047,
+    0x00000003, 0x0000000b, 0x0000001b, 0x00040047, 0x00000007, 0x00000006, 0x00000004, 0x00040047,
+    0x00000008, 0x00000006, 0x00000002, 0x00040047, 0x00000009, 0x00000006, 0x00000004, 0x00050048,
+    0x0000000a, 0x00000000, 0x00000023, 0x00000000, 0x00050048, 0x0000000b, 0x00000000, 0x00000023,
+    0x00000000, 0x00050048, 0x0000000c, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x0000000a,
+    0x00000002, 0x00030047, 0x0000000b, 0x00000002, 0x00030047, 0x0000000c, 0x00000002, 0x00040047,
+    0x00000004, 0x00000022, 0x00000000, 0x00040047, 0x00000004, 0x00000021, 0x00000000, 0x00040047,
+    0x00000005, 0x00000022, 0x00000000, 0x00040047, 0x00000005, 0x00000021, 0x00000001, 0x00040047,
+    0x00000006, 0x00000022, 0x00000000, 0x00040047, 0x00000006, 0x00000021, 0x00000002, 0x00020013,
+    0x0000000d, 0x00030021, 0x0000000e, 0x0000000d, 0x00040015, 0x0000000f, 0x00000020, 0x00000000,
+    0x00020014, 0x00000010, 0x00040015, 0x00000011, 0x00000010, 0x00000000, 0x00030016, 0x00000012,
+    0x00000020, 0x00040017, 0x00000013, 0x0000000f, 0x00000003, 0x0004002b, 0x0000000f, 0x00000014,
+    0x00000040, 0x0004002b, 0x0000000f, 0x00000015, 0x00000000, 0x0004002b, 0x0000000f, 0x00000016,
+    0x00000010, 0x0004002b, 0x0000000f, 0x00000017, 0x00007fff, 0x0004002b, 0x0000000f, 0x00000018,
+    0x00000001, 0x0004002b, 0x0000000f, 0x00000019, 0x0a0a0a33, 0x0004002b, 0x0000000f, 0x0000001a,
+    0x0a0a0a34, 0x0003001d, 0x00000007, 0x00000012, 0x0003001d, 0x00000008, 0x00000011, 0x0003001d,
+    0x00000009, 0x00000012, 0x0003001e, 0x0000000a, 0x00000007, 0x0003001e, 0x0000000b, 0x00000008,
+    0x0003001e, 0x0000000c, 0x00000009, 0x00040020, 0x0000001b, 0x0000000c, 0x0000000a, 0x00040020,
+    0x0000001c, 0x0000000c, 0x0000000b, 0x00040020, 0x0000001d, 0x0000000c, 0x0000000c, 0x00040020,
+    0x0000001e, 0x0000000c, 0x00000012, 0x00040020, 0x0000001f, 0x0000000c, 0x00000011, 0x00040020,
+    0x00000020, 0x00000001, 0x00000013, 0x0004003b, 0x00000020, 0x00000002, 0x00000001, 0x0004003b,
+    0x00000020, 0x00000003, 0x00000001, 0x0004003b, 0x0000001b, 0x00000004, 0x0000000c, 0x0004003b,
+    0x0000001c, 0x00000005, 0x0000000c, 0x0004003b, 0x0000001d, 0x00000006, 0x0000000c, 0x00050036,
+    0x0000000d, 0x00000001, 0x00000000, 0x0000000e, 0x000200f8, 0x00000021, 0x0004003d, 0x00000013,
+    0x00000022, 0x00000002, 0x00050051, 0x0000000f, 0x00000023, 0x00000022, 0x00000000, 0x0004003d,
+    0x00000013, 0x00000024, 0x00000003, 0x00050051, 0x0000000f, 0x00000025, 0x00000024, 0x00000000,
+    0x00050084, 0x0000000f, 0x00000026, 0x00000023, 0x00000014, 0x00050080, 0x0000000f, 0x00000027,
+    0x00000026, 0x00000025, 0x000500b0, 0x00000010, 0x00000028, 0x00000027, 0x0000001a, 0x000300f7,
+    0x00000029, 0x00000000, 0x000400fa, 0x00000028, 0x0000002a, 0x00000029, 0x000200f8, 0x0000002a,
+    0x00050089, 0x0000000f, 0x0000002b, 0x00000027, 0x00000019, 0x00060041, 0x0000001e, 0x0000002c,
+    0x00000004, 0x00000015, 0x00000027, 0x0004003d, 0x00000012, 0x0000002d, 0x0000002c, 0x00060041,
+    0x0000001f, 0x0000002e, 0x00000005, 0x00000015, 0x0000002b, 0x0004003d, 0x00000011, 0x0000002f,
+    0x0000002e, 0x00040071, 0x0000000f, 0x00000030, 0x0000002f, 0x000500c4, 0x0000000f, 0x00000031,
+    0x00000030, 0x00000016, 0x0004007c, 0x00000012, 0x00000032, 0x00000031, 0x00050081, 0x00000012,
+    0x00000033, 0x0000002d, 0x00000032, 0x00060041, 0x0000001e, 0x00000034, 0x00000006, 0x00000015,
+    0x00000027, 0x0003003e, 0x00000034, 0x00000033, 0x000200f9, 0x00000029, 0x000200f8, 0x00000029,
+    0x000100fd, 0x00010038,
+];
+
+/// The bf16-bias / f32-result epilogue module for an `m x n` result.
+pub fn epilogue_bf16_bias_f32(n: usize, count: usize) -> Option<Vec<u32>> {
+    if n == 0 || count == 0 {
+        return None;
+    }
+    let mut out = EPILOGUE_BF16_BIAS_F32.to_vec();
+    for (sent, val) in [
+        (SENTINEL_EPIM_N, n),
+        (SENTINEL_EPIM_COUNT, count),
     ] {
         let mut hits = out.iter_mut().filter(|w| **w == sent);
         let first = hits.next()?;

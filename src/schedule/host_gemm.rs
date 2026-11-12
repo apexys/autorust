@@ -626,16 +626,13 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         store.clone()
     };
     if ctx.op_of(&st0) != Ops::Store {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 16"); }
         return None;
     }
     if !has_reduce(ctx, &ctx.srcs(&st0)[1].clone()) {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 19"); }
         return None;
     }
     let kind = gemm_device(ctx, &store)?;
     if !library_ready(ctx, kind) {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 23"); }
         return None;
     }
 
@@ -645,14 +642,12 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         store.clone()
     };
     if ctx.op_of(&st) != Ops::Store {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 32"); }
         return None;
     }
     let dst_ptr = ctx.srcs(&st)[0].clone();
     if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: c-affine"); }
     let (c_off0, c_map) = affine(ctx, &index_offset(ctx, &dst_ptr))?;
     if c_map.len() < 2 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 38"); }
         return None;
     }
     let (c_slot, c_dt, c_base) = base_of(ctx, &dst_ptr)?;
@@ -736,7 +731,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: value-reduce"); }
     value = unwrap(ctx, value);
     if ctx.op_of(&value) != Ops::Reduce {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 121"); }
         return None;
     }
     let reduce = value;
@@ -744,7 +738,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: rsrcs"); }
     let rsrcs = ctx.srcs(&reduce).to_vec();
     if rsrcs.len() != 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 128"); }
         return None;
     }
     let red_k = range_key(ctx, &rsrcs[1])?;
@@ -772,12 +765,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 cur = ks[0].clone();
             }
         }
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 155"); }
         return None;
     }
     let msrcs = ctx.srcs(&mul).to_vec();
     if msrcs.len() != 2 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 159"); }
         return None;
     }
     let mul_dt = ctx.dt_of(&mul);
@@ -793,24 +784,20 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         && (c_dt == crate::dtype::FLOAT32
             || (kind == GemmDevice::Vk && c_dt == mul_dt));
     if (mul_dt != red_dt || mul_dt != c_dt) && !mixed_f16_f32 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 174"); }
         return None;
     }
     if !matches!(
         ctx.dt_of(&mul),
         crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
     ) {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 180"); }
         return None;
     }
     // CLBlast's `Sgemm` is the only entry point wired up on OpenCL.
     if kind == GemmDevice::Cl && ctx.dt_of(&mul) != crate::dtype::FLOAT32 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 184"); }
         return None;
     }
     // The CPU host GEMM packs f32 panels; other dtypes stay generated.
     if kind == GemmDevice::Cpu && ctx.dt_of(&mul) != crate::dtype::FLOAT32 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 188"); }
         return None;
     }
 
@@ -824,7 +811,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     ctx.op_of(&unwrap(ctx, msrcs[0].clone()))
                 );
             }
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 201"); }
             return None;
         }
     };
@@ -837,7 +823,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     ctx.op_of(&unwrap(ctx, msrcs[1].clone()))
                 );
             }
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 213"); }
             return None;
         }
     };
@@ -863,7 +848,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
             ))
     {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 238"); }
         return None;
     }
 
@@ -879,13 +863,11 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         .collect();
     n_candidates.dedup();
     if n_candidates.len() != 1 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 253"); }
         return None;
     }
     let n_key = n_candidates[0];
     let n = range_extent(ctx, &st, n_key)?;
     if n <= 1 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 258"); }
         return None;
     }
     let mut m_candidates: Vec<(RKey, i64)> = a_keys
@@ -900,14 +882,12 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     m_candidates.sort_by_key(|(_, c)| *c);
     if m_candidates.is_empty() || (m_candidates.len() > 1 && m_candidates[0].1 == m_candidates[1].1)
     {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 272"); }
         return None;
     }
     let m_key = m_candidates[0].0;
     let m = range_extent(ctx, &st, m_key)?;
     let k = range_extent(ctx, &st, red_k)?;
     if m <= 0 || k <= 0 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 278"); }
         return None;
     }
 
@@ -920,11 +900,9 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // The CPU blocked kernel stores rows contiguously; anything else keeps the
     // generated kernel.
     if kind == GemmDevice::Cpu && c_n != 1 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 290"); }
         return None;
     }
     if c_n != 1 || c_m < n {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 293"); }
         return None;
     }
     // A row-major (k contiguous) or column-major (m contiguous). The leading
@@ -935,7 +913,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let b_row = b_n == 1 && b_k >= n;
     let b_col = b_k == 1 && b_n >= k;
     if !(a_row || a_col) || !(b_row || b_col) {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 303"); }
         return None;
     }
 
@@ -959,7 +936,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
             );
         if dt != c_dt && !bias_ok {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 326"); }
             return None;
         }
         let off = off0 + base;
@@ -969,13 +945,11 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             // expressed by this epilogue, so leave the kernel generated.
             if e.from_mul {
                 if scale.0 >= 0 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 335"); }
                     return None;
                 }
                 scale = (slot, off);
             } else {
                 if bias.0 >= 0 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 340"); }
                     return None;
                 }
                 bias = (slot, off);
@@ -987,7 +961,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         let same_layout =
             map.len() == c_map.len() && c_map.iter().all(|(k, v)| coeff(&map, *k) == *v);
         if !same_layout || e.from_mul || residual.0 >= 0 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 351"); }
             return None;
         }
         residual = (slot, off);
@@ -1020,7 +993,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     for (key, _) in a_map.iter().chain(b_map.iter()) {
         if *key != m_key && *key != n_key && *key != red_k && !batch.iter().any(|(k, ..)| k == key)
         {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 383"); }
             return None;
         }
     }
@@ -1053,7 +1025,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         // MPS only produces a row-major result, and a fused bias/scale/residual
         // epilogue would need a separate kernel, so those stay generated too.
         if !force || c_n != 1 || bias_slot >= 0 || scale_slot >= 0 || res_slot >= 0 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 415"); }
             return None;
         }
         // MPS supports f32/f32, f16/f16 and f16 inputs with an f32 result.
@@ -1065,7 +1036,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 | (crate::dtype::FLOAT16, crate::dtype::FLOAT32)
         );
         if !ok_dtypes {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 426"); }
             return None;
         }
     }
@@ -1081,7 +1051,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         ))]
         {
             if !force && !crate::runtime::cpu_gemm::worth_dispatching(m, n, k) {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 441"); }
                 return None;
             }
         }
@@ -1092,7 +1061,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             feature = "backend_rayon"
         )))]
         {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 451"); }
             return None;
         }
     } else if kind == GemmDevice::Vk {
@@ -1101,7 +1069,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         // (measured for cuBLAS/CLBlast) does not apply; `coopmat::eligible` is
         // the filter.
     } else if !force && !cuda_f32 && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 459"); }
         return None;
     }
 
@@ -1166,7 +1133,6 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     "[vk] coopmat declined (bf16_accum={bf16_accum} tc={tc_on}): {desc:?}"
                 );
             }
-        if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] bail 523"); }
             return None;
         }
     }

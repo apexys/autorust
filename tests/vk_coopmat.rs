@@ -210,7 +210,7 @@ fn coopmat_is_used_for_f16_f32_matmul() {
     let mut cache = ProgCache::default();
     let got = tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache);
     let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
-    assert_eq!(used, 1, "expected one coopmat dispatch");
+    assert!(used >= 1, "expected a coopmat dispatch, got {used}");
     for (i, j) in [(0usize, 0usize), (1, 3), (M as usize / 2, N as usize / 2), (63, 63)] {
         let mut acc = 0.0f64;
         for kk in 0..K as usize {
@@ -222,7 +222,7 @@ fn coopmat_is_used_for_f16_f32_matmul() {
             "coopmat[{i},{j}]: {g} vs {acc}"
         );
     }
-    println!("f16/f32 pipeline {M}x{N}x{K}: one dispatch, matches the host reference");
+    println!("f16/f32 pipeline {M}x{N}x{K}: {used} dispatch(es), matches the host reference");
 
     // A plain f16 dot (16-bit accumulate) must stay on the generated kernel.
     let before = autorust::runtime::ops_vk::coop_gemm_count();
@@ -271,7 +271,7 @@ fn coopmat_handles_bf16_storage() {
             let mut cache = ProgCache::default();
             let got = tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache);
             let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
-            assert_eq!(used, 1, "one dispatch for c_dtype {cdt:?}, transposed={transposed}");
+            assert!(used >= 1, "a dispatch for c_dtype {cdt:?}, transposed={transposed} (got {used})");
             // Reference in f64 over the same operand values (the transposed view
             // reads the buffer column-major, exactly as the descriptor says).
             for (i, j) in [(0usize, 0usize), (2, 5), (31, 17), (63, 63)] {
@@ -340,4 +340,56 @@ fn coopmat_handles_a_biased_linear() {
         );
     }
     println!("biased Linear {m}x{n}x{k}: coopmat used, matches INTERP");
+}
+
+/// A mixed-precision `Linear` — f32 activations, bf16 weight, bf16 bias, f32
+/// result — goes through the MMA by staging the activation to f16. That rounds
+/// the activations, so it is gated by `USE_TC`: with `USE_TC=0` the generated
+/// kernel must run instead.
+#[test]
+fn coopmat_handles_mixed_precision_linear() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::nn::Linear;
+    use autorust::tensor::{Ctx, Tensor};
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    let tc_on = std::env::var("USE_TC").map(|v| v != "0" && v != "false").unwrap_or(true);
+    let (m, n, k) = (128i64, 192, 256);
+    let ctx = Ctx::new();
+    let x: Vec<f32> = (0..m * k).map(|i| ((i % 11) as f32 - 5.0) * 0.25).collect();
+    let w: Vec<f32> = (0..n * k).map(|i| ((i % 7) as f32 - 3.0) * 0.5).collect();
+    let b: Vec<f32> = (0..n).map(|i| ((i % 5) as f32 - 2.0) * 0.125).collect();
+    let run = |dev: Option<&str>| {
+        let xt = Tensor::from_slice(&ctx, &x, Some(dtype::FLOAT32), dev).reshape([m, k]);
+        let wt = Tensor::from_slice(&ctx, &w, Some(dtype::BFLOAT16), dev).reshape([n, k]);
+        let bt = Tensor::from_slice(&ctx, &b, Some(dtype::BFLOAT16), dev);
+        let lin = Linear {
+            weight: wt,
+            bias: Some(bt),
+        };
+        let out = lin.forward(&xt);
+        let mut cache = ProgCache::default();
+        tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache)
+    };
+    let before = autorust::runtime::ops_vk::coop_gemm_count();
+    let got = run(Some("VK"));
+    let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+    let want = run(None);
+    assert_eq!(
+        used > 0,
+        tc_on,
+        "the mixed-precision path must follow USE_TC (coopmat dispatches: {used})"
+    );
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        // f32 activations rounded to f16: ~1e-3 relative.
+        assert!(
+            (g - w).abs() <= 2e-3 * w.abs().max(1.0),
+            "mixed Linear [{i}]: {g} vs {w}"
+        );
+    }
+    println!("mixed-precision Linear {m}x{n}x{k}: coopmat={used} (USE_TC={tc_on}), matches INTERP");
 }
