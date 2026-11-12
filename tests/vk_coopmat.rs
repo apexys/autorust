@@ -482,3 +482,50 @@ fn coopmat_handles_a_residual_linear() {
     }
     println!("residual Linear {m}x{n}x{k}: {used} coopmat dispatch(es), matches INTERP");
 }
+
+/// The attention score matmul, `Q @ K^T` over `(batch, seq, head_dim)`, is a
+/// plain contraction and takes the same path — including the transposed `K`
+/// view, which becomes a column-major operand.
+///
+/// This matters because it is the shape of the ViT's largest kernel: measured
+/// one 197x197x64 slice at 0.069 ms (stage + MMA) against 0.213 ms for the
+/// generated kernel, i.e. 3.1x. The ViT's own kernel is still rejected by
+/// `host_gemm::extract` (see `CURRENT_STATE.md` §9.53), so this gate pins the
+/// capability and the numerics while that matcher gap is closed.
+#[test]
+fn coopmat_handles_the_attention_score_matmul() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::{Ctx, Tensor};
+
+    fn run(dev: Option<&str>, b: i64, m: i64, n: i64, k: i64) -> Vec<f64> {
+        let ctx = Ctx::new();
+        let q: Vec<f32> = (0..b * m * k).map(|i| ((i % 13) as f32 - 6.0) * 0.05).collect();
+        let kt: Vec<f32> = (0..b * n * k).map(|i| ((i % 7) as f32 - 3.0) * 0.05).collect();
+        let qt = Tensor::from_slice(&ctx, &q, Some(dtype::BFLOAT16), dev).reshape([b, m, k]);
+        let ktt = Tensor::from_slice(&ctx, &kt, Some(dtype::BFLOAT16), dev)
+            .reshape([b, n, k])
+            .transpose(1, 2);
+        let out = qt.dot_dtype(&ktt, Some(dtype::FLOAT32));
+        let mut cache = ProgCache::default();
+        tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache)
+    }
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    let (b, m, n, k) = (8i64, 197, 197, 64);
+    let before = autorust::runtime::ops_vk::coop_gemm_count();
+    let got = run(Some("VK"), b, m, n, k);
+    let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+    let want = run(None, b, m, n, k);
+    assert_eq!(used, b as usize, "one dispatch per batch slice for Q@K^T");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 1e-3 * w.abs().max(1.0),
+            "Q@K^T [{i}]: {g} vs {w}"
+        );
+    }
+    println!("Q@K^T {b}x{m}x{n}x{k}: {used} coopmat dispatch(es), matches INTERP");
+}

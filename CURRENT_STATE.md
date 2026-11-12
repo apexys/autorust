@@ -4519,6 +4519,26 @@ GEMM is unaffected (`r_128_32_4_16_8_8_1024_4`'s only loop has an 820-uop body, 
 it stays rolled) — verified by stashing the change and re-measuring 4096³
 (35.9 vs 35.8 ms).
 
+**The attention score matmul goes through the seam — but not the ViT's own
+kernel.** `Q @ K^T` over `(batch, seq, head_dim)` is a plain contraction, and a
+synthetic one at the ViT's exact shape (8x197x197x64, bf16 in, f32 out) dispatches
+one cooperative matrix per batch slice and matches INTERP
+(`coopmat_handles_the_attention_score_matmul`). Measured on one 197x197x64 slice:
+**0.069 ms (stage + MMA) against 0.213 ms for the generated kernel — 3.1x**. The
+ViT's score kernel is 76.9 ms of its ~320 ms of GPU time, so that is roughly 25 ms
+of a 114 ms step, which would put the row *ahead* of OpenCL's 96 ms.
+
+The ViT's kernel itself is still rejected by `host_gemm::extract`. Ruled out by
+instrumenting every decision point (each counted against the 12 attention kernels):
+`value` is a `Reduce`, the reduce op is `Add` (the 36 `Max` rejections are amax and
+the softmax denominator, correctly declined), the peel finds a `Mul`, the operand
+dtypes pass, `affine(A)` succeeds, `n_candidates` is exactly 1, and neither
+`range_extent` nor `base_of` fails. The bails therefore sit in the remaining
+un-instrumented `?`s of the extras loop and the `m_candidates`/`c_n` block; the next
+attempt should start from that short list rather than from the mask-epilogue
+hypothesis, which this ruled out (the kernel has three bindings — A, B, C — and no
+mask operand at all).
+
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
 is codegen quality on the same kernels — the depthwise convs are already fully

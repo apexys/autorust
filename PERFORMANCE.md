@@ -474,10 +474,14 @@ Reading it:
   OpenCL's. `VkDevice` now reuses freed buffers by size, which took that row from
   1.35x behind to slightly ahead. Worth remembering when a small model looks
   inexplicably slow: profile host and device separately before touching codegen.
-- **What still trails** is the reduced-precision ViT (1.23x — its fused
-  softmax+matmul attention kernels, not its linears; see below) and MobileNetV2
-  (1.11x, GPU codegen on identical conv kernels). Everything else is at parity or
-  ahead.
+- **What still trails** is the reduced-precision ViT (1.19x) and MobileNetV2
+  (1.09x, GPU codegen on identical conv kernels). Everything else is at parity or
+  ahead. The ViT has a measured 3.1x waiting behind a matcher gap: its attention
+  score matmul (`Q @ K^T`, 76.9 ms of ~320 ms) is a plain contraction that the
+  cooperative matrix runs at 0.069 ms per 197×197×64 slice against 0.213 ms
+  generated — a synthetic graph at that exact shape already takes the seam and is
+  exact (`coopmat_handles_the_attention_score_matmul`), but the ViT's own kernel is
+  still rejected inside `host_gemm::extract` (see `CURRENT_STATE.md` §9.53).
 
 ### Tensor cores (`VK_KHR_cooperative_matrix`)
 
