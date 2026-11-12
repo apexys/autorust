@@ -4264,5 +4264,14 @@ train 453 vs 449, ResNet-50 102 vs 99, **UNet 18.1 vs 21.2**, LLM prefill 423 vs
 and 2048³/4096³/TN 1.07-1.38x behind. Remaining gaps: bf16 (GEMM 4.39 vs 3.16,
 ViT-B/16 154 vs 92) where the graph's 15-uop round-to-bf16 idiom is compiled
 literally by the driver but optimized into a few `prmt`/`lop3`/`selp`s by the
-OpenCL C compiler; MobileNet/ResNet-50/ONNX (1.03-1.35x) and a native
-f16/tensor-core `OpCooperativeMatrixMulAddKHR` path.
+OpenCL C compiler; MobileNet/ResNet-50/ONNX (1.03-1.35x).
+
+A bf16 tensor-core path is the concrete follow-up for the last gap: bf16 `dot`
+accumulates in bf16 (the output dtype), so the graph rounds *every product*, and
+that idiom costs the same on both backends — only hardware MMA accumulates in f32
+for free. The device advertises `VK_KHR_cooperative_matrix` plus
+`VK_NV_cooperative_matrix{,_2}` (and lavapipe advertises the KHR one), so
+`OpTypeCooperativeMatrixKHR` + `OpCooperativeMatrixMulAddKHR` is available
+without a new dependency; it needs a capability probe, the emitter's type/decor
+support, and a WMMA-shaped tile from the scheduler (the CUDA backend's `tc` path
+is the model). Not attempted yet.

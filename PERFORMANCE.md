@@ -460,7 +460,11 @@ Reading it:
   the matmul itself is fine; the cost is the graph's 15-uop round-to-bf16 idiom,
   which the OpenCL C compiler turns into a handful of `prmt`/`lop3`/`selp`s while
   the driver compiles the literal SPIR-V as 15 instructions. It runs on *every*
-  bf16 elementwise op, so it grows with the model, not with the matmul.
+  bf16 elementwise op, so it grows with the model, not with the matmul. A bf16
+  `dot` also accumulates in bf16 (its output dtype), so every product is rounded;
+  only hardware MMA (which accumulates in f32) removes that, and this device does
+  advertise `VK_KHR_cooperative_matrix`, so `OpCooperativeMatrixMulAddKHR` is the
+  way to close it.
 - **Large GEMMs** are 1.07-1.38x off: the scheduler-unrolled 1024-deep reduce
   body is too big to unroll further, and `TN` (both operands transposed) is the
   worst case.
