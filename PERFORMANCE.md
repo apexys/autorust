@@ -392,24 +392,24 @@ Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 
 | workload | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| MNIST CNN train, bs 512 | 22.3 | **22.2** | 1.01x |
-| ViT-B/16 infer, bs 1 | **29.8** | 30.9 | 0.97x |
-| ViT-B/16 infer, bs 8 | **116.4** | 177.9 | 0.65x |
-| ViT-B/16 infer, bf16, bs 8 | 113.4 | **92.5** | 1.23x |
-| ResNet-18 infer, bs 32 | **319.9** | 374.5 | 0.85x |
-| ResNet-18 train, bs 32 | 450.8 | **449.9** | 1.00x |
-| ResNet-50 infer, bs 32 | 100.3 | **100.0** | 1.00x |
-| MobileNetV2 infer, bs 32 | 61.5 | **55.5** | 1.11x |
-| UNet infer, 64² | **17.8** | 20.9 | 0.85x |
-| LLM prefill, 512 tok | 420.4 | **396.9** | 1.06x |
-| LLM decode, 1 tok | 20.4 | **20.1** | 1.01x |
-| ONNX MNIST, bs 32 | **11.2** | 11.4 | 0.98x |
-| ONNX ResNet-18 (w=0.25), bs 8 | 70.4 | **70.3** | 1.00x |
-| AdamW, 100M params | **94.9** | 97.0 | 0.98x |
+| MNIST CNN train, bs 512 | 23.4 | **22.4** | 1.04x |
+| ViT-B/16 infer, bs 1 | **30.4** | 30.9 | 0.98x |
+| ViT-B/16 infer, bs 8 | **117.3** | 180.3 | 0.65x |
+| ViT-B/16 infer, bf16, bs 8 | 113.9 | **96.1** | 1.19x |
+| ResNet-18 infer, bs 32 | **320.3** | 377.4 | 0.85x |
+| ResNet-18 train, bs 32 | 453.6 | **450.9** | 1.01x |
+| ResNet-50 infer, bs 32 | 101.8 | **100.0** | 1.02x |
+| MobileNetV2 infer, bs 32 | 62.2 | **56.8** | 1.09x |
+| UNet infer, 64² | **18.1** | 22.2 | 0.81x |
+| LLM prefill, 512 tok | 427.1 | **398.2** | 1.07x |
+| LLM decode, 1 tok | **19.8** | 22.1 | 0.89x |
+| ONNX MNIST, bs 32 | 11.7 | **11.6** | 1.00x |
+| ONNX ResNet-18 (w=0.25), bs 8 | 70.4 | **69.5** | 1.01x |
+| AdamW, 100M params | **94.2** | 96.4 | 0.98x |
 
-**VK is at or ahead of OpenCL on 6 of 14 rows and within 1.06x on 12 of 14.** Only
-two rows trail by more than 10%: ViT-B/16 bf16 (1.23x, fused attention) and
-MobileNetV2 (1.11x, conv codegen).
+**VK is at or ahead of OpenCL on 6 of 14 rows, within 1.06x on 11 of 14 and within
+1.20x on all 14.** The largest remaining gap is ViT-B/16 bf16 at 1.19x (fused
+attention), then MobileNetV2 1.09x (conv codegen) and LLM prefill 1.07x.
 
 GEMM and memory-bound ops (ms per case, best of two runs — this machine's clocks
 swing ±30%, so a single run can read 1.5-2x high):

@@ -25,8 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loops (197) and most conv tails; the driver's SPIR-V frontend does not unroll on
   its own. It now runs `ext / 8` full chunks and emits the leftover iterations as
   straight-line copies (same load order, same accumulator order, so identical
-  numerics): `vit_infer_bf16` **130 -> 113 ms**, ViT bs 8 130 -> 116,
-  UNet 19.5 -> 17.8, LLM decode now ahead of OpenCL.
+  numerics): `vit_infer_bf16` **130 -> 114 ms**, ViT bs 8 130 -> 117,
+  UNet 19.5 -> 18.1, LLM decode 22.4 -> 19.8 (now ahead of OpenCL).
 - **Device-buffer reuse for the Vulkan backend.** The engine's buffer cache is
   bypassed by every backend's `_free`, so a schedule re-allocated one
   `vkCreateBuffer`+`vkAllocateMemory` per kernel per step (~0.25 ms each).

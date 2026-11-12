@@ -9,20 +9,20 @@
   "warmup": 2,
   "iters": 10,
   "ms_cold": 0.0,
-  "ms_median": 94.9452,
+  "ms_median": 94.1978,
   "ms_min": 0.0,
   "ms_iqr": 0.0,
   "images_per_s": 0.0,
   "cases": [
     {
       "case": "adamw 100000000 params, 32 tensors",
-      "ms": 94.9452,
-      "gbs": 29.4907
+      "ms": 94.1978,
+      "gbs": 29.7247
     }
   ],
   "name": "autorust-vk-optim",
   "variant": "VK",
-  "commit": "c263709",
-  "date": "2026-11-12T15:54:19",
+  "commit": "45acbac",
+  "date": "2026-11-12T16:02:08",
   "notes": ""
 }

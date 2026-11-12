@@ -1554,9 +1554,10 @@ impl<'a> Emitter<'a> {
         self.d_at(iv_next, op::I_ADD, vty, &[phi, step]);
         let bty = self.bool_ty();
         // The loop covers whole chunks only; a trailing partial chunk would read
-        // past the extent, so it is emitted below instead.
-        let bound = match self.ctx.ssimplify(end.clone()) {
-            Ok(crate::uop::sint::SVal::I(ext)) => {
+        // past the extent, so it is emitted below instead. The extent is the
+        // `RANGE`'s source (`end` here is the matching `END` uop).
+        let bound = match self.ctx.ssimplify(self.info[range].srcs[0].clone()) {
+            Ok(crate::uop::sint::SVal::I(ext)) if ext > 0 => {
                 let rem = ext as i64 % Self::UNROLL as i64;
                 if rem == 0 {
                     None

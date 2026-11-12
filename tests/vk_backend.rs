@@ -224,7 +224,11 @@ fn vk_reduce_covers_the_last_chunk() {
         return;
     }
     let ctx = Ctx::new();
-    for n in [16i64, 64, 128, 1024] {
+    // Extents that are *not* a multiple of the unroll factor matter as much as
+    // the divisible ones: the emitter runs `n / 8` full chunks and then emits the
+    // remainder as straight-line copies, and reading a partial chunk instead
+    // would silently pick up neighbouring elements.
+    for n in [16i64, 17, 64, 100, 128, 197, 1000, 1024] {
         let data: Vec<f32> = (0..n).map(|i| (i + 1) as f32).collect();
         let d2 = data.clone();
         let (got, want) = both(&ctx, Some("VK"), move |c, d| {

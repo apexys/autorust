@@ -4494,8 +4494,9 @@ range uop is saved and restored around the tail so nothing outside the loop sees
 the peel.
 
 That is the single largest kernel-side win since the register promotion:
-`vit_infer_bf16` 130 -> 113 ms, ViT bs 8 130 -> 116 ms, UNet 19.5 -> 17.8,
-LLM decode 22.4 -> 20.4 (now ahead of CL), ONNX ResNet 74.7 -> 70.4. Large f32
+`vit_infer_bf16` 130 -> 114 ms, ViT bs 8 130 -> 117 ms, UNet 19.5 -> 18.1 (0.81x),
+LLM decode 22.4 -> 19.8 (now ahead of CL), ONNX ResNet 74.7 -> 70.4. The matrix is
+now 6 of 14 ahead, 11 of 14 within 1.06x and all 14 within 1.20x. Large f32
 GEMM is unaffected (`r_128_32_4_16_8_8_1024_4`'s only loop has an 820-uop body, so
 it stays rolled) — verified by stashing the change and re-measuring 4096³
 (35.9 vs 35.8 ms).
