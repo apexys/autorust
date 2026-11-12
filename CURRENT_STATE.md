@@ -4473,6 +4473,14 @@ which idles the device first. Measured: ONNX-MNIST **15.5 -> 11.6 ms** (VK is no
 *ahead* of CL's 12.1), ONNX ResNet-0.25 **82.6 -> 73.5** (1.02x, was 1.23x).
 MobileNet is unaffected (it is GPU-bound) — see below.
 
+**A plain f32 matmul must never be demoted.** Allowing `Stage::F32` on *both*
+operands meant that with `USE_TC` on (the default) an ordinary `x.dot(w)` on f32
+tensors was staged to f16 and run on the MMA: it measured 1.8x faster than the f32
+GEMM and was silently f16 arithmetic. Staging now only joins a contraction that is
+*already* reduced-precision (f32 activations against 16-bit weights); a plain f32
+matmul keeps the generated kernel (4.65 vs OpenCL's 4.42 ms at 2048³). This is the
+line between "the graph already chose f16/bf16 storage" and "we chose it for it".
+
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
 is codegen quality on the same kernels — the depthwise convs are already fully
