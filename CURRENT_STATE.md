@@ -4228,6 +4228,20 @@ factor). `softmax` went 2.14 -> 1.16 ms and `layernorm` 2.18 -> 1.18 ms against
 CL's 1.41/1.44, i.e. **both are now faster than OpenCL**, and LLM decode dropped
 from 34 to 25 ms.
 
+**Register arrays must live in `OpPhi`s, and the carry must come from the
+continue block.** A 64-float accumulator declared as a `Function` array is not
+promoted by the driver, so the GEMM reduce and the 4-float scalar tiles in the
+conv kernels round-trip through scratch (`OpAccessChain`+`OpLoad`+`OpStore` per
+lane per iteration). The emitter now promotes a `BUFFER` whose every index is a
+constant and whose stores are not inside an `IF` to SSA, with a loop-carried
+`OpPhi`. Two pitfalls: (a) the store pointer is `Index(After(Buffer), k)`, so
+both chain walks must pass through `AFTER`; (b) the loop's exit branch is taken
+from the *continue* block, so the value used after the loop must be the one
+carried out of the continue block — using the header phi silently drops the last
+iteration (a 64-element sum of ones returned 24 and the bf16 matmul was off by
+0.15). `vk_reduce_covers_the_last_chunk` and `vk_bf16_matmul_matches_interp` pin
+both; ResNet-18 inference went 403 -> 321 ms and UNet 21.0 -> 18.1 ms.
+
 **Dispatch batching needs a flush point.** A Vulkan submit + fence costs ~25 us
 where `clEnqueueNDRangeKernel` is nearly free, so consecutive dispatches are now
 recorded into one command buffer (8 per batch, one descriptor set per
@@ -4240,15 +4254,15 @@ the batch at the step boundary, which restores the CPU/GPU overlap; both wins
 then hold.
 
 Measured against `CL` on the same machine (`bench/run.py --only
-'autorust-(vk|cl)-'`, 138-row matrix, medians): **every memory-bound microbench
-is at parity or faster** (add 0.85 vs 1.03 ms, softmax 1.09 vs 1.38, layernorm
-1.19 vs 1.42, sum 0.68 vs 0.70, copy 0.80 vs 0.83, transpose 0.92 vs 0.89),
-MNIST train 23.0 vs 21.9 ms, ViT infer bs 8 **132.5 vs 179.9 ms**, ResNet-18
-infer 403 vs 376, ResNet-18 train 452 vs 450, UNet 21.0 vs 21.0, LLM prefill
-426 vs 396, **LLM decode 21.3 vs 22.1**, AdamW 94.5 vs 96.0, GEMM 1024³/NT/
-batched ahead and 2048³/4096³/TN 1.0-1.4x behind, bf16 ViT 154 vs 94. Remaining
-gaps: bf16 inference (the 16-bit load/convert path; the bf16 GEMM alone is 1.33x
-off), large GEMMs (the scheduler-unrolled 1024-deep body is too big to unroll
-further and its 64-float accumulator is not promoted out of `Function` storage),
-MobileNet/ResNet-50/ONNX (1.2-1.3x) and a native f16/tensor-core
-`OpCooperativeMatrixMulAddKHR` path.
+'autorust-(vk|cl)-'`, 138-row matrix, medians): **7 of 8 memory-bound
+microbenches are at parity or faster** (add 0.85 vs 1.07 ms, layernorm 1.13 vs
+1.43, softmax 1.20 vs 1.38, sum 0.61 vs 0.69, copy 0.80 vs 0.85, gelu 0.81 vs
+0.83; `amax` 0.69 vs 0.62 is the one behind), MNIST train 22.6 vs 21.9 ms, ViT
+infer bs 8 **132.5 vs 179.9 ms**, **ResNet-18 infer 321 vs 376**, ResNet-18
+train 453 vs 449, ResNet-50 102 vs 99, **UNet 18.1 vs 21.2**, LLM prefill 423 vs
+397, LLM decode 22.4 vs 20.2, AdamW 95.8 vs 97.4, GEMM 1024³/NT/batched ahead
+and 2048³/4096³/TN 1.07-1.38x behind. Remaining gaps: bf16 (GEMM 4.39 vs 3.16,
+ViT-B/16 154 vs 92) where the graph's 15-uop round-to-bf16 idiom is compiled
+literally by the driver but optimized into a few `prmt`/`lop3`/`selp`s by the
+OpenCL C compiler; MobileNet/ResNet-50/ONNX (1.03-1.35x) and a native
+f16/tensor-core `OpCooperativeMatrixMulAddKHR` path.

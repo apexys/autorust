@@ -115,11 +115,12 @@ The bench also isolates the pieces the two models hide:
 | MNIST infer via ONNX, bs 32 | CUDA | 10.9 ms | **0.35 ms** | runner reschedules per call |
 | ResNet-18 (w=0.25) via ONNX, bs 8 | CUDA | 67.7 ms | **1.25 ms** | same, larger graph |
 
-Vulkan (`VK`) emits SPIR-V directly and runs the same kernels as OpenCL: every
-memory-bound microbench is at parity or faster (softmax 1.09 vs 1.38 ms,
-layernorm 1.19 vs 1.42 ms, add 0.85 vs 1.03 ms), ViT-B/16 infer at bs 8 is
-**132.5 vs 179.9 ms**, LLM decode 21.3 vs 22.1 ms, AdamW 94.5 vs 96.0 ms, and
-MNIST train 23.0 vs 21.9 ms. The remaining gaps are `LOCAL`-memory reductions
+Vulkan (`VK`) emits SPIR-V directly and runs the same kernels as OpenCL: seven of
+eight memory-bound microbenches are at parity or faster (softmax 1.20 vs 1.38 ms,
+layernorm 1.13 vs 1.43 ms, add 0.85 vs 1.07 ms), ViT-B/16 infer at bs 8 is
+**132.5 vs 179.9 ms**, ResNet-18 inference **321 vs 376 ms**, UNet 18.1 vs
+21.2 ms, AdamW 95.8 vs 97.4 ms, and MNIST train 22.6 vs 21.9 ms. bf16 is the
+remaining gap (ViT-B/16 bf16 154 vs 92 ms). The remaining gaps are `LOCAL`-memory reductions
 (softmax/layernorm), decode-heavy graphs (one command buffer per kernel) and
 bf16 inference; see
 [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#vulkan-vk).

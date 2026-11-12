@@ -25,7 +25,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   took `softmax`/`layernorm` from 2.1/2.2 ms to 1.09/1.19 ms, ahead of OpenCL's
   1.38/1.42, and consecutive launches are batched into one command buffer (closed
   at each executed linear via the new `Prog::flush` seam) which took LLM decode
-  from 25.6 to 21.3 ms.
+  from 25.6 to 21.3 ms. Register arrays (GEMM accumulators, the per-lane tiles in
+  the conv kernels) are promoted to SSA with loop-carried `OpPhi`s instead of
+  round-tripping through `Function` memory, worth 20% on ResNet-18 inference
+  (403 -> 321 ms) and 14% on UNet; the loop carry has to be read out of the
+  continue block, which `tests/vk_backend.rs` pins (using the header phi dropped
+  the last iteration of every reduction).
 - **Backend memory reporting.** `Compiled::memory_info()` returns
   `MemoryInfo { total, free }`, implemented through
   `BackendAllocator::memory_info()`: CUDA uses `cuMemGetInfo_v2`, OpenCL reports
