@@ -407,9 +407,10 @@ Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 | ONNX ResNet-18 (w=0.25), bs 8 | 74.7 | **64.4** | 1.16x |
 | AdamW, 100M params | **94.7** | 96.2 | 0.98x |
 
-**VK is at or ahead of OpenCL on 6 of 14 rows and within 1.10x on 10 of 14.** The
-five that still trail are ViT-B/16 bf16 (1.37x), ViT-B/16 bs 1 (1.15x), ONNX
-ResNet-0.25 (1.16x), MobileNetV2 (1.11x) and LLM prefill (1.07x).
+**VK is at or ahead of OpenCL on 5 of 14 rows** (ViT-B/16 bs 8, ResNet-18 infer,
+UNet, ONNX MNIST, AdamW) **and within 1.10x on 10 of 14.** The four that still
+trail by more are ViT-B/16 bf16 (1.37x), ONNX ResNet-0.25 (1.16x), ViT-B/16 at
+bs 1 (1.15x) and MobileNetV2 (1.11x).
 
 GEMM and memory-bound ops (ms per case, best of three runs — this machine's clocks
 swing ±30%, so a single run reads 1.5-2x high):
