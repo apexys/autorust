@@ -4374,11 +4374,22 @@ not amortise, so but re-measuring 1024^3 with the cutoff in place gave 1.25 ms (
 0.98 ms the MMA took), i.e. the machine's +-30% noise, so there is **no size
 cutoff**; the batched-8x512^3 row is a batched descriptor and stays generated).
 
-`vit_infer_bf16` is **unchanged** (154 ms): its `Linear` layers have a **bias**, and
-`plan` requires `bias_slot < 0`, so no descriptor is built for them. The epilogue
-is the remaining step — add the per-column bias add after the f32 accumulator
-(and consider whether the 2 G-MAC cutoff should stay, since the ViT's projections
-are 0.9 G MACs and were 4.6x faster in the fixture before staging existed).
+The **bias epilogue** is in: `coopmat::epilogue_bf16` adds a per-column bf16 bias
+to the f32 accumulator and rounds once to bf16 (`out[i] = bf16(acc[i] +
+bias[i % n])`), and `plan` accepts a `bias_slot` when the result is bf16
+(`bias_off` is honoured through the binding offset). `coopmat_handles_a_biased_linear`
+pins it: a `Linear` (transposed weight *and* bias) dispatches through the MMA and
+matches INTERP.
+
+`vit_infer_bf16` is **still 155 ms vs CL's 92**: with the bias accepted, the ViT's
+projections still produce no descriptor — tracing `extract` for that workload
+shows it never reaches the device filter (no "declined" line), so it bails inside
+the matcher on that graph (the shapes are fine: 1576x768x768 etc., all row-major
+one-transposed-operand forms that the bench's GEMM rows use successfully). The
+instrumentation used to localise it was reverted with the file, so the next step is
+to re-add the per-`return` tags around `extract` for the ViT graph specifically and
+fix whatever it reports — the same method that found the dtype gate and the
+staging cache-key bugs.
 
 Also found on the way: `Tensor::rand(..., FLOAT16)` on `VK` produces an init
 kernel (`E_..._2_16_2`) whose pipeline the driver rejects ("unknown error"), so

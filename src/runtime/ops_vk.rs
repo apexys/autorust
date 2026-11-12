@@ -666,6 +666,56 @@ fn stage(
         .unwrap_or_else(|e| panic!("TGERR: VK stage dispatch: {e}"));
 }
 
+/// Record the fused bias + round epilogue over an `m x n` f32 accumulator.
+fn epilogue(
+    inner: &VkInner,
+    n: usize,
+    count: usize,
+    src: Bind<'_>,
+    bias: Bind<'_>,
+    dst: Bind<'_>,
+) {
+    let words = coopmat::epilogue_bf16(n, count).expect("coopmat: epilogue module");
+    let key = (3, n, count, 0, 0);
+    let pipe = {
+        let mut cache = inner.conv.borrow_mut();
+        if let Some(p) = cache.get(&key) {
+            p.clone()
+        } else {
+            let p = Rc::new(
+                inner
+                    .dev
+                    .pipeline(&words, 3)
+                    .unwrap_or_else(|e| panic!("TGERR: VK epilogue pipeline: {e}")),
+            );
+            cache.insert(key, p.clone());
+            p
+        }
+    };
+    let sets = inner
+        .dev
+        .alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+    let bound = [
+        (src.buf, src.off, src.size),
+        (bias.buf, bias.off, bias.size),
+        (dst.buf, dst.off, dst.size),
+    ];
+    if trace_on() {
+        trace(&format!("epilogue n={n} count={count}"));
+    }
+    inner
+        .dev
+        .dispatch(
+            &pipe,
+            &sets,
+            &bound,
+            coopmat::element_grid(count),
+            false,
+            "epilogue",
+        )
+        .unwrap_or_else(|e| panic!("TGERR: VK epilogue dispatch: {e}"));
+}
+
 /// Run one `HostGemm` descriptor as a cooperative-matrix kernel.
 ///
 /// The library-GEMM seam (`schedule::host_gemm`) has already checked
@@ -685,6 +735,12 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
             off: o.offset as u64,
             size: o.size as u64,
         }
+    };
+    // The bias vector is 2 bytes per element, so its element offset scales.
+    let view_elem2 = |slot: i64, off: i64| {
+        let mut b = view(slot);
+        b.off += (off as u64) * 2;
+        b
     };
     let (a, b, c) = (view(g.a_slot), view(g.b_slot), view(g.c_slot));
     let plan = coopmat::plan(g).expect("coopmat: eligible descriptor");
@@ -774,7 +830,12 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
         .unwrap_or_else(|e| panic!("TGERR: VK coopmat dispatch: {e}"));
 
     if g.c_dtype == crate::dtype::BFLOAT16 {
-        convert(inner, Conversion::F32ToBf16, m * n, out, c);
+        if g.bias_slot >= 0 {
+            let bias = view_elem2(g.bias_slot, g.bias_off);
+            epilogue(inner, n, m * n, out, bias, c);
+        } else {
+            convert(inner, Conversion::F32ToBf16, m * n, out, c);
+        }
     }
 }
 

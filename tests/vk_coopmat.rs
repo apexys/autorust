@@ -296,3 +296,48 @@ fn coopmat_handles_bf16_storage() {
         }
     }
 }
+
+/// A `Linear` (transposed weight **and** a per-column bias) must take the
+/// cooperative-matrix path: the bias rides the f32 -> bf16 epilogue, so the f32
+/// accumulator is rounded only once, after the add.
+#[test]
+fn coopmat_handles_a_biased_linear() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::nn::Linear;
+    use autorust::tensor::{Ctx, Tensor};
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    let (m, n, k) = (128i64, 192, 256);
+    let ctx = Ctx::new();
+    let x: Vec<f32> = (0..m * k).map(|i| ((i % 11) as f32 - 5.0) * 0.25).collect();
+    let w: Vec<f32> = (0..n * k).map(|i| ((i % 7) as f32 - 3.0) * 0.5).collect();
+    let b: Vec<f32> = (0..n).map(|i| ((i % 5) as f32 - 2.0) * 0.125).collect();
+    let run = |dev: Option<&str>| {
+        let xt = Tensor::from_slice(&ctx, &x, Some(dtype::BFLOAT16), dev).reshape([m, k]);
+        let wt = Tensor::from_slice(&ctx, &w, Some(dtype::BFLOAT16), dev).reshape([n, k]);
+        let bt = Tensor::from_slice(&ctx, &b, Some(dtype::BFLOAT16), dev);
+        let lin = Linear {
+            weight: wt,
+            bias: Some(bt),
+        };
+        let out = lin.forward(&xt);
+        let mut cache = ProgCache::default();
+        tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache)
+    };
+    let before = autorust::runtime::ops_vk::coop_gemm_count();
+    let got = run(Some("VK"));
+    let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+    let want = run(None);
+    assert!(used > 0, "coopmat not used for a biased Linear");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 1e-2 * w.abs().max(1.0),
+            "biased Linear [{i}]: {g} vs {w}"
+        );
+    }
+    println!("biased Linear {m}x{n}x{k}: coopmat used, matches INTERP");
+}
