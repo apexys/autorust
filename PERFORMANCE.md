@@ -487,7 +487,9 @@ Reading it:
   A two-batch-axis descriptor now exists and takes it in bf16
   (`coopmat_handles_a_two_axis_batch`), but the ViT's own attention is
   **f32 × f32**, which the no-demotion rule keeps off a 16-bit MMA; the 3.1x was
-  measured on bf16 operands and does not transfer — see `CURRENT_STATE.md` §9.53.
+  measured on bf16 operands and does not transfer. That is now a **decision**:
+  the ViT keeps f32 activations, so the row stays ~1.2x behind by choice — see
+  `CURRENT_STATE.md` §9.53.
 
 ### Tensor cores (`VK_KHR_cooperative_matrix`)
 

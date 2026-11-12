@@ -4599,6 +4599,25 @@ parameters), or allow f32 -> f16 staging for this contraction behind `USE_TC` (a
 numerics change that would also have to be visible in the benchmark's dtype
 label).
 
+**Decision (2026-11): the ViT keeps f32 attention activations.** `vit_infer_bf16`
+casts parameters to bf16 and leaves activations f32, so its attention is an f32 x
+f32 contraction; sending it to the 16-bit MMA needs either bf16 activations (a
+model change) or a `USE_TC`-gated f32 -> f16 staging. Both were offered and the
+answer was to leave it as-is, so the row keeps its ~1.2x gap and the benchmark
+continues to measure a genuine f32-activation model. The two-axis batch descriptor
+added for that kernel stays: it is correct, tested, and any bf16-activation model
+with a `(batch, head)` layout will use it.
+
+The remaining trailing rows were then checked for a *structural* cause and have
+none: for `f32 TN 2048³` both backends pick the **same** kernel
+(`r_64_16_4_16_8_8_512_4`), its loads are `v4float` with `ArrayStride 16` and an
+`>> 4` index (so vectorization and alignment are both right), and the op histogram
+is identical (16 vector loads, 192 `Fma`, 256 `FMul`). MobileNet's conv kernels are
+the same story (identical names on both backends, fully unrolled, 22 scalar loads
+for 9 FMAs). What is left in those rows is NVCC's OpenCL frontend compiling the
+same uops better than its SPIR-V frontend — the same asymmetry documented for the
+bf16 round-to-bf16 idiom in §9.52 — not something the renderer can reach.
+
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
 is codegen quality on the same kernels — the depthwise convs are already fully
