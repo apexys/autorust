@@ -4528,16 +4528,42 @@ one cooperative matrix per batch slice and matches INTERP
 ViT's score kernel is 76.9 ms of its ~320 ms of GPU time, so that is roughly 25 ms
 of a 114 ms step, which would put the row *ahead* of OpenCL's 96 ms.
 
-The ViT's kernel itself is still rejected by `host_gemm::extract`. Ruled out by
-instrumenting every decision point (each counted against the 12 attention kernels):
-`value` is a `Reduce`, the reduce op is `Add` (the 36 `Max` rejections are amax and
-the softmax denominator, correctly declined), the peel finds a `Mul`, the operand
-dtypes pass, `affine(A)` succeeds, `n_candidates` is exactly 1, and neither
-`range_extent` nor `base_of` fails. The bails therefore sit in the remaining
-un-instrumented `?`s of the extras loop and the `m_candidates`/`c_n` block; the next
-attempt should start from that short list rather than from the mask-epilogue
-hypothesis, which this ruled out (the kernel has three bindings — A, B, C — and no
-mask operand at all).
+The ViT's kernel itself is still rejected by `host_gemm::extract`, and the exact
+reason is now known: **`affine()` cannot read the `A` operand's index because the
+scheduler split a fused axis.** Instrumenting the operand stage (counts in
+brackets, all against one ViT run — 247 candidate stores enter `extract`):
+
+```text
+c-affine 247 -> value-reduce 170 -> rsrcs 133 -> mul 121 -> a-affine 73
+          -> ab-dtype 61 -> shape 61 -> folds 60
+```
+
+so 12 kernels (one per layer) die between `ext: a-affine` and `ext: ab-dtype`, and
+a dump of the failing index shows why:
+
+```text
+bail-a-affine op=Add kids=[Add/INDEX, Mul/INDEX]
+  s0 = Add( Add( Mul(Range, Const), Mul(Range, Const) ), Floormod( Mul(Range, Const), Const ) )
+  s1 = Mul(Range, Const)
+```
+
+The `Floormod` is the fused-axis decomposition (`i % 197` recovering the head axis
+of a `[8, 12, 197, 64]` view of a contiguous projection output). `affine()`
+understands `Add`/`Sub`/`Mul`-by-constant/`Range`/`Const` only, so a `Mod`/`Div` term
+makes the operand non-strided as far as it is concerned. Everything else was ruled
+out empirically: the store value is a `Reduce`, its op is `Add` (the 36 `Max`
+rejections are amax and the softmax denominator, correctly declined), the peel
+finds a `Mul`, the dtype gate passes, `affine(B)`, `base_of(A/B)`, `n_candidates`,
+`range_extent(n/m/k)`, the `m_candidates` and `c_n`/`c_m` checks all pass, and the
+extras loop is never reached.
+
+The fix is therefore **axis splitting in the matcher**, not an epilogue: teach
+`affine()` to represent `Mod`/`Div` of a single range as synthetic axes (tinygrad's
+`split_axis`), and give `range_extent` extents for those synthetic keys. That is a
+self-contained change in `schedule::host_gemm` with no scheduler impact, and it is
+worth about 25 ms of the ViT step (the 3.1x above). It also rules out the earlier
+mask-epilogue hypothesis for good: the kernel has three bindings (A, B, C) and no
+mask operand at all.
 
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
