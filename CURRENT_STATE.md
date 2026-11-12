@@ -4446,6 +4446,11 @@ summed over one run) shows why that is where it stops:
 | epilogue | 144 | 4.9 ms |
 | other (elementwise/copies) | 6289 | 26 ms |
 
+The **residual epilogue** (`coopmat::epilogue_res`, `Epilogue::BiasBf16Residual`)
+then took the 11 `x + linear(ln(x))` projections onto the MMA too — `plan` had a
+leftover `res_slot >= 0` rejection from before that kernel existed. `vit_infer_bf16`
+went **146.7 -> 132.1 ms** (CL 92.3), i.e. 1.59x -> 1.43x.
+
 So the tensor-core path is ~7% of the ViT's GPU time and the **generated kernels
 are 85%**: the projections now run on the MMA, and what is left is the *attention*
 matmuls (per-head, per-batch 197x197x64 tiles), the 11 projections with a residual,

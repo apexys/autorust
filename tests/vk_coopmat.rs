@@ -435,3 +435,50 @@ fn coopmat_handles_a_batched_dot() {
     }
     println!("batched dot {b}x{m}x{n}x{k}: {used} coopmat dispatch(es), matches INTERP");
 }
+
+/// A transformer block's `x + linear(ln(x))`: the residual join is fused into the
+/// cooperative-matrix epilogue (`out = acc + bias + residual`), so the whole block
+/// is one MMA dispatch plus the packing, not an extra full-tensor add.
+#[test]
+fn coopmat_handles_a_residual_linear() {
+    use autorust::dtype;
+    use autorust::engine::realize::{ProgCache, tensor_values};
+    use autorust::runtime::buffer::BufTable;
+    use autorust::tensor::nn::Linear;
+    use autorust::tensor::{Ctx, Tensor};
+
+    if !autorust::runtime::ops_vk::available() || !autorust::runtime::ops_vk::coop_gemm_available() {
+        return;
+    }
+    let (m, n, k) = (64i64, 96, 128);
+    let ctx = Ctx::new();
+    let x: Vec<f32> = (0..m * k).map(|i| ((i % 11) as f32 - 5.0) * 0.25).collect();
+    let w: Vec<f32> = (0..n * k).map(|i| ((i % 7) as f32 - 3.0) * 0.5).collect();
+    let b: Vec<f32> = (0..n).map(|i| ((i % 5) as f32 - 2.0) * 0.125).collect();
+    let r: Vec<f32> = (0..m * n).map(|i| ((i % 3) as f32 - 1.0) * 0.25).collect();
+    let run = |dev: Option<&str>| {
+        let xt = Tensor::from_slice(&ctx, &x, Some(dtype::FLOAT32), dev).reshape([m, k]);
+        let wt = Tensor::from_slice(&ctx, &w, Some(dtype::BFLOAT16), dev).reshape([n, k]);
+        let bt = Tensor::from_slice(&ctx, &b, Some(dtype::BFLOAT16), dev);
+        let rt = Tensor::from_slice(&ctx, &r, Some(dtype::FLOAT32), dev).reshape([m, n]);
+        let lin = Linear {
+            weight: wt,
+            bias: Some(bt),
+        };
+        let out = lin.forward(&xt).add(&rt);
+        let mut cache = ProgCache::default();
+        tensor_values(&mut ctx.raw(), out.uop(), &mut BufTable::default(), &mut cache)
+    };
+    let before = autorust::runtime::ops_vk::coop_gemm_count();
+    let got = run(Some("VK"));
+    let used = autorust::runtime::ops_vk::coop_gemm_count() - before;
+    let want = run(None);
+    assert!(used > 0, "coopmat not used for x + linear(x)");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 3e-3 * w.abs().max(1.0),
+            "residual Linear [{i}]: {g} vs {w}"
+        );
+    }
+    println!("residual Linear {m}x{n}x{k}: {used} coopmat dispatch(es), matches INTERP");
+}

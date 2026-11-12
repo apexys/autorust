@@ -676,6 +676,60 @@ fn stage(
         .unwrap_or_else(|e| panic!("TGERR: VK stage dispatch: {e}"));
 }
 
+/// Record the fused bias + residual + round epilogue over an `m x n` f32
+/// accumulator (`x + linear(ln(x))`).
+#[allow(clippy::too_many_arguments)]
+fn epilogue_res(
+    inner: &VkInner,
+    n: usize,
+    count: usize,
+    src: Bind<'_>,
+    bias: Bind<'_>,
+    res: Bind<'_>,
+    dst: Bind<'_>,
+) {
+    let words = coopmat::epilogue_res(n, count).expect("coopmat: residual epilogue module");
+    let key = (4, n, count, 0, 0);
+    let (pipe, sets) = {
+        let mut cache = inner.conv.borrow_mut();
+        if let Some(p) = cache.get(&key) {
+            p.clone()
+        } else {
+            let p = Rc::new(
+                inner
+                    .dev
+                    .pipeline(&words, 4)
+                    .unwrap_or_else(|e| panic!("TGERR: VK residual epilogue pipeline: {e}")),
+            );
+            let sets = inner
+                .dev
+                .alloc_sets(p.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
+            cache.insert(key, (p.clone(), sets.clone()));
+            (p, sets)
+        }
+    };
+    let bound = [
+        (src.buf, src.off, src.size),
+        (bias.buf, bias.off, bias.size),
+        (res.buf, res.off, res.size),
+        (dst.buf, dst.off, dst.size),
+    ];
+    if trace_on() {
+        trace(&format!("epilogue+res n={n} count={count}"));
+    }
+    inner
+        .dev
+        .dispatch(
+            &pipe,
+            &sets,
+            &bound,
+            coopmat::element_grid(count),
+            false,
+            "epilogue",
+        )
+        .unwrap_or_else(|e| panic!("TGERR: VK residual epilogue dispatch: {e}"));
+}
+
 /// Record the fused bias + round epilogue over an `m x n` f32 accumulator.
 fn epilogue(
     inner: &VkInner,
@@ -690,6 +744,8 @@ fn epilogue(
         coopmat::Epilogue::BiasBf16OutBf16 => coopmat::epilogue_bf16(n, count),
         coopmat::Epilogue::BiasBf16OutF32 => coopmat::epilogue_bf16_bias_f32(n, count),
         coopmat::Epilogue::BiasF32OutF32 => coopmat::epilogue_f32(n, count),
+        // Handled by `epilogue_res` (four bindings).
+        coopmat::Epilogue::BiasBf16Residual => return,
         coopmat::Epilogue::None => return,
     }
     .expect("coopmat: epilogue module");
@@ -929,6 +985,11 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
                         convert(inner, Conversion::F32ToBf16, c_slice, slice_in, slice_out);
                     }
                 }
+                coopmat::Epilogue::BiasBf16Residual => {
+                    let bias = view_elem(g.bias_slot, g.bias_off, 2);
+                    let res = view_elem(g.res_slot, g.res_off, elem_c);
+                    epilogue_res(inner, n, c_slice, slice_in, bias, res, slice_out);
+                }
                 kind => {
                     let elem = if g.bias_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
                     let bias = view_elem(g.bias_slot, g.bias_off, elem);
@@ -950,6 +1011,11 @@ fn coop_gemm(inner: &VkInner, bufs: &[crate::runtime::buffer::OpaqueView], g: &H
                 if g.c_dtype == crate::dtype::BFLOAT16 {
                     convert(inner, Conversion::F32ToBf16, count, pc, dst);
                 }
+            }
+            coopmat::Epilogue::BiasBf16Residual => {
+                let bias = view_elem(g.bias_slot, g.bias_off, 2);
+                let res = view_elem(g.res_slot, g.res_off, elem_c);
+                epilogue_res(inner, n, count, pc, bias, res, dst);
             }
             kind => {
                 let elem = if g.bias_dtype == crate::dtype::FLOAT32 { 4 } else { 2 };
