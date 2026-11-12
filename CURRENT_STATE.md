@@ -4214,12 +4214,30 @@ Emission details that are easy to get wrong, each found by a real failure:
   window, with staged copies otherwise. Staging in the BAR window is much
   *slower* for readback than system memory (404 ms vs 64 ms for 16 MB).
 
+**The reduce gap was loop unrolling, not local memory.** An isolated 64 MiB
+row-reduce (`amax` over axis 1 of 4096x4096) measured 0.71 ms of device time on
+VK and 0.258 ms on CL (`VK_TIME=1` timestamp queries vs OpenCL event profiling,
+both added for this comparison). glslang's canonical SPIR-V for the same kernel
+was equally slow (0.78 ms through a raw-module runner), so the emitted IR was
+not at fault; a hand-written 4x-unrolled GLSL variant ran in 0.263 ms. The
+NVIDIA SPIR-V path does not unroll that loop, while its OpenCL compiler does,
+and the extra loads in flight are what make a 32-lane/16 KB-stride reduce reach
+memory bandwidth. `renderer::spirv` now unrolls small constant-trip-count loops
+8x (`UNROLL`: body <= 48 uops, must contain a load, extent divisible by the
+factor). `softmax` went 2.14 -> 1.16 ms and `layernorm` 2.18 -> 1.18 ms against
+CL's 1.41/1.44, i.e. **both are now faster than OpenCL**, and LLM decode dropped
+from 34 to 25 ms.
+
 Measured against `CL` on the same machine (`bench/run.py --only
-'autorust-(vk|cl)-'`, 138-row matrix): MNIST train 23.8 vs 21.8 ms, ViT infer
-bs 8 **135.7 vs 178.4 ms**, ResNet-18 infer 404 vs 376, LLM prefill 461 vs 394,
-LLM decode 28.1 vs 20.2, AdamW 96.1 vs 96.3, f32 GEMM parity up to 2048³ (and
-better on NT), elementwise `add`/`copy`/`amax` ahead. The gaps are `LOCAL`-memory
-reductions (`softmax`/`layernorm`, per-lane local accesses because SPIR-V cannot
-cast a local pointer to a vector pointer), decode-heavy graphs (~300 kernels per
-token, one command buffer each) and bf16 ViT inference. Those, plus a native
+'autorust-(vk|cl)-'`, 138-row matrix): **every memory-bound microbench is
+faster** (add 0.90 vs 1.07 ms, softmax 1.16 vs 1.41, layernorm 1.18 vs 1.44,
+sum 0.60 vs 0.72, copy 0.79 vs 0.86, transpose 0.91 vs 0.95); MNIST train 28.1
+vs 22.7 ms, ViT infer bs 8 **136.6 vs 179.0 ms**, ResNet-18 infer 404 vs 376,
+LLM prefill 423 vs 398, LLM decode 24.9 vs 21.3, AdamW 96.0 vs 97.2, GEMM
+1024³/NT/batched ahead and 2048³/4096³/TN 1.2-1.5x behind, bf16 ViT 155.8 vs
+92.3. Remaining gaps: bf16 inference (the 16-bit load/convert path; the bf16
+GEMM alone is 1.33x off), large GEMMs (the scheduler-unrolled 1024-deep body is
+too big to unroll further and its 64-float accumulator is not promoted out of
+`Function` storage), decode-heavy graphs (one command buffer per kernel, ~25 us
+of host time each) and ONNX per-call rescheduling. Those, plus a native
 f16/tensor-core `OpCooperativeMatrixMulAddKHR` path, are the follow-ups.

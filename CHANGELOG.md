@@ -20,7 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ~20% of the OpenCL backend on most workloads (faster on elementwise, `add`,
   `gelu`, TN/NT GEMM and AdamW; slower on `LOCAL`-memory reductions and on
   decode-heavy graphs, which pay one command buffer per kernel — see
-  `PERFORMANCE.md`).
+  `PERFORMANCE.md`). The emitter unrolls small constant-trip-count loops 8x
+  because the NVIDIA SPIR-V path does not (its OpenCL compiler does): that alone
+  took `softmax`/`layernorm` from 2.1/2.2 ms to 1.16/1.18 ms, ahead of OpenCL's
+  1.41/1.44.
 - **Backend memory reporting.** `Compiled::memory_info()` returns
   `MemoryInfo { total, free }`, implemented through
   `BackendAllocator::memory_info()`: CUDA uses `cuMemGetInfo_v2`, OpenCL reports

@@ -549,3 +549,38 @@ pub fn supported_dtype(dt: DTypeId) -> bool {
     let caps = vk_devices().first().map(|d| d.caps).unwrap_or_default();
     spirv::supported_dtype(dt, &caps)
 }
+
+/// Diagnostic: run a raw SPIR-V module on the first usable Vulkan device.
+///
+/// Allocates one storage buffer per binding (`sizes[i]` bytes, descriptor
+/// binding `i`), dispatches `groups` workgroups of `local` invocations `iters`
+/// times with a fence wait per dispatch, and returns the median milliseconds.
+/// This exists so the Vulkan IR can be A/B-tested against another compiler's
+/// output for the same kernel; it is a development tool, not a stable API.
+pub fn run_raw_module(
+    spv: &[u32],
+    sizes: &[usize],
+    groups: [u32; 3],
+    iters: usize,
+) -> Option<f64> {
+    let devs = vk_devices();
+    let info = devs.first()?;
+    let lib = vk_sys::VkLib::get()?;
+    let dev = vk_sys::VkDevice::open(&lib.instance, lib.api, info).ok()?;
+    let pipe = dev.pipeline(spv, sizes.len() as u32).ok()?;
+    let sets = dev.alloc_sets(pipe.set_layout, dev.cmds.len() as u32);
+    let bufs: Vec<vk_sys::GpuBuffer> = sizes
+        .iter()
+        .map(|s| dev.alloc(*s).expect("vk raw alloc"))
+        .collect();
+    let bound: Vec<(&vk_sys::GpuBuffer, u64, u64)> =
+        bufs.iter().map(|b| (b, 0, b.size as u64)).collect();
+    let mut samples = Vec::with_capacity(iters);
+    for _ in 0..=iters {
+        let t = std::time::Instant::now();
+        dev.dispatch(&pipe, &sets, &bound, groups, true, "raw").ok()?;
+        samples.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    samples.sort_by(f64::total_cmp);
+    Some(samples[samples.len() / 2])
+}

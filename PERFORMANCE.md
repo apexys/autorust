@@ -392,61 +392,70 @@ Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 
 | workload | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| MNIST CNN train, bs 512 | 23.8 | **21.8** | 1.09x |
-| ViT-B/16 infer, bs 1 | 35.9 | **28.5** | 1.26x |
-| ViT-B/16 infer, bs 8 | **135.7** | 178.4 | 0.76x |
-| ViT-B/16 infer, bf16, bs 8 | 156.3 | **91.8** | 1.70x |
-| ResNet-18 infer, bs 32 | 404.2 | **376.0** | 1.08x |
-| ResNet-18 train, bs 32 | 459.8 | **450.0** | 1.02x |
-| ResNet-50 infer, bs 32 | 124.2 | **100.4** | 1.24x |
-| MobileNetV2 infer, bs 32 | 62.5 | **55.8** | 1.12x |
-| UNet infer, 64² | 24.8 | **20.5** | 1.21x |
-| LLM prefill, 512 tok | 461.2 | **393.8** | 1.17x |
-| LLM decode, 1 tok | 28.1 | **20.2** | 1.39x |
-| ONNX MNIST, bs 32 | 14.8 | **12.0** | 1.23x |
-| ONNX ResNet-18 (w=0.25), bs 8 | 80.1 | **65.0** | 1.23x |
-| AdamW, 100M params | **96.1** | 96.3 | 1.00x |
+| MNIST CNN train, bs 512 | 28.1 | **22.7** | 1.24x |
+| ViT-B/16 infer, bs 1 | 36.3 | **29.4** | 1.23x |
+| ViT-B/16 infer, bs 8 | **136.6** | 179.0 | 0.76x |
+| ViT-B/16 infer, bf16, bs 8 | 155.8 | **92.3** | 1.69x |
+| ResNet-18 infer, bs 32 | 404.4 | **376.5** | 1.07x |
+| ResNet-18 train, bs 32 | 475.7 | **449.7** | 1.06x |
+| ResNet-50 infer, bs 32 | 124.1 | **99.3** | 1.25x |
+| MobileNetV2 infer, bs 32 | 63.2 | **57.3** | 1.10x |
+| UNet infer, 64² | 25.1 | **22.5** | 1.11x |
+| LLM prefill, 512 tok | 423.5 | **397.5** | 1.07x |
+| LLM decode, 1 tok | 24.9 | **21.3** | 1.17x |
+| ONNX MNIST, bs 32 | 15.3 | **11.3** | 1.36x |
+| ONNX ResNet-18 (w=0.25), bs 8 | 86.7 | **67.4** | 1.29x |
+| AdamW, 100M params | **96.0** | 97.2 | 0.99x |
 
-GEMM (ms per case) and memory-bound ops (ms per op) with the OpenCL twin:
+GEMM and memory-bound ops (ms per case), which the backend is the closest match
+on:
 
 | case | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| f32 GEMM 1024³ | 1.17 | **1.09** | 1.07x |
-| f32 GEMM 2048³ | 4.87 | **4.70** | 1.04x |
-| f32 GEMM 4096³ | 38.26 | **30.17** | 1.27x |
-| f32 GEMM TN 2048³ | 3.90 | **2.97** | 1.31x |
-| f32 GEMM NT 2048³ | **4.86** | 6.32 | 0.77x |
-| f32 GEMM batched 8×512³ | 1.10 | **1.04** | 1.06x |
+| f32 GEMM 1024³ | **0.98** | 1.25 | 0.79x |
+| f32 GEMM 2048³ | 5.27 | **4.41** | 1.19x |
+| f32 GEMM 4096³ | 37.95 | **31.26** | 1.21x |
+| f32 GEMM TN 2048³ | 4.00 | **2.72** | 1.47x |
+| f32 GEMM NT 2048³ | **4.84** | 6.14 | 0.79x |
+| f32 GEMM batched 8×512³ | **0.91** | 1.03 | 0.88x |
 | add 16M | **0.90** | 1.07 | 0.84x |
-| copy 16M | **0.79** | 0.84 | 0.94x |
-| gelu 16M | 1.22 | **0.91** | 1.34x |
-| softmax 16M | 2.20 | **1.48** | 1.48x |
-| layernorm 16M | 2.26 | **1.45** | 1.56x |
-| sum 16M | 0.82 | **0.71** | 1.15x |
-| amax 16M | **0.65** | 0.65 | 1.00x |
-| transpose 16M | 1.18 | **0.96** | 1.24x |
+| copy 16M | **0.79** | 0.86 | 0.92x |
+| gelu 16M | **0.78** | 0.87 | 0.90x |
+| softmax 16M | **1.16** | 1.41 | 0.83x |
+| layernorm 16M | **1.18** | 1.44 | 0.82x |
+| sum 16M | **0.60** | 0.72 | 0.83x |
+| amax 16M | **0.60** | 0.65 | 0.93x |
+| transpose 16M | **0.91** | 0.95 | 0.96x |
 
 Reading it:
 
-- **Elementwise and optimizer work is at parity or better** (VK wins `add`,
-  `copy`, `amax`, `NT` GEMM and ties AdamW). The Vulkan path is not paying a
-  structural overhead for being a second API.
-- **Reductions using `LOCAL` memory are the main gap** (`softmax`, `layernorm`):
-  the OpenCL renderer casts a local-memory pointer to `__local float4*` for a
-  128-bit shared-memory access, while SPIR-V has no pointer casts, so the
-  emitter uses one `OpAccessChain`+`OpLoad` per lane. Fixing it needs the local
-  array declared with a vector element type.
-- **Decode-heavy graphs** (`llm_decode`, ~300 kernels/token) pay a
-  command-buffer-per-dispatch cost: each kernel re-records, submits and waits on
-  its ring fence (~25-35 µs of host time on this driver, vs ~0 for an
-  `clEnqueueNDRangeKernel`). Batching several dispatches into one command
-  buffer would close most of it.
-- **`bf16` ViT inference** is 1.7x off CL; f32 inference at bs 8 is *faster*
-  than CL, so the gap is in the 16-bit load/convert path, not the matmul.
-- Very large GEMMs (4096³) run a 1024-deep unrolled reduce whose 64-float
-  accumulator lives in a SPIR-V `Function` array; the driver does not promote it
-  to registers the way it does the OpenCL C local array, so the inner loop
-  round-trips through scratch. Smaller shapes (≤2048³) are at parity.
+- **Every memory-bound microbench is now faster than OpenCL**, and so are the
+  small/batched GEMM shapes, ViT inference at bs 8 and AdamW. The Vulkan path
+  is not paying a structural overhead for being a second API.
+- **The reduce gap was loop unrolling.** An isolated 64 MiB row-reduce took
+  0.71 ms on VK and 0.26 ms on CL, and glslang's SPIR-V for the same kernel was
+  equally slow (0.76 ms) — so it was not the emitted IR. A hand-written 4x
+  unrolled variant ran in 0.26 ms: the NVIDIA SPIR-V path does not unroll these
+  loops, while its OpenCL compiler does, and the extra loads in flight are what
+  makes a strided reduce reach bandwidth. `renderer::spirv` now unrolls small
+  constant-trip-count loops 8x (`UNROLL`, body <= 48 uops, must read memory),
+  which took `softmax` from 2.14 to 1.16 ms and `layernorm` from 2.18 to 1.18 ms
+  (CL: 1.41 / 1.44) and improved LLM decode from 34 to 25 ms.
+- **`bf16` ViT inference is the one clear gap (1.69x).** CL's bf16 forward is
+  1.9x faster than its own f32 (half the storage traffic, same f32 math), while
+  the Vulkan bf16 row is only 1.15x faster than f32, so the extra cost is in the
+  16-bit load/convert path rather than the matmul (the bf16 GEMM alone is 1.33x
+  off CL). Unresolved.
+- **The large GEMMs are 1.2-1.5x off** for the same reason as before: the
+  1024-deep unrolled reduce body is too big to unroll further (the scheduler
+  already unrolled it), and its 64-float accumulator lives in a SPIR-V
+  `Function` array that the driver does not promote to registers. TN (both
+  operands transposed) is the worst case at 1.47x.
+- **Decode-heavy graphs** (`llm_decode`, ~300 kernels/token) are still 1.17x
+  off: the per-kernel command buffer costs ~25 µs of host time where
+  `clEnqueueNDRangeKernel` costs ~0. Batching several dispatches into one
+  command buffer is the remaining fix; the per-kernel *GPU* time is already at
+  parity.
 
 ## Cross-framework comparison
 

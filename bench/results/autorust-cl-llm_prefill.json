@@ -9,13 +9,13 @@
   "warmup": 1,
   "iters": 3,
   "ms_cold": 0.0,
-  "ms_median": 393.8167,
-  "ms_min": 393.8167,
+  "ms_median": 397.5422,
+  "ms_min": 397.5422,
   "ms_iqr": 0.0,
-  "images_per_s": 1300.1,
+  "images_per_s": 1287.91,
   "name": "autorust-cl-llm_prefill",
   "variant": "CL",
-  "commit": "b91fe2f",
-  "date": "2026-11-12T07:45:43",
+  "commit": "46ded4b",
+  "date": "2026-11-12T08:43:08",
   "notes": ""
 }

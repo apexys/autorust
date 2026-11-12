@@ -9,13 +9,13 @@
   "warmup": 1,
   "iters": 3,
   "ms_cold": 0.0,
-  "ms_median": 461.2476,
-  "ms_min": 461.2476,
+  "ms_median": 423.4508,
+  "ms_min": 423.4508,
   "ms_iqr": 0.0,
-  "images_per_s": 1110.03,
+  "images_per_s": 1209.11,
   "name": "autorust-vk-llm_prefill",
   "variant": "VK",
-  "commit": "b91fe2f",
-  "date": "2026-11-12T07:45:39",
+  "commit": "46ded4b",
+  "date": "2026-11-12T08:43:03",
   "notes": ""
 }

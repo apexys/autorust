@@ -165,6 +165,8 @@ unsafe fn query_caps(instance: &ash::Instance, pd: vk::PhysicalDevice, api: u32)
         int64: base.shader_int64 == vk::TRUE,
         f64: base.shader_float64 == vk::TRUE,
         storage8: storage8.storage_buffer8_bit_access == vk::TRUE,
+        // SPIR-V 1.3 (`StorageBuffer` + `Block`) needs Vulkan 1.1.
+        spirv13: api >= vk::API_VERSION_1_1,
     }
 }
 
@@ -235,6 +237,10 @@ pub struct VkDevice {
     /// flight. Vulkan forbids destroying a buffer a pending command buffer
     /// references, so destruction is deferred to the next idle point.
     pub graveyard: std::cell::RefCell<Vec<GpuBuffer>>,
+    /// Timestamp query pool (2 queries per ring slot) for `VK_TIME=1`.
+    ts_pool: vk::QueryPool,
+    /// `timestampPeriod` in nanoseconds.
+    ts_period: f32,
     /// `storage_id` counter, so views of one allocation share an id.
     pub next_id: std::cell::Cell<usize>,
 }
@@ -321,6 +327,21 @@ impl VkDevice {
             )
         }
         .map_err(|e| format!("vkCreateDescriptorPool: {e}"))?;
+        // Timestamp queries: exact per-dispatch GPU time for `VK_TIME=1`. The
+        // queue must support timestamps at all (`timestampValidBits`).
+        let ts_pool = if info.props.limits.timestamp_compute_and_graphics != 0 {
+            unsafe {
+                device.create_query_pool(
+                    &vk::QueryPoolCreateInfo::default()
+                        .query_type(vk::QueryType::TIMESTAMP)
+                        .query_count(8),
+                    None,
+                )
+            }
+            .unwrap_or(vk::QueryPool::null())
+        } else {
+            vk::QueryPool::null()
+        };
         crate::runtime::ops_vk::trace_public("desc pool");
         // Created signalled so the first wait on each slot returns immediately.
         let mut fences = [vk::Fence::null(); 4];
@@ -352,6 +373,8 @@ impl VkDevice {
             pending: std::cell::RefCell::new(Vec::new()),
             staging: std::cell::RefCell::new(None),
             graveyard: std::cell::RefCell::new(Vec::new()),
+            ts_pool,
+            ts_period: info.props.limits.timestamp_period,
             next_id: std::cell::Cell::new(1),
         })
     }
@@ -370,16 +393,46 @@ impl VkDevice {
     }
 
     /// Print the GPU time of submissions that completed at `t` (`VK_TIME=1`).
-    fn report_pending(&self, t: std::time::Instant) {
+    fn report_pending(&self, _t: std::time::Instant) {
         if !crate::runtime::ops_vk::time_on() {
             return;
         }
-        let mut p = self.pending.borrow_mut();
-        for (_, start, name) in p.drain(..) {
-            eprintln!(
-                "[vk] gpu {name} {:.3} ms",
-                t.duration_since(start).as_secs_f64() * 1e3
-            );
+        // Drain the tail: each slot's timestamps are complete once the queue is
+        // idle.
+        for slot in 0..self.cmds.len() {
+            self.report_slot(slot);
+        }
+    }
+
+    /// Print the GPU time of the last dispatch recorded in `slot` (timestamp
+    /// query readback: exact device time, no host attribution).
+    fn report_slot(&self, slot: usize) {
+        if !crate::runtime::ops_vk::time_on() || self.ts_pool == vk::QueryPool::null() {
+            return;
+        }
+        let name = {
+            let mut p = self.pending.borrow_mut();
+            let (mine, rest): (Vec<_>, Vec<_>) =
+                p.drain(..).partition(|(s, _, _)| *s == slot);
+            *p = rest;
+            mine.into_iter().next().map(|(_, _, n)| n)
+        };
+        let Some(name) = name else {
+            return;
+        };
+        let mut data = [0u64; 2];
+        let ok = unsafe {
+            self.device.get_query_pool_results(
+                self.ts_pool,
+                2 * slot as u32,
+                &mut data,
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
+        if ok.is_ok() {
+            let ticks = data[1].saturating_sub(data[0]);
+            let ms = ticks as f64 * self.ts_period as f64 * 1e-6;
+            eprintln!("[vk] gpu {name} {ms:.3} ms");
         }
     }
 
@@ -760,12 +813,10 @@ impl VkDevice {
                 .map_err(|e| format!("vkWaitForFences: {e}"))?;
             dev.reset_fences(&[fence])
                 .map_err(|e| format!("vkResetFences: {e}"))?;
-            // Everything submitted before this slot's previous use has finished.
-            let t = std::time::Instant::now();
-            self.pending
-                .borrow_mut()
-                .retain(|(s, _, _)| *s != slot);
-            let _ = t;
+            // Everything submitted before this slot's previous use has finished,
+            // so this slot's timestamps are ready and attributable to the kernel
+            // queued in it.
+            self.report_slot(slot);
         }
         let set = sets[slot];
         let infos: Vec<vk::DescriptorBufferInfo> = buffers
@@ -814,6 +865,16 @@ impl VkDevice {
                 &[],
                 &[],
             );
+            let timed = crate::runtime::ops_vk::time_on() && self.ts_pool != vk::QueryPool::null();
+            if timed {
+                dev.cmd_reset_query_pool(cmd, self.ts_pool, 2 * slot as u32, 2);
+                dev.cmd_write_timestamp(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    self.ts_pool,
+                    2 * slot as u32,
+                );
+            }
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline);
             dev.cmd_bind_descriptor_sets(
                 cmd,
@@ -824,6 +885,14 @@ impl VkDevice {
                 &[],
             );
             dev.cmd_dispatch(cmd, groups[0].max(1), groups[1].max(1), groups[2].max(1));
+            if timed {
+                dev.cmd_write_timestamp(
+                    cmd,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    self.ts_pool,
+                    2 * slot as u32 + 1,
+                );
+            }
             dev.end_command_buffer(cmd)
                 .map_err(|e| format!("vkEndCommandBuffer: {e}"))?;
             let cmds = [cmd];

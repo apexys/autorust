@@ -21,6 +21,7 @@ fn caps() -> Caps {
         storage8: true,
         int8: true,
         int16: true,
+        spirv13: true,
     }
 }
 

@@ -59,6 +59,11 @@ pub struct Caps {
     pub int8: bool,
     /// `shaderInt16`: 16-bit arithmetic (`bf16` bit patterns).
     pub int16: bool,
+    /// Emit SPIR-V 1.3 with the `StorageBuffer` storage class + `Block`
+    /// decoration (Vulkan 1.1+) instead of the SPIR-V 1.0 `Uniform` +
+    /// `BufferBlock` form. The newer form is what shader compilers emit and is
+    /// measurably faster on some drivers.
+    pub spirv13: bool,
 }
 
 impl Caps {
@@ -66,13 +71,14 @@ impl Caps {
     /// is never executed against another.
     pub fn tag(&self) -> String {
         format!(
-            "f16{}{}{}{}{}{}",
+            "f16{}{}{}{}{}{}{}",
             self.f16 as u8,
             self.storage16 as u8,
             self.int8 as u8,
             self.int64 as u8,
             self.f64 as u8,
-            self.storage8 as u8
+            self.storage8 as u8,
+            self.spirv13 as u8
         )
     }
 }
@@ -179,6 +185,7 @@ mod cap {
 }
 
 mod deco {
+    pub const BLOCK: u32 = 2;
     pub const BUFFER_BLOCK: u32 = 3;
     pub const ARRAY_STRIDE: u32 = 6;
     pub const BUILT_IN: u32 = 11;
@@ -195,6 +202,7 @@ mod builtin {
 mod storage {
     pub const INPUT: u32 = 1;
     pub const UNIFORM: u32 = 2;
+    pub const STORAGE_BUFFER: u32 = 12;
     pub const WORKGROUP: u32 = 4;
     pub const FUNCTION: u32 = 7;
 }
@@ -475,7 +483,15 @@ enum Root {
     /// A global buffer slot (the `PARAM`'s slot number).
     Buf(i64),
     /// A `BUFFER` uop (register array or local memory), already declared.
-    Local { var: u32, cat: Cat, stride: u32, sc: u32 },
+    /// `scalar` marks a 1-element buffer, declared as a plain variable (no
+    /// access chain, which is what lets the driver keep it in a register).
+    Local {
+        var: u32,
+        cat: Cat,
+        stride: u32,
+        sc: u32,
+        scalar: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -539,7 +555,7 @@ struct Emitter<'a> {
     /// whether any 2-byte storage element was bound
     uses_16: bool,
     builtin_var: HashMap<u32, u32>,
-    local_var: HashMap<u32, u32>,
+    local_var: HashMap<u32, (u32, bool)>,
     /// `Function`-storage variables, emitted first in the entry block.
     locals: Vec<u32>,
     block: Vec<u32>,
@@ -550,6 +566,9 @@ struct Emitter<'a> {
     glsl: u32,
     main: u32,
     void: u32,
+    /// Storage class + `Block`-style decoration for SSBOs (SPIR-V 1.0 vs 1.3).
+    ssbo_sc: u32,
+    ssbo_block: u32,
     local_size: [u32; 3],
 }
 
@@ -1136,11 +1155,11 @@ impl<'a> Emitter<'a> {
         // bindings cannot share it.
         let st = self.id();
         Self::push(&mut self.types, op::TYPE_STRUCT, &[st, arr]);
-        let ptr = self.ty(TyKey::Ptr(storage::UNIFORM, st));
+        let ptr = self.ty(TyKey::Ptr(self.ssbo_sc, st));
         let var = self.id();
-        Self::push(&mut self.types, op::VARIABLE, &[ptr, var, storage::UNIFORM]);
+        Self::push(&mut self.types, op::VARIABLE, &[ptr, var, self.ssbo_sc]);
         let idx = self.bindings.len() as u32;
-        Self::push(&mut self.annotations, op::DECORATE, &[st, deco::BUFFER_BLOCK]);
+        Self::push(&mut self.annotations, op::DECORATE, &[st, self.ssbo_block]);
         Self::push(
             &mut self.annotations,
             op::MEMBER_DECORATE,
@@ -1208,7 +1227,7 @@ impl<'a> Emitter<'a> {
             Root::Buf(slot) => {
                 let (var, stride) = self.binding(slot, cat, lanes);
                 let ty = self.storage_ty(cat, lanes);
-                let ptr_ty = self.ty(TyKey::Ptr(storage::UNIFORM, ty));
+                let ptr_ty = self.ty(TyKey::Ptr(self.ssbo_sc, ty));
                 let idx = self.elem_index(p.off, stride);
                 let ptr = self.access_chain(var, ptr_ty, idx, true);
                 self.d(op::LOAD, ty, &[ptr])
@@ -1218,9 +1237,13 @@ impl<'a> Emitter<'a> {
                 cat: bcat,
                 stride,
                 sc,
+                scalar,
             } => {
                 if lanes == 1 && cat == bcat {
                     let ty = self.cat_ty(cat);
+                    if scalar {
+                        return self.d(op::LOAD, ty, &[var]);
+                    }
                     let ptr_ty = self.ty(TyKey::Ptr(sc, ty));
                     let idx = self.elem_index(p.off, stride);
                     let ptr = self.access_chain(var, ptr_ty, idx, false);
@@ -1292,7 +1315,7 @@ impl<'a> Emitter<'a> {
             Root::Buf(slot) => {
                 let (var, stride) = self.binding(slot, cat, lanes);
                 let ty = self.storage_ty(cat, lanes);
-                let ptr_ty = self.ty(TyKey::Ptr(storage::UNIFORM, ty));
+                let ptr_ty = self.ty(TyKey::Ptr(self.ssbo_sc, ty));
                 let idx = self.elem_index(p.off, stride);
                 let ptr = self.access_chain(var, ptr_ty, idx, true);
                 self.e(op::STORE, &[ptr, val]);
@@ -1302,9 +1325,14 @@ impl<'a> Emitter<'a> {
                 cat: bcat,
                 stride,
                 sc,
+                scalar,
             } => {
                 if lanes == 1 && cat == bcat {
                     let ty = self.cat_ty(cat);
+                    if scalar {
+                        self.e(op::STORE, &[var, val]);
+                        return;
+                    }
                     let ptr_ty = self.ty(TyKey::Ptr(sc, ty));
                     let idx = self.elem_index(p.off, stride);
                     let ptr = self.access_chain(var, ptr_ty, idx, false);
@@ -1365,6 +1393,134 @@ impl<'a> Emitter<'a> {
 
     // ---- walks ----
 
+    /// Unroll factor for hot, small, constant-trip-count loops.
+    ///
+    /// The NVIDIA SPIR-V path does not unroll a 1024-iteration reduce loop,
+    /// while its OpenCL compiler unrolls the *same* loop 4x (measured: a 64 MiB
+    /// row-reduce takes 0.78 ms un-unrolled and 0.26 ms with a manual 4x
+    /// unroll, matching OpenCL's 0.26 ms). The extra loads in flight are what
+    /// makes a strided reduce reach memory bandwidth, so unroll here where the
+    /// body is small enough not to blow up register pressure.
+    const UNROLL: usize = 8;
+
+    /// The index of the `END` matching the `RANGE` at `u`, when that loop
+    /// should be unrolled.
+    fn unroll_end(&mut self, u: &UopId, lst: &[UopId]) -> Option<usize> {
+        let info = self.info.get(u)?;
+        if info.op != Ops::Range || info.dt == dtype::VOID {
+            return None;
+        }
+        // Constant trip count, divisible by the factor.
+        let Ok(crate::uop::sint::SVal::I(ext)) = self.ctx.ssimplify(info.srcs[0].clone()) else {
+            return None;
+        };
+        let ext = ext as i64;
+        if ext < (2 * Self::UNROLL) as i64 || ext % Self::UNROLL as i64 != 0 {
+            return None;
+        }
+        // Find the matching END (nested RANGE/IF depth).
+        let start = lst.iter().position(|x| x.id() == u.id())?;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, x) in lst.iter().enumerate().skip(start) {
+            match self.info.get(x).map(|i| i.op) {
+                Some(Ops::Range) | Some(Ops::If) => depth += 1,
+                Some(Ops::End) | Some(Ops::Endif) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end?;
+        // Only unroll small bodies that actually read memory; a large fused
+        // body (the GEMM reduce) would spill registers instead.
+        let body = &lst[start + 1..end];
+        if crate::helpers::env::get("VK_TRACE").is_some() {
+            let reads = body
+                .iter()
+                .filter(|x| self.info.get(x).map(|i| i.op == Ops::Load).unwrap_or(false))
+                .count();
+            eprintln!(
+                "[vk] loop {ext}: body {} uops, {reads} loads",
+                body.len()
+            );
+        }
+        if body.len() > 48 {
+            return None;
+        }
+        let reads = body.iter().any(|x| {
+            self.info
+                .get(x)
+                .map(|i| i.op == Ops::Load)
+                .unwrap_or(false)
+        });
+        reads.then_some(end)
+    }
+
+    /// Emit `range` with its body duplicated `UNROLL` times and a step of
+    /// `UNROLL` (the trip count is a multiple of it, checked by
+    /// [`Self::unroll_end`]).
+    fn unroll_loop(&mut self, range: &UopId, body: &[UopId], end: &UopId) {
+        let cat = cat_of(self.info[range].dt, &self.caps);
+        let end_v = self.val_id(&self.info[range].srcs[0].clone());
+        let end_v = if cat_of(self.info[&self.info[range].srcs[0]].dt, &self.caps) == cat {
+            end_v
+        } else {
+            let fcat = cat_of(self.info[&self.info[range].srcs[0]].dt, &self.caps);
+            self.cast_num(end_v, fcat, cat, 1)
+        };
+        let pred = self.label;
+        let hdr = self.id();
+        let body_l = self.id();
+        let cont = self.id();
+        let merge = self.id();
+        self.end_block(op::BRANCH, &[hdr]);
+        self.start_block(hdr);
+        let vty = self.cat_ty(cat);
+        let zero = self.const_bits(cat, 0);
+        let iv_next = self.id();
+        let phi = self.d(op::PHI, vty, &[zero, pred, iv_next, cont]);
+        self.e(op::LOOP_MERGE, &[merge, cont, 0]);
+        self.end_block(op::BRANCH, &[body_l]);
+        self.start_block(body_l);
+        for k in 0..Self::UNROLL {
+            let iv = if k == 0 {
+                phi
+            } else {
+                let kc = self.const_bits(cat, k as u64);
+                self.d(op::I_ADD, vty, &[phi, kc])
+            };
+            self.vals.insert(
+                range.clone(),
+                V::Val(
+                    iv,
+                    cat,
+                    1,
+                ),
+            );
+            for u in body {
+                self.step(u);
+            }
+        }
+        self.end_block(op::BRANCH, &[cont]);
+        self.start_block(cont);
+        let step = self.const_bits(cat, Self::UNROLL as u64);
+        self.d_at(iv_next, op::I_ADD, vty, &[phi, step]);
+        let bty = self.bool_ty();
+        let cmp = if cat.is_signed() {
+            self.d(op::S_LESS_THAN, bty, &[iv_next, end_v])
+        } else {
+            self.d(op::U_LESS_THAN, bty, &[iv_next, end_v])
+        };
+        self.end_block(op::BRANCH_CONDITIONAL, &[cmp, hdr, merge]);
+        self.start_block(merge);
+        let _ = end;
+    }
+
     fn step(&mut self, u: &UopId) {
         let (op, dt, srcs, numel, addrspace) = {
             let i = &self.info[u];
@@ -1398,7 +1554,7 @@ impl<'a> Emitter<'a> {
                 );
             }
             Ops::Buffer => {
-                let var = *self
+                let (var, scalar) = *self
                     .local_var
                     .get(&u.id())
                     .unwrap_or_else(|| panic!("TGERR: SPIR-V BUFFER not declared"));
@@ -1416,6 +1572,7 @@ impl<'a> Emitter<'a> {
                             cat,
                             stride: cat.size(),
                             sc,
+                            scalar,
                         },
                         off: Off::C(0),
                     }),
@@ -1987,6 +2144,11 @@ fn is_cmp(op: Ops) -> bool {
 impl<'a> Emitter<'a> {
     /// Render the whole kernel.
     fn run(&mut self, lst: &[UopId]) -> VkModule {
+        // The newer SSBO form needs SPIR-V 1.3 (`StorageBuffer` + `Block`).
+        if self.caps.spirv13 {
+            self.ssbo_sc = storage::STORAGE_BUFFER;
+            self.ssbo_block = deco::BLOCK;
+        }
         // ---- snapshot the linear list -------------------------------------
         for u in lst {
             let numel = match self.ctx.shape(u) {
@@ -2080,9 +2242,18 @@ impl<'a> Emitter<'a> {
             } else {
                 storage::FUNCTION
             };
-            let ptr_ty = self.ty(TyKey::Ptr(sc, arr));
+            // A one-element buffer is just a scalar variable: declaring
+            // `float[1]` and indexing it with a constant access chain is the
+            // shape drivers are least likely to promote out of Function storage,
+            // and the reduce accumulators in softmax/layernorm are exactly that.
+            let scalar = numel <= 1;
+            let ptr_ty = if scalar {
+                self.ty(TyKey::Ptr(sc, elem))
+            } else {
+                self.ty(TyKey::Ptr(sc, arr))
+            };
             let var = self.id();
-            let mut words = vec![ptr_ty, var, sc];
+            let words = vec![ptr_ty, var, sc];
             if sc == storage::FUNCTION {
                 // `Function` storage is only legal inside a function, and all
                 // such variables must be declared in the entry block.
@@ -2090,8 +2261,7 @@ impl<'a> Emitter<'a> {
             } else {
                 Self::push(&mut self.types, op::VARIABLE, &words);
             }
-            words.clear();
-            self.local_var.insert(u.id(), var);
+            self.local_var.insert(u.id(), (var, scalar));
         }
 
         // ---- function -----------------------------------------------------
@@ -2102,8 +2272,19 @@ impl<'a> Emitter<'a> {
         self.label = entry;
         self.terminated = false;
 
-        for u in lst {
+        // Walk by index so a qualifying `RANGE` can consume its whole body at
+        // once (see `unroll_loop`).
+        let mut i = 0usize;
+        while i < lst.len() {
+            let u = &lst[i];
+            if let Some(end) = self.unroll_end(u, lst) {
+                let (body, end_uop) = (lst[i + 1..end].to_vec(), lst[end].clone());
+                self.unroll_loop(u, &body, &end_uop);
+                i = end + 1;
+                continue;
+            }
             self.step(u);
+            i += 1;
         }
         self.end_block(op::RETURN, &[]);
         self.func.append(&mut self.block);
@@ -2173,7 +2354,7 @@ impl<'a> Emitter<'a> {
                 + self.func.len(),
         );
         out.push(0x0723_0203); // magic
-        out.push(0x0001_0000); // SPIR-V 1.0
+        out.push(if self.caps.spirv13 { 0x0001_0300 } else { 0x0001_0000 });
         out.push(0);
         out.push(0); // bound, patched below
         out.push(0); // schema
@@ -2324,6 +2505,8 @@ pub fn render(ctx: &mut UOpCtx, lst: &[UopId], caps: Caps) -> VkModule {
         glsl: 0,
         main: 0,
         void: 0,
+        ssbo_sc: storage::UNIFORM,
+        ssbo_block: deco::BUFFER_BLOCK,
         local_size: [1, 1, 1],
     };
     em.run(lst)

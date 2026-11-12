@@ -9,55 +9,55 @@
   "warmup": 1,
   "iters": 3,
   "ms_cold": 0.0,
-  "ms_median": 60.3103,
+  "ms_median": 59.3987,
   "ms_min": 0.0,
   "ms_iqr": 0.0,
   "images_per_s": 0.0,
   "cases": [
     {
       "case": "f32 1024\u00b3",
-      "ms": 1.1664,
-      "tflops": 1.8411
+      "ms": 0.9847,
+      "tflops": 2.1809
     },
     {
       "case": "f32 2048\u00b3",
-      "ms": 4.8687,
-      "tflops": 3.5286
+      "ms": 5.2677,
+      "tflops": 3.2614
     },
     {
       "case": "f32 4096\u00b3",
-      "ms": 38.2588,
-      "tflops": 3.5923
+      "ms": 37.9549,
+      "tflops": 3.6211
     },
     {
       "case": "f32 1024x1024x4096",
-      "ms": 2.5881,
-      "tflops": 3.319
+      "ms": 2.9386,
+      "tflops": 2.9231
     },
     {
       "case": "f32 4096x1024x1024",
-      "ms": 3.5684,
-      "tflops": 2.4072
+      "ms": 2.5074,
+      "tflops": 3.4259
     },
     {
       "case": "f32 TN 2048\u00b3",
-      "ms": 3.896,
-      "tflops": 4.4096
+      "ms": 3.9965,
+      "tflops": 4.2987
     },
     {
       "case": "f32 NT 2048\u00b3",
-      "ms": 4.8597,
-      "tflops": 3.5352
+      "ms": 4.8411,
+      "tflops": 3.5488
     },
     {
       "case": "f32 batched 8x512\u00b3",
-      "ms": 1.1042,
-      "tflops": 1.9449
+      "ms": 0.9079,
+      "tflops": 2.3654
     }
   ],
   "name": "autorust-vk-gemm",
   "variant": "VK",
-  "commit": "b91fe2f",
-  "date": "2026-11-12T07:43:59",
+  "commit": "46ded4b",
+  "date": "2026-11-12T08:41:21",
   "notes": ""
 }

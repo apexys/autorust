@@ -519,14 +519,22 @@ impl Prog for ClProgram {
                 .enqueue_nd_range_kernel(self.kernel.get(), &gs, ls.as_ref()),
             "clEnqueueNDRangeKernel",
         );
-        if wait {
+        // `CL_TIME=1` waits on every kernel and prints its event time, the
+        // OpenCL counterpart of the Vulkan backend's `VK_TIME` (diagnostics for
+        // comparing the two kernels' device time).
+        let timed = crate::helpers::env::get("CL_TIME").is_some();
+        if wait || timed {
             // tinygrad waits on the event (`clWaitForEvents`, ops_cl.py:72), not
             // `clFinish` on the shared queue — the latter is prone to being
             // invalidated after many throwaway BEAM programs.
             check(ev.wait(), "clWaitForEvents");
             let start = check(ev.profiling_command_start(), "event start");
             let end = check(ev.profiling_command_end(), "event end");
-            return Some(end.saturating_sub(start) as f64 * 1e-9);
+            let secs = end.saturating_sub(start) as f64 * 1e-9;
+            if timed {
+                eprintln!("[cl] gpu {:.3} ms", secs * 1e3);
+            }
+            return Some(secs);
         }
         let _ = st;
         None

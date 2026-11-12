@@ -9,20 +9,20 @@
   "warmup": 2,
   "iters": 10,
   "ms_cold": 0.0,
-  "ms_median": 96.2572,
+  "ms_median": 97.1593,
   "ms_min": 0.0,
   "ms_iqr": 0.0,
   "images_per_s": 0.0,
   "cases": [
     {
       "case": "adamw 100000000 params, 32 tensors",
-      "ms": 96.2572,
-      "gbs": 29.0887
+      "ms": 97.1593,
+      "gbs": 28.8187
     }
   ],
   "name": "autorust-cl-optim",
   "variant": "CL",
-  "commit": "b91fe2f",
-  "date": "2026-11-12T07:44:29",
+  "commit": "46ded4b",
+  "date": "2026-11-12T08:41:52",
   "notes": ""
 }
