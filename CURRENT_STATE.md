@@ -4217,8 +4217,8 @@ Emission details that are easy to get wrong, each found by a real failure:
 Measured against `CL` on the same machine (`bench/run.py --only
 'autorust-(vk|cl)-'`, 138-row matrix): MNIST train 23.8 vs 21.8 ms, ViT infer
 bs 8 **135.7 vs 178.4 ms**, ResNet-18 infer 404 vs 376, LLM prefill 461 vs 394,
-AdamW 96.1 vs 96.3, f32 GEMM parity up to 2048³ (and better on TN/NT),
-elementwise `add`/`gelu` and `transpose` ahead. The gaps are `LOCAL`-memory
+LLM decode 28.1 vs 20.2, AdamW 96.1 vs 96.3, f32 GEMM parity up to 2048³ (and
+better on NT), elementwise `add`/`copy`/`amax` ahead. The gaps are `LOCAL`-memory
 reductions (`softmax`/`layernorm`, per-lane local accesses because SPIR-V cannot
 cast a local pointer to a vector pointer), decode-heavy graphs (~300 kernels per
 token, one command buffer each) and bf16 ViT inference. Those, plus a native

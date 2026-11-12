@@ -389,45 +389,45 @@ Same machine, same scheduler, same kernels; OpenCL has no clBLAST here. Medians
 
 | workload | VK | CL | VK/CL |
 |---|---:|---:|---:|
-| MNIST CNN train, bs 512 | **23.8** | 21.8 | 1.09x |
+| MNIST CNN train, bs 512 | 23.8 | **21.8** | 1.09x |
 | ViT-B/16 infer, bs 1 | 35.9 | **28.5** | 1.26x |
 | ViT-B/16 infer, bs 8 | **135.7** | 178.4 | 0.76x |
-| ViT-B/16 infer, bf16, bs 8 | 156.9 | **93.3** | 1.68x |
+| ViT-B/16 infer, bf16, bs 8 | 156.3 | **91.8** | 1.70x |
 | ResNet-18 infer, bs 32 | 404.2 | **376.0** | 1.08x |
 | ResNet-18 train, bs 32 | 459.8 | **450.0** | 1.02x |
 | ResNet-50 infer, bs 32 | 124.2 | **100.4** | 1.24x |
 | MobileNetV2 infer, bs 32 | 62.5 | **55.8** | 1.12x |
 | UNet infer, 64² | 24.8 | **20.5** | 1.21x |
 | LLM prefill, 512 tok | 461.2 | **393.8** | 1.17x |
-| LLM decode, 1 tok | 34.1 | **20.2** | 1.69x |
+| LLM decode, 1 tok | 28.1 | **20.2** | 1.39x |
 | ONNX MNIST, bs 32 | 14.8 | **12.0** | 1.23x |
 | ONNX ResNet-18 (w=0.25), bs 8 | 80.1 | **65.0** | 1.23x |
 | AdamW, 100M params | **96.1** | 96.3 | 1.00x |
 
-GEMM (TFLOP/s, higher is better) and memory-bound ops (GB/s):
+GEMM (ms per case) and memory-bound ops (ms per op) with the OpenCL twin:
 
-| case | VK | CL |
-|---|---:|---:|
-| f32 GEMM 1024³ | 1.77 TF/s | **1.88** |
-| f32 GEMM 2048³ | 3.53 | **3.66** |
-| f32 GEMM 4096³ | 3.59 | **4.56** |
-| f32 GEMM TN 2048³ | **4.75** | 4.55 |
-| f32 GEMM NT 2048³ | **3.54** | 2.72 |
-| f32 GEMM batched 8×512³ | 1.94 | **2.06** |
-| add 16M | **224 GB/s** | 189 |
-| copy 16M | 130 | **159** |
-| gelu 16M | **162** | 147 |
-| softmax 16M | 61 | **91** |
-| layernorm 16M | 48 | **93** |
-| sum 16M | 23-111 | **94** |
-| amax 16M | 82 | **103** |
-| transpose 16M | 118 | **140** |
+| case | VK | CL | VK/CL |
+|---|---:|---:|---:|
+| f32 GEMM 1024³ | 1.17 | **1.09** | 1.07x |
+| f32 GEMM 2048³ | 4.87 | **4.70** | 1.04x |
+| f32 GEMM 4096³ | 38.26 | **30.17** | 1.27x |
+| f32 GEMM TN 2048³ | 3.90 | **2.97** | 1.31x |
+| f32 GEMM NT 2048³ | **4.86** | 6.32 | 0.77x |
+| f32 GEMM batched 8×512³ | 1.10 | **1.04** | 1.06x |
+| add 16M | **0.90** | 1.07 | 0.84x |
+| copy 16M | **0.79** | 0.84 | 0.94x |
+| gelu 16M | 1.22 | **0.91** | 1.34x |
+| softmax 16M | 2.20 | **1.48** | 1.48x |
+| layernorm 16M | 2.26 | **1.45** | 1.56x |
+| sum 16M | 0.82 | **0.71** | 1.15x |
+| amax 16M | **0.65** | 0.65 | 1.00x |
+| transpose 16M | 1.18 | **0.96** | 1.24x |
 
 Reading it:
 
 - **Elementwise and optimizer work is at parity or better** (VK wins `add`,
-  `gelu`, TN/NT GEMM). The Vulkan path is not paying a structural overhead for
-  being a second API.
+  `copy`, `amax`, `NT` GEMM and ties AdamW). The Vulkan path is not paying a
+  structural overhead for being a second API.
 - **Reductions using `LOCAL` memory are the main gap** (`softmax`, `layernorm`):
   the OpenCL renderer casts a local-memory pointer to `__local float4*` for a
   128-bit shared-memory access, while SPIR-V has no pointer casts, so the
@@ -435,7 +435,7 @@ Reading it:
   array declared with a vector element type.
 - **Decode-heavy graphs** (`llm_decode`, ~300 kernels/token) pay a
   command-buffer-per-dispatch cost: each kernel re-records, submits and waits on
-  its ring fence (~37 µs of host time on this driver, vs ~0 for an
+  its ring fence (~25-35 µs of host time on this driver, vs ~0 for an
   `clEnqueueNDRangeKernel`). Batching several dispatches into one command
   buffer would close most of it.
 - **`bf16` ViT inference** is 1.7x off CL; f32 inference at bs 8 is *faster*

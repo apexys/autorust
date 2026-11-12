@@ -59,6 +59,13 @@ impl VkInner {
     }
 }
 
+/// Whether `VK_TRACE` is on (cached: the hot path must not read the
+/// environment per dispatch).
+pub(crate) fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::helpers::env::get("VK_TRACE").is_some())
+}
+
 /// [`trace`], for `vk_sys` (which cannot reach the private helper).
 pub(crate) fn trace_public(msg: &str) {
     trace(msg);
@@ -66,9 +73,27 @@ pub(crate) fn trace_public(msg: &str) {
 
 /// Print the backend probe (set `VK_TRACE=1`).
 fn trace(msg: &str) {
-    if crate::helpers::env::get("VK_TRACE").is_some() {
+    if trace_on() {
         eprintln!("[vk] {msg}");
     }
+}
+
+/// `VK_TIME` (cached).
+pub(crate) fn time_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::helpers::env::get("VK_TIME").is_some())
+}
+
+/// `VK_SYNC` (cached).
+fn sync_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::helpers::env::get("VK_SYNC").is_some())
+}
+
+/// `VK_DUMP_SPV` (cached).
+fn dump_dir() -> Option<String> {
+    static ON: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ON.get_or_init(|| crate::helpers::env::get("VK_DUMP_SPV")).clone()
 }
 
 /// The usable physical devices (cached per thread: enumeration is not free).
@@ -160,7 +185,9 @@ impl BackendAllocator for VkAllocator {
         let buf = dev
             .alloc(size)
             .unwrap_or_else(|| panic!("TGERR: VK: could not allocate {size} bytes"));
-        trace(&format!("alloc {size} bytes"));
+        if trace_on() {
+            trace(&format!("alloc {size} bytes"));
+        }
         let id = dev.next_id.get();
         dev.next_id.set(id + 1);
         Rc::new(VkOpaque {
@@ -175,7 +202,9 @@ impl BackendAllocator for VkAllocator {
     }
 
     fn _copyin(&self, dest: &dyn OpaqueT, src: &[u8]) {
-        trace(&format!("copyin {}", src.len()));
+        if trace_on() {
+            trace(&format!("copyin {}", src.len()));
+        }
         // A queued dispatch may still be reading this buffer.
         self.inner.dev.wait_idle();
         let dev = &self.inner.dev;
@@ -199,7 +228,9 @@ impl BackendAllocator for VkAllocator {
     }
 
     fn _copyout(&self, dest: &mut [u8], src: &dyn OpaqueT) {
-        trace(&format!("copyout {}", dest.len()));
+        if trace_on() {
+            trace(&format!("copyout {}", dest.len()));
+        }
         let dev = &self.inner.dev;
         let s = vk_of(src);
         assert_eq!(dest.len(), s.size, "TGERR: VK copyout size mismatch");
@@ -231,7 +262,7 @@ impl BackendAllocator for VkAllocator {
                         )
                     };
                 }
-                if crate::helpers::env::get("VK_TIME").is_some() {
+                if time_on() {
                     eprintln!(
                         "[vk] copyout {} bytes {:.3} ms",
                         dest.len(),
@@ -312,7 +343,7 @@ impl VkProgram {
         let text = std::str::from_utf8(&elf.lib).expect("TGERR: VK elF lib is not utf8");
         let m = VkModule::decode(text)
             .unwrap_or_else(|| panic!("TGERR: bad VK payload for {}", elf.name));
-        if let Some(dir) = crate::helpers::env::get("VK_DUMP_SPV") {
+        if let Some(dir) = dump_dir() {
             let mut bytes = Vec::with_capacity(m.words.len() * 4);
             for w in &m.words {
                 bytes.extend_from_slice(&w.to_le_bytes());
@@ -321,12 +352,14 @@ impl VkProgram {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(path, bytes);
         }
-        trace(&format!(
-            "program {} bindings={} local={:?}",
-            elf.name,
-            m.slots.len(),
-            m.local
-        ));
+        if trace_on() {
+            trace(&format!(
+                "program {} bindings={} local={:?}",
+                elf.name,
+                m.slots.len(),
+                m.local
+            ));
+        }
         let pipeline = inner
             .dev
             .pipeline(&m.words, m.slots.len() as u32)
@@ -392,15 +425,17 @@ impl Prog for VkProgram {
             global_size[1] as u32,
             global_size[2] as u32,
         ];
-        trace(&format!(
-            "dispatch {} groups={groups:?} local={:?} bufs={}",
-            self.name,
-            self.local,
-            bound.len()
-        ));
+        if trace_on() {
+            trace(&format!(
+                "dispatch {} groups={groups:?} local={:?} bufs={}",
+                self.name,
+                self.local,
+                bound.len()
+            ));
+        }
         // `VK_SYNC=1` waits after every dispatch, so a faulting kernel is
         // attributable (a lost device otherwise hides which one it was).
-        let wait = wait || crate::helpers::env::get("VK_SYNC").is_some();
+        let wait = wait || sync_on();
         self.inner
             .dev
             .dispatch(&self.pipeline, &self.sets, &bound, groups, wait, &self.name)

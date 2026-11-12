@@ -9,13 +9,13 @@
   "warmup": 2,
   "iters": 5,
   "ms_cold": 0.0,
-  "ms_median": 20.1818,
-  "ms_min": 20.1818,
+  "ms_median": 20.1975,
+  "ms_min": 20.1975,
   "ms_iqr": 0.0,
-  "images_per_s": 49.55,
+  "images_per_s": 49.51,
   "name": "autorust-cl-llm_decode",
   "variant": "CL",
-  "commit": "b91fe2f",
-  "date": "2026-11-12T07:45:53",
+  "commit": "c29914c",
+  "date": "2026-11-12T08:03:49",
   "notes": ""
 }

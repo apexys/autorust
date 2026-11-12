@@ -269,9 +269,7 @@ impl VkDevice {
         let features = vk::PhysicalDeviceFeatures::default()
             .shader_int64(info.caps.int64)
             .shader_float64(info.caps.f64)
-            .robust_buffer_access(
-                crate::helpers::env::get("VK_NO_ROBUST").is_none(),
-            )
+            .robust_buffer_access(robust_access())
             .shader_int16(info.caps.int16);
         let mut create = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
@@ -373,7 +371,7 @@ impl VkDevice {
 
     /// Print the GPU time of submissions that completed at `t` (`VK_TIME=1`).
     fn report_pending(&self, t: std::time::Instant) {
-        if crate::helpers::env::get("VK_TIME").is_none() {
+        if !crate::runtime::ops_vk::time_on() {
             return;
         }
         let mut p = self.pending.borrow_mut();
@@ -452,7 +450,7 @@ impl VkDevice {
         }
         let flags = self.memory_flags(ty);
         let host_visible = flags.contains(F::HOST_VISIBLE);
-        if crate::helpers::env::get("VK_TRACE").is_some() {
+        if crate::runtime::ops_vk::trace_on() {
             eprintln!(
                 "[vk] alloc {size} bytes -> memory type {ty} ({}{})",
                 if flags.contains(F::DEVICE_LOCAL) { "device-local" } else { "host" },
@@ -835,7 +833,7 @@ impl VkDevice {
         }
         self.slot.set((slot + 1) % self.cmds.len());
         self.in_flight.set(true);
-        if crate::helpers::env::get("VK_TIME").is_some() {
+        if crate::runtime::ops_vk::time_on() {
             self.pending.borrow_mut().retain(|(s, _, _)| *s != slot);
             self.pending.borrow_mut().push((
                 slot,
@@ -876,6 +874,12 @@ impl VkDevice {
             self.props.driver_version & 0xfff,
         )
     }
+}
+
+/// `robustBufferAccess` (on unless `VK_NO_ROBUST` asks otherwise).
+fn robust_access() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::helpers::env::get("VK_NO_ROBUST").is_none())
 }
 
 /// Whether the loader and a usable compute device exist.
