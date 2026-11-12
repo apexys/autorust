@@ -484,8 +484,9 @@ Reading it:
   still rejected inside `host_gemm::extract`, for a reason that is now pinned: its
   `A` operand's index contains a `Floormod` (a split fused axis from the
   `[8, 12, 197, 64]` view) and `affine()` only reads `Add`/`Sub`/`Mul`-by-constant.
-  Closing it means axis splitting in the matcher, not an epilogue — see
-  `CURRENT_STATE.md` §9.53.
+  Closing it needs axis splitting **plus** a split batch axis in the descriptor
+  (the `(batch, head)` pair is interleaved with `seq`, so it is not a single
+  strided axis: `32·3 ≠ 6144`), not an epilogue — see `CURRENT_STATE.md` §9.53.
 
 ### Tensor cores (`VK_KHR_cooperative_matrix`)
 

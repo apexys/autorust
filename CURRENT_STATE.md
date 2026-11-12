@@ -4557,13 +4557,35 @@ finds a `Mul`, the dtype gate passes, `affine(B)`, `base_of(A/B)`, `n_candidates
 `range_extent(n/m/k)`, the `m_candidates` and `c_n`/`c_m` checks all pass, and the
 extras loop is never reached.
 
-The fix is therefore **axis splitting in the matcher**, not an epilogue: teach
-`affine()` to represent `Mod`/`Div` of a single range as synthetic axes (tinygrad's
-`split_axis`), and give `range_extent` extents for those synthetic keys. That is a
-self-contained change in `schedule::host_gemm` with no scheduler impact, and it is
-worth about 25 ms of the ViT step (the 3.1x above). It also rules out the earlier
-mask-epilogue hypothesis for good: the kernel has three bindings (A, B, C) and no
-mask operand at all.
+Axis splitting alone is **not enough**, and the arithmetic says why. The natural
+view is `Div(p, h) * s1 + Mod(p, h) * s2` for the fused `(batch, head)` axis `p`;
+that collapses to a single strided axis `p` only when `s2 * h == s1`. For the ViT
+slice measured here `s2 = 32` and `h = 3` give 96, while `s1 = 6144`, so the
+operand is a genuinely 4-D strided view — the `(batch, head)` pair is interleaved
+with `seq`, not contiguous in it. `affine()` returning a two-key map would then be
+*rejected* by the existing strictness check ("A and B must not iterate any other
+range we ignored", which requires every A/B axis to appear in C), because C stores
+that axis **fused** (`Mul(p, ...)`, no `Mod`) — and that check is what makes the
+current design safe, so it must not be relaxed.
+
+What would actually work, and is entirely local:
+
+1. `affine()` learns `Mod`/`Div` of a single range as synthetic axes (mint a key
+   from the uop id plus a sentinel axis type; record `ext(c)` / `ext(x)/c`), which
+   is what makes A's index readable at all;
+2. `HostGemm` gains a *split* batch axis for A — `(head_extent, hi_stride,
+   lo_stride)` — and the executor's `for bi in 0..batch` loop computes
+   `off_a = ((p / h) * s1 + (p % h) * s2) * elem` instead of `a_b * p`. The kernel
+   module needs no change: the host just binds a different window per slice, which
+   is what it already does for `a_b`;
+3. `plan` accepts the pair only when *both* `Div` and `Mod` of the same range with
+   the same divisor are present, so the offsets are exact by construction.
+
+A reproducer for (1)+(3) is cheap and is the gate to write first: a `[b, s, h, d]`
+tensor permuted to `[b, h, s, d]` and contracted to scores matches INTERP on the
+generated kernel today (`coopmat` count 0), so the test can assert "coopmat takes
+it and the numbers are unchanged" once the descriptor exists — at b=4, s=64, h=3,
+d=32 it reproduces the fused-axis index without needing the ViT.
 
 **MobileNet is the one row buffer reuse does not help**: its step is GPU-bound
 (196 ms of kernel time vs OpenCL's 176 ms, 3682 vs 3725 dispatches), so its 1.10x
