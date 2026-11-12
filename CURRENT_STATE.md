@@ -4481,6 +4481,14 @@ GEMM and was silently f16 arithmetic. Staging now only joins a contraction that 
 matmul keeps the generated kernel (4.65 vs OpenCL's 4.42 ms at 2048³). This is the
 line between "the graph already chose f16/bf16 storage" and "we chose it for it".
 
+One trap worth naming: `unroll_loop` receives the matching **`END`** uop alongside
+the range, and the peel has to simplify the `RANGE`'s *source* (`range.srcs[0]`),
+not that `END`. Simplifying the wrong one yields "no remainder" and the unrolled
+loop then runs whole chunks past a non-divisible bound — a 197-trip loop reads 3
+elements beyond every row, which is silent because they are still inside the
+buffer except on the very last row. `vk_reduce_covers_the_last_chunk` now sums
+non-divisible extents (17, 100, 197, 1000), which fails loudly on an over-read.
+
 **The unroller skipped every loop whose extent was not a multiple of 8.** The
 attention loop (197) and most conv tails fell into that hole, and the driver's
 SPIR-V frontend does not unroll on its own (the OpenCL frontend does — that is the
