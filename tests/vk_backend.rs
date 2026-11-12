@@ -165,3 +165,20 @@ fn vk_is_a_fallback_after_cl() {
         );
     }
 }
+
+/// Native `f16` storage + arithmetic, when the device advertises it.
+#[test]
+fn vk_f16_round_trip() {
+    if !have_vk() || !autorust::runtime::ops_vk::supported_dtype(dtype::FLOAT16) {
+        return;
+    }
+    let ctx = Ctx::new();
+    let (got, want) = both(&ctx, Some("VK"), |c, d| {
+        Tensor::from_slice(c, &[1.5f32, -2.25, 0.5, 8.0], None, d)
+            .cast(dtype::FLOAT16)
+            .mul(2.0)
+            .add(1.0)
+            .cast(dtype::FLOAT32)
+    });
+    check("f16", &got, &want);
+}

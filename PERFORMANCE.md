@@ -370,7 +370,10 @@ Design points worth knowing:
   integer arithmetic): loads zero/sign-extend, stores truncate, and casts wrap
   the way the interpreter does (`f32 -> u8 -> f32` gives 44 for 300).
   `bf16` is a 16-bit storage pattern widened to f32 by the same extra matcher
-  the OpenCL backend uses.
+  the OpenCL backend uses. `f16` is native when the device exposes
+  `shaderFloat16` + 16-bit storage, and is dropped from `supported_dtypes`
+  otherwise (the graph then computes in f32), so a device without the feature
+  still runs.
 - **Memory** is `DEVICE_LOCAL` (VRAM) for tensors; small allocations (≤1 MB) use
   the BAR window so host upload/download is a `memcpy`, and larger transfers are
   staged through a reused host-visible buffer. Buffers whose last reference
