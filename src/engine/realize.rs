@@ -963,7 +963,7 @@ fn exec_kernel(
     call: UopId,
     cp: &Rc<CompiledProg>,
     var_vals: &HashMap<String, i64>,
-) {
+) -> Option<Rc<std::cell::RefCell<dyn crate::runtime::device::Prog>>> {
     let prof = crate::engine::prof::enabled();
     let t0 = prof.then(std::time::Instant::now);
     let resolved = resolve_params(ctx, call);
@@ -1026,7 +1026,7 @@ fn exec_kernel(
             use crate::engine::prof::add;
             add("kx.host", a.elapsed().as_secs_f64());
         }
-        return;
+        return None;
     }
     let rt = dev.runtime_keyed(cp.elf_key, &cp.elf);
     let t3 = prof.then(std::time::Instant::now);
@@ -1052,6 +1052,7 @@ fn exec_kernel(
         add("kx.runtime", d.duration_since(c).as_secs_f64());
         add("kx.launch", d.elapsed().as_secs_f64());
     }
+    Some(rt)
 }
 
 /// A lowered+compiled LINEAR (tinygrad `jit_lower`): every SINK-ast CALL swapped
@@ -1084,6 +1085,7 @@ pub fn exec_linear(
 ) {
     let calls = ctx.srcs(&c.line).to_vec();
     let whole = crate::engine::prof::enabled().then(std::time::Instant::now);
+    let mut runtimes: Vec<Rc<std::cell::RefCell<dyn crate::runtime::device::Prog>>> = Vec::new();
     for call in &calls {
         let ast = &ctx.srcs(call)[0].clone();
         match ctx.op_of(ast) {
@@ -1102,12 +1104,25 @@ pub fn exec_linear(
                     .expect("TGERR: exec_linear missing CompiledProg")
                     .clone();
                 let timer = crate::engine::prof::enabled().then(std::time::Instant::now);
-                exec_kernel(ctx, t, call.clone(), &cp, var_vals);
+                if let Some(rt) = exec_kernel(ctx, t, call.clone(), &cp, var_vals)
+                    && !runtimes.iter().any(|r| Rc::ptr_eq(r, &rt))
+                {
+                    runtimes.push(rt);
+                }
                 if let Some(tr) = timer {
                     crate::engine::prof::add("exec.kernel", tr.elapsed().as_secs_f64());
                 }
             }
             other => panic!("TGERR: exec_linear call ast op {other:?}"),
+        }
+    }
+    // Let a batching backend submit what it recorded for this linear. The
+    // Vulkan backend keeps one command buffer open across consecutive kernels;
+    // holding it while the host builds the next graph would idle the GPU, so the
+    // batch is closed at the linear boundary.
+    for rt in &runtimes {
+        if let Ok(mut p) = rt.try_borrow_mut() {
+            p.flush();
         }
     }
     if let Some(t) = whole {

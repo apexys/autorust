@@ -4228,16 +4228,27 @@ factor). `softmax` went 2.14 -> 1.16 ms and `layernorm` 2.18 -> 1.18 ms against
 CL's 1.41/1.44, i.e. **both are now faster than OpenCL**, and LLM decode dropped
 from 34 to 25 ms.
 
+**Dispatch batching needs a flush point.** A Vulkan submit + fence costs ~25 us
+where `clEnqueueNDRangeKernel` is nearly free, so consecutive dispatches are now
+recorded into one command buffer (8 per batch, one descriptor set per
+(ring slot, batch position) because a set may not be rewritten while a batch
+references it). That alone took LLM decode from 25.6 to 21.3 ms — but holding
+the submit back idles the GPU while the host builds the next graph, and a
+single-kernel step went from 0.91 to 1.45 ms. `Prog::flush` (a default-no-op
+trait method called at the end of every executed linear in `exec_linear`) closes
+the batch at the step boundary, which restores the CPU/GPU overlap; both wins
+then hold.
+
 Measured against `CL` on the same machine (`bench/run.py --only
-'autorust-(vk|cl)-'`, 138-row matrix): **every memory-bound microbench is
-faster** (add 0.90 vs 1.07 ms, softmax 1.16 vs 1.41, layernorm 1.18 vs 1.44,
-sum 0.60 vs 0.72, copy 0.79 vs 0.86, transpose 0.91 vs 0.95); MNIST train 28.1
-vs 22.7 ms, ViT infer bs 8 **136.6 vs 179.0 ms**, ResNet-18 infer 404 vs 376,
-LLM prefill 423 vs 398, LLM decode 24.9 vs 21.3, AdamW 96.0 vs 97.2, GEMM
-1024³/NT/batched ahead and 2048³/4096³/TN 1.2-1.5x behind, bf16 ViT 155.8 vs
-92.3. Remaining gaps: bf16 inference (the 16-bit load/convert path; the bf16
-GEMM alone is 1.33x off), large GEMMs (the scheduler-unrolled 1024-deep body is
-too big to unroll further and its 64-float accumulator is not promoted out of
-`Function` storage), decode-heavy graphs (one command buffer per kernel, ~25 us
-of host time each) and ONNX per-call rescheduling. Those, plus a native
-f16/tensor-core `OpCooperativeMatrixMulAddKHR` path, are the follow-ups.
+'autorust-(vk|cl)-'`, 138-row matrix, medians): **every memory-bound microbench
+is at parity or faster** (add 0.85 vs 1.03 ms, softmax 1.09 vs 1.38, layernorm
+1.19 vs 1.42, sum 0.68 vs 0.70, copy 0.80 vs 0.83, transpose 0.92 vs 0.89),
+MNIST train 23.0 vs 21.9 ms, ViT infer bs 8 **132.5 vs 179.9 ms**, ResNet-18
+infer 403 vs 376, ResNet-18 train 452 vs 450, UNet 21.0 vs 21.0, LLM prefill
+426 vs 396, **LLM decode 21.3 vs 22.1**, AdamW 94.5 vs 96.0, GEMM 1024³/NT/
+batched ahead and 2048³/4096³/TN 1.0-1.4x behind, bf16 ViT 154 vs 94. Remaining
+gaps: bf16 inference (the 16-bit load/convert path; the bf16 GEMM alone is 1.33x
+off), large GEMMs (the scheduler-unrolled 1024-deep body is too big to unroll
+further and its 64-float accumulator is not promoted out of `Function` storage),
+MobileNet/ResNet-50/ONNX (1.2-1.3x) and a native f16/tensor-core
+`OpCooperativeMatrixMulAddKHR` path.

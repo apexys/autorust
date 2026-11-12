@@ -372,7 +372,7 @@ impl VkProgram {
             });
         let sets = inner
             .dev
-            .alloc_sets(pipeline.set_layout, inner.dev.cmds.len() as u32);
+            .alloc_sets(pipeline.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
         VkProgram {
             inner,
             name: elf.name.clone(),
@@ -441,6 +441,12 @@ impl Prog for VkProgram {
             .dispatch(&self.pipeline, &self.sets, &bound, groups, wait, &self.name)
             .unwrap_or_else(|e| panic!("TGERR: VK dispatch failed: {e}"));
         None
+    }
+
+    fn flush(&mut self) {
+        // Batched launches are submitted at the linear boundary (and before any
+        // host access), so the GPU is never idle while the host builds a graph.
+        let _ = self.inner.dev.flush();
     }
 }
 
@@ -568,7 +574,7 @@ pub fn run_raw_module(
     let lib = vk_sys::VkLib::get()?;
     let dev = vk_sys::VkDevice::open(&lib.instance, lib.api, info).ok()?;
     let pipe = dev.pipeline(spv, sizes.len() as u32).ok()?;
-    let sets = dev.alloc_sets(pipe.set_layout, dev.cmds.len() as u32);
+    let sets = dev.alloc_sets(pipe.set_layout, vk_sys::SETS_PER_PROGRAM as u32);
     let bufs: Vec<vk_sys::GpuBuffer> = sizes
         .iter()
         .map(|s| dev.alloc(*s).expect("vk raw alloc"))

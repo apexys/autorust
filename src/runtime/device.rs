@@ -261,6 +261,12 @@ pub trait Prog {
         vals: &[i64],
         wait: bool,
     ) -> Option<f64>;
+
+    /// Submit any work deferred by [`Prog::call`]. Called once at the end of an
+    /// executed linear, so a backend that batches launches into one submission
+    /// does not hold the GPU idle while the host builds the next graph. The
+    /// default is a no-op (every other backend submits inside `call`).
+    fn flush(&mut self) {}
 }
 
 // ---------------- Compiled device ----------------

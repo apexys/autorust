@@ -1,1 +1,58 @@
-{"framework":"autorust","version":"0.1.0","device":"VK","workload":"memops","batch":1,"dtype":"f32","jit":true,"warmup":4,"iters":20,"ms_cold":0.0,"ms_median":6.9270,"ms_min":0.0,"ms_iqr":0.0,"images_per_s":0.0,"cases":[{"case":"add 16777216","ms":0.9022,"gbs":223.1569},{"case":"copy 16777216","ms":0.7927,"gbs":169.3238},{"case":"gelu 16777216","ms":0.7804,"gbs":171.9956},{"case":"softmax 16777216","ms":1.1645,"gbs":115.2534},{"case":"layernorm 16777216","ms":1.1843,"gbs":113.3273},{"case":"sum 16777216","ms":0.5968,"gbs":112.4479},{"case":"amax 16777216","ms":0.5999,"gbs":111.8685},{"case":"transpose 16777216","ms":0.9063,"gbs":148.1018}]}
+{
+  "framework": "autorust",
+  "version": "0.1.0",
+  "device": "VK",
+  "workload": "memops",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": true,
+  "warmup": 6,
+  "iters": 20,
+  "ms_cold": 0.0,
+  "ms_median": 7.2931,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "add 16777216",
+      "ms": 0.8488,
+      "gbs": 237.1768
+    },
+    {
+      "case": "copy 16777216",
+      "ms": 0.8011,
+      "gbs": 167.5499
+    },
+    {
+      "case": "gelu 16777216",
+      "ms": 0.8799,
+      "gbs": 152.5383
+    },
+    {
+      "case": "softmax 16777216",
+      "ms": 1.1807,
+      "gbs": 113.679
+    },
+    {
+      "case": "layernorm 16777216",
+      "ms": 1.1865,
+      "gbs": 113.1223
+    },
+    {
+      "case": "sum 16777216",
+      "ms": 0.6777,
+      "gbs": 99.0225
+    },
+    {
+      "case": "amax 16777216",
+      "ms": 0.7037,
+      "gbs": 95.3646
+    },
+    {
+      "case": "transpose 16777216",
+      "ms": 1.0147,
+      "gbs": 132.2747
+    }
+  ]
+}

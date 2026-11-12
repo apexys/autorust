@@ -22,8 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decode-heavy graphs, which pay one command buffer per kernel — see
   `PERFORMANCE.md`). The emitter unrolls small constant-trip-count loops 8x
   because the NVIDIA SPIR-V path does not (its OpenCL compiler does): that alone
-  took `softmax`/`layernorm` from 2.1/2.2 ms to 1.16/1.18 ms, ahead of OpenCL's
-  1.41/1.44.
+  took `softmax`/`layernorm` from 2.1/2.2 ms to 1.09/1.19 ms, ahead of OpenCL's
+  1.38/1.42, and consecutive launches are batched into one command buffer (closed
+  at each executed linear via the new `Prog::flush` seam) which took LLM decode
+  from 25.6 to 21.3 ms.
 - **Backend memory reporting.** `Compiled::memory_info()` returns
   `MemoryInfo { total, free }`, implemented through
   `BackendAllocator::memory_info()`: CUDA uses `cuMemGetInfo_v2`, OpenCL reports

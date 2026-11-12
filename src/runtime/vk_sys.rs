@@ -170,6 +170,22 @@ unsafe fn query_caps(instance: &ash::Instance, pd: vk::PhysicalDevice, api: u32)
     }
 }
 
+/// Dispatches recorded into one command buffer before it is submitted.
+///
+/// One submit + fence wait costs ~25 us on this driver, while recording a
+/// dispatch into an already-open command buffer costs ~1 us: batching is what
+/// makes a graph with hundreds of small kernels (LLM decode) competitive with
+/// OpenCL, where `clEnqueueNDRangeKernel` is nearly free.
+const BATCH: usize = 8;
+
+/// Descriptor sets a program must own: one per (ring slot, batch position).
+///
+/// A set may not be rewritten while the batch referencing it is still in
+/// flight, so the index has to include the ring slot, not just the position in
+/// the batch: reusing `sets[0]` across consecutive batches makes the driver
+/// serialize (measured: 0.9 -> 1.5 ms for a single-kernel step).
+pub const SETS_PER_PROGRAM: usize = 4 * BATCH;
+
 /// One GPU buffer (handles only; cloning shares the allocation).
 #[derive(Clone)]
 pub struct GpuBuffer {
@@ -229,18 +245,22 @@ pub struct VkDevice {
     pub slot: std::cell::Cell<usize>,
     /// Whether work is queued that the host has not waited for.
     pub in_flight: std::cell::Cell<bool>,
-    /// Submit time per ring slot, and the kernel name, for `VK_TIME=1`.
-    pub pending: std::cell::RefCell<Vec<(usize, std::time::Instant, String)>>,
     /// Reused host-visible buffer for device-local transfers.
     pub staging: std::cell::RefCell<Option<GpuBuffer>>,
     /// Buffers whose last reference was dropped while work may still be in
     /// flight. Vulkan forbids destroying a buffer a pending command buffer
     /// references, so destruction is deferred to the next idle point.
     pub graveyard: std::cell::RefCell<Vec<GpuBuffer>>,
-    /// Timestamp query pool (2 queries per ring slot) for `VK_TIME=1`.
+    /// Timestamp query pool (`BATCH` pairs per ring slot) for `VK_TIME=1`.
     ts_pool: vk::QueryPool,
     /// `timestampPeriod` in nanoseconds.
     ts_period: f32,
+    /// Whether the current ring slot's command buffer is open for recording.
+    recording: std::cell::Cell<bool>,
+    /// Dispatches recorded into the open command buffer.
+    batch: std::cell::Cell<usize>,
+    /// Kernel names per ring slot, for the timestamp report.
+    batch_names: std::cell::RefCell<Vec<Vec<String>>>,
     /// `storage_id` counter, so views of one allocation share an id.
     pub next_id: std::cell::Cell<usize>,
 }
@@ -317,11 +337,14 @@ impl VkDevice {
         let desc_pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    // 64 programs' worth of sets; programs are cached per kernel.
-                    .max_sets(1024)
+                    // `SETS_PER_PROGRAM` sets per cached program (programs live
+                    // for the process); generous so a many-kernel model never
+                    // exhausts it and falls back to one set per program (which
+                    // serializes batches, see `SETS_PER_PROGRAM`).
+                    .max_sets(32768)
                     .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(16384)])
+                        .descriptor_count(131072)])
                     .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET),
                 None,
             )
@@ -334,7 +357,7 @@ impl VkDevice {
                 device.create_query_pool(
                     &vk::QueryPoolCreateInfo::default()
                         .query_type(vk::QueryType::TIMESTAMP)
-                        .query_count(8),
+                        .query_count((2 * BATCH * 4) as u32),
                     None,
                 )
             }
@@ -370,67 +393,59 @@ impl VkDevice {
             fences,
             slot: std::cell::Cell::new(0),
             in_flight: std::cell::Cell::new(false),
-            pending: std::cell::RefCell::new(Vec::new()),
             staging: std::cell::RefCell::new(None),
             graveyard: std::cell::RefCell::new(Vec::new()),
             ts_pool,
             ts_period: info.props.limits.timestamp_period,
+            recording: std::cell::Cell::new(false),
+            batch: std::cell::Cell::new(0),
+            batch_names: std::cell::RefCell::new(vec![Vec::new(); 4]),
             next_id: std::cell::Cell::new(1),
         })
     }
 
-    /// Wait for everything submitted so far.
+    /// Wait for everything submitted so far (flushing the open batch first).
     pub fn wait_idle(&self) {
+        let _ = self.flush();
         if self.in_flight.get() {
-            let t = std::time::Instant::now();
             unsafe {
                 let _ = self.device.device_wait_idle();
             }
             self.in_flight.set(false);
-            self.report_pending(t);
+            for slot in 0..self.cmds.len() {
+                self.report_batch(slot);
+            }
             self.drain();
         }
     }
 
-    /// Print the GPU time of submissions that completed at `t` (`VK_TIME=1`).
-    fn report_pending(&self, _t: std::time::Instant) {
-        if !crate::runtime::ops_vk::time_on() {
-            return;
-        }
-        // Drain the tail: each slot's timestamps are complete once the queue is
-        // idle.
-        for slot in 0..self.cmds.len() {
-            self.report_slot(slot);
-        }
-    }
-
-    /// Print the GPU time of the last dispatch recorded in `slot` (timestamp
+    /// Print the GPU time of each dispatch in `slot`'s last batch (timestamp
     /// query readback: exact device time, no host attribution).
-    fn report_slot(&self, slot: usize) {
+    fn report_batch(&self, slot: usize) {
         if !crate::runtime::ops_vk::time_on() || self.ts_pool == vk::QueryPool::null() {
             return;
         }
-        let name = {
-            let mut p = self.pending.borrow_mut();
-            let (mine, rest): (Vec<_>, Vec<_>) =
-                p.drain(..).partition(|(s, _, _)| *s == slot);
-            *p = rest;
-            mine.into_iter().next().map(|(_, _, n)| n)
+        let names: Vec<String> = {
+            let mut n = self.batch_names.borrow_mut();
+            std::mem::take(&mut n[slot])
         };
-        let Some(name) = name else {
+        if names.is_empty() {
             return;
-        };
-        let mut data = [0u64; 2];
+        }
+        let mut data = vec![0u64; 2 * names.len()];
         let ok = unsafe {
             self.device.get_query_pool_results(
                 self.ts_pool,
-                2 * slot as u32,
+                (2 * BATCH * slot) as u32,
                 &mut data,
                 vk::QueryResultFlags::TYPE_64,
             )
         };
-        if ok.is_ok() {
-            let ticks = data[1].saturating_sub(data[0]);
+        if ok.is_err() {
+            return;
+        }
+        for (i, name) in names.iter().enumerate() {
+            let ticks = data[2 * i + 1].saturating_sub(data[2 * i]);
             let ms = ticks as f64 * self.ts_period as f64 * 1e-6;
             eprintln!("[vk] gpu {name} {ms:.3} ms");
         }
@@ -721,10 +736,10 @@ impl VkDevice {
         }
     }
 
-    /// Record and submit one buffer-to-buffer copy `src[src_off ..+ size]` →
-    /// `dst[dst_off ..+ size]`. `wait` blocks until it completes (needed before
-    /// the host touches the staging buffer); a device-to-device copy is ordered
-    /// by the queue and needs no host round-trip.
+    /// Record a buffer-to-buffer copy `src[src_off ..+ size]` →
+    /// `dst[dst_off ..+ size]` into the open batch. `wait` flushes and blocks
+    /// (needed before the host touches the staging buffer); a device-to-device
+    /// copy is ordered by the queue and needs no host round-trip.
     pub fn copy_buffer(
         &self,
         src: &GpuBuffer,
@@ -734,76 +749,46 @@ impl VkDevice {
         size: u64,
         wait: bool,
     ) {
+        if wait {
+            let _ = self.flush();
+        }
+        if !self.recording.get() {
+            let _ = self.begin_batch();
+        }
         let region = [vk::BufferCopy::default()
             .src_offset(src_off)
             .dst_offset(dst_off)
             .size(size)];
-        let slot = self.slot.get();
-        let fence = self.fences[slot];
-        let cmd = self.cmds[slot];
-        unsafe {
-            self.device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .expect("TGERR: vkWaitForFences");
-            self.device.reset_fences(&[fence]).expect("TGERR: vkResetFences");
-            self.device
-                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-                .expect("TGERR: vkResetCommandBuffer");
-            self.device
-                .begin_command_buffer(
-                    cmd,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .expect("TGERR: vkBeginCommandBuffer");
-            self.device.cmd_copy_buffer(cmd, src.buf, dst.buf, &region);
-            self.device
-                .end_command_buffer(cmd)
-                .expect("TGERR: vkEndCommandBuffer");
-            let cmds = [cmd];
-            let submit = vk::SubmitInfo::default().command_buffers(&cmds);
-            self.device
-                .queue_submit(self.queue, &[submit], fence)
-                .expect("TGERR: vkQueueSubmit(copy)");
-            if wait {
-                self.device
-                    .wait_for_fences(&[fence], true, u64::MAX)
-                    .expect("TGERR: vkWaitForFences(copy)");
-            }
+        let cmd = self.cmds[self.slot.get()];
+        unsafe { self.device.cmd_copy_buffer(cmd, src.buf, dst.buf, &region) };
+        self.batch.set(self.batch.get() + 1);
+        if wait {
+            let _ = self.flush();
+            self.wait_idle();
         }
-        self.slot.set((slot + 1) % self.cmds.len());
-        self.in_flight.set(true);
     }
 
     /// The descriptor sets one program needs (one per ring slot).
     pub fn alloc_sets(&self, layout: vk::DescriptorSetLayout, n: u32) -> Vec<vk::DescriptorSet> {
-        let layouts = vec![layout; n as usize];
-        unsafe {
-            self.device
-                .allocate_descriptor_sets(
+        for n in [n, 1] {
+            let layouts = vec![layout; n as usize];
+            if let Ok(v) = unsafe {
+                self.device.allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(self.desc_pool)
                         .set_layouts(&layouts),
                 )
-                .unwrap_or_else(|e| panic!("TGERR: vkAllocateDescriptorSets: {e}"))
+            } {
+                return v;
+            }
         }
+        // A single set always forces a flush per dispatch, so batching degrades
+        // instead of failing if the pool is ever exhausted.
+        panic!("TGERR: vkAllocateDescriptorSets: pool exhausted")
     }
 
-    /// Run one dispatch of `pipeline` over `buffers` (binding order) on a
-    /// `groups` workgroup grid, using `sets[slot]` for this ring slot.
-    ///
-    /// The ring makes recording legal while earlier submissions may still run:
-    /// a slot's command buffer is only reset after its own fence signalled, and
-    /// its descriptor set is only rewritten at that point too.
-    pub fn dispatch(
-        &self,
-        pipeline: &GpuPipeline,
-        sets: &[vk::DescriptorSet],
-        buffers: &[(&GpuBuffer, u64, u64)],
-        groups: [u32; 3],
-        wait: bool,
-        name: &str,
-    ) -> Result<(), String> {
+    /// Open the current ring slot's command buffer for recording.
+    fn begin_batch(&self) -> Result<(), String> {
         let dev = &self.device;
         let slot = self.slot.get();
         let fence = self.fences[slot];
@@ -813,12 +798,83 @@ impl VkDevice {
                 .map_err(|e| format!("vkWaitForFences: {e}"))?;
             dev.reset_fences(&[fence])
                 .map_err(|e| format!("vkResetFences: {e}"))?;
-            // Everything submitted before this slot's previous use has finished,
-            // so this slot's timestamps are ready and attributable to the kernel
-            // queued in it.
-            self.report_slot(slot);
         }
-        let set = sets[slot];
+        // That slot's previous batch has completed: its timestamps are ready.
+        self.report_batch(slot);
+        unsafe {
+            dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("vkResetCommandBuffer: {e}"))?;
+            dev.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .map_err(|e| format!("vkBeginCommandBuffer: {e}"))?;
+            if crate::runtime::ops_vk::time_on() && self.ts_pool != vk::QueryPool::null() {
+                dev.cmd_reset_query_pool(
+                    cmd,
+                    self.ts_pool,
+                    (2 * BATCH * slot) as u32,
+                    (2 * BATCH) as u32,
+                );
+            }
+        }
+        self.recording.set(true);
+        self.batch.set(0);
+        self.batch_names.borrow_mut()[slot].clear();
+        Ok(())
+    }
+
+    /// Close and submit the open batch (if any).
+    pub fn flush(&self) -> Result<(), String> {
+        if !self.recording.get() {
+            return Ok(());
+        }
+        let dev = &self.device;
+        let slot = self.slot.get();
+        let cmd = self.cmds[slot];
+        unsafe {
+            dev.end_command_buffer(cmd)
+                .map_err(|e| format!("vkEndCommandBuffer: {e}"))?;
+            let cmds = [cmd];
+            let submit = vk::SubmitInfo::default().command_buffers(&cmds);
+            dev.queue_submit(self.queue, &[submit], self.fences[slot])
+                .map_err(|e| format!("vkQueueSubmit: {e}"))?;
+        }
+        self.slot.set((slot + 1) % self.cmds.len());
+        self.recording.set(false);
+        self.in_flight.set(true);
+        Ok(())
+    }
+
+    /// Run one dispatch of `pipeline` over `buffers` (binding order) on a
+    /// `groups` workgroup grid, recorded into the open command buffer.
+    ///
+    /// `sets[i]` is the descriptor set for the i-th dispatch of a batch; the
+    /// caller provides one per batch position because a descriptor set may only
+    /// be rewritten once the batch referencing it has completed.
+    pub fn dispatch(
+        &self,
+        pipeline: &GpuPipeline,
+        sets: &[vk::DescriptorSet],
+        buffers: &[(&GpuBuffer, u64, u64)],
+        groups: [u32; 3],
+        wait: bool,
+        name: &str,
+    ) -> Result<(), String> {
+        let slot0 = self.slot.get();
+        let idx0 = self.batch.get();
+        let open = self.recording.get()
+            && idx0 < BATCH
+            && slot0 * BATCH + idx0 < sets.len();
+        if !open {
+            self.flush()?;
+        }
+        let slot = self.slot.get();
+        let idx = if open { idx0 } else { 0 };
+        let set = sets[slot * BATCH + idx];
+        // Descriptors are updated *before* the command buffer is reopened, which
+        // is the order that keeps the driver from serializing.
         let infos: Vec<vk::DescriptorBufferInfo> = buffers
             .iter()
             .map(|(b, off, size)| {
@@ -839,42 +895,44 @@ impl VkDevice {
                     .buffer_info(std::slice::from_ref(bi))
             })
             .collect();
-        unsafe { dev.update_descriptor_sets(&writes, &[]) };
-
-        let barriers = [vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        if !open {
+            self.begin_batch()?;
+        }
+        let cmd = self.cmds[slot];
+        let timed = crate::runtime::ops_vk::time_on() && self.ts_pool != vk::QueryPool::null();
+        let dev = &self.device;
         unsafe {
-            dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-                .map_err(|e| format!("vkResetCommandBuffer: {e}"))?;
-            dev.begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )
-            .map_err(|e| format!("vkBeginCommandBuffer: {e}"))?;
-            // Make every prior dispatch's storage-buffer writes visible. The
-            // queue is ordered, so a single execution+memory dependency covers
-            // both the barrier below and any earlier submission.
+            if timed {
+                dev.cmd_write_timestamp(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    self.ts_pool,
+                    (2 * (BATCH * slot + idx)) as u32,
+                );
+            }
+            // Make the previous dispatch's storage-buffer writes visible. The
+            // first dispatch of a batch also has to cover the previous batch and
+            // any recorded copies, so it uses ALL_COMMANDS (free: nothing else is
+            // recorded yet); later ones only need the compute->compute edge,
+            // which avoids flushing every cache mid-batch.
+            let (src_stage, src_access) = if idx == 0 {
+                (vk::PipelineStageFlags::ALL_COMMANDS, vk::AccessFlags::MEMORY_WRITE)
+            } else {
+                (vk::PipelineStageFlags::COMPUTE_SHADER, vk::AccessFlags::SHADER_WRITE)
+            };
+            let barriers = [vk::MemoryBarrier::default()
+                .src_access_mask(src_access)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
             dev.cmd_pipeline_barrier(
                 cmd,
-                vk::PipelineStageFlags::ALL_COMMANDS,
+                src_stage,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &barriers,
                 &[],
                 &[],
             );
-            let timed = crate::runtime::ops_vk::time_on() && self.ts_pool != vk::QueryPool::null();
-            if timed {
-                dev.cmd_reset_query_pool(cmd, self.ts_pool, 2 * slot as u32, 2);
-                dev.cmd_write_timestamp(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    self.ts_pool,
-                    2 * slot as u32,
-                );
-            }
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline);
             dev.cmd_bind_descriptor_sets(
                 cmd,
@@ -890,27 +948,14 @@ impl VkDevice {
                     cmd,
                     vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                     self.ts_pool,
-                    2 * slot as u32 + 1,
+                    (2 * (BATCH * slot + idx) + 1) as u32,
                 );
             }
-            dev.end_command_buffer(cmd)
-                .map_err(|e| format!("vkEndCommandBuffer: {e}"))?;
-            let cmds = [cmd];
-            let submit = vk::SubmitInfo::default().command_buffers(&cmds);
-            dev.queue_submit(self.queue, &[submit], fence)
-                .map_err(|e| format!("vkQueueSubmit: {e}"))?;
         }
-        self.slot.set((slot + 1) % self.cmds.len());
-        self.in_flight.set(true);
-        if crate::runtime::ops_vk::time_on() {
-            self.pending.borrow_mut().retain(|(s, _, _)| *s != slot);
-            self.pending.borrow_mut().push((
-                slot,
-                std::time::Instant::now(),
-                name.to_string(),
-            ));
-        }
+        self.batch_names.borrow_mut()[slot].push(name.to_string());
+        self.batch.set(idx + 1);
         if wait {
+            self.flush()?;
             self.wait_idle();
         }
         Ok(())
