@@ -248,6 +248,56 @@ fn cublas_collapses_two_reduce_axes() {
 }
 
 #[test]
+fn cublas_handles_column_major_output() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    // `assign` into a transposed view stores the product through a column-major
+    // view of the destination: the scheduler's C index then has stride 1 on the
+    // *m* axis, which a row-major descriptor cannot describe. cuBLAS computes it
+    // natively, so `extract` swaps the operand roles (`C^T = B^T A^T`).
+    let (m, n, k) = (37usize, 48usize, 64usize);
+    let ad = values(1, m * k);
+    let bd = values(7, k * n);
+    let run_case = |lib: bool| {
+        autorust::runtime::ops_cuda::CUBLAS_GEMMS.store(0, Ordering::Relaxed);
+        let ctx = Ctx::new();
+        ctx.borrow_mut().settings.library_gemm =
+            autorust::settings::LibraryGemmPolicy::uniform(if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            });
+        let mut sess = autorust::engine::session::Session::new();
+        let a = Tensor::from_slice(&ctx, &ad, None, Some("CUDA")).reshape([m as i64, k as i64]);
+        let b = Tensor::from_slice(&ctx, &bd, None, Some("CUDA")).reshape([k as i64, n as i64]);
+        let c = Tensor::zeros_param(&ctx, [n as i64, m as i64], None, Some("CUDA"));
+        let ct = c.transpose(0, 1);
+        ct.assign(&mut sess, &a.dot(&b));
+        let out = ct.to_list::<f32>(&mut sess);
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLAS_GEMMS.load(Ordering::Relaxed),
+        )
+    };
+    let (want, calls_never) = run_case(false);
+    let (got, calls_always) = run_case(true);
+    assert_eq!(calls_never, 0, "Never policy must stay generated");
+    assert!(
+        calls_always > 0,
+        "a column-major output must dispatch to cuBLAS"
+    );
+    assert!(
+        got.iter().any(|v| *v != 0.0),
+        "the transposed store must land (got all zeros)"
+    );
+    let d = maxdiff(&want, &got);
+    assert!(d < 1e-4, "column-major output: cuBLAS diff {d:e}");
+}
+
+#[test]
 fn cublas_matches_bf16() {
     let _guard = LOCK.lock().unwrap();
     if !have_cuda_and_cublas() {

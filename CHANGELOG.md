@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Transposed (column-major) GEMM outputs stay on cuBLAS.** A store through a
+  transposed view (`assign` into `p.transpose()`, the backward weight-gradient
+  path) used to keep the generated kernel. `extract` now describes the
+  transposed product (`C^T = B^T A^T`) and swaps the operand roles. ViT-B/16
+  f32 training on an RTX 3060: **bs 4 317.6 → 230.2 ms/step (-27.5%)**, **bs 1
+  100.2 → 81.0 (-19%)**; bs 4 inference unchanged. Descriptor coverage at bs 4
+  goes 97 → 170. Covered by
+  `tests/cublas.rs::cublas_handles_column_major_output`.
 - **A two-axis reduction folds into one contraction axis when the operands are
   contiguous over the pair.** Weight gradients summed over `(batch, tokens)`
   (`REDUCE(ADD, Mul, Range, Range)`) now reach cuBLAS as a single `K` axis

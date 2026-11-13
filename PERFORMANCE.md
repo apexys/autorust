@@ -140,8 +140,22 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   families (`197x64x197x48`, `197x197x64x48`) and has no `batch-layout`
   rejections, and the step drops **315.5 → 297.8/299.3 ms** on an RTX 3060
   (medians of two processes, 2 warmups + 5 iterations; -5.4%). bs 1 training
-  and bs 4 inference are unchanged. Weight-gradient reductions still carry two
-  reduce axes (batch and tokens) and keep the generated kernel.
+  and bs 4 inference are unchanged. The non-contiguous weight-gradient
+  reductions (12 at bs 4) still keep the generated kernel.
+- **Column-major C (a store through a transposed view).** `assign`-style
+  outputs write the product through a transposed view of the destination, so the
+  scheduler's C index has stride 1 on the *m* axis. `extract` now recognises
+  that (`stride1` on the A-only output axis, `>= m` on the other) and swaps the
+  operand roles to describe `C^T = B^T A^T`, which cuBLAS computes natively. This
+  recovers the backward weight-gradient stores that had been kept on generated
+  kernels: ViT-B/16 f32 training at bs 4 **317.6 → 230.2 ms/step (-27.5%)** and
+  at bs 1 **100.2 → 81.0 ms/step (-19%)** on the RTX 3060 (alternating builds,
+  two processes each). Only plain GEMMs are transposed: a fused
+  bias/scale/residual writes along the original `n`, which is the transposed
+  `m`, so those stay generated. The mapping is gated by
+  `tests/cublas.rs::cublas_handles_column_major_output` (lib vs generated,
+  `< 1e-4`) and the ViT step loss matches the generated path to ~1e-3 over 3
+  steps with `BENCH_LOSS=1 BENCH_SEED=…`.
 - **CL → CLBlast** (`CLBlastSgemm` / `CLBlastSgemmStridedBatched`, f32,
   row-major). Install `libclblast1` (`apt install libclblast1`); without it the
   OpenCL backend keeps using generated kernels.

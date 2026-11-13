@@ -305,7 +305,10 @@ fn main() {
             };
             let run = |jit: &mut Jit, sess: &mut Session| {
                 let loss = jit.call(&ctx, sess, |_c, s| step(s));
-                let _ = loss.item::<f32>(sess);
+                let l = loss.item::<f32>(sess);
+                if std::env::var("BENCH_LOSS").is_ok() {
+                    eprintln!("LOSS {l:.6}");
+                }
             };
             let (cold, samples) = measure(|| run(&mut jit, &mut sess), warmup, iters);
             emit(
@@ -328,6 +331,9 @@ fn main() {
             let embed = env_i64("BENCH_EMBED", 768);
             let heads = env_i64("BENCH_HEADS", 12);
             let img = env_i64("BENCH_IMG", 224);
+            if let Ok(seed) = std::env::var("BENCH_SEED") {
+                Tensor::manual_seed(seed.parse().expect("BENCH_SEED"));
+            }
             let model = ViT::build(&ctx, layers, embed, heads, 3, img, 16, 1000).into_params();
             let x = Tensor::zeros(&ctx, [bs, 3, img, img]).to_param();
             let mut jit = Jit::new();
@@ -358,6 +364,9 @@ fn main() {
             let embed = env_i64("BENCH_EMBED", 768);
             let heads = env_i64("BENCH_HEADS", 12);
             let img = env_i64("BENCH_IMG", 224);
+            if let Ok(seed) = std::env::var("BENCH_SEED") {
+                Tensor::manual_seed(seed.parse().expect("BENCH_SEED"));
+            }
             let model = ViT::build(&ctx, layers, embed, heads, 3, img, 16, 1000).into_params();
             let params: Vec<Tensor> = model.params().collect();
             let opt = Adam::new(params.clone(), 3e-4);
@@ -375,7 +384,10 @@ fn main() {
             };
             let run = |jit: &mut Jit, sess: &mut Session| {
                 let loss = jit.call(&ctx, sess, |_c, s| step(s));
-                let _ = loss.item::<f32>(sess);
+                let l = loss.item::<f32>(sess);
+                if std::env::var("BENCH_LOSS").is_ok() {
+                    eprintln!("LOSS {l:.6}");
+                }
             };
             let (cold, samples) = measure(|| run(&mut jit, &mut sess), warmup, iters);
             emit(

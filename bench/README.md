@@ -38,6 +38,13 @@ contains no data loading, evaluation or logging. This keeps the comparison
 about the framework, not the data pipeline. The MNIST model itself is the
 `beautiful_mnist` one, so the absolute step time is representative of the demo.
 
+`BENCH_SEED=<n>` seeds the model (`vit_train`), and `BENCH_LOSS=1` prints each
+step's loss. Together they are the kernel-parity check: run once with
+`AUTORUST_CUBLAS=0` (generated kernels) and once with the default library path,
+then compare the loss sequences. Differences stay at fp-rounding level (~1e-3
+over three ViT steps) when the library descriptors are correct; a wrong
+transpose or stride shows up as a divergent loss.
+
 ## Protocol
 
 - One fresh process per run; warmup then `N` timed steps (see `run.py`), report

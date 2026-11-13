@@ -1175,17 +1175,17 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if a_affine.is_none() {
         note_detail(&format!("idx={}", expr_sig(ctx, &a_index, 6)));
     }
-    let (a_off0, a_map) = or_reject(a_affine, "a-index-not-affine")?;
+    let (a_off0, mut a_map) = or_reject(a_affine, "a-index-not-affine")?;
     let b_index = index_offset(ctx, &b_idx);
     let b_affine = affine(ctx, &b_index);
     if b_affine.is_none() {
         note_detail(&format!("idx={}", expr_sig(ctx, &b_index, 6)));
     }
-    let (b_off0, b_map) = or_reject(b_affine, "b-index-not-affine")?;
-    let (a_slot, a_dt, a_base) = or_reject(base_of(ctx, &a_idx), "a-not-param")?;
-    let a_off = a_off0 + a_base;
-    let (b_slot, b_dt, b_base) = or_reject(base_of(ctx, &b_idx), "b-not-param")?;
-    let b_off = b_off0 + b_base;
+    let (b_off0, mut b_map) = or_reject(b_affine, "b-index-not-affine")?;
+    let (mut a_slot, mut a_dt, a_base) = or_reject(base_of(ctx, &a_idx), "a-not-param")?;
+    let mut a_off = a_off0 + a_base;
+    let (mut b_slot, mut b_dt, b_base) = or_reject(base_of(ctx, &b_idx), "b-not-param")?;
+    let mut b_off = b_off0 + b_base;
     // The library GEMM reads the operand buffers with the contraction dtype.
     // A casted staging buffer (e.g. f32 -> f16 `from_slice`) must stay on the
     // generated kernel.
@@ -1204,6 +1204,26 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             ))
     {
         return reject("operand-dtype");
+    }
+
+    // A store through a transposed view (`assign` into `p.transpose()`) is a
+    // column-major C: stride 1 on the m axis and >= m on the n axis. cuBLAS
+    // computes that natively, so swap the operand roles and let the row-major
+    // path describe the transposed product `C^T = B^T A^T`. Recognise it by
+    // which *only* axis has unit C stride (B-only = row-major, A-only =
+    // column-major).
+    let a_only_unit = a_map
+        .iter()
+        .any(|(k, _)| !b_map.iter().any(|(bk, _)| bk == k) && coeff(&c_map, *k) == 1);
+    let b_only_unit = b_map
+        .iter()
+        .any(|(k, _)| !a_map.iter().any(|(ak, _)| ak == k) && coeff(&c_map, *k) == 1);
+    let col_major = kind == GemmDevice::Cuda && !b_only_unit && a_only_unit;
+    if col_major {
+        std::mem::swap(&mut a_map, &mut b_map);
+        std::mem::swap(&mut a_off, &mut b_off);
+        std::mem::swap(&mut a_slot, &mut b_slot);
+        std::mem::swap(&mut a_dt, &mut b_dt);
     }
 
     // n is the only range B iterates that A does not, and C stores it
@@ -1371,6 +1391,11 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let (bias_slot, bias_off) = bias;
     let (scale_slot, scale_off) = scale;
     let (res_slot, res_off) = residual;
+    // The transposed view swaps the output axes: the epilogue adds along the
+    // original n, which is the new m. Only a plain GEMM is transposed.
+    if col_major && (bias_slot >= 0 || scale_slot >= 0 || res_slot >= 0) {
+        return reject("col-major-epilogue");
+    }
 
     // Batch axes: every range in C that is neither m nor n. Fold a contiguous
     // set into one strided batch axis.

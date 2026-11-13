@@ -4910,3 +4910,49 @@ does this for host-backend interior contractions
 (`realize_interior_contractions`, see PERFORMANCE.md "Host GEMM"), but it is not
 wired to the CUDA `HostGemm` seam; doing so is a scheduler change, not an
 extractor tweak, and was outside the scope of this pass.
+
+### 9.57 Column-major (transposed) outputs stay on cuBLAS (2026-11)
+
+The remaining GEMM-shaped rejections after §9.56 split into three groups; the
+largest one turned out not to be a staging problem at all. Diagnostic dumps
+(`AUTORUST_GEMM_STATS=all`) showed the backward weight-gradient stores with
+`c=[n:768, m:1]`: the store writes the product **through a transposed view** of
+the destination, so C has stride 1 on the *m* axis and `>= m` on the n axis.
+That is a plain column-major matrix, which cuBLAS computes natively — the
+descriptor just had to describe it.
+
+Changes:
+
+- `host_gemm::extract` detects a column-major C from the C stride map (unit
+  stride on the A-only output axis, `>= m` on the other) and swaps the operand
+  roles, so the row-major path describes the transposed product
+  `C^T = B^T A^T`. Slots, offsets, dtypes and both batch strides move with the
+  swap; m/n come out transposed. CUDA only.
+- A fused bias/scale/residual writes along the original `n`, which is the
+  transposed `m`, so `col-major-epilogue` stays on the generated kernel.
+
+Effect at ViT-B/16 f32 (RTX 3060, JIT replay, alternating builds, two processes
+each):
+
+| workload | before | after |
+|---|---:|---:|
+| `vit_train` bs 4 | 317.6-318.9 ms | **229.6-230.7 ms (-27.5%)** |
+| `vit_train` bs 1 | 99.9-100.6 ms | **80.4-81.6 ms (-19%)** |
+| `vit_infer` bs 4 | 40.3 ms | 40.0-41.1 ms (unchanged) |
+
+Descriptor coverage at bs 4: accepted 97 → **170**; `n-axis-ambiguous` 73 → 0.
+New families include `64x197x197x48`, `197x768x3072x4` and the second 12
+attention descriptors.
+
+Numerics: `tests/cublas.rs::cublas_handles_column_major_output` builds the
+scenario (`assign` into a transposed parameter view), asserts the dispatch and
+compares to the generated kernel (`< 1e-4`). End to end, the ViT training loss
+with `AUTORUST_CUBLAS=0` and `=all` matches over 3 steps to ~1e-3
+(`BENCH_LOSS=1 BENCH_SEED=7`, bs 4: 6.907755 / 2.1279 / 46.5276 / 57.6800 vs
+6.907755 / 2.1279 / 46.5279 / 57.6816). The bench gained `BENCH_LOSS` and
+`BENCH_SEED` knobs for exactly this kind of kernel-parity check.
+
+Remaining GEMM-shaped rejections (48 `b-index-not-affine`, 12
+`reduce-axes-not-contiguous`, 36 `a-operand-not-load`) are still the staging /
+per-slice-accumulation cases described in §9.56; none of them is a layout the
+descriptor model can describe.
