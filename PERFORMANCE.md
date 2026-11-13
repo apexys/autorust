@@ -129,7 +129,16 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
 
 - **CUDA → cuBLAS** (`cublasSgemm_v2` / `cublasGemmEx`, f32/f16/bf16,
   strided-batched, in-place epilogue kernel). Loaded dynamically
-  (`libcublas.so.12/13`).
+  (`libcublas.so.12/13`). A two-axis batch (attention's `(batch, head)`) is not
+  one strided axis when the head and batch strides do not collapse
+  (`head_stride * heads != batch_stride`), so CUDA issues one strided-batched
+  call per outer batch slice: the descriptor stays a library GEMM instead of
+  falling back to the generated kernel at bs > 1. `AUTORUST_GEMM_STATS=1` shows
+  the effect directly: ViT-B/16 f32 training at bs 4 accepts the two attention
+  families (`197x64x197x48`, `197x197x64x48`) and has no `batch-layout`
+  rejections, and the step drops **315.5 → 301.6 ms** on an RTX 3060 (5 runs,
+  2 warmups; medians of two processes). Weight-gradient reductions still carry
+  two reduce axes (batch and tokens) and keep the generated kernel.
 - **CL → CLBlast** (`CLBlastSgemm` / `CLBlastSgemmStridedBatched`, f32,
   row-major). Install `libclblast1` (`apt install libclblast1`); without it the
   OpenCL backend keeps using generated kernels.

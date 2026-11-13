@@ -154,6 +154,54 @@ fn cublas_matches_strided_batched_attention() {
 }
 
 #[test]
+fn cublas_handles_two_axis_batch_layout() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    // `b > 1` makes `(batch, head)` two non-collapsible axes: the head stride is
+    // `k` while the batch stride is `m*h*k`, so `head_stride * h != batch_stride`.
+    // This is the ViT training-batch layout the generated kernel used to keep.
+    let (b, h, m, k, n) = (2usize, 3usize, 37usize, 16usize, 37usize);
+    let qd = values(2, b * h * m * k);
+    let kd = values(9, b * h * n * k);
+    let run_case = |lib: bool| {
+        autorust::runtime::ops_cuda::CUBLAS_GEMMS.store(0, Ordering::Relaxed);
+        let out = run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let q = Tensor::from_slice(ctx, &qd, None, Some("CUDA"))
+                    .reshape([b as i64, m as i64, h as i64, k as i64])
+                    .transpose(1, 2);
+                let kk = Tensor::from_slice(ctx, &kd, None, Some("CUDA"))
+                    .reshape([b as i64, n as i64, h as i64, k as i64])
+                    .transpose(1, 2)
+                    .transpose(2, 3);
+                vec![q.dot(&kk)]
+            },
+        );
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLAS_GEMMS.load(Ordering::Relaxed),
+        )
+    };
+    let (want, calls_never) = run_case(false);
+    let (got, calls_always) = run_case(true);
+    assert_eq!(calls_never, 0, "Never policy must stay generated");
+    assert!(
+        calls_always > 0,
+        "two-axis (batch, head) layout must dispatch to cuBLAS"
+    );
+    let d = maxdiff(&want, &got);
+    assert!(d < 1e-3, "two-axis batch: cuBLAS diff {d:e}");
+}
+
+#[test]
 fn cublas_matches_bf16() {
     let _guard = LOCK.lock().unwrap();
     if !have_cuda_and_cublas() {

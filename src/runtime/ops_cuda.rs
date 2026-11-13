@@ -34,6 +34,9 @@ use crate::uop::ctx::UOpCtx;
 
 // ---------------- device inner ----------------
 
+/// Number of host GEMMs dispatched through cuBLAS (diagnostics/tests).
+pub static CUBLAS_GEMMS: AtomicUsize = AtomicUsize::new(0);
+
 thread_local! {
     /// SM version of the open device, as `major * 10 + minor` (86 for sm_86).
     /// `0` = not opened on this thread yet. Set by [`CudaInner::open`]; read by
@@ -386,24 +389,48 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
         let handle = handle
             .as_ref()
             .unwrap_or_else(|| panic!("TGERR: cuBLAS handle creation failed"));
-        let rc = unsafe {
-            crate::runtime::cublas::gemm(
-                handle,
-                &gemm,
-                b as *const std::ffi::c_void,
-                a as *const std::ffi::c_void,
-                c as *mut std::ffi::c_void,
-                g.batch,
-                g.b_b,
-                g.a_b,
-                g.c_b,
-            )
+        CUBLAS_GEMMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A two-axis `(batch, head)` layout has no single cuBLAS batch stride.
+        // cuBLAS can still run it as `outer` strided-batched calls over the inner
+        // (contiguous) axis: outer slices sit a constant stride apart, and the
+        // inner axis is uniformly strided, so every sub-call is a plain
+        // `cublasSgemmStridedBatched`. `inner == 1` is the folded path.
+        let inner = g.batch_inner.max(1);
+        let outer = if inner > 1 { g.batch / inner } else { 1 };
+        let (stride_a, stride_b) = if inner > 1 {
+            (g.b_bi, g.a_bi)
+        } else {
+            (g.b_b, g.a_b)
         };
-        if let Err(e) = rc {
-            panic!(
-                "TGERR: {e} (m={} n={} k={} batch={})",
-                g.m, g.n, g.k, g.batch
-            );
+        for o in 0..outer {
+            let (oa, ob, oc) = if inner > 1 {
+                (
+                    a.wrapping_add((o * g.a_b * isz) as u64),
+                    b.wrapping_add((o * g.b_b * isz) as u64),
+                    c.wrapping_add((o * inner * g.c_b * isz) as u64),
+                )
+            } else {
+                (a, b, c)
+            };
+            let rc = unsafe {
+                crate::runtime::cublas::gemm(
+                    handle,
+                    &gemm,
+                    ob as *const std::ffi::c_void,
+                    oa as *const std::ffi::c_void,
+                    oc as *mut std::ffi::c_void,
+                    if inner > 1 { inner } else { g.batch },
+                    stride_a,
+                    stride_b,
+                    g.c_b,
+                )
+            };
+            if let Err(e) = rc {
+                panic!(
+                    "TGERR: {e} (m={} n={} k={} batch={} inner={} outer={})",
+                    g.m, g.n, g.k, g.batch, inner, outer
+                );
+            }
         }
         let opt = |slot: i64, off: i64| -> Option<(u64, i64)> {
             if slot >= 0 {

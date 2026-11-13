@@ -1308,31 +1308,33 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // pair, so keep one slice counter and two strides per operand and let the
     // host split the counter (`p / inner`, `p % inner`) — exact by construction.
     batch.sort_by_key(|(_, _, _, _, c)| *c);
-    // Only the Vulkan executor implements the split counter (`a_bi`/`batch_inner`);
-    // cuBLAS, CLBlast and the CPU kernel read `a_b`/`b_b` alone, so for them a
-    // non-contiguous pair must keep the generated kernel.
-    let (batch_count, a_b, b_b, c_b, batch_inner, a_bi, b_bi) = if kind == GemmDevice::Vk
-        && batch.len() == 2
-        && batch[1].4 == batch[0].4.saturating_mul(batch[0].1)
-        && batch[0].1 > 1
-    {
-        let (_, e0, a0, b0, c0) = batch[0];
-        let (_, e1, a1, b1, _c1) = batch[1];
-        // C is contiguous over the pair, so its slice stride is the *inner* one.
-        (e0.saturating_mul(e1), a1, b1, c0, e0, a0, b0)
-    } else {
-        let (n, ab, bb, cb) = match fold_batches(&mut batch) {
-            Some(v) => v,
-            // The coverage cliff: `(batch, head)` is not a single contiguous
-            // strided slice, and only the Vulkan executor implements the split
-            // counter, so cuBLAS/CLBlast/CPU keep the generated kernel here.
-            None => {
-                note_detail(&format!("batch_axes={}", batch.len()));
-                return reject("batch-layout");
-            }
+    // Only Vulkan and CUDA execute the split counter (`a_bi`/`batch_inner`):
+    // VK's cooperative-matrix loop and CUDA's outer-loop of strided-batched
+    // cuBLAS calls. CLBlast and the CPU kernel read `a_b`/`b_b` alone, so for
+    // them a non-contiguous pair must keep the generated kernel.
+    let (batch_count, a_b, b_b, c_b, batch_inner, a_bi, b_bi) =
+        if matches!(kind, GemmDevice::Vk | GemmDevice::Cuda)
+            && batch.len() == 2
+            && batch[1].4 == batch[0].4.saturating_mul(batch[0].1)
+            && batch[0].1 > 1
+        {
+            let (_, e0, a0, b0, c0) = batch[0];
+            let (_, e1, a1, b1, _c1) = batch[1];
+            // C is contiguous over the pair, so its slice stride is the *inner* one.
+            (e0.saturating_mul(e1), a1, b1, c0, e0, a0, b0)
+        } else {
+            let (n, ab, bb, cb) = match fold_batches(&mut batch) {
+                Some(v) => v,
+                // The coverage cliff: `(batch, head)` is not a single contiguous
+                // strided slice, and only the Vulkan executor implements the split
+                // counter, so cuBLAS/CLBlast/CPU keep the generated kernel here.
+                None => {
+                    note_detail(&format!("batch_axes={}", batch.len()));
+                    return reject("batch-layout");
+                }
+            };
+            (n, ab, bb, cb, 1, ab, bb)
         };
-        (n, ab, bb, cb, 1, ab, bb)
-    };
 
     // Kernel-only measurements (2026-11, RTX 3060) show cuBLAS winning f32 at
     // the square and batch-8 projection shapes and tying/winning elsewhere;
