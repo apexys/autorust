@@ -989,14 +989,22 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     }
     let rsrcs = ctx.srcs(&reduce).to_vec();
     if rsrcs.len() != 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
+        // `srcs` is `[value, range, ...]`: a second range is a multi-axis
+        // reduction, not a second summand, and the two must not be conflated.
+        let desc: Vec<String> = rsrcs
+            .iter()
+            .map(|s| match ctx.op_of(s) {
+                Ops::Range => format!(
+                    "Range({:?})",
+                    crate::uop::range::AxisType::range_axis_type(ctx, s.clone())
+                ),
+                op => format!("{op:?}"),
+            })
+            .collect();
         note_detail(&format!(
-            "reduce_op={:?} srcs={} body={}",
+            "reduce_op={:?} srcs=[{}]",
             reduce_op(ctx, &reduce),
-            rsrcs.len(),
-            rsrcs
-                .first()
-                .map(|s| op_chain(ctx, s, 3))
-                .unwrap_or_default()
+            desc.join(",")
         ));
         return reject("unsupported-reduce");
     }
