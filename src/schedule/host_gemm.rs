@@ -306,12 +306,18 @@ pub fn host_gemm_of(ctx: &UOpCtx, sink: &UopId) -> Option<HostGemm> {
 //
 // The accounting is off by default and allocation-free on the rejection paths:
 // each attempt writes at most one `&'static str` into a `Cell`, and the maps are
-// only touched by the `extract` wrapper.
+// only touched by the `extract` wrapper. `AUTORUST_GEMM_STATS=2` (or `all`) also
+// records a short structural detail per rejection (`op=Add c_axes=4`), which is
+// what turns "85 unsupported-reduce" into "the backward reduce body is an Add of
+// two Muls" without a full AST dump.
 
 thread_local! {
     /// Rejection reason of the in-flight `extract` call. Only the last write
     /// matters because `extract` returns at the first failure.
     static LAST_REJECT: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+    /// `key=value` structural hints for the in-flight rejection.
+    static LAST_DETAIL: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
     static STATS: std::cell::RefCell<Stats> = std::cell::RefCell::new(Stats::default());
 }
 
@@ -320,6 +326,7 @@ struct Stats {
     attempts: u64,
     accepted: u64,
     rejects: std::collections::BTreeMap<&'static str, u64>,
+    details: std::collections::BTreeMap<String, u64>,
     families: std::collections::BTreeMap<String, u64>,
 }
 
@@ -333,8 +340,49 @@ fn stats_enabled() -> bool {
     })
 }
 
+/// Whether per-rejection structural details are recorded (`AUTORUST_GEMM_STATS`
+/// = `2`/`all`/`detail`). Implies [`stats_enabled`].
+fn detail_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        crate::helpers::env::get("AUTORUST_GEMM_STATS")
+            .map(|v| matches!(v.as_str(), "2" | "all" | "detail"))
+            .unwrap_or(false)
+    })
+}
+
 fn note_reject(reason: &'static str) {
     LAST_REJECT.with(|r| r.set(reason));
+}
+
+/// A depth-limited `Op<Op<Op` chain (no args), for a rejection detail.
+fn op_chain(ctx: &UOpCtx, u: &UopId, depth: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = u.clone();
+    for _ in 0..depth {
+        out.push(format!("{:?}", ctx.op_of(&cur)));
+        let srcs = ctx.srcs(&cur);
+        if srcs.is_empty() {
+            break;
+        }
+        cur = srcs[0].clone();
+    }
+    out.join("<")
+}
+
+/// Append a `key=value` structural hint to the in-flight rejection. No-op
+/// unless the detailed accounting is on.
+fn note_detail(part: &str) {
+    if !detail_enabled() {
+        return;
+    }
+    LAST_DETAIL.with(|d| {
+        let mut d = d.borrow_mut();
+        if !d.is_empty() {
+            d.push(' ');
+        }
+        d.push_str(part);
+    });
 }
 
 /// Reject an extraction with a reason (for the `AUTORUST_GEMM_STATS` table).
@@ -384,6 +432,12 @@ pub fn report_stats() {
             println!("{:<28} {:>7}", "reject reason", "count");
             for (reason, count) in s.rejects.iter() {
                 println!("{reason:<28} {count:>7}");
+            }
+        }
+        if !s.details.is_empty() {
+            println!("{:<44} {:>7}", "reject reason + detail", "count");
+            for (detail, count) in s.details.iter() {
+                println!("{detail:<44} {count:>7}");
             }
         }
     });
@@ -771,8 +825,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return extract_impl(ctx, store);
     }
     LAST_REJECT.with(|r| r.set("other"));
+    LAST_DETAIL.with(|d| d.borrow_mut().clear());
     let out = extract_impl(ctx, store);
     let reason = LAST_REJECT.with(|r| r.get());
+    let detail = LAST_DETAIL.with(|d| d.borrow().clone());
     STATS.with(|s| {
         let mut s = s.borrow_mut();
         s.attempts += 1;
@@ -783,7 +839,12 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     .entry(format!("{}x{}x{}x{}", g.m, g.n, g.k, g.batch))
                     .or_default() += 1;
             }
-            None => *s.rejects.entry(reason).or_default() += 1,
+            None => {
+                *s.rejects.entry(reason).or_default() += 1;
+                if !detail.is_empty() {
+                    *s.details.entry(format!("{reason} {detail}")).or_default() += 1;
+                }
+            }
         }
     });
     out
@@ -831,6 +892,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         affine(ctx, &index_offset(ctx, &dst_ptr)),
         "c-index-not-affine",
     )?;
+    note_detail(&format!("c_axes={}", c_map.len()));
     if c_map.len() < 2 {
         return reject("c-not-2d");
     }
@@ -917,6 +979,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     }
     value = unwrap(ctx, value);
     if ctx.op_of(&value) != Ops::Reduce {
+        note_detail(&format!("op={}", op_chain(ctx, &value, 3)));
         return reject("epilogue-not-reduce");
     }
     let reduce = value;
@@ -926,6 +989,15 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     }
     let rsrcs = ctx.srcs(&reduce).to_vec();
     if rsrcs.len() != 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
+        note_detail(&format!(
+            "reduce_op={:?} srcs={} body={}",
+            reduce_op(ctx, &reduce),
+            rsrcs.len(),
+            rsrcs
+                .first()
+                .map(|s| op_chain(ctx, s, 3))
+                .unwrap_or_default()
+        ));
         return reject("unsupported-reduce");
     }
     let red_k = or_reject(range_key(ctx, &rsrcs[1]), "reduce-not-range")?;
@@ -958,6 +1030,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 cur = ks[0].clone();
             }
         }
+        note_detail(&format!("op={}", op_chain(ctx, &mul, 3)));
         return reject("mul-not-plain");
     }
     let msrcs = ctx.srcs(&mul).to_vec();
@@ -976,6 +1049,10 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         && red_dt == crate::dtype::FLOAT32
         && (c_dt == crate::dtype::FLOAT32 || (kind == GemmDevice::Vk && c_dt == mul_dt));
     if (mul_dt != red_dt || mul_dt != c_dt) && !mixed_f16_f32 {
+        note_detail(&format!(
+            "mul_dt={:?} red_dt={:?} c_dt={:?}",
+            mul_dt, red_dt, c_dt
+        ));
         return reject("dtype-mismatch");
     }
     if !matches!(
@@ -1003,6 +1080,12 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     ctx.op_of(&unwrap(ctx, msrcs[0].clone()))
                 );
             }
+            if detail_enabled() {
+                note_detail(&format!(
+                    "op={:?}",
+                    ctx.op_of(&unwrap(ctx, msrcs[0].clone()))
+                ));
+            }
             return reject("a-operand-not-load");
         }
     };
@@ -1014,6 +1097,12 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     "[hg] reject: B operand is {:?}, not a load",
                     ctx.op_of(&unwrap(ctx, msrcs[1].clone()))
                 );
+            }
+            if detail_enabled() {
+                note_detail(&format!(
+                    "op={:?}",
+                    ctx.op_of(&unwrap(ctx, msrcs[1].clone()))
+                ));
             }
             return reject("b-operand-not-load");
         }
@@ -1065,6 +1154,12 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         .collect();
     n_candidates.dedup();
     if n_candidates.len() != 1 {
+        note_detail(&format!(
+            "n_candidates={} a_axes={} b_axes={}",
+            n_candidates.len(),
+            a_map.len(),
+            b_map.len()
+        ));
         return reject("n-axis-ambiguous");
     }
     let n_key = n_candidates[0];
@@ -1084,6 +1179,12 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     m_candidates.sort_by_key(|(_, c)| *c);
     if m_candidates.is_empty() || (m_candidates.len() > 1 && m_candidates[0].1 == m_candidates[1].1)
     {
+        note_detail(&format!(
+            "m_candidates={} a_axes={} b_axes={}",
+            m_candidates.len(),
+            a_map.len(),
+            b_map.len()
+        ));
         return reject("m-axis-ambiguous");
     }
     let m_key = m_candidates[0].0;
@@ -1225,7 +1326,10 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             // The coverage cliff: `(batch, head)` is not a single contiguous
             // strided slice, and only the Vulkan executor implements the split
             // counter, so cuBLAS/CLBlast/CPU keep the generated kernel here.
-            None => return reject("batch-layout"),
+            None => {
+                note_detail(&format!("batch_axes={}", batch.len()));
+                return reject("batch-layout");
+            }
         };
         (n, ab, bb, cb, 1, ab, bb)
     };

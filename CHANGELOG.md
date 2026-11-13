@@ -15,8 +15,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cliff is visible as data instead of hidden in wall time. CUDA `KPROF` rows now
   carry the same content key as the host rows, and cuBLAS calls print
   `KPROF host_gemm <secs> <layout-key>` with a stream-synchronized sample, so
-  library time is no longer invisible next to generated kernels. `BENCH_ITERS=0`
-  priming runs now report `cache primed; no timed samples` instead of `NaN`.
+  library time is no longer invisible next to generated kernels. Setting
+  `AUTORUST_GEMM_STATS=all` also records a structural hint per rejection
+  (`op=Add<Mul`, `c_axes=4 batch_axes=2`, `reduce_op=Some(Add) srcs=3`).
+  `BENCH_ITERS=0` priming runs now report `cache primed; no timed samples`
+  instead of `NaN`.
 - **Cooperative-matrix GEMM for the Vulkan backend (f16 in, f32 out).** The
   library-GEMM seam recognises an f16 matmul with an f32 accumulator
   (`AUTORUST_VK_GEMM`) and runs one `OpCooperativeMatrixMulAddKHR` kernel

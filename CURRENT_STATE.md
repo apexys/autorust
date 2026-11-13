@@ -4795,6 +4795,26 @@ This is the measurement the review asked for: descriptor coverage is reported
 alongside milliseconds, and the disappearing library calls are attributable to a
 named reason.
 
+`AUTORUST_GEMM_STATS=all` adds the structural detail, which resolves the bs-4
+rejections into distinct patterns:
+
+- `batch-layout c_axes=4 batch_axes=2` (24): the forward-attention
+  `(batch, head)` fold failure.
+- `unsupported-reduce reduce_op=Some(Add) srcs=3` (72): a reduction with a third
+  non-reduced source. The extractor only accepts a two-source `ADD` reduce, so
+  whatever add was hoisted into the reduce body at bs 4 keeps the generated
+  kernel. If that source's index ignores the reduce axis it is a bias and can
+  join the epilogue; if not, it is a genuine multi-term reduction and must stay
+  generated.
+- `n-axis-ambiguous n_candidates=0 a_axes=2 b_axes=3` (24): a 3-D output whose B
+  operand iterates three axes, so no pure output-column axis exists.
+- `b-index-not-affine c_axes=3` (24): a non-affine B index (moved/gathered view).
+- `epilogue-not-reduce op=Add<Add<Add` (12): a residual chain with no reduction.
+
+The three-source reduction is the largest single group (72) and is independent
+of the batch layout, so it is the first thing to attack; layout
+canonicalization then recovers the 24 forward descriptors.
+
 Consequence for future work: the HostGemm/annotation A/B in
 `PERFORMANCE_REVIEW.md` can be read directly from the profile tables, and a
 disappearing descriptor is now visible as a changed *reason count*, not merely
