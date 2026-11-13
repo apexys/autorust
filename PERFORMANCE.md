@@ -136,9 +136,10 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   falling back to the generated kernel at bs > 1. `AUTORUST_GEMM_STATS=1` shows
   the effect directly: ViT-B/16 f32 training at bs 4 accepts the two attention
   families (`197x64x197x48`, `197x197x64x48`) and has no `batch-layout`
-  rejections, and the step drops **315.5 → 301.6 ms** on an RTX 3060 (5 runs,
-  2 warmups; medians of two processes). Weight-gradient reductions still carry
-  two reduce axes (batch and tokens) and keep the generated kernel.
+  rejections, and the step drops **315.5 → 297.8/299.3 ms** on an RTX 3060
+  (medians of two processes, 2 warmups + 5 iterations; -5.4%). bs 1 training
+  and bs 4 inference are unchanged. Weight-gradient reductions still carry two
+  reduce axes (batch and tokens) and keep the generated kernel.
 - **CL → CLBlast** (`CLBlastSgemm` / `CLBlastSgemmStridedBatched`, f32,
   row-major). Install `libclblast1` (`apt install libclblast1`); without it the
   OpenCL backend keeps using generated kernels.

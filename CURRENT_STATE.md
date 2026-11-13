@@ -4831,7 +4831,7 @@ P0 item that fit without an architectural change:
   cuBLAS call per outer batch slice (the inner slices are uniformly strided), so
   `197x64x197x48` and `197x197x64x48` are dispatchable again. Measured,
   RTX 3060, `vit_train` f32 bs 4, JIT replay (2 warmups + 5 iterations, two
-  processes): **315.5 / 315.7 → 301.1 / 302.1 ms/step (-4.5%)**. bs 1 training
+  processes): **315.5 / 315.7 → 297.8 / 299.3 ms/step (-5.4%)**. bs 1 training
   and bs 4 inference are unchanged; the layout is covered by
   `tests/cublas.rs::cublas_handles_two_axis_batch_layout`, which also asserts the
   dispatch (a new `CUBLAS_GEMMS` counter), not just numerics.
