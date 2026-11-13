@@ -898,6 +898,10 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         return reject("not-a-store");
     }
     if !has_reduce(ctx, &ctx.srcs(&st0)[1].clone()) {
+        note_detail(&format!(
+            "op={}",
+            expr_sig(ctx, &ctx.srcs(&st0)[1].clone(), 3)
+        ));
         return reject("no-reduce");
     }
     let kind = or_reject(gemm_device(ctx, &store), "no-library-device")?;

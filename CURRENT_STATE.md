@@ -5059,3 +5059,33 @@ afterwards; `BufTable::prune` drops the parameter's binding, and the later
 `pin_buffer_ctx` would re-allocate from the parameter's `initial_data` — the
 first step's update silently disappeared. `assign_ctx` used to pin as a side
 effect; the deferred stores do it explicitly.
+
+### 9.60 Materialized im2col for convolution (2026-11)
+
+ResNet-18 inference on CUDA measured 378 ms against torch's 17 ms. The conv is
+the tinygrad expression `pad -> pool -> expand -> mul -> sum`: `pool` produces a
+sliding-window *view*, the `expand` duplicates it per output channel (a
+stride-0 view), and `mul/sum` lowers to a generated implicit-GEMM reduce.
+
+Change: permute the pooled view into `[bs, g, 1, oy, ox, cin, kh, kw]` **before**
+the channel expansion, make it contiguous when the patch buffer is at most 64M
+elements (256 MB), then expand. The copy is the im2col materialization; it is
+done once per group rather than once per output channel, and `contiguous` is
+differentiable, so training takes the same path.
+
+| workload (bs 32, RTX 3060) | before | after |
+|---|---:|---:|
+| ResNet-18 infer | 378.1 ms | **326.9 ms (-13.5%)** |
+| ResNet-18 train | 448.6 ms | **399.5 ms (-11%)** |
+
+The remaining conv kernels (`r_*` rows in KPROF) are still generated, not
+cuBLAS: `split_reduceop` fires first for any reduce with ratio >= 32768 and
+rewrites the contraction into two partial-reduction kernels, so by the time
+`split_store` calls `host_gemm::extract` the store is no longer a full
+contraction. Making the library-GEMM decision before the reduce split (or
+teaching `extract` the partial-reduce form) is the next step; a naive im2col
+alone cannot close the gap to cuDNN's implicit GEMM, and a full implicit-GEMM
+kernel is a much larger change.
+
+`tests/nn_conv.rs`, `tests/conv_tiling.rs` and the model goldens pass; the
+64M-element cap keeps the streaming path for very large convolutions.

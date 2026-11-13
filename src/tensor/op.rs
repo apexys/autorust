@@ -322,22 +322,42 @@ impl Tensor {
         sh1.extend(oyx.iter().cloned());
         sh1.extend(hw.iter().map(|&h| SVal::I(h as i128)));
         let x = x.reshape_ctx(ctx, sh1);
-        let mut sh2: Vec<SVal> = vec![
-            bs.clone(),
-            SVal::I(groups as i128),
-            cin.clone(),
-            SVal::I(rcout as i128),
-        ];
-        sh2.extend(oyx.iter().cloned());
-        sh2.extend(hw.iter().map(|&h| SVal::I(h as i128)));
-        let x = x.expand_ctx(ctx, sh2);
-
-        // .permute(0, 1, 3, 4..4+len(oyx), 2, 4+len(oyx)..)
+        // .permute(0, 1, 3, 4..4+len(oyx), 2, 4+len(oyx)..) with the group
+        // expansion applied *after* the permutation, so the im2col buffer below
+        // is materialized once per group instead of once per output channel.
         let mut perm: Vec<i64> = vec![0, 1, 3];
         perm.extend((0..hw_len).map(|i| (4 + i) as i64));
         perm.push(2);
         perm.extend((0..hw_len).map(|i| (4 + hw_len + i) as i64));
         let x = x.permute_ctx(ctx, &perm);
+
+        // The pooled view is a non-affine stride pattern, so the reduction below
+        // cannot be described as a GEMM and runs as a generated conv kernel.
+        // Materializing the patches turns `(x*w).sum(cin,*HW)` into a plain
+        // matmul `[bs*oy*ox, cin*kh*kw] @ [cin*kh*kw, cout]`, which the host
+        // GEMM recognizes (cuBLAS/CLBlast/packed CPU). One copy of M*K elements
+        // replaces the direct kernel; cap it so huge convs keep the streaming
+        // path instead of a multi-hundred-MB temporary.
+        let im2col_elems: i128 = bs
+            .clone()
+            .as_i128_or_panic()
+            .saturating_mul(groups as i128)
+            .saturating_mul(
+                oyx.iter()
+                    .map(|d| d.clone().as_i128_or_panic())
+                    .product::<i128>(),
+            )
+            .saturating_mul(cin.clone().as_i128_or_panic())
+            .saturating_mul(hw.iter().map(|&h| h as i128).product::<i128>());
+        let use_im2col = im2col_elems <= 64_000_000 && hw.iter().product::<i64>() > 1;
+        let x = if use_im2col { x.contiguous_ctx(ctx) } else { x };
+
+        // Expanded in the *permuted* order: [bs, g, rcout, oyx.., cin, HW..].
+        let mut sh2: Vec<SVal> = vec![bs.clone(), SVal::I(groups as i128), SVal::I(rcout as i128)];
+        sh2.extend(oyx.iter().cloned());
+        sh2.push(cin.clone());
+        sh2.extend(hw.iter().map(|&h| SVal::I(h as i128)));
+        let x = x.expand_ctx(ctx, sh2);
 
         // weight.reshape(1, groups, rcout, *[1]*len(oyx), cin, *HW)
         let mut wsh: Vec<SVal> = vec![SVal::I(1), SVal::I(groups as i128), SVal::I(rcout as i128)];

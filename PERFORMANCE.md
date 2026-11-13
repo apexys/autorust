@@ -853,7 +853,7 @@ ResNet-18 trains, the others infer (batch 32; UNet batch 4 at 64²).
 | workload | device | autorust | torch | ratio |
 |---|---|---:|---:|---:|
 | ResNet-18 infer | CPU | 1781.2 ms | **374.4 ms** | 4.8x |
-| ResNet-18 infer | CUDA | 373.6 ms | **17.1 ms** | 21.9x |
+| ResNet-18 infer | CUDA | 326.9 ms | **17.1 ms** | 19.1x |
 | ResNet-18 train | CPU | 1177.5 ms | **1110.8 ms** | 1.06x |
 | ResNet-18 train | CUDA | 441.8 ms | **64.2 ms** | 6.9x |
 | ResNet-50 infer | CPU | 531.9 ms | **306.1 ms** | 1.7x |

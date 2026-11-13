@@ -40,6 +40,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Materialized im2col for convolution.** The pooled patch view is now made
+  contiguous (once per group, before the output-channel expansion) when the
+  patch buffer is at most 64M elements, turning `(x*w).sum(cin,*kh,*kw)` into a
+  plain `[bs*oy*ox, cin*kh*kw] @ [..., cout]` matmul on a real buffer. ResNet-18
+  on CUDA: inference **378.1 → 326.9 ms (-13.5%)**, training **448.6 → 399.5 ms
+  (-11%)**. The contraction still runs as a generated reduce kernel where the
+  scheduler split the reduction (>32K reduction ratio); closing that needs the
+  host-GEMM decision to happen before `split_reduceop`, so the remaining gap to
+  torch is conv lowering, not patch materialization.
 - **Fused CUDA optimizer kernel.** Adam/AdamW/LAMB now run one 256-thread pass
   per parameter (`runtime::cuda_optim`) instead of four or five elementwise
   passes, updating the first/second moments and the parameter from one load of
