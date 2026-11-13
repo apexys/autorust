@@ -238,6 +238,8 @@ All of these are inert unless set; most accept any value.
 | `AUTORUST_CPU_GEMM_DEBUG` | CPU host-GEMM packing/tile decisions. |
 | `AUTORUST_MM_DEBUG` | Generated matmul tiling decisions and `host_gemm::extract` rejection reasons. |
 | `AUTORUST_OPTIM_KERNEL=0` | Disable the fused CUDA Adam/AdamW/LAMB update and use the tensor-graph path (the numeric reference, ~4x slower). |
+| `AUTORUST_COMPILE_WORKERS` | Worker pool size for `RUST`/`CC` subprocess kernel compilation (default `min(cpus, 8)`). `1` restores the serial path. |
+| `BEAM=n` | Per-kernel opt search over UPCAST/UNROLL/LOCAL/GROUPTOP/GROUP, cached on disk per `(kernel, width, device)`. Off by default; `n=1` measured -13.7% steady on `vit_infer` at a ~55 s one-off search, `n=2` -15.8% at ~82 s. |
 | `AUTORUST_DEVICE_VERBOSE` | Per-launch `RUST` backend lines (grid, args, buffer count). |
 | `AUTORUST_RUST_DUMP`, `AUTORUST_CC_DUMP` | Print the compiled Rust/C kernel source. |
 | `AUTORUST_ATTN_DEBUG` | One-time line describing the selected fused-attention kernel. |

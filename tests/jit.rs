@@ -2,7 +2,7 @@
 //! buffers. Verified here on INTERP with an in-place SGD step; the device-RNG
 //! replay path is covered by the CL run of `tests/rand.rs` plus the MNIST example.
 
-use autorust::engine::jit::Jit;
+use autorust::engine::jit::{Jit, StepPlan};
 use autorust::engine::session::Session;
 use autorust::tensor::{Ctx, Tensor};
 
@@ -208,4 +208,40 @@ fn jit_rng_continues_from_host_counter() {
         .collect();
     sess.jit(false);
     assert_eq!(a, b, "JIT must continue the host counter left by init");
+}
+
+/// `StepPlan` captures the step once, then replays it with freshly copied
+/// inputs: the step closure runs a single time and the replayed values match a
+/// direct eager computation.
+#[test]
+fn step_plan_captures_once_and_rebinds_inputs() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let w =
+        Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], None, None).reshape([3, 2]);
+    let x1 =
+        Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], None, None).reshape([2, 3]);
+    let x2 =
+        Tensor::from_slice(&ctx, &[-1.0f32, 0.5, 2.0, 3.0, -2.0, 1.0], None, None).reshape([2, 3]);
+    let calls = std::cell::Cell::new(0u32);
+    let mut plan = StepPlan::new();
+    let mut run = |x: &Tensor| {
+        plan.run(&ctx, &mut sess, std::slice::from_ref(x), |_c, _s, ins| {
+            calls.set(calls.get() + 1);
+            vec![ins[0].dot(&w)]
+        })
+    };
+    let a = run(&x1);
+    let b = run(&x2);
+    assert_eq!(calls.get(), 1, "the step must be captured once, not re-run");
+    assert!(plan.is_captured());
+    let got = b[0].to_list::<f32>(&mut sess);
+    let want = x2.dot(&w).to_list::<f32>(&mut sess);
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).abs() < 1e-5, "replay[{i}]: {g} != {w}");
+    }
+    // The captured output of the first run aliases the plan buffers, so read it
+    // through a fresh eager computation instead (the contract is documented).
+    let _ = a;
 }

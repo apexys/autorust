@@ -150,9 +150,7 @@ impl CudaInner {
         // Normal device selection already ran `probe_device`; if CUDA was
         // requested directly, pin a driver-compatible NVRTC here before the
         // compiler is used for real kernels.
-        if !crate::runtime::nvrtc::has_validated()
-            || !crate::runtime::nvrtc::supports_arch(&arch)
-        {
+        if !crate::runtime::nvrtc::has_validated() || !crate::runtime::nvrtc::supports_arch(&arch) {
             validate_nvrtc(&ctx, &arch)
                 .unwrap_or_else(|e| panic!("TGERR: NVRTC/PTX probe for {arch}: {e}"));
         }
@@ -769,6 +767,7 @@ impl CudaProgram {
     fn new(inner: Rc<CudaInner>, obj: &TinyElf) -> CudaProgram {
         // `obj.lib` holds the PTX text produced by `CudaCompiler.compile`.
         let ptx_src = String::from_utf8(obj.lib.clone()).expect("TGERR: CUDA elf lib not utf8");
+        let load_t = crate::engine::prof::enabled().then(std::time::Instant::now);
         let module = inner
             .ctx
             .load_module(Ptx::from_src(ptx_src))
@@ -776,6 +775,9 @@ impl CudaProgram {
         let func = module
             .load_function(&obj.name)
             .unwrap_or_else(|e| panic!("TGERR: cuModuleGetFunction({}): {e}", obj.name));
+        if let Some(t) = load_t {
+            crate::engine::prof::add("cuda.module_load", t.elapsed().as_secs_f64());
+        }
         if crate::helpers::env::get_os("AUTORUST_KERNEL_INFO").is_some() {
             use cudarc::driver::sys;
             let f = func.cu_function();

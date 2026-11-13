@@ -40,6 +40,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`StepPlan`: a reusable eager plan.** `engine::jit::StepPlan` captures a step
+  function once (binding its inputs to dedicated buffers) and replays it
+  afterwards, recapturing when the input shapes/dtypes change — the same
+  mechanism ONNX uses, now available for eager user loops. The step closure is
+  proven to run exactly once (`tests/jit.rs`).
+- **Parallel subprocess compilation for the `RUST`/`CC` backends.** Their
+  source caches are `Mutex`-guarded and `compile_batch` compiles kernels in a
+  bounded thread pool (`AUTORUST_COMPILE_WORKERS`, default `min(cpus, 8)`).
+  RUST `vit_infer` fresh-cache cold start 2654 → 2161 ms (-18.6%). CUDA's NVRTC
+  batch was already parallel.
 - **Materialized im2col for convolution.** The pooled patch view is now made
   contiguous (once per group, before the output-channel expansion) when the
   patch buffer is at most 64M elements, turning `(x*w).sum(cin,*kh,*kw)` into a

@@ -136,10 +136,16 @@ impl LruAllocator {
             .get_mut(&(size, Default::default()))
             .and_then(|v| v.pop())
         {
+            crate::engine::prof::count("alloc.reuse");
             return o;
         }
-        // OOM retry path: our host allocator only fails on OOM, same retry
-        self.inner._alloc(size)
+        crate::engine::prof::count("alloc.backend");
+        let t = crate::engine::prof::enabled().then(std::time::Instant::now);
+        let ret = self.inner._alloc(size);
+        if let Some(t) = t {
+            crate::engine::prof::add("alloc.backend.secs", t.elapsed().as_secs_f64());
+        }
+        ret
     }
 
     /// `LRUAllocator.free` — push to the cache (LRU on by default).

@@ -231,3 +231,145 @@ fn collect_buffers(ctx: &mut UOpCtx, sess: &mut Session, steps: &[JitStep]) -> V
     }
     out
 }
+
+/// A shape-specialized replay plan for one step function — the eager half of the
+/// "reusable plan" work, built on [`Jit`].
+///
+/// The first call copies the inputs into dedicated buffers, runs the step under
+/// capture and lowers it; later calls copy the new inputs in and replay the
+/// captured LINEARS, skipping graph construction and rangeify entirely. A
+/// changed input signature (shape/dtype) recaptures. Outputs alias the plan's
+/// buffers, so they are valid until the next call (the [`Jit`] contract).
+///
+/// ```ignore
+/// let mut plan = StepPlan::new();
+/// loop {
+///     let loss = plan.run(&ctx, &mut sess, &[x.clone()], |c, s, ins| {
+///         step(c, s, &ins[0])
+///     });
+///     // `loss` is the replayed output
+/// }
+/// ```
+pub struct StepPlan {
+    jit: Jit,
+    inputs: Vec<Tensor>,
+    sig: Vec<(Vec<i64>, crate::dtype::DTypeId)>,
+    enabled: bool,
+}
+
+impl StepPlan {
+    /// An empty plan; the first [`StepPlan::run`] captures.
+    pub fn new() -> Self {
+        StepPlan {
+            jit: Jit::new(),
+            inputs: Vec::new(),
+            sig: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    /// Disable the plan (runs `f` directly) and drop any capture. Used by tests
+    /// and as an escape hatch.
+    pub fn set_enabled(&mut self, on: bool) {
+        self.enabled = on;
+        if !on {
+            self.reset();
+        }
+    }
+
+    /// Whether a plan is captured and can be replayed.
+    pub fn is_captured(&self) -> bool {
+        self.jit.is_captured()
+    }
+
+    /// Drop the capture; the next run re-captures.
+    pub fn reset(&mut self) {
+        self.jit.reset();
+        self.inputs.clear();
+        self.sig.clear();
+    }
+
+    /// Run the step through the plan. `f` receives the plan's own input buffers
+    /// (filled from `inputs`) and must return the step's outputs.
+    pub fn run<F>(&mut self, ctx: &Ctx, sess: &mut Session, inputs: &[Tensor], f: F) -> Vec<Tensor>
+    where
+        F: Fn(&Ctx, &mut Session, &[Tensor]) -> Vec<Tensor>,
+    {
+        if !self.enabled {
+            return f(ctx, sess, inputs);
+        }
+        let sig = signature(ctx, inputs);
+        if self.jit.is_captured() && self.sig == sig {
+            for (dst, src) in self.inputs.iter().zip(inputs) {
+                dst.assign(sess, src);
+            }
+            let mut c = ctx.borrow_mut();
+            return self.jit.replay(&mut c, sess);
+        }
+
+        // (Re)capture: bind the inputs to dedicated buffers, then run once.
+        self.reset();
+        let mut metas = Vec::with_capacity(inputs.len());
+        {
+            let mut c = ctx.borrow_mut();
+            for t in inputs {
+                let shape: Vec<i64> = t
+                    .shape_ctx(&mut c)
+                    .into_vec()
+                    .iter()
+                    .map(|d| d.clone().as_i64().unwrap_or(-1))
+                    .collect();
+                let dt = t.dtype_ctx(&c);
+                let dev = match crate::schedule::indexing::device_of(&mut c, t.uop().clone()) {
+                    Some(crate::uop::arg::DeviceSpec::Single(s)) => Some(s),
+                    Some(crate::uop::arg::DeviceSpec::Multi(v)) => v.first().cloned(),
+                    None => None,
+                };
+                metas.push((shape, dt, dev));
+            }
+        }
+        let bound: Vec<Tensor> = metas
+            .iter()
+            .map(|(shape, dt, dev)| {
+                Tensor::zeros_param(ctx, shape.clone(), Some(*dt), dev.as_deref())
+            })
+            .collect();
+        {
+            let mut c = ctx.borrow_mut();
+            for (dst, src) in bound.iter().zip(inputs) {
+                dst.assign_ctx(&mut c, sess, src);
+            }
+        }
+        sess.begin_capture();
+        let rets = f(ctx, sess, &bound);
+        let mut c = ctx.borrow_mut();
+        Tensor::realize_many(&mut c, sess, rets.iter());
+        let planned = sess.end_capture();
+        self.jit.lower_capture(&mut c, sess, planned, rets.clone());
+        self.inputs = bound;
+        self.sig = sig;
+        rets
+    }
+}
+
+impl Default for StepPlan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn signature(ctx: &Ctx, inputs: &[Tensor]) -> Vec<(Vec<i64>, crate::dtype::DTypeId)> {
+    let mut c = ctx.borrow_mut();
+    inputs
+        .iter()
+        .map(|t| {
+            let shape: Vec<i64> = t
+                .shape_ctx(&mut c)
+                .into_vec()
+                .iter()
+                .map(|d| d.clone().as_i64().unwrap_or(-1))
+                .collect();
+            (shape, t.dtype_ctx(&c))
+        })
+        .collect()
+}

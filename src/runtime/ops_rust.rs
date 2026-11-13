@@ -200,14 +200,14 @@ pub fn available() -> bool {
 
 /// `RUST` compiler: Rust source → cdylib bytes via `rustc`.
 pub struct RustcCompiler {
-    cache: RefCell<HashMap<String, Vec<u8>>>,
+    cache: std::sync::Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl RustcCompiler {
     /// A compiler with an empty in-memory cache.
     pub fn new() -> RustcCompiler {
         RustcCompiler {
-            cache: RefCell::new(HashMap::new()),
+            cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -276,7 +276,7 @@ impl Comp for RustcCompiler {
     }
 
     fn compile_cached(&self, src: &str) -> Vec<u8> {
-        if let Some(lib) = self.cache.borrow().get(src) {
+        if let Some(lib) = self.cache.lock().unwrap().get(src) {
             return lib.clone();
         }
         let key = cache_key(src);
@@ -287,7 +287,10 @@ impl Comp for RustcCompiler {
             && let Ok(lib) = std::fs::read(&path)
         {
             if dylib_magic_ok(&lib) {
-                self.cache.borrow_mut().insert(src.to_string(), lib.clone());
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .insert(src.to_string(), lib.clone());
                 return lib;
             }
             // Corrupt cache entry (interrupted write / full disk): recompile.
@@ -304,8 +307,49 @@ impl Comp for RustcCompiler {
                 let _ = std::fs::rename(&tmp, &path);
             }
         }
-        self.cache.borrow_mut().insert(src.to_string(), lib.clone());
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(src.to_string(), lib.clone());
         lib
+    }
+
+    /// Compile several kernels concurrently. Each rustc/cc invocation is an
+    /// independent process, so a small scoped pool cuts cold start by roughly
+    /// the worker count without touching the arena.
+    fn compile_batch(&self, srcs: &[String]) -> Vec<Vec<u8>> {
+        let workers = crate::helpers::env::get("AUTORUST_COMPILE_WORKERS")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    .min(8)
+            })
+            .min(srcs.len());
+        if workers <= 1 {
+            return srcs.iter().map(|s| self.compile_cached(s)).collect();
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let out: Vec<std::sync::OnceLock<Vec<u8>>> = (0..srcs.len())
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= srcs.len() {
+                            break;
+                        }
+                        let _ = out[i].set(self.compile_cached(&srcs[i]));
+                    }
+                });
+            }
+        });
+        out.into_iter()
+            .map(|c| c.into_inner().expect("TGERR: compile_batch slot"))
+            .collect()
     }
 }
 

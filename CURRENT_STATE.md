@@ -5119,3 +5119,61 @@ handoff or independent worker arenas followed by serial re-interning, exactly
 as the review describes. That is a cross-cutting refactor of `uop::ctx` and
 `codegen`, out of proportion to the cold-start share (~0.5 s of a 1.2 s first
 call, and zero on replay/ONNX after the plan capture in §9.58).
+
+### 9.62 PROPOSED_OPTIMIZATIONS.md: what was measured and landed (2026-11)
+
+Ten proposals were evaluated; four produced code, two produced decisions backed
+by numbers, and four were judged out of scope.
+
+1. **Small per-kernel opt search — measured, not landed.** The existing search
+   (`BEAM=n`, `codegen::opt_search`) is exactly the parameter search: width 1
+   times the full ~100-action set on `vit_infer` bs 4 took **38.55 → 33.25 ms
+   (-13.7%)** with a 54.8 s cold search; width 2 gave **32.35 ms (-15.8%)** at
+   82 s. The disk cache makes later processes pay the normal ~0.6 s cold. A
+   bounded 24-action `(LOCAL, UPCAST)` subset only reached **37.7 ms (-2.3%)**
+   (32.6 s cold) because the winning sequences use the wider arg/axis set
+   (`UPCAST:0:3`, `UNROLL`, `GROUPTOP`), so it was reverted: a search small
+   enough for a default is too small to pay. BEAM stays opt-in, as the review
+   recommended, and the numbers are recorded for users who can amortise it.
+2. **BEAM width 2-4 — measured (same row above).** Width 2 is the best steady
+   result for ViT inference; the cold cost is the blocker, not the width.
+3. **Library GEMM before `split_reduceop` — attempted, disproved.** Disabling
+   the reduce split (`AUTORUST_NO_REDUCE_SPLIT=1`) changed ResNet-18 inference
+   by nothing (325.99 → 326.80 ms) and the extraction-attempt count stayed at
+   38 with the same reject reasons, so the split is not the conv blocker. The
+   conv stores are not reaching `extract` as contractions at all; the remaining
+   work is in how the conv graph is split into kernels, not in host-GEMM
+   eligibility.
+4. **Eager plan cache — landed.** `engine::jit::StepPlan` is the session-level
+   `plan(step_fn)` API: the first call binds inputs to dedicated buffers,
+   captures and lowers; later calls copy the inputs in and replay. A changed
+   shape/dtype recaptures. `tests/jit.rs::step_plan_captures_once_and_rebinds_inputs`
+   proves the step closure runs exactly once and the replayed values match an
+   eager computation. The same machinery is what ONNX uses (§9.58), where the
+   measured win was 11.7 → 1.7 ms.
+5. **Cubin cache — measured, skipped.** `cuda.module_load` (new profile counter)
+   is **1.9 ms for 15 modules (0.126 ms each)** on a warm-PTX `vit_infer` cold
+   start of 595 ms: 0.3%. A driver-ready cubin cache cannot move the number.
+6. **SDPA/FFN epilogue fusion — skipped.** It requires changing kernel-fusion
+   decisions around the HostGemm split and a multiset gate; the risk of hiding a
+   library GEMM is exactly what the review warns about, and the remaining
+   elementwise share was not re-measured after the optimizer/conv changes.
+7. **Allocator at larger batches — measured, no bottleneck.** New counters:
+   every buffer allocation is a backend call (`alloc.backend` ~600/step; the
+   free-list never hits), but the cost is **0.010 ms each, ~6 ms/step** at
+   `vit_train` bs 4 (1.15 s of GPU time) and bs 1 is the same — a few percent,
+   not a capacity or allocator bottleneck.
+8. **RUST/CC `compile_batch` — landed.** Both subprocess compilers moved their
+   source cache to `Mutex` and compile in a bounded scoped pool
+   (`AUTORUST_COMPILE_WORKERS`, default `min(cpus, 8)`). RUST `vit_infer` bs 4
+   fresh-cache cold start: **2654 → 2161 ms (-18.6%)**. CUDA's NVRTC batch was
+   already parallel.
+9. **CUDA graphs for LLM decode — skipped.** Requires replay-safe buffer
+   lifetimes/scalar updates and a new capture/replay seam; the optimizer that
+   motivated part of it is now one kernel per parameter, leaving decode as the
+   only consumer. Large, deferred.
+10. **Bufferize/substitution rewrite — skipped.** The measured hotspot is eager
+    ViT (363 ms/step, 8.5M visits); `StepPlan` (item 4) removes the eager
+    scheduling for opted-in users, so the remaining value is for unplanned eager
+    and ONNX-without-a-plan. The rewrite needs a shared traversal and the
+    kernel-multiset gate, and was not attempted this pass.
