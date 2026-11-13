@@ -41,7 +41,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `KPROF host_gemm <secs> <layout-key>` with a stream-synchronized sample, so
   library time is no longer invisible next to generated kernels. Setting
   `AUTORUST_GEMM_STATS=all` also records a structural hint per rejection
-  (`op=Add<Mul`, `c_axes=4 batch_axes=2`, `reduce_op=Some(Add) srcs=3`).
+  (`op=Add<Mul`, `c_axes=4 batch_axes=2`, `reduce_op=Some(Add) srcs=3`), and
+  `b-index-not-affine`/`n-axis-ambiguous` print the offending index expression
+  and the `a`/`b`/`c` stride maps, which is how the remaining groups were
+  classified as "needs staging" rather than "needs more parsing".
   `BENCH_ITERS=0` priming runs now report `cache primed; no timed samples`
   instead of `NaN`.
 - **Cooperative-matrix GEMM for the Vulkan backend (f16 in, f32 out).** The

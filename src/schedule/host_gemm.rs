@@ -370,6 +370,35 @@ fn op_chain(ctx: &UOpCtx, u: &UopId, depth: usize) -> String {
     out.join("<")
 }
 
+/// Compact rendering of an index expression (`Add(Const(4),IDiv(Range(1),Const(3)))`),
+/// for the `AUTORUST_GEMM_STATS=all` rejection detail. Depth- and width-limited.
+fn expr_sig(ctx: &UOpCtx, u: &UopId, depth: usize) -> String {
+    if depth == 0 {
+        return "...".into();
+    }
+    if let Some(c) = const_int(ctx, u) {
+        return c.to_string();
+    }
+    if let Some(k) = range_key(ctx, u) {
+        return format!("r{}", k.0);
+    }
+    let op = format!("{:?}", ctx.op_of(u));
+    let arg = match ctx.arg_of(u) {
+        Arg::Int(i) => format!(":{i}"),
+        _ => String::new(),
+    };
+    let srcs = ctx.srcs(u);
+    if srcs.is_empty() {
+        return format!("{op}{arg}");
+    }
+    let kids: Vec<String> = srcs
+        .iter()
+        .take(4)
+        .map(|s| expr_sig(ctx, s, depth - 1))
+        .collect();
+    format!("{op}{arg}({})", kids.join(","))
+}
+
 /// Append a `key=value` structural hint to the in-flight rejection. No-op
 /// unless the detailed accounting is on.
 fn note_detail(part: &str) {
@@ -1015,7 +1044,13 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let mut red_axes: Vec<RKey> = Vec::new();
     let mut red_exts: Vec<i64> = Vec::new();
     for r in &rsrcs[1..] {
-        let key = or_reject(range_key(ctx, r), "reduce-not-range")?;
+        let key = match range_key(ctx, r) {
+            Some(k) => k,
+            None => {
+                note_detail(&format!("src={}", expr_sig(ctx, r, 3)));
+                return reject("reduce-not-range");
+            }
+        };
         let ext = or_reject(range_extent(ctx, &st, key), "symbolic-extent")?;
         if ext > 1 {
             red_axes.push(key);
@@ -1106,8 +1141,9 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             }
             if detail_enabled() {
                 note_detail(&format!(
-                    "op={:?}",
-                    ctx.op_of(&unwrap(ctx, msrcs[0].clone()))
+                    "op={:?} expr={}",
+                    ctx.op_of(&unwrap(ctx, msrcs[0].clone())),
+                    expr_sig(ctx, &msrcs[0], 4)
                 ));
             }
             return reject("a-operand-not-load");
@@ -1134,14 +1170,18 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if crate::helpers::env::get("VK_TRACE").is_some() {
         eprintln!("[vk] ext: a-affine");
     }
-    let (a_off0, a_map) = or_reject(
-        affine(ctx, &index_offset(ctx, &a_idx)),
-        "a-index-not-affine",
-    )?;
-    let (b_off0, b_map) = or_reject(
-        affine(ctx, &index_offset(ctx, &b_idx)),
-        "b-index-not-affine",
-    )?;
+    let a_index = index_offset(ctx, &a_idx);
+    let a_affine = affine(ctx, &a_index);
+    if a_affine.is_none() {
+        note_detail(&format!("idx={}", expr_sig(ctx, &a_index, 6)));
+    }
+    let (a_off0, a_map) = or_reject(a_affine, "a-index-not-affine")?;
+    let b_index = index_offset(ctx, &b_idx);
+    let b_affine = affine(ctx, &b_index);
+    if b_affine.is_none() {
+        note_detail(&format!("idx={}", expr_sig(ctx, &b_index, 6)));
+    }
+    let (b_off0, b_map) = or_reject(b_affine, "b-index-not-affine")?;
     let (a_slot, a_dt, a_base) = or_reject(base_of(ctx, &a_idx), "a-not-param")?;
     let a_off = a_off0 + a_base;
     let (b_slot, b_dt, b_base) = or_reject(base_of(ctx, &b_idx), "b-not-param")?;
@@ -1178,11 +1218,18 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         .collect();
     n_candidates.dedup();
     if n_candidates.len() != 1 {
+        let fmt_map = |m: &[(RKey, i64)]| -> String {
+            m.iter()
+                .map(|(k, v)| format!("{}:{v}", k.0))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         note_detail(&format!(
-            "n_candidates={} a_axes={} b_axes={}",
+            "n_candidates={} a=[{}] b=[{}] c=[{}]",
             n_candidates.len(),
-            a_map.len(),
-            b_map.len()
+            fmt_map(&a_map),
+            fmt_map(&b_map),
+            fmt_map(&c_map)
         ));
         return reject("n-axis-ambiguous");
     }

@@ -4873,3 +4873,40 @@ P0 item that fit without an architectural change:
   axis sits between batch and token in B. Those need per-slice accumulation
   (`beta = 1`) — a kernel feature, not an extractor change — so they stay
   generated for now.
+
+### 9.56 The remaining HostGemm rejections need staging, not more parsing (2026-11)
+
+After the two-axis batch split (§9.55) the ViT training bs-4 dispatch table still
+rejects 2,189 extraction attempts. `AUTORUST_GEMM_STATS=all` now renders the
+offending expressions (`expr_sig`), which classifies the remaining GEMM-shaped
+groups:
+
+- **`b-index-not-affine` (48)**: the operand index is
+  `(r3//64)*12608 + r3%64 + r1*64 + r0*151296`. That is a `[b,h,t,d]` tensor
+  addressed as `(b, h, t, d)` where the scheduler merged `(h,d)` into one range
+  `r3` and then split it again by 64. Running `pm_split_ranges` over the store
+  for analysis only (the same rewrite the codegen pipeline already performs) does
+  make the index affine and removes all 48 rejections, but the kernels then fail
+  at `n-axis-ambiguous` with `c=[3:65, 2:768]`: the **destination** store has no
+  unit-stride axis, i.e. it writes a strided sub-tile. That is not a matrix
+  operand for cuBLAS/CLBlast, so the split rewrite was reverted (it only moved
+  the rejection).
+- **`a-operand-not-load` (36)**: `expr=Add(Load(A), Mul(Load(B), -1))`, a
+  computed operand `(x - y) @ W`. `(x-y)@W` is not one GEMM.
+- **`b-operand-not-load` (26)**: `Where` (masked operand) and `Add`.
+- **`n-axis-ambiguous` (73)**: 4-D outputs (`a_axes=4 b_axes=4`) or B-only axes
+  whose C stride is not 1.
+- **`reduce-axes-not-contiguous` (12)**: `k_axes=4x197 a=[151296,768]
+  b=[151296,1]` — the N axis sits between batch and token in B, so the pair is a
+  sum of per-slice GEMMs (`beta = 1`), not one contraction.
+- **`mul-not-plain` (85), `epilogue-not-reduce` (62)**: the reduce body is a
+  bare `INDEX` (`sum(x, axis)`) or the store is a normalization (`Sqrt(Add(Mul))`)
+  — not a contraction at all.
+
+Conclusion: no extractor change can recover these without changing semantics.
+The next lever is **staging**: materialise the non-affine operand (or the strided
+destination) as a contiguous matrix and run the GEMM on it. The scheduler already
+does this for host-backend interior contractions
+(`realize_interior_contractions`, see PERFORMANCE.md "Host GEMM"), but it is not
+wired to the CUDA `HostGemm` seam; doing so is a scheduler change, not an
+extractor tweak, and was outside the scope of this pass.
