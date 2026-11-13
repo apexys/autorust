@@ -70,7 +70,11 @@ def main():
     )
 
     for workload, title, unit in WORKLOADS:
-        subset = [r for r in rows if r.get("workload") == workload]
+        subset = [
+            r
+            for r in rows
+            if r.get("workload") == workload and not r.get("cold_only")
+        ]
         if not subset:
             continue
         lines += ["", f"## {title}", ""]

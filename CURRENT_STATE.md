@@ -4739,3 +4739,63 @@ are f32, so `coopmat::eligible` only accepts a descriptor whose `c_dtype` is
 f32 — a plain 16-bit `dot` (which accumulates in 16 bits) never takes it. That is
 the conservative choice; the CUDA path's `USE_TC`-gated f32 accumulation for bf16
 is the more aggressive alternative if the bf16 rows are to improve.
+
+### 9.54 HostGemm dispatch accounting and keyed CUDA KPROF rows (2026-11)
+
+The profiling surface had two blind spots that made the ViT batch-size
+regression look like a generic kernel problem:
+
+1. CUDA library GEMMs (`host_exec` -> cuBLAS) produced no `KPROF` row at all:
+   `exec_kernel` gated host-op timing to `RUST`/`CC`/`RAYON`/`INTERP`/`CPU`, and
+   `kx.host` measured the asynchronous submission (launch overhead), not the
+   GEMM. A generated-kernel table therefore silently omitted cuBLAS time and
+   attributed the surrounding work to whatever kernels remained.
+2. CUDA `KPROF` rows carried only the kernel name. The name encodes the loop
+   structure, so distinct programs that share a name were merged, and the
+   program key that `CompiledProg`/the runtime cache use was only printed by
+   host-op rows.
+
+Changes (instrumentation only; no codegen or scheduling behaviour):
+
+- `schedule::host_gemm::extract` is now a thin wrapper over `extract_impl` that
+  records, under `AUTORUST_GEMM_STATS=1`, every attempt: accepted
+  `(m,n,k,batch)` families and a coarse rejection reason (`batch-layout`,
+  `epilogue-*`, `divisibility`, `library-not-ready`, ...). The table prints from
+  `engine::prof::report`, so `bench/autorust` and the examples emit it with no
+  extra plumbing. Off by default; the rejection paths only write one
+  `&'static str` into a `Cell`.
+- CUDA `KPROF` rows now end with `elf_key` (`<name> <secs> <016x>`), matching
+  the host rows, so rows aggregate by program content rather than by a name that
+  collides.
+- cuBLAS calls print `KPROF host_gemm <secs> <key>`, where the key is the
+  layout family (`m,n,k,batch`, strides, epilogue presence, dtypes) and the
+  sample is bracketed by stream synchronizations, so it includes the fused
+  epilogue kernel. The first row in a process also contains module/handle
+  initialization; treat it as cold.
+- `prof::add` timings are labelled `total`/`per call` and `prof::acc`
+  accumulators (`subst.nodes`, `codegen.ast_nodes`) print as raw totals instead
+  of being mistaken for seconds. The header notes that phases are inclusive.
+- `BENCH_ITERS=0` (the cache-priming mode in `bench/run.py`) now prints `cache
+  primed; no timed samples` and emits `null` statistics with `cold_only: true`
+  instead of `NaN`; `bench/report.py` skips those rows.
+
+Worked example (`DEFAULT_DEVICE=CUDA AUTORUST_GEMM_STATS=1
+BENCH_WORKLOAD=vit_train BENCH_JIT=1 BENCH_ITERS=0`, RTX 3060, debug build):
+
+- bs 1 accepts the attention and backward families
+  (`197x64x197x12`, `197x197x64x12`, `768x768x197x1`, `768x3072x197x1`,
+  `3072x768x197x1`) plus the projections/FFN; 107 accepted of 2,407 attempts.
+- bs 4 accepts **only** `197x768x768x4`, `197x3072x768x4` and the classifier,
+  and records 24 `batch-layout` rejections: the two-axis `(batch, head)` fold
+  failure from `PERFORMANCE_REVIEW.md` Finding 4, now a counter instead of an
+  inference from generated-kernel timings. Accepted descriptors drop from 107
+  to 50.
+
+This is the measurement the review asked for: descriptor coverage is reported
+alongside milliseconds, and the disappearing library calls are attributable to a
+named reason.
+
+Consequence for future work: the HostGemm/annotation A/B in
+`PERFORMANCE_REVIEW.md` can be read directly from the profile tables, and a
+disappearing descriptor is now visible as a changed *reason count*, not merely
+as slower generated kernels.

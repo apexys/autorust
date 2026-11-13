@@ -20,6 +20,9 @@ use std::sync::OnceLock;
 struct Entry {
     count: u64,
     total: f64,
+    /// `false` for an accumulator (`acc`), whose total is a raw quantity (node
+    /// visits) rather than seconds.
+    is_time: bool,
 }
 
 thread_local! {
@@ -60,6 +63,21 @@ pub fn add(name: &'static str, secs: f64) {
         let ent = m.entry(name).or_default();
         ent.count += 1;
         ent.total += secs;
+        ent.is_time = true;
+    });
+}
+
+/// Accumulate an integer-valued quantity under `name` (e.g. nodes visited or
+/// AST size). The total is printed raw, not as seconds.
+pub fn acc(name: &'static str, value: f64) {
+    if !enabled() {
+        return;
+    }
+    ENTRIES.with(|e| {
+        let mut m = e.borrow_mut();
+        let ent = m.entry(name).or_default();
+        ent.count += 1;
+        ent.total += value;
     });
 }
 
@@ -75,9 +93,11 @@ pub fn count(name: &'static str) {
 }
 
 /// Clear all accumulators (e.g. after a JIT capture, so the reported table
-/// describes steady-state replay only).
+/// describes steady-state replay only). This also clears the opt-in HostGemm
+/// dispatch accounting, so it describes the same region.
 pub fn reset() {
     ENTRIES.with(|e| e.borrow_mut().clear());
+    crate::schedule::host_gemm::reset_stats();
 }
 
 /// Current count for `name` (0 when profiling is off).
@@ -85,29 +105,41 @@ pub fn get(name: &'static str) -> u64 {
     ENTRIES.with(|e| e.borrow().get(name).map(|x| x.count).unwrap_or(0))
 }
 
-/// Print the accumulated table (no-op when disabled or empty).
+/// Print the accumulated table (no-op when disabled or empty), then the opt-in
+/// HostGemm dispatch accounting (`AUTORUST_GEMM_STATS`), which is useful on its
+/// own and does not require `AUTORUST_PROF`.
+///
+/// Timings are inclusive: a phase may contain another (e.g. `realize.schedule`
+/// contains `rng.*`), so do not sum the table. Counters (`calls` only) have no
+/// time and print `-` under the timing columns.
 pub fn report() {
-    if !enabled() {
-        return;
-    }
-    ENTRIES.with(|e| {
-        let m = e.borrow();
-        if m.is_empty() {
-            return;
-        }
-        println!("--- autorust profile ---");
-        println!(
-            "{:<24} {:>7} {:>12} {:>12}",
-            "phase", "calls", "total (s)", "per call"
-        );
-        for (name, ent) in m.iter() {
+    if enabled() {
+        ENTRIES.with(|e| {
+            let m = e.borrow();
+            if m.is_empty() {
+                return;
+            }
+            println!("--- autorust profile (inclusive; phases nest) ---");
             println!(
-                "{:<24} {:>7} {:>12.4} {:>12}",
-                name,
-                ent.count,
-                ent.total,
-                format!("{:.3} ms", ent.total / ent.count as f64 * 1e3)
+                "{:<24} {:>7} {:>12} {:>12}",
+                "phase", "calls", "total", "per call"
             );
-        }
-    });
+            for (name, ent) in m.iter() {
+                let (total, per_call) = if ent.is_time {
+                    (
+                        format!("{:.4} s", ent.total),
+                        format!("{:.3} ms", ent.total / ent.count as f64 * 1e3),
+                    )
+                } else {
+                    // A counter/accumulator (`count`/`acc`), not a duration.
+                    (format!("{:.0}", ent.total), "-".to_string())
+                };
+                println!(
+                    "{:<24} {:>7} {:>12} {:>12}",
+                    name, ent.count, total, per_call
+                );
+            }
+        });
+    }
+    crate::schedule::host_gemm::report_stats();
 }

@@ -333,6 +333,14 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
         use crate::schedule::host_gemm::HostGemm;
         let g = HostGemm::from_arg(&crate::uop::arg::Arg::Data(desc.clone()))
             .unwrap_or_else(|| panic!("TGERR: bad HostGemm descriptor"));
+        // cuBLAS is asynchronous, so the realize loop's host timer would measure
+        // only the submission. Under KPROF the stream is synchronized around the
+        // call (like generated launches) so the row carries GPU time; the
+        // epilogue kernel is inside the same bracket.
+        let trace = kprof_enabled().then(|| {
+            self.synchronize();
+            std::time::Instant::now()
+        });
         let elem = match g.dtype {
             crate::dtype::FLOAT32 => crate::runtime::cublas::Elem::F32,
             crate::dtype::FLOAT16 => crate::runtime::cublas::Elem::F16,
@@ -416,6 +424,16 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             if g.batch > 1 { g.c_b } else { 0 },
             g.c_off,
         );
+        if let Some(t) = trace {
+            self.synchronize();
+            // Keyed by the shape/layout family, not the SSA kernel name: every
+            // attention descriptor of one shape aggregates into one row.
+            eprintln!(
+                "KPROF\thost_gemm\t{:.6}\t{:016x}",
+                t.elapsed().as_secs_f64(),
+                crate::schedule::host_gemm::trace_key(&g)
+            );
+        }
     }
 
     fn synchronize(&self) {
@@ -707,6 +725,9 @@ pub struct CudaProgram {
     func: CudaFunction,
     name: String,
     signature: Vec<(i64, DTypeId)>,
+    /// Content hash of the compiled artifact (same key the runtime cache uses).
+    /// Printed by KPROF so two kernels that share a name can be told apart.
+    key: u64,
 }
 
 /// `AUTORUST_KPROF=1` synchronizes after each kernel and prints its name/time.
@@ -751,6 +772,7 @@ impl CudaProgram {
             func,
             name: obj.name.clone(),
             signature: obj.signature.clone(),
+            key: crate::runtime::device::elf_key(obj),
         }
     }
 }
@@ -832,7 +854,10 @@ impl Prog for CudaProgram {
         if kprof_enabled() && !wait {
             self.inner.synchronize();
             let secs = start.elapsed().as_secs_f64();
-            eprintln!("KPROF\t{}\t{secs:.6}", self.name);
+            // Key by program content: kernel names encode the loop structure and
+            // collide between distinct programs, so a name alone misattributes
+            // aggregate time.
+            eprintln!("KPROF\t{}\t{secs:.6}\t{:016x}", self.name, self.key);
             return Some(secs);
         }
         if wait {

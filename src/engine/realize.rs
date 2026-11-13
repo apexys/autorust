@@ -553,7 +553,7 @@ fn prepare_program(
     let gkey = global_program_key(ctx, dev, &ast);
     if crate::engine::prof::enabled() {
         // Kernel AST size, for comparing against tinygrad (see CURRENT_STATE 8.34).
-        crate::engine::prof::add("codegen.ast_nodes", ctx.toposort(&ast).len() as f64);
+        crate::engine::prof::acc("codegen.ast_nodes", ctx.toposort(&ast).len() as f64);
     }
     if let Some(p) = cache.get(key) {
         // The cached program may have been compiled in a different arena (the key
@@ -998,7 +998,9 @@ fn exec_kernel(
         .collect();
     let t2 = prof.then(std::time::Instant::now);
     // Per-kernel timing for host-executed backends (the CUDA path has its own
-    // stream-synchronised profiler).
+    // stream-synchronised profiler). For CUDA library GEMMs the backend prints
+    // `KPROF host_gemm` itself under KPROF (cuBLAS is asynchronous, so only that
+    // row carries GPU time); without KPROF, `kx.host` is submission time.
     let kprof = crate::engine::prof::kprof()
         && matches!(dev_name.as_str(), "RUST" | "CC" | "RAYON" | "INTERP" | "CPU");
     if let Some(host) = &cp.host {

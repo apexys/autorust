@@ -230,7 +230,8 @@ All of these are inert unless set; most accept any value.
 | variable | output |
 |---|---|
 | `AUTORUST_PROF` (any value except `0`/empty) | Scheduler phase table; also enabled by `TG_RW_TRACE`/`TG_RW_VISITS`. |
-| `AUTORUST_KPROF` | Per-program kernel time table: `KPROF <name> <secs> <program-key>`. CUDA synchronises per launch (so its timings are profiling-only); host backends (`RUST`/`CC`/`RAYON`) print generated kernels and `HostGemm` calls. |
+| `AUTORUST_KPROF` | Per-program kernel time table: `KPROF <name> <secs> <program-key>`. CUDA synchronises per launch (so its timings are profiling-only) and prints a keyed row per generated kernel; library-GEMM calls print `KPROF host_gemm <secs> <layout-key>` with the key derived from `(m,n,k,batch)` and the epilogue shape. Host backends (`RUST`/`CC`/`RAYON`) print generated kernels and `HostGemm` calls. |
+| `AUTORUST_GEMM_STATS` | Host-GEMM dispatch accounting printed by `prof::report`: attempts, accepted `(m,n,k,batch)` families and per-reason rejections (e.g. `batch-layout`). Independent of `AUTORUST_PROF`. |
 | `AUTORUST_KERNEL_INFO` | Registers/shared/local bytes per compiled CUDA kernel. |
 | `FROZEN_PROF` | Per-kernel and host-GEMM counters in a `FrozenRunner` (`report_profile()`). |
 | `AUTORUST_CUBLAS_DEBUG` | Host-GEMM dispatch/descriptor lines. |

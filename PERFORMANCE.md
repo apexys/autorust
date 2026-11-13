@@ -26,7 +26,8 @@ Diagnostics:
 | variable | effect |
 |---|---|
 | `AUTORUST_PROF=1` | scheduler phase table (`rangeify`, `kernel_graph`, …); also enabled by `TG_RW_TRACE`/`TG_RW_VISITS` |
-| `AUTORUST_KPROF=1` | per-kernel CUDA time table (syncs per launch; no GPU performance-counter permission needed) |
+| `AUTORUST_KPROF=1` | per-kernel CUDA time table with a stable program key per row (syncs per launch; no GPU performance-counter permission needed). Library GEMMs print `KPROF host_gemm <secs> <layout-key>`, so cuBLAS time is visible and aggregatable by `(m,n,k,batch)`. |
+| `AUTORUST_GEMM_STATS=1` | host-GEMM dispatch accounting at `prof::report`: attempts, accepted families, and rejection reasons (`batch-layout`, `epilogue-*`, `divisibility`, …). This is how a batch-size dispatch cliff becomes a number instead of a wall-time mystery. |
 | `AUTORUST_KERNEL_INFO=1` | registers / shared memory / local bytes per compiled CUDA kernel |
 | `FROZEN_PROF=1` | per-kernel and host-GEMM counters inside a `FrozenRunner` (`report_profile()`) |
 | `AUTORUST_MM_DEBUG=1` | generated matmul tiling decisions |

@@ -296,6 +296,138 @@ pub fn host_gemm_of(ctx: &UOpCtx, sink: &UopId) -> Option<HostGemm> {
     }
 }
 
+// ---------------- dispatch accounting ----------------
+//
+// Descriptor coverage is a benchmark output, not just an implementation detail:
+// a library-GEMM "cliff" across a batch-size change is invisible in wall time
+// alone (the work simply moves into a generated kernel). `AUTORUST_GEMM_STATS=1`
+// records every extraction attempt, the accepted `(m,n,k,batch)` families and
+// the reason for each rejection, and `prof::report` prints the table.
+//
+// The accounting is off by default and allocation-free on the rejection paths:
+// each attempt writes at most one `&'static str` into a `Cell`, and the maps are
+// only touched by the `extract` wrapper.
+
+thread_local! {
+    /// Rejection reason of the in-flight `extract` call. Only the last write
+    /// matters because `extract` returns at the first failure.
+    static LAST_REJECT: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+    static STATS: std::cell::RefCell<Stats> = std::cell::RefCell::new(Stats::default());
+}
+
+#[derive(Default)]
+struct Stats {
+    attempts: u64,
+    accepted: u64,
+    rejects: std::collections::BTreeMap<&'static str, u64>,
+    families: std::collections::BTreeMap<String, u64>,
+}
+
+/// Whether HostGemm dispatch accounting is on (`AUTORUST_GEMM_STATS`).
+fn stats_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        crate::helpers::env::get("AUTORUST_GEMM_STATS")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn note_reject(reason: &'static str) {
+    LAST_REJECT.with(|r| r.set(reason));
+}
+
+/// Reject an extraction with a reason (for the `AUTORUST_GEMM_STATS` table).
+fn reject(reason: &'static str) -> Option<HostGemm> {
+    note_reject(reason);
+    None
+}
+
+/// `?`-friendly rejection: note `reason` when `v` is `None`.
+fn or_reject<T>(v: Option<T>, reason: &'static str) -> Option<T> {
+    if v.is_none() {
+        note_reject(reason);
+    }
+    v
+}
+
+/// Clear the dispatch accounting (called by [`crate::engine::prof::reset`]).
+pub fn reset_stats() {
+    STATS.with(|s| *s.borrow_mut() = Stats::default());
+}
+
+/// Print the dispatch accounting (`AUTORUST_GEMM_STATS=1`).
+///
+/// Called by [`crate::engine::prof::report`], so a normal `AUTORUST_PROF=1`
+/// run and the bench harness both produce it without extra plumbing.
+pub fn report_stats() {
+    if !stats_enabled() {
+        return;
+    }
+    STATS.with(|s| {
+        let s = s.borrow();
+        if s.attempts == 0 {
+            return;
+        }
+        println!("--- host_gemm dispatch ---");
+        println!(
+            "attempts {}  accepted {}  rejected {}",
+            s.attempts,
+            s.accepted,
+            s.attempts - s.accepted
+        );
+        println!("{:<28} {:>7}", "accept (m,n,k,batch)", "count");
+        for (family, count) in s.families.iter() {
+            println!("{family:<28} {count:>7}");
+        }
+        if !s.rejects.is_empty() {
+            println!("{:<28} {:>7}", "reject reason", "count");
+            for (reason, count) in s.rejects.iter() {
+                println!("{reason:<28} {count:>7}");
+            }
+        }
+    });
+}
+
+/// Stable KPROF key for a descriptor: its shape/layout family, not its buffer
+/// slots or offsets (those change per graph instance). Two kernels with the same
+/// family aggregate together even when their SSA names differ.
+pub fn trace_key(g: &HostGemm) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    let mut mix = |v: i64| {
+        h ^= v as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    };
+    for v in [
+        g.m,
+        g.n,
+        g.k,
+        g.batch,
+        g.a_m,
+        g.a_k,
+        g.b_k,
+        g.b_n,
+        g.c_m,
+        g.c_n,
+        g.a_b,
+        g.b_b,
+        g.c_b,
+        g.batch_inner,
+        g.bias_slot.signum(),
+        g.scale_slot.signum(),
+        g.res_slot.signum(),
+        0,
+    ] {
+        mix(v);
+    }
+    // The 0 separator above keeps `batch_inner` and the epilogue flags apart
+    // from the shape fields; the dtype is folded in after the loop.
+    h ^= (g.dtype.0 as u64) << 1;
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= (g.c_dtype.0 as u64) << 1;
+    h
+}
+
 /// A range keyed by its (axis id, axis type) rather than its arena id.
 type RKey = (i64, u16);
 
@@ -632,8 +764,32 @@ fn gemm_device(ctx: &UOpCtx, u: &UopId) -> Option<GemmDevice> {
 /// Try to interpret a lowered kernel store as a library GEMM.
 ///
 /// Returns `None` for anything that is not a plain strided matrix product, or
-/// when the kernel's backend has no usable library GEMM.
+/// when the kernel's backend has no usable library GEMM. With
+/// `AUTORUST_GEMM_STATS=1` every attempt is recorded (see [`report_stats`]).
 pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
+    if !stats_enabled() {
+        return extract_impl(ctx, store);
+    }
+    LAST_REJECT.with(|r| r.set("other"));
+    let out = extract_impl(ctx, store);
+    let reason = LAST_REJECT.with(|r| r.get());
+    STATS.with(|s| {
+        let mut s = s.borrow_mut();
+        s.attempts += 1;
+        match &out {
+            Some(g) => {
+                s.accepted += 1;
+                *s.families
+                    .entry(format!("{}x{}x{}x{}", g.m, g.n, g.k, g.batch))
+                    .or_default() += 1;
+            }
+            None => *s.rejects.entry(reason).or_default() += 1,
+        }
+    });
+    out
+}
+
+fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // Cheap reject for elementwise kernels: only the store value matters, and
     // we must not descend into AFTER (which embeds whole earlier kernels).
     fn has_reduce(ctx: &UOpCtx, u: &UopId) -> bool {
@@ -649,14 +805,14 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         store.clone()
     };
     if ctx.op_of(&st0) != Ops::Store {
-        return None;
+        return reject("not-a-store");
     }
     if !has_reduce(ctx, &ctx.srcs(&st0)[1].clone()) {
-        return None;
+        return reject("no-reduce");
     }
-    let kind = gemm_device(ctx, &store)?;
+    let kind = or_reject(gemm_device(ctx, &store), "no-library-device")?;
     if !library_ready(ctx, kind) {
-        return None;
+        return reject("library-not-ready");
     }
 
     let st = if ctx.op_of(&store) == Ops::End {
@@ -665,15 +821,20 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         store.clone()
     };
     if ctx.op_of(&st) != Ops::Store {
-        return None;
+        return reject("not-a-store");
     }
     let dst_ptr = ctx.srcs(&st)[0].clone();
-    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: c-affine"); }
-    let (c_off0, c_map) = affine(ctx, &index_offset(ctx, &dst_ptr))?;
-    if c_map.len() < 2 {
-        return None;
+    if crate::helpers::env::get("VK_TRACE").is_some() {
+        eprintln!("[vk] ext: c-affine");
     }
-    let (c_slot, c_dt, c_base) = base_of(ctx, &dst_ptr)?;
+    let (c_off0, c_map) = or_reject(
+        affine(ctx, &index_offset(ctx, &dst_ptr)),
+        "c-index-not-affine",
+    )?;
+    if c_map.len() < 2 {
+        return reject("c-not-2d");
+    }
+    let (c_slot, c_dt, c_base) = or_reject(base_of(ctx, &dst_ptr), "c-not-param")?;
     let c_off = c_off0 + c_base;
 
     // Operands are either `LOAD(INDEX(...))` or the bare `INDEX(...)` the
@@ -708,10 +869,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 let srcs = ctx.srcs(&value).to_vec();
                 let (sa, sb) = (srcs[0].clone(), srcs[1].clone());
                 if ctx.srcs(&sb).is_empty() {
-                    alpha *= const_float(ctx, &sb)? as f32;
+                    alpha *= or_reject(const_float(ctx, &sb), "epilogue-scalar")? as f32;
                     value = sa;
                 } else if ctx.srcs(&sa).is_empty() {
-                    alpha *= const_float(ctx, &sa)? as f32;
+                    alpha *= or_reject(const_float(ctx, &sa), "epilogue-scalar")? as f32;
                     value = sb;
                 } else if contains_reduce(ctx, &sa) && !contains_reduce(ctx, &sb) {
                     extras.push(Extra {
@@ -751,21 +912,27 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             _ => break,
         }
     }
-    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: value-reduce"); }
+    if crate::helpers::env::get("VK_TRACE").is_some() {
+        eprintln!("[vk] ext: value-reduce");
+    }
     value = unwrap(ctx, value);
     if ctx.op_of(&value) != Ops::Reduce {
-        return None;
+        return reject("epilogue-not-reduce");
     }
     let reduce = value;
     let red_dt = ctx.dt_of(&reduce);
-    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: rsrcs"); }
+    if crate::helpers::env::get("VK_TRACE").is_some() {
+        eprintln!("[vk] ext: rsrcs");
+    }
     let rsrcs = ctx.srcs(&reduce).to_vec();
     if rsrcs.len() != 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
-        return None;
+        return reject("unsupported-reduce");
     }
-    let red_k = range_key(ctx, &rsrcs[1])?;
+    let red_k = or_reject(range_key(ctx, &rsrcs[1]), "reduce-not-range")?;
 
-    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: mul"); }
+    if crate::helpers::env::get("VK_TRACE").is_some() {
+        eprintln!("[vk] ext: mul");
+    }
     let mul = unwrap(ctx, rsrcs[0].clone());
     if ctx.op_of(&mul) != Ops::Mul {
         if crate::helpers::env::get("VK_TRACE").is_some() {
@@ -780,7 +947,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     .collect();
                 let arg = format!("{:?}", ctx.arg_of(&cur));
                 let arg: String = arg.chars().take(90).collect();
-                eprintln!("[vk] hg body[{depth}] {op:?} dt={dt:?} kids=[{}] arg={arg}", kids.join(", "));
+                eprintln!(
+                    "[vk] hg body[{depth}] {op:?} dt={dt:?} kids=[{}] arg={arg}",
+                    kids.join(", ")
+                );
                 let ks = ctx.srcs(&cur).to_vec();
                 if ks.is_empty() {
                     break;
@@ -788,11 +958,11 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 cur = ks[0].clone();
             }
         }
-        return None;
+        return reject("mul-not-plain");
     }
     let msrcs = ctx.srcs(&mul).to_vec();
     if msrcs.len() != 2 {
-        return None;
+        return reject("mul-not-binary");
     }
     let mul_dt = ctx.dt_of(&mul);
     // A reduced-precision GEMM whose *reduce* is f32 is the scheduler's
@@ -804,24 +974,23 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         && (mul_dt == crate::dtype::FLOAT16
             || (kind == GemmDevice::Vk && mul_dt == crate::dtype::BFLOAT16))
         && red_dt == crate::dtype::FLOAT32
-        && (c_dt == crate::dtype::FLOAT32
-            || (kind == GemmDevice::Vk && c_dt == mul_dt));
+        && (c_dt == crate::dtype::FLOAT32 || (kind == GemmDevice::Vk && c_dt == mul_dt));
     if (mul_dt != red_dt || mul_dt != c_dt) && !mixed_f16_f32 {
-        return None;
+        return reject("dtype-mismatch");
     }
     if !matches!(
         ctx.dt_of(&mul),
         crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
     ) {
-        return None;
+        return reject("unsupported-dtype");
     }
     // CLBlast's `Sgemm` is the only entry point wired up on OpenCL.
     if kind == GemmDevice::Cl && ctx.dt_of(&mul) != crate::dtype::FLOAT32 {
-        return None;
+        return reject("cl-f32-only");
     }
     // The CPU host GEMM packs f32 panels; other dtypes stay generated.
     if kind == GemmDevice::Cpu && ctx.dt_of(&mul) != crate::dtype::FLOAT32 {
-        return None;
+        return reject("cpu-f32-only");
     }
 
     let dbg = crate::helpers::env::get("AUTORUST_MM_DEBUG").is_some();
@@ -834,7 +1003,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     ctx.op_of(&unwrap(ctx, msrcs[0].clone()))
                 );
             }
-            return None;
+            return reject("a-operand-not-load");
         }
     };
     let b_idx = match operand(ctx, msrcs[1].clone()) {
@@ -846,20 +1015,30 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                     ctx.op_of(&unwrap(ctx, msrcs[1].clone()))
                 );
             }
-            return None;
+            return reject("b-operand-not-load");
         }
     };
-    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: a-affine"); }
-    let (a_off0, a_map) = affine(ctx, &index_offset(ctx, &a_idx))?;
-    let (b_off0, b_map) = affine(ctx, &index_offset(ctx, &b_idx))?;
-    let (a_slot, a_dt, a_base) = base_of(ctx, &a_idx)?;
+    if crate::helpers::env::get("VK_TRACE").is_some() {
+        eprintln!("[vk] ext: a-affine");
+    }
+    let (a_off0, a_map) = or_reject(
+        affine(ctx, &index_offset(ctx, &a_idx)),
+        "a-index-not-affine",
+    )?;
+    let (b_off0, b_map) = or_reject(
+        affine(ctx, &index_offset(ctx, &b_idx)),
+        "b-index-not-affine",
+    )?;
+    let (a_slot, a_dt, a_base) = or_reject(base_of(ctx, &a_idx), "a-not-param")?;
     let a_off = a_off0 + a_base;
-    let (b_slot, b_dt, b_base) = base_of(ctx, &b_idx)?;
+    let (b_slot, b_dt, b_base) = or_reject(base_of(ctx, &b_idx), "b-not-param")?;
     let b_off = b_off0 + b_base;
     // The library GEMM reads the operand buffers with the contraction dtype.
     // A casted staging buffer (e.g. f32 -> f16 `from_slice`) must stay on the
     // generated kernel.
-    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: ab-dtype"); }
+    if crate::helpers::env::get("VK_TRACE").is_some() {
+        eprintln!("[vk] ext: ab-dtype");
+    }
     if (a_dt != mul_dt || b_dt != mul_dt)
         && !(kind == GemmDevice::Vk
             && matches!(
@@ -871,7 +1050,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
             ))
     {
-        return None;
+        return reject("operand-dtype");
     }
 
     // n is the only range B iterates that A does not, and C stores it
@@ -886,12 +1065,12 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         .collect();
     n_candidates.dedup();
     if n_candidates.len() != 1 {
-        return None;
+        return reject("n-axis-ambiguous");
     }
     let n_key = n_candidates[0];
-    let n = range_extent(ctx, &st, n_key)?;
+    let n = or_reject(range_extent(ctx, &st, n_key), "symbolic-extent")?;
     if n <= 1 {
-        return None;
+        return reject("n-extent-1");
     }
     let mut m_candidates: Vec<(RKey, i64)> = a_keys
         .iter()
@@ -905,13 +1084,13 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     m_candidates.sort_by_key(|(_, c)| *c);
     if m_candidates.is_empty() || (m_candidates.len() > 1 && m_candidates[0].1 == m_candidates[1].1)
     {
-        return None;
+        return reject("m-axis-ambiguous");
     }
     let m_key = m_candidates[0].0;
-    let m = range_extent(ctx, &st, m_key)?;
-    let k = range_extent(ctx, &st, red_k)?;
+    let m = or_reject(range_extent(ctx, &st, m_key), "symbolic-extent")?;
+    let k = or_reject(range_extent(ctx, &st, red_k), "symbolic-extent")?;
     if m <= 0 || k <= 0 {
-        return None;
+        return reject("degenerate-shape");
     }
 
     let a_m = coeff(&a_map, m_key);
@@ -923,10 +1102,10 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // The CPU blocked kernel stores rows contiguously; anything else keeps the
     // generated kernel.
     if kind == GemmDevice::Cpu && c_n != 1 {
-        return None;
+        return reject("cpu-c-layout");
     }
     if c_n != 1 || c_m < n {
-        return None;
+        return reject("c-not-row-major");
     }
     // A row-major (k contiguous) or column-major (m contiguous). The leading
     // dimension may be larger than the tight size: ViT's attention operands are
@@ -936,7 +1115,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let b_row = b_n == 1 && b_k >= n;
     let b_col = b_k == 1 && b_n >= k;
     if !(a_row || a_col) || !(b_row || b_col) {
-        return None;
+        return reject("operand-layout");
     }
 
     // Classify the peeled epilogue operands. A MUL operand is the per-column
@@ -947,9 +1126,9 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let mut scale: (i64, i64) = (-1, 0);
     let mut residual: (i64, i64) = (-1, 0);
     for e in &extras {
-        let idx = operand(ctx, e.expr.clone())?;
-        let (off0, map) = affine(ctx, &index_offset(ctx, &idx))?;
-        let (slot, dt, base) = base_of(ctx, &idx)?;
+        let idx = or_reject(operand(ctx, e.expr.clone()), "epilogue-operand")?;
+        let (off0, map) = or_reject(affine(ctx, &index_offset(ctx, &idx)), "epilogue-not-affine")?;
+        let (slot, dt, base) = or_reject(base_of(ctx, &idx), "epilogue-not-param")?;
         // The Vulkan cooperative-matrix epilogue can read a 16-bit bias for an
         // f32 result (a mixed-precision `Linear`); everything else needs the
         // bias in the result dtype.
@@ -959,7 +1138,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 crate::dtype::FLOAT32 | crate::dtype::FLOAT16 | crate::dtype::BFLOAT16
             );
         if dt != c_dt && !bias_ok {
-            return None;
+            return reject("epilogue-dtype");
         }
         let off = off0 + base;
         if map.len() == 1 && coeff(&map, n_key) == 1 {
@@ -968,12 +1147,12 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             // expressed by this epilogue, so leave the kernel generated.
             if e.from_mul {
                 if scale.0 >= 0 {
-                    return None;
+                    return reject("epilogue-duplicate-scale");
                 }
                 scale = (slot, off);
             } else {
                 if bias.0 >= 0 {
-                    return None;
+                    return reject("epilogue-duplicate-bias");
                 }
                 bias = (slot, off);
                 bias_dt = dt;
@@ -984,7 +1163,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         let same_layout =
             map.len() == c_map.len() && c_map.iter().all(|(k, v)| coeff(&map, *k) == *v);
         if !same_layout || e.from_mul || residual.0 >= 0 {
-            return None;
+            return reject("epilogue-layout");
         }
         residual = (slot, off);
     }
@@ -999,7 +1178,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         if *key == m_key || *key == n_key {
             continue;
         }
-        let ext = range_extent(ctx, &st, *key)?;
+        let ext = or_reject(range_extent(ctx, &st, *key), "batch-extent")?;
         // An extent-1 axis contributes a constant zero; drop it.
         if ext == 1 {
             continue;
@@ -1016,10 +1195,12 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     for (key, _) in a_map.iter().chain(b_map.iter()) {
         if *key != m_key && *key != n_key && *key != red_k && !batch.iter().any(|(k, ..)| k == key)
         {
-            return None;
+            return reject("operand-extra-axis");
         }
     }
-    if crate::helpers::env::get("VK_TRACE").is_some() { eprintln!("[vk] ext: fold-batches"); }
+    if crate::helpers::env::get("VK_TRACE").is_some() {
+        eprintln!("[vk] ext: fold-batches");
+    }
     // Two batch axes (attention's `(batch, head)`) need not collapse into one
     // strided axis per operand: the ViT's `[b, h, s, d]` view has head stride 32
     // and batch stride 6144 while `32 * 3 != 6144`. C *is* contiguous over the
@@ -1039,7 +1220,13 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         // C is contiguous over the pair, so its slice stride is the *inner* one.
         (e0.saturating_mul(e1), a1, b1, c0, e0, a0, b0)
     } else {
-        let (n, ab, bb, cb) = fold_batches(&mut batch)?;
+        let (n, ab, bb, cb) = match fold_batches(&mut batch) {
+            Some(v) => v,
+            // The coverage cliff: `(batch, head)` is not a single contiguous
+            // strided slice, and only the Vulkan executor implements the split
+            // counter, so cuBLAS/CLBlast/CPU keep the generated kernel here.
+            None => return reject("batch-layout"),
+        };
         (n, ab, bb, cb, 1, ab, bb)
     };
 
@@ -1069,7 +1256,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         // MPS only produces a row-major result, and a fused bias/scale/residual
         // epilogue would need a separate kernel, so those stay generated too.
         if !force || c_n != 1 || bias_slot >= 0 || scale_slot >= 0 || res_slot >= 0 {
-            return None;
+            return reject("metal-epilogue");
         }
         // MPS supports f32/f32, f16/f16 and f16 inputs with an f32 result.
         // bfloat16 is not accepted by MPSMatrixMultiplication on macOS.
@@ -1080,7 +1267,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
                 | (crate::dtype::FLOAT16, crate::dtype::FLOAT32)
         );
         if !ok_dtypes {
-            return None;
+            return reject("metal-dtype");
         }
     }
     // The CPU host GEMM is a *different* implementation, not just a library
@@ -1095,7 +1282,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         ))]
         {
             if !force && !crate::runtime::cpu_gemm::worth_dispatching(m, n, k) {
-                return None;
+                return reject("cpu-size-gate");
             }
         }
         // No host-memory backend is compiled in, so nothing can execute it.
@@ -1105,7 +1292,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             feature = "backend_rayon"
         )))]
         {
-            return None;
+            return reject("no-host-backend");
         }
     } else if kind == GemmDevice::Vk {
         // The cooperative-matrix module is 2.6-4.6x the generated kernel at these
@@ -1113,7 +1300,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         // (measured for cuBLAS/CLBlast) does not apply; `coopmat::eligible` is
         // the filter.
     } else if !force && !cuda_f32 && m % 4 == 0 && n % 4 == 0 && k % 4 == 0 {
-        return None;
+        return reject("divisibility");
     }
 
     if crate::helpers::env::get("AUTORUST_CUBLAS_DEBUG").is_some() {
@@ -1167,8 +1354,7 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         // A plain bf16 dot accumulates in bf16 in the graph, while the MMA
         // accumulates in f32, so that case is a numerics change and rides the
         // same switch as the CUDA tensor-core path (`USE_TC`, on by default).
-        let bf16_accum =
-            desc.c_dtype == crate::dtype::BFLOAT16 && red_dt == crate::dtype::BFLOAT16;
+        let bf16_accum = desc.c_dtype == crate::dtype::BFLOAT16 && red_dt == crate::dtype::BFLOAT16;
         let tc_on = ctx.settings.tensor_cores
             && !matches!(
                 crate::helpers::env::get("USE_TC").as_deref(),
@@ -1176,11 +1362,9 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             );
         if !crate::runtime::coopmat::eligible(&desc) || (bf16_accum && !tc_on) {
             if crate::helpers::env::get("VK_TRACE").is_some() {
-                eprintln!(
-                    "[vk] coopmat declined (bf16_accum={bf16_accum} tc={tc_on}): {desc:?}"
-                );
+                eprintln!("[vk] coopmat declined (bf16_accum={bf16_accum} tc={tc_on}): {desc:?}");
             }
-            return None;
+            return reject("vk-coopmat-ineligible");
         }
     }
     Some(desc)
@@ -1239,4 +1423,78 @@ fn fold_batches(batch: &mut [(RKey, i64, i64, i64, i64)]) -> Option<(i64, i64, i
     count = count.checked_mul(batch.last()?.1)?;
     let (_, _, a, b, c) = batch[0];
     Some((count, a, b, c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn desc(m: i64, n: i64, k: i64, batch: i64) -> HostGemm {
+        HostGemm {
+            a_slot: 0,
+            b_slot: 1,
+            c_slot: 2,
+            a_off: 0,
+            b_off: 0,
+            c_off: 0,
+            m,
+            n,
+            k,
+            a_m: k,
+            a_k: 1,
+            b_k: n,
+            b_n: 1,
+            c_m: n,
+            c_n: 1,
+            batch,
+            a_b: 0,
+            a_bi: 0,
+            batch_inner: 1,
+            b_b: 0,
+            b_bi: 0,
+            c_b: 0,
+            dtype: crate::dtype::FLOAT32,
+            a_dtype: crate::dtype::FLOAT32,
+            b_dtype: crate::dtype::FLOAT32,
+            c_dtype: crate::dtype::FLOAT32,
+            alpha: 1.0,
+            bias_slot: -1,
+            bias_off: 0,
+            bias_dtype: crate::dtype::FLOAT32,
+            scale_slot: -1,
+            scale_off: 0,
+            res_slot: -1,
+            res_off: 0,
+        }
+    }
+
+    /// The KPROF key aggregates by layout family: two descriptors of the same
+    /// shape at different buffer slots/offsets/alpha are one row.
+    #[test]
+    fn trace_key_ignores_slots_offsets_and_alpha() {
+        let a = desc(197, 768, 768, 4);
+        let mut b = a.clone();
+        b.a_slot = 7;
+        b.b_slot = 3;
+        b.c_slot = 9;
+        b.a_off = 128;
+        b.b_off = 64;
+        b.c_off = 2048;
+        b.alpha = 0.5;
+        assert_eq!(trace_key(&a), trace_key(&b));
+    }
+
+    /// Different shapes and different epilogues are different rows: that is how
+    /// a batch-size coverage cliff becomes visible.
+    #[test]
+    fn trace_key_separates_shapes_and_epilogues() {
+        assert_ne!(
+            trace_key(&desc(197, 768, 768, 1)),
+            trace_key(&desc(197, 768, 768, 4))
+        );
+        let plain = desc(197, 768, 768, 1);
+        let mut biased = plain.clone();
+        biased.bias_slot = 4;
+        assert_ne!(trace_key(&plain), trace_key(&biased));
+    }
 }

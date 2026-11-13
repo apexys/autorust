@@ -1863,7 +1863,7 @@ pub fn substitute(
         memo.insert(u, out);
     }
     if prof {
-        crate::engine::prof::add("subst.nodes", visited as f64);
+        crate::engine::prof::acc("subst.nodes", visited as f64);
     }
     memo.get(&root).cloned().unwrap_or(root)
 }

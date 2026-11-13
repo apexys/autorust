@@ -139,6 +139,26 @@ fn emit(
     mut samples: Vec<f64>,
 ) {
     let (median, min, iqr) = stats(&mut samples);
+    // `BENCH_ITERS=0` is the cache-priming mode used by `bench/run.py`: report
+    // the cold time and say so, instead of printing/emitting `NaN` statistics.
+    if samples.is_empty() {
+        println!(
+            "{workload} {device} bs={batch} jit={jit}: cache primed; \
+             no timed samples (cold {cold:.1} ms)"
+        );
+        let json = format!(
+            "{{\"framework\":\"autorust\",\"version\":\"{}\",\"device\":\"{device}\",\
+             \"workload\":\"{workload}\",\"batch\":{batch},\"dtype\":\"{dtype_name}\",\"jit\":{jit},\
+             \"warmup\":{warmup},\"iters\":0,\"ms_cold\":{cold:.4},\"ms_median\":null,\
+             \"ms_min\":null,\"ms_iqr\":null,\"images_per_s\":null,\"cold_only\":true}}",
+            env!("CARGO_PKG_VERSION")
+        );
+        if let Ok(path) = std::env::var("BENCH_OUT") {
+            std::fs::write(path, &json).expect("write BENCH_OUT");
+        }
+        println!("RESULT {json}");
+        return;
+    }
     let images_per_s = if median.is_finite() && median > 0.0 {
         batch as f64 * 1e3 / median
     } else {
