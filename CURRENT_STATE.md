@@ -4956,3 +4956,45 @@ Remaining GEMM-shaped rejections (48 `b-index-not-affine`, 12
 `reduce-axes-not-contiguous`, 36 `a-operand-not-load`) are still the staging /
 per-slice-accumulation cases described in §9.56; none of them is a layout the
 descriptor model can describe.
+
+### 9.58 ONNX replay plans: one capture per input shape (2026-11)
+
+`OnnxModel::run` rebuilt and re-scheduled the whole graph on every call. The
+profile made the split unambiguous: at `onnx_mnist` bs 32 (CUDA),
+`sched.rangeify` was **11.1 ms/call**, `sched.kernel_graph` 9.0 ms/call and
+`exec.kernel` 0.049 ms/call — ~90% of the step was host scheduling, so no
+kernel-side work could move the number.
+
+Changes:
+
+- `Jit` gained `lower_capture` and `replay` (public), and `call`/`call_many`
+  now use them. A caller that drives its own `Session::begin_capture` can reuse
+  the lowering without the session's JIT toggle.
+- `OnnxModel` owns one `OnnxPlan` for the current input signature. The first
+  run (or a shape/dtype change) binds each input to a dedicated
+  `zeros_param` buffer, builds the graph, realizes every declared output under
+  capture, lowers the plan and returns the outputs. Later runs `assign` the new
+  inputs into those buffers and `Jit::replay`, which skips parsing, `eval`, and
+  every `create_linear_with_vars`/`to_program`.
+- `OnnxModel::set_plan_cache(false)` drops the plan and forces the eager path;
+  `has_plan()` reports whether one is captured. The eager path keeps its input
+  pinning; the plan holds its buffers through `Jit::held`.
+
+Measured (RTX 3060, alternating builds, 2 processes each, 2 warmups + 10
+iterations):
+
+| workload | eager | planned |
+|---|---:|---:|
+| ONNX MNIST bs 32 | 11.72 / 12.21 ms | **1.696 / 1.688 ms (-86%)** |
+| ONNX ResNet-0.25 bs 8 | 73.8 / 70.7 ms | **11.69 / 12.28 ms (-84%)** |
+
+The remaining ONNX gap to torch (4.8x / 9.6x) is now kernel time and conv
+lowering, not host scheduling.
+
+Contract: outputs alias the plan's buffers, so they are valid until the next
+`run` (the `Jit` contract). Static shapes are the T0/T1 surface; the plan is
+captured per concrete signature and recaptured when it changes, and there are no
+control-flow ops whose structure could depend on input data. Covered by
+`tests/onnx.rs::plan_cache_matches_eager_and_rebinds_inputs` (eager vs planned,
+including a replay with different data) and the existing
+`session_is_reusable_across_runs`, which now exercises capture + two replays.

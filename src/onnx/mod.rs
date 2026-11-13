@@ -15,8 +15,10 @@
 //! ```
 //!
 //! The runner owns a [`Ctx`] and a [`Session`]. Inputs must be tensors built
-//! from [`OnnxModel::ctx`]. The returned tensors stay valid after the model is
-//! dropped because the arena is reference-counted.
+//! from [`OnnxModel::ctx`]. The first run for an input shape captures a replay
+//! plan and later runs replay it; the returned tensors alias the plan's buffers,
+//! so they are valid until the next [`OnnxModel::run`].
+//! [`OnnxModel::set_plan_cache`] disables the plan for debugging.
 
 pub mod pb;
 
@@ -25,6 +27,7 @@ mod ops;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::engine::jit::Jit;
 use crate::engine::session::Session;
 use crate::tensor::{Ctx, Tensor};
 use crate::uop::graph::UopId;
@@ -48,6 +51,23 @@ pub struct OnnxModel {
     /// Host values of small integer shape tensors, keyed by interned UOp id.
     host_i64: HashMap<UopId, Vec<i64>>,
     host_f64: HashMap<UopId, Vec<f64>>,
+    /// Captured replay plan for the current input signature. `None` until the
+    /// first run (and after a shape change, which recaptures).
+    plan: Option<OnnxPlan>,
+    /// Whether to capture a replay plan at all (tests flip this to compare the
+    /// eager path).
+    plan_enabled: bool,
+}
+
+/// One captured replay plan: the whole graph's LINEARS, the dedicated input
+/// buffers they read, and the captured outputs. Replay skips parsing/eval and
+/// every `create_linear_with_vars`, which is ~90% of a small ONNX step.
+struct OnnxPlan {
+    jit: Jit,
+    /// Input buffers owned by the plan. Each run copies the caller's input in.
+    inputs: Vec<(String, Tensor)>,
+    /// `(name, shape, dtype)` the plan was captured for.
+    sig: Vec<(String, Vec<i64>, crate::dtype::DTypeId)>,
 }
 
 impl OnnxModel {
@@ -116,6 +136,8 @@ impl OnnxModel {
             opsets,
             host_i64: HashMap::new(),
             host_f64: HashMap::new(),
+            plan: None,
+            plan_enabled: true,
         })
     }
 
@@ -152,14 +174,61 @@ impl OnnxModel {
     /// Run the graph. Inputs must be built from [`OnnxModel::ctx`].
     ///
     /// Returns the realized values of the declared graph outputs. The caller can
-    /// read them with `model.session_mut()`:
+    /// read them with [`OnnxModel::session_mut`]:
     ///
     /// ```ignore
     /// let out = model.run(&[("image", image)])?;
     /// let depth = out["depth"].to_list::<f32>(model.session_mut());
     /// ```
+    ///
+    /// The first run for a given input shape captures a replay plan; later runs
+    /// copy the inputs into the plan's buffers and execute the captured LINEARS.
+    /// Outputs alias the plan buffers, so they are valid until the next `run`
+    /// (same contract as [`crate::engine::jit::Jit`]). A changed input shape
+    /// recaptures. [`OnnxModel::set_plan_cache`] disables it.
     pub fn run(&mut self, inputs: &[(&str, Tensor)]) -> Result<HashMap<String, Tensor>> {
-        let mut env = self.values.clone();
+        let env_in = self.prepare_inputs(inputs)?;
+        let sig = self.signature(&env_in);
+        if self.plan_enabled
+            && let Some(plan) = self.plan.as_mut()
+            && plan.sig == sig
+        {
+            for (name, dst) in &plan.inputs {
+                dst.assign(&mut self.sess, &env_in[name]);
+            }
+            let outs = {
+                let mut c = self.ctx.borrow_mut();
+                plan.jit.replay(&mut c, &mut self.sess)
+            };
+            return Ok(self.outputs.iter().cloned().zip(outs).collect());
+        }
+        self.plan = None;
+        if self.plan_enabled
+            && let Some(out) = self.run_captured(env_in.clone(), sig)?
+        {
+            return Ok(out);
+        }
+        self.run_eager(env_in)
+    }
+
+    /// Enable or disable the captured replay plan (default enabled). Disabling
+    /// drops the current plan; the next `run` is eager.
+    pub fn set_plan_cache(&mut self, on: bool) {
+        self.plan_enabled = on;
+        if !on {
+            self.plan = None;
+        }
+    }
+
+    /// Whether a replay plan is currently captured.
+    pub fn has_plan(&self) -> bool {
+        self.plan.is_some()
+    }
+
+    /// Validate the caller's inputs (shape/dtype/ctx) and apply the model's
+    /// declared input dtype.
+    fn prepare_inputs(&self, inputs: &[(&str, Tensor)]) -> Result<HashMap<String, Tensor>> {
+        let mut env = HashMap::new();
         for spec in &self.inputs {
             let Some((_, t)) = inputs.iter().find(|(n, _)| *n == spec.name) else {
                 return Err(OnnxError::Runtime(format!(
@@ -199,17 +268,34 @@ impl OnnxModel {
             {
                 t = t.cast(want);
             }
-            // Pin the input storage for the duration of the run: evaluating an
-            // unrelated shape/index constant realizes a schedule, and `prune`
-            // would otherwise reclaim an input buffer that later nodes still
-            // read (visible as zeros / out-of-bounds loads).
-            {
-                let mut c = self.ctx.borrow_mut();
-                t.pin_buffer_ctx(&mut c, &mut self.sess);
-            }
             env.insert(spec.name.clone(), t);
         }
+        Ok(env)
+    }
 
+    /// `(name, shape, dtype)` of the prepared inputs, compared on every run.
+    fn signature(
+        &self,
+        env: &HashMap<String, Tensor>,
+    ) -> Vec<(String, Vec<i64>, crate::dtype::DTypeId)> {
+        self.inputs
+            .iter()
+            .map(|spec| {
+                let t = &env[&spec.name];
+                let shape: Vec<i64> = t
+                    .shape()
+                    .into_vec()
+                    .iter()
+                    .map(|d| d.clone().as_i64().unwrap_or(-1))
+                    .collect();
+                (spec.name.clone(), shape, t.dtype())
+            })
+            .collect()
+    }
+
+    /// Build + evaluate the graph over `env` (which already contains the
+    /// initializers and any prepared inputs).
+    fn run_graph(&mut self, mut env: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
         for i in 0..self.nodes.len() {
             let node = self.nodes[i].clone();
             let ins: Vec<Option<Tensor>> = node
@@ -235,7 +321,6 @@ impl OnnxModel {
                 }
             }
         }
-
         let mut result = HashMap::new();
         for name in &self.outputs {
             let t = env
@@ -245,6 +330,77 @@ impl OnnxModel {
             result.insert(name.clone(), t);
         }
         Ok(result)
+    }
+
+    /// One eager pass: no capture, fresh output tensors.
+    fn run_eager(&mut self, env_in: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
+        // Pin the input storage for the duration of the run: evaluating an
+        // unrelated shape/index constant realizes a schedule, and `prune`
+        // would otherwise reclaim an input buffer that later nodes still
+        // read (visible as zeros / out-of-bounds loads).
+        {
+            let mut c = self.ctx.borrow_mut();
+            for t in env_in.values() {
+                t.pin_buffer_ctx(&mut c, &mut self.sess);
+            }
+        }
+        let mut env = self.values.clone();
+        env.extend(env_in);
+        let out = self.run_graph(env)?;
+        let rets: Vec<Tensor> = self.outputs.iter().map(|n| out[n].clone()).collect();
+        {
+            let mut c = self.ctx.borrow_mut();
+            Tensor::realize_many(&mut c, &mut self.sess, rets.iter());
+        }
+        Ok(self.outputs.iter().cloned().zip(rets).collect())
+    }
+
+    /// Run once under capture and adopt the plan. Returns `None` when the graph
+    /// realized nothing (a constant-only graph cannot be replayed) so the
+    /// caller falls back to the eager path.
+    fn run_captured(
+        &mut self,
+        env_in: HashMap<String, Tensor>,
+        sig: Vec<(String, Vec<i64>, crate::dtype::DTypeId)>,
+    ) -> Result<Option<HashMap<String, Tensor>>> {
+        // Bind each input to a dedicated buffer the plan owns: replay reads
+        // these, and `assign` copies a new input in before each replay.
+        let mut env = self.values.clone();
+        let mut plan_inputs = Vec::new();
+        for spec in &self.inputs {
+            let src = &env_in[&spec.name];
+            let dst = Tensor::zeros_param(
+                &self.ctx,
+                src.shape().into_vec(),
+                Some(src.dtype()),
+                self.device.as_deref(),
+            );
+            dst.assign(&mut self.sess, src);
+            plan_inputs.push((spec.name.clone(), dst.clone()));
+            env.insert(spec.name.clone(), dst);
+        }
+        self.sess.begin_capture();
+        let out = self.run_graph(env)?;
+        let rets: Vec<Tensor> = self.outputs.iter().map(|n| out[n].clone()).collect();
+        {
+            let mut c = self.ctx.borrow_mut();
+            Tensor::realize_many(&mut c, &mut self.sess, rets.iter());
+        }
+        let planned = self.sess.end_capture();
+        if planned.is_empty() {
+            return Ok(None);
+        }
+        let mut jit = Jit::new();
+        {
+            let mut c = self.ctx.borrow_mut();
+            jit.lower_capture(&mut c, &mut self.sess, planned, rets.clone());
+        }
+        self.plan = Some(OnnxPlan {
+            jit,
+            inputs: plan_inputs,
+            sig,
+        });
+        Ok(Some(self.outputs.iter().cloned().zip(rets).collect()))
     }
 
     /// Convenience: run and read every declared output as `Vec<f32>`.

@@ -1311,3 +1311,43 @@ fn lrn_and_lp_normalization() {
         1e-6,
     );
 }
+
+/// The captured replay plan must return the same values as the eager path and
+/// must rebind fresh inputs on every replay (only the copy changes, not the
+/// schedule).
+#[test]
+fn plan_cache_matches_eager_and_rebinds_inputs() {
+    let w = b::f32_tensor("w", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let nodes = vec![b::node("MatMul", &["x", "w"], &["out"], &[])];
+    let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(2), Dim::Val(3)])];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2), Dim::Val(2)])];
+    let bytes = b::model(&b::graph(&nodes, &[w], &inputs, &outputs, "mm"), 17);
+
+    let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
+    let x1 = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let x2 = vec![-1.0f32, 0.5, 2.0, 3.0, -2.0, 1.0];
+    let make = |m: &OnnxModel, vals: &[f32]| {
+        Tensor::from_slice(m.ctx(), vals, Some(dtype::FLOAT32), None).reshape([2, 3])
+    };
+    let read = |m: &mut OnnxModel, t: Tensor| {
+        let mut out = m.run(&[("x", t)]).unwrap();
+        out.remove("out").unwrap().to_list::<f32>(m.session_mut())
+    };
+
+    m.set_plan_cache(false);
+    let t1 = make(&m, &x1);
+    let want1 = read(&mut m, t1);
+    let t2 = make(&m, &x2);
+    let want2 = read(&mut m, t2);
+    assert!(!m.has_plan(), "plan disabled means no capture");
+
+    m.set_plan_cache(true);
+    let t1 = make(&m, &x1);
+    let got1 = read(&mut m, t1);
+    assert!(m.has_plan(), "the first planned run must capture");
+    // Replay with different data: the input copy must be picked up.
+    let t2 = make(&m, &x2);
+    let got2 = read(&mut m, t2);
+    close(&got1, &want1, 1e-5);
+    close(&got2, &want2, 1e-5);
+}

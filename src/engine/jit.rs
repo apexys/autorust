@@ -45,7 +45,6 @@ pub enum JitStep {
     /// A hand-written kernel launch (fused attention).
     Host(Box<crate::engine::session::HostCall>),
 }
-
 /// `_TinyJit` (jit.py:220) — captures the compiled LINEARS of one `call` and
 /// replays them. Owns the captured result tensor and keeps every captured buffer
 /// alive (so the session's `prune` cannot reclaim a replay's intermediates).
@@ -114,31 +113,11 @@ impl Jit {
             let mut c = ctx.borrow_mut();
             ret.realize_ctx(&mut c, sess);
             let planned = sess.end_capture();
-            assert!(
-                !planned.is_empty(),
-                "TGERR: JIT captured no linears (did the step realize anything?)"
-            );
-            self.steps = planned
-                .into_iter()
-                .map(|l| match l {
-                    crate::engine::session::CaptureEntry::Linear(cl) => JitStep::Linear(cl),
-                    crate::engine::session::CaptureEntry::Host(h) => JitStep::Host(h),
-                })
-                .collect();
-            self.held = collect_buffers(&mut c, sess, &self.steps);
-            self.rets = vec![ret.clone()];
+            self.lower_capture(&mut c, sess, planned, vec![ret.clone()]);
             ret
         } else {
             let mut c = ctx.borrow_mut();
-            for st in &self.steps {
-                match st {
-                    JitStep::Linear(cl) => {
-                        exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new())
-                    }
-                    JitStep::Host(h) => h.exec(),
-                }
-            }
-            self.rets
+            self.replay(&mut c, sess)
                 .first()
                 .cloned()
                 .expect("TGERR: JIT replay missing captured result")
@@ -164,35 +143,55 @@ impl Jit {
             // (jit.py:258): force every root to realize inside the capture.
             Tensor::realize_many(&mut c, sess, rets.iter());
             let planned = sess.end_capture();
-            assert!(
-                !planned.is_empty(),
-                "TGERR: JIT captured no linears (did the step realize anything?)"
-            );
-            // `jit_lower`: lower + compile each linear once; replay executes these.
-            self.steps = planned
-                .into_iter()
-                .map(|l| match l {
-                    crate::engine::session::CaptureEntry::Linear(cl) => JitStep::Linear(cl),
-                    crate::engine::session::CaptureEntry::Host(h) => JitStep::Host(h),
-                })
-                .collect();
-            // hold all buffers the captured steps reference so `prune` keeps them.
-            self.held = collect_buffers(&mut c, sess, &self.steps);
-            self.rets = rets.clone();
+            self.lower_capture(&mut c, sess, planned, rets.clone());
             rets
         } else {
             // replay: execute the compiled schedules against the live buffers.
             let mut c = ctx.borrow_mut();
-            for st in &self.steps {
-                match st {
-                    JitStep::Linear(cl) => {
-                        exec_linear(&mut c, &mut sess.buffers, cl, &HashMap::new())
-                    }
-                    JitStep::Host(h) => h.exec(),
-                }
-            }
-            self.rets.clone()
+            self.replay(&mut c, sess)
         }
+    }
+
+    /// Lower captured steps into replay steps and adopt `rets` as the outputs.
+    ///
+    /// A caller that drives its own [`Session::begin_capture`] can use this and
+    /// [`Jit::replay`] directly (the ONNX runner captures without the session's
+    /// JIT toggle).
+    pub fn lower_capture(
+        &mut self,
+        ctx: &mut UOpCtx,
+        sess: &mut Session,
+        planned: Vec<crate::engine::session::CaptureEntry>,
+        rets: Vec<Tensor>,
+    ) {
+        assert!(
+            !planned.is_empty(),
+            "TGERR: JIT captured no linears (did the step realize anything?)"
+        );
+        // `jit_lower`: lower + compile each linear once; replay executes these.
+        self.steps = planned
+            .into_iter()
+            .map(|l| match l {
+                crate::engine::session::CaptureEntry::Linear(cl) => JitStep::Linear(cl),
+                crate::engine::session::CaptureEntry::Host(h) => JitStep::Host(h),
+            })
+            .collect();
+        // hold all buffers the captured steps reference so `prune` keeps them.
+        self.held = collect_buffers(ctx, sess, &self.steps);
+        self.rets = rets;
+    }
+
+    /// Execute the captured steps against the live buffers and return the
+    /// captured outputs (valid until the next replay).
+    pub fn replay(&mut self, ctx: &mut UOpCtx, sess: &mut Session) -> Vec<Tensor> {
+        assert!(!self.rets.is_empty(), "TGERR: JIT replay before capture");
+        for st in &self.steps {
+            match st {
+                JitStep::Linear(cl) => exec_linear(ctx, &mut sess.buffers, cl, &HashMap::new()),
+                JitStep::Host(h) => h.exec(),
+            }
+        }
+        self.rets.clone()
     }
 }
 

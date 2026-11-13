@@ -12,6 +12,11 @@ use autorust::dtype;
 use autorust::runtime::device::device;
 use autorust::tensor::{Ctx, Tensor};
 
+/// The timing test measures one kernel against another on the same GPU; the
+/// tests in this file run in parallel threads and contend for it, which made the
+/// causal/full ratio flap between 1.6x and 0.9x. Serialize them.
+static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Clone, Copy, Debug)]
 enum Kernel {
     Scalar,
@@ -216,6 +221,7 @@ fn run_kernel(
 
 #[test]
 fn causal_mask_gqa_all_kernels() {
+    let _gpu = GPU_LOCK.lock().unwrap();
     if !autorust::runtime::ops_cuda::available() {
         return;
     }
@@ -291,6 +297,7 @@ fn causal_mask_gqa_all_kernels() {
 /// and for causal, and match SDPA.
 #[test]
 fn dispatch_handles_mask_and_causal() {
+    let _gpu = GPU_LOCK.lock().unwrap();
     if !autorust::runtime::ops_cuda::has_tensor_cores() {
         return;
     }
@@ -328,6 +335,7 @@ fn dispatch_handles_mask_and_causal() {
 /// The automatic path must handle GQA (fewer K/V heads) and match SDPA.
 #[test]
 fn dispatch_handles_gqa() {
+    let _gpu = GPU_LOCK.lock().unwrap();
     if !autorust::runtime::ops_cuda::has_tensor_cores() {
         return;
     }
@@ -356,6 +364,7 @@ fn dispatch_handles_gqa() {
 /// Causal should nearly halve the key tiles at the app shape.
 #[test]
 fn causal_skips_half_the_work() {
+    let _gpu = GPU_LOCK.lock().unwrap();
     if !autorust::runtime::ops_cuda::has_tensor_cores() {
         return;
     }

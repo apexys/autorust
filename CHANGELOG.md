@@ -40,6 +40,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ONNX replay plans.** `OnnxModel::run` captures the whole graph's LINEARS on
+  the first call for an input shape and replays them afterwards (inputs are
+  copied into the plan's buffers; a shape change recaptures;
+  `set_plan_cache(false)` forces the eager path). The profiled ONNX step was
+  ~90% host scheduling (`sched.rangeify` 11.1 ms vs `exec.kernel` 0.049 ms), so
+  this is the dominant fix: **ONNX MNIST bs 32 11.7 → 1.7 ms (-86%)**, **ONNX
+  ResNet-0.25 bs 8 73.8 → 12.0 ms (-84%)** on an RTX 3060. Outputs alias the
+  plan's buffers and are valid until the next `run`. `Jit` gained public
+  `lower_capture`/`replay` for callers that drive their own capture.
 - **Host-GEMM dispatch accounting and keyed CUDA `KPROF` rows.** With
   `AUTORUST_GEMM_STATS=1`, `prof::report` prints every library-GEMM extraction
   attempt: accepted `(m,n,k,batch)` families and rejected-by-reason counts
