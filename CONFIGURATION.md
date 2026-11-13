@@ -237,6 +237,7 @@ All of these are inert unless set; most accept any value.
 | `AUTORUST_CUBLAS_DEBUG` | Host-GEMM dispatch/descriptor lines. |
 | `AUTORUST_CPU_GEMM_DEBUG` | CPU host-GEMM packing/tile decisions. |
 | `AUTORUST_MM_DEBUG` | Generated matmul tiling decisions and `host_gemm::extract` rejection reasons. |
+| `AUTORUST_OPTIM_KERNEL=0` | Disable the fused CUDA Adam/AdamW/LAMB update and use the tensor-graph path (the numeric reference, ~4x slower). |
 | `AUTORUST_DEVICE_VERBOSE` | Per-launch `RUST` backend lines (grid, args, buffer count). |
 | `AUTORUST_RUST_DUMP`, `AUTORUST_CC_DUMP` | Print the compiled Rust/C kernel source. |
 | `AUTORUST_ATTN_DEBUG` | One-time line describing the selected fused-attention kernel. |

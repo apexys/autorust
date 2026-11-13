@@ -834,13 +834,16 @@ traffic per parameter (grad, m, v, p reads; m, v, p writes).
 
 | device | autorust | torch |
 |---|---:|---:|
-| CUDA | 102.2 ms (27.4 GB/s) | **26.3 ms (106.3 GB/s)** |
+| CUDA | **26.0 ms (107.7 GB/s)** | 26.3 ms (106.3 GB/s) |
 | CPU | **232.0 ms (12.1 GB/s)** | 295.8 ms (9.5 GB/s) |
 
-On CUDA the optimizer is 4x slower than torch: the update is decomposed into
-separate elementwise launches per parameter (32 tensors × several kernels), so
-the 2.8 GB of traffic runs at 27 GB/s instead of near peak. This is one of the
-few places where kernel launch/fusion, not bandwidth, is the limit.
+On CUDA the update is a single fused kernel per parameter
+(`runtime::cuda_optim`, on by default): one 256-thread pass loads g/m/v, stores
+the new moments and updates p, so the 2.8 GB of traffic runs at the ideal
+28 bytes per parameter. The tensor graph (four or five elementwise passes per
+parameter, ~52 bytes and ~15% of peak because the scheduler can only give each
+launch 8-thread blocks for these extents) is the fallback and the numeric
+reference; it measured 102-104 ms. `AUTORUST_OPTIM_KERNEL=0` forces it.
 
 ## Conv models
 

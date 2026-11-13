@@ -40,6 +40,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fused CUDA optimizer kernel.** Adam/AdamW/LAMB now run one 256-thread pass
+  per parameter (`runtime::cuda_optim`) instead of four or five elementwise
+  passes, updating the first/second moments and the parameter from one load of
+  g/m/v. The 100M-parameter / 32-tensor benchmark goes **102.2 → 26.0 ms**
+  (27 → 108 GB/s, level with torch's 26.3 ms); the graph path remains the
+  reference and the fallback for non-CUDA, non-f32 and small tensors.
+  `AUTORUST_OPTIM_KERNEL=0` forces it, `set_fused_optimizer(false)` from code.
+  Also: every moment/parameter store is deferred into one schedule, so the graph
+  fallback dropped from 66 `create_linear_with_vars` passes to two.
 - **ONNX replay plans.** `OnnxModel::run` captures the whole graph's LINEARS on
   the first call for an input shape and replays them afterwards (inputs are
   copied into the plan's buffers; a shape change recaptures;

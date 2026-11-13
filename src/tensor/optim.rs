@@ -19,6 +19,66 @@ use crate::engine::session::Session;
 use crate::tensor::{Ctx, Tensor};
 use crate::uop::ctx::UOpCtx;
 
+/// Whether the fused optimizer kernel is enabled (default: on, unless
+/// `AUTORUST_OPTIM_KERNEL=0`). The graph path remains the reference and is used
+/// for non-CUDA devices, non-f32 parameters, and tiny tensors.
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+pub fn set_fused_optimizer(on: bool) {
+    FUSED_OPTIM.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+static FUSED_OPTIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn fused_optimizer_enabled() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let env = *ENV.get_or_init(|| {
+        crate::helpers::env::get("AUTORUST_OPTIM_KERNEL")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(true)
+    });
+    env && FUSED_OPTIM.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `Some(n)` when this parameter can use the fused kernel: contiguous f32 on
+/// CUDA with at least one block's worth of elements.
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn fused_optim_elems(ctx: &mut UOpCtx, t: &Tensor) -> Option<i64> {
+    let u = t.uop().clone();
+    if ctx.dt_of(&u) != crate::dtype::FLOAT32 {
+        return None;
+    }
+    let Some(crate::uop::arg::DeviceSpec::Single(dev)) =
+        crate::schedule::indexing::device_of(ctx, u.clone())
+    else {
+        return None;
+    };
+    if !dev.starts_with("CUDA") {
+        return None;
+    }
+    let n: i64 = ctx
+        .shape(&u)
+        .ok()
+        .flatten()?
+        .iter()
+        .map(|d| d.clone().as_i64().unwrap_or(0))
+        .product();
+    (n >= crate::runtime::cuda_optim::MIN_ELEMS).then_some(n)
+}
+
 /// Common surface for an optimizer step.
 pub trait Optim {
     /// The parameters this optimizer updates, in order.
@@ -377,28 +437,125 @@ impl Optim for LAMB {
         params: &[Tensor],
         grads: &[Tensor],
     ) -> (Vec<Tensor>, Vec<Tensor>) {
-        // `self.b1_t *= self.b1` / `self.b2_t *= self.b2` (optim.py:163-164)
+        // Fused path: one 256-thread host kernel per parameter does the whole
+        // update in one pass (m, v and p), instead of the graph's four or five
+        // elementwise passes. Only taken when *every* parameter (and its
+        // gradient) is a large contiguous f32 CUDA buffer, because
+        // `schedule_step` zips `params` with the returned updates.
+        #[cfg(all(
+            feature = "backend_cuda",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        if fused_optimizer_enabled() && !params.is_empty() {
+            let mut ns: Vec<i64> = Vec::with_capacity(params.len());
+            for (p, g) in params.iter().zip(grads.iter()) {
+                match fused_optim_elems(ctx, p) {
+                    Some(n) if fused_optim_elems(ctx, g) == Some(n) => ns.push(n),
+                    _ => {
+                        ns.clear();
+                        break;
+                    }
+                }
+            }
+            if ns.len() == params.len() {
+                // The kernel reads the updated bias correction, so store it
+                // first (two 1-element tensors; the launches are negligible).
+                let b1t_new = self.b1_t.mul_ctx(ctx, self.b1 as f64);
+                self.b1_t.assign_ctx(ctx, sess, &b1t_new);
+                let b2t_new = self.b2_t.mul_ctx(ctx, self.b2 as f64);
+                self.b2_t.assign_ctx(ctx, sess, &b2t_new);
+                for t in self
+                    .m
+                    .iter()
+                    .chain(self.v.iter())
+                    .chain([&self.b1_t, &self.b2_t])
+                {
+                    t.pin_buffer_ctx(ctx, sess);
+                }
+                let dev = match crate::schedule::indexing::device_of(ctx, params[0].uop().clone()) {
+                    Some(crate::uop::arg::DeviceSpec::Single(d)) => d,
+                    _ => "CUDA".to_string(),
+                };
+                let dev = crate::runtime::device::canonicalize_device_name(&dev);
+                let b1buf = crate::runtime::buffer::buffer_of(
+                    ctx,
+                    &mut sess.buffers,
+                    self.b1_t.uop().clone(),
+                );
+                let b2buf = crate::runtime::buffer::buffer_of(
+                    ctx,
+                    &mut sess.buffers,
+                    self.b2_t.uop().clone(),
+                );
+                for ((i, t), (g, n)) in params.iter().enumerate().zip(grads.iter().zip(ns.iter())) {
+                    let bufs = vec![
+                        crate::runtime::buffer::buffer_of(ctx, &mut sess.buffers, t.uop().clone()),
+                        crate::runtime::buffer::buffer_of(ctx, &mut sess.buffers, g.uop().clone()),
+                        crate::runtime::buffer::buffer_of(
+                            ctx,
+                            &mut sess.buffers,
+                            self.m[i].uop().clone(),
+                        ),
+                        crate::runtime::buffer::buffer_of(
+                            ctx,
+                            &mut sess.buffers,
+                            self.v[i].uop().clone(),
+                        ),
+                        b1buf.clone(),
+                        b2buf.clone(),
+                    ];
+                    let mut call = crate::runtime::cuda_optim::host_call(
+                        bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
+                    );
+                    call.device = dev.clone();
+                    sess.capture_host(call.clone());
+                    call.exec();
+                }
+                // Pin the parameters now: the fused kernel wrote their buffers,
+                // and the next realize's `prune` would otherwise drop the
+                // binding and re-allocate from the parameter's initial data.
+                for p in params.iter() {
+                    p.pin_buffer_ctx(ctx, sess);
+                }
+                let mut extra = vec![self.b1_t.clone(), self.b2_t.clone()];
+                extra.extend(self.m.iter().cloned());
+                extra.extend(self.v.iter().cloned());
+                return (Vec::new(), extra);
+            }
+        }
+        // `self.b1_t *= self.b1` / `self.b2_t *= self.b2` (optim.py:163-164).
+        //
+        // Every store is deferred as an `assign_effect` and returned in `extra`,
+        // so `schedule_step` co-realizes the moments and the parameter write in
+        // one schedule. `assign_ctx` used to realize each one immediately: for a
+        // 32-tensor step that was 66 schedules and six elementwise passes per
+        // parameter (m store, v store, then the update re-reading both), which
+        // measured ~104 ms for 100M parameters. The update below reads the
+        // *new* moments as values (`m_new`/`v_new`), so the fused kernel can emit
+        // the moment and parameter stores from one load of m, v and g.
         let b1t_new = self.b1_t.mul_ctx(ctx, self.b1 as f64);
-        self.b1_t.assign_ctx(ctx, sess, &b1t_new);
         let b2t_new = self.b2_t.mul_ctx(ctx, self.b2 as f64);
-        self.b2_t.assign_ctx(ctx, sess, &b2t_new);
+        let mut effects = vec![
+            self.b1_t.assign_effect_ctx(ctx, &b1t_new),
+            self.b2_t.assign_effect_ctx(ctx, &b2t_new),
+        ];
         let one = scalar(ctx, 1.0);
+        let one_m_b1 = one.sub_ctx(ctx, &b1t_new);
+        let one_m_b2 = one.sub_ctx(ctx, &b2t_new);
         let mut ret = Vec::with_capacity(params.len());
         for (i, (t, g)) in params.iter().zip(grads.iter()).enumerate() {
             let dt = t.dtype_ctx(ctx);
             let m_old = self.m[i].mul_ctx(ctx, self.b1 as f64);
             let g_b1 = g.mul_ctx(ctx, 1.0 - self.b1 as f64);
             let m_new = m_old.add_ctx(ctx, &g_b1).cast_ctx(ctx, dt);
-            self.m[i].assign_ctx(ctx, sess, &m_new);
+            effects.push(self.m[i].assign_effect_ctx(ctx, &m_new));
             let v_old = self.v[i].mul_ctx(ctx, self.b2 as f64);
             let g_sq = g.square_ctx(ctx);
             let g_b2 = g_sq.mul_ctx(ctx, 1.0 - self.b2 as f64);
             let v_new = v_old.add_ctx(ctx, &g_b2).cast_ctx(ctx, dt);
-            self.v[i].assign_ctx(ctx, sess, &v_new);
-            let one_m_b1 = one.sub_ctx(ctx, &self.b1_t);
-            let m_hat = self.m[i].div_ctx(ctx, &one_m_b1);
-            let one_m_b2 = one.sub_ctx(ctx, &self.b2_t);
-            let v_hat = self.v[i].div_ctx(ctx, &one_m_b2);
+            effects.push(self.v[i].assign_effect_ctx(ctx, &v_new));
+            let m_hat = m_new.div_ctx(ctx, &one_m_b1);
+            let v_hat = v_new.div_ctx(ctx, &one_m_b2);
             let v_den = v_hat.sqrt_ctx(ctx).add_ctx(ctx, self.eps as f64);
             let mut up = m_hat.div_ctx(ctx, &v_den);
             if self.wd > 0.0 {
@@ -424,7 +581,19 @@ impl Optim for LAMB {
             let rl = r.mul_ctx(ctx, self.lr as f64);
             ret.push(rl.mul_ctx(ctx, &up).cast_ctx(ctx, dt));
         }
-        let mut extra = vec![self.b1_t.clone(), self.b2_t.clone()];
+        // Pin the state storages: the deferred stores no longer run through
+        // `assign_ctx`, and `prune` must not drop a moment buffer between the
+        // store and the update that reads it.
+        for t in self
+            .m
+            .iter()
+            .chain(self.v.iter())
+            .chain([&self.b1_t, &self.b2_t])
+        {
+            t.pin_buffer_ctx(ctx, sess);
+        }
+        let mut extra = effects;
+        extra.extend([self.b1_t.clone(), self.b2_t.clone()]);
         extra.extend(self.m.iter().cloned());
         extra.extend(self.v.iter().cloned());
         (ret, extra)

@@ -4998,3 +4998,64 @@ control-flow ops whose structure could depend on input data. Covered by
 `tests/onnx.rs::plan_cache_matches_eager_and_rebinds_inputs` (eager vs planned,
 including a replay with different data) and the existing
 `session_is_reusable_across_runs`, which now exercises capture + two replays.
+
+### 9.59 A fused optimizer kernel: 104 ms -> 26 ms over 100M parameters (2026-11)
+
+The `optim` microbench (32 tensors, 100M f32 parameters, 28 bytes of traffic
+each) measured 102-104 ms on the RTX 3060 — 27 GB/s, 4x behind torch. The KPROF
+breakdown showed five elementwise programs, each launched once per tensor (160
+launches), and the generated source explained the bandwidth: every parameter's
+flat extent is 3,125,000 = 2^3 * 5^8, so after the default `UPCAST 4` the
+scheduler can only pick `LOCAL 2`:
+
+```cuda
+int lidx0 = threadIdx.x; /* 2 */
+int gidx0 = blockIdx.x;  /* 390625 */
+```
+
+Two-thread blocks cap occupancy at a few percent. Deferring the moment stores
+into one schedule (§ above) removed 64 `create_linear_with_vars` passes but did
+not change the kernel count or the bandwidth; skipping the upcast to buy 8
+threads gained only ~3%.
+
+The fix is `runtime::cuda_optim`: one hand-written kernel per parameter,
+256-thread blocks, one element per thread, gated on CUDA + f32 + at least
+`MIN_ELEMS = 1024`:
+
+```cuda
+float bc1 = 1.0f - b1t[0];
+float bc2 = 1.0f - b2t[0];
+float gi = g[i];
+float mi = m[i] * 0.9f + gi * 0.1f;
+float vi = v[i] * 0.999f + gi * gi * 0.001f;
+m[i] = mi; v[i] = vi;
+float up = (mi / bc1) / (sqrtf(vi / bc2) + 1e-8f);
+up += p[i] * 0.01f;            // AdamW only
+p[i] = p[i] - lr * up;
+```
+
+The optimizer launches it through the same `HostCall` seam as fused attention
+(`Session::capture_host` + `exec`), so JIT replay records it in order between the
+generated linears. The bias-correction tensors are updated first with the graph
+path (two 1-element stores) and passed as buffers; `lr`/`b1`/`b2`/`eps`/`wd` are
+compile-time constants, so NVRTC compiles once.
+
+| | graph | fused |
+|---|---:|---:|
+| `optim` (100M, 32 tensors) | 102-104 ms (27 GB/s) | **25.9-26.5 ms (106-108 GB/s)** |
+| torch (same workload) | — | 26.3 ms (106.3 GB/s) |
+
+Numerics: `tests/nn_optim.rs::fused_kernel_matches_graph_update` runs three
+AdamW steps on a 4096-element CUDA parameter through both paths and requires
+them to agree to `1e-5`; the tiny-parameter goldens keep exercising the graph
+path. `AUTORUST_OPTIM_KERNEL=0` (or `optim::set_fused_optimizer(false)`) forces
+the graph path, which is also the fallback for non-CUDA devices, non-f32
+parameters, gradients that are not the same size, and tensors below
+`MIN_ELEMS`.
+
+One correctness note that cost a debugging cycle: the fused path must pin each
+parameter after writing it. `schedule_step` realizes the state tensors
+afterwards; `BufTable::prune` drops the parameter's binding, and the later
+`pin_buffer_ctx` would re-allocate from the parameter's `initial_data` — the
+first step's update silently disappeared. `assign_ctx` used to pin as a side
+effect; the deferred stores do it explicitly.

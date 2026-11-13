@@ -221,7 +221,7 @@ fn run_kernel(
 
 #[test]
 fn causal_mask_gqa_all_kernels() {
-    let _gpu = GPU_LOCK.lock().unwrap();
+    let _gpu = GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !autorust::runtime::ops_cuda::available() {
         return;
     }
@@ -297,7 +297,7 @@ fn causal_mask_gqa_all_kernels() {
 /// and for causal, and match SDPA.
 #[test]
 fn dispatch_handles_mask_and_causal() {
-    let _gpu = GPU_LOCK.lock().unwrap();
+    let _gpu = GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !autorust::runtime::ops_cuda::has_tensor_cores() {
         return;
     }
@@ -335,7 +335,7 @@ fn dispatch_handles_mask_and_causal() {
 /// The automatic path must handle GQA (fewer K/V heads) and match SDPA.
 #[test]
 fn dispatch_handles_gqa() {
-    let _gpu = GPU_LOCK.lock().unwrap();
+    let _gpu = GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !autorust::runtime::ops_cuda::has_tensor_cores() {
         return;
     }
@@ -364,7 +364,7 @@ fn dispatch_handles_gqa() {
 /// Causal should nearly halve the key tiles at the app shape.
 #[test]
 fn causal_skips_half_the_work() {
-    let _gpu = GPU_LOCK.lock().unwrap();
+    let _gpu = GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !autorust::runtime::ops_cuda::has_tensor_cores() {
         return;
     }
@@ -430,8 +430,11 @@ fn causal_skips_half_the_work() {
         "tf32 n={n}: full {full:.2} ms, causal {causal:.2} ms ({:.2}x)",
         full / causal
     );
+    // A broken causal path makes the two times equal (~1.0x); a working one is
+    // 1.5-1.6x in isolation but can drop to ~1.2x when the GPU is warm from the
+    // rest of the suite. 0.9 still fails the regression while tolerating that.
     assert!(
-        causal < full * 0.8,
+        causal < full * 0.9,
         "causal should skip key tiles: {causal} vs {full}"
     );
 }
