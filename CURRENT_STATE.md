@@ -5089,3 +5089,33 @@ kernel is a much larger change.
 
 `tests/nn_conv.rs`, `tests/conv_tiling.rs` and the model goldens pass; the
 64M-element cap keeps the streaming path for very large convolutions.
+
+### 9.61 Scope notes: staging and cold-start parallelism (2026-11)
+
+Two review items were attempted and deliberately not landed; the reasons are
+mechanical, not scheduling of effort.
+
+**Staging for the last 48 GEMM-shaped rejections.** These are ViT training
+weight gradients whose operand index is
+`(r//64)*12608 + r%64 + ...`: a `[b,h,t,d]` tensor where the scheduler merged
+`(h,d)` into one range and split it again, plus a destination store with no
+unit-stride axis (`c=[3:65,2:768]`). Running `pm_split_ranges` on the store for
+analysis (the pipeline's own rewrite) removes the non-affine index but leaves
+the strided destination, so it only moved the rejection to `n-axis-ambiguous`
+and was reverted. Recovering them needs a scheduler that allocates a temporary
+buffer, writes the GEMM there and copies it out (or accumulates per batch slice
+with `beta = 1`). That is a new scheduler feature, not an extractor change; the
+extractor-side work in the same area (two-axis batch split, reduce collapse,
+column-major outputs) recovered 170 of the 2,286 bs-4 extraction attempts.
+
+**Cold-start parallelism.** `compile_linear` already splits cold compilation
+into serial rendering + per-device `compile_batch`; CUDA's
+`compile_batch` deduplicates sources and runs up to eight NVRTC workers.
+Measured with a fresh cache, `vit_infer` bs 4 renders 14 kernels in 83 ms
+(`codegen.sink` 5.7 ms each — the ~30 rewrite stages) while compilation is
+already batched. Rendering is serial because it mutates the `Rc`-based UOp
+arena (`UOpCtx` is `!Send`); parallelizing it needs an owned, `Send` kernel-IR
+handoff or independent worker arenas followed by serial re-interning, exactly
+as the review describes. That is a cross-cutting refactor of `uop::ctx` and
+`codegen`, out of proportion to the cold-start share (~0.5 s of a 1.2 s first
+call, and zero on replay/ONNX after the plan capture in §9.58).
