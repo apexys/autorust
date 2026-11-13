@@ -4857,11 +4857,19 @@ P0 item that fit without an architectural change:
   they depend on), which is called by every opt that rewrites the AST.
 - **`realize_many` buffer-map lookup.** Above 8 co-realized roots (optimizer
   steps) the per-target linear scan becomes a hash map.
-
-Not taken: the 72 remaining `unsupported-reduce` rejections at bs 4 turned out to
-be *two-axis reductions* (`REDUCE(ADD, Mul, Range(Reduce), Range(Reduce))`), not
-"a third summand" — the weight gradient sums over batch and tokens. Treating
-that as a single GEMM would fold a batch sum into a matmul, so it needs an
-accumulating grouped GEMM (`beta = 1` per batch slice), which is a new kernel
-feature rather than an extractor fix. `n-axis-ambiguous` (3-axis outputs) and
-`b-index-not-affine` (moved-staging views) are the next groups after that.
+- **Two-axis reductions collapse to one K axis when the operands allow it.** The
+  72 `unsupported-reduce` rejections at bs 4 are `REDUCE(ADD, Mul, Range, Range)`
+  (a weight gradient summed over batch and tokens), not "a third summand".
+  `extract` now accepts a second reduction axis when both operands are linear in
+  the same flattened index (`stride2 == stride1 * extent1`, or the reverse
+  order); the pair becomes one `K = batch*tokens` contraction, so it is the same
+  batched GEMM, not an accumulation. At bs 4 that accepts 23 more descriptors
+  (`3072x768x788x1`, `768x3072x788x1`) and is worth **-0.7%** in an alternating
+  A/B on `vit_train` (306.4 → 304.4 ms/step; cuBLAS is only ~4% faster than the
+  generated kernel at `3072x768x788`: 6.37 vs 6.62 ms).
+  The other 49 of the 72 do not reach the collapse: 24 now fail at
+  `b-index-not-affine` and 14 at `b-operand-not-load`, and 12 have a
+  non-contiguous pair (`k_axes=4x197 a=[151296,768] b=[151296,1]`) because the N
+  axis sits between batch and token in B. Those need per-slice accumulation
+  (`beta = 1`) — a kernel feature, not an extractor change — so they stay
+  generated for now.

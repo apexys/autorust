@@ -202,6 +202,52 @@ fn cublas_handles_two_axis_batch_layout() {
 }
 
 #[test]
+fn cublas_collapses_two_reduce_axes() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    // `dW = sum_{batch, tokens} x[b,t,:] (x) dy[b,t,:]`: the scheduler keeps two
+    // reduction axes, and both operands are contiguous over the pair, so it is
+    // one `K = batch*tokens` contraction rather than two nested reductions.
+    let (b, t, k, n) = (2usize, 37usize, 64usize, 48usize);
+    let xd = values(1, b * t * k);
+    let dd = values(7, b * t * n);
+    let run_case = |lib: bool| {
+        autorust::runtime::ops_cuda::CUBLAS_GEMMS.store(0, Ordering::Relaxed);
+        let out = run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let x = Tensor::from_slice(ctx, &xd, None, Some("CUDA"))
+                    .reshape([b as i64, t as i64, k as i64]);
+                let dy = Tensor::from_slice(ctx, &dd, None, Some("CUDA"))
+                    .reshape([b as i64, t as i64, n as i64]);
+                let prod = x.unsqueeze(3).mul(dy.unsqueeze(2));
+                vec![prod.sum(Some(&[0, 1]), false, None)]
+            },
+        );
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLAS_GEMMS.load(Ordering::Relaxed),
+        )
+    };
+    let (want, calls_never) = run_case(false);
+    let (got, calls_always) = run_case(true);
+    assert_eq!(calls_never, 0, "Never policy must stay generated");
+    assert!(
+        calls_always > 0,
+        "a contiguous two-axis reduction must collapse to one GEMM"
+    );
+    let d = maxdiff(&want, &got);
+    assert!(d < 1e-3, "collapsed reduction: cuBLAS diff {d:e}");
+}
+
+#[test]
 fn cublas_matches_bf16() {
     let _guard = LOCK.lock().unwrap();
     if !have_cuda_and_cublas() {

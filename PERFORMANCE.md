@@ -133,7 +133,9 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   one strided axis when the head and batch strides do not collapse
   (`head_stride * heads != batch_stride`), so CUDA issues one strided-batched
   call per outer batch slice: the descriptor stays a library GEMM instead of
-  falling back to the generated kernel at bs > 1. `AUTORUST_GEMM_STATS=1` shows
+  falling back to the generated kernel at bs > 1. Two *reduction* axes that are
+  linear in the same flattened index (a `(batch, tokens)` weight gradient)
+  collapse into one `K` axis, so it is still a plain batched GEMM. `AUTORUST_GEMM_STATS=1` shows
   the effect directly: ViT-B/16 f32 training at bs 4 accepts the two attention
   families (`197x64x197x48`, `197x197x64x48`) and has no `batch-layout`
   rejections, and the step drops **315.5 → 297.8/299.3 ms** on an RTX 3060

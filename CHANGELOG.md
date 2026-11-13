@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A two-axis reduction folds into one contraction axis when the operands are
+  contiguous over the pair.** Weight gradients summed over `(batch, tokens)`
+  (`REDUCE(ADD, Mul, Range, Range)`) now reach cuBLAS as a single `K` axis
+  instead of staying on the generated kernel: 23 more descriptors at ViT
+  training bs 4, worth ~0.7% (306.4 → 304.4 ms/step in an alternating A/B).
+  A non-contiguous pair (the N axis between batch and token in B) is still
+  rejected, since it needs per-slice accumulation.
 - **Two-axis `(batch, head)` GEMMs stay on cuBLAS at batch > 1.** The library
   path now issues one strided-batched cuBLAS call per outer batch slice instead
   of rejecting the split layout, so ViT training keeps its forward-attention

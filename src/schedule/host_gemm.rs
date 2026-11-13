@@ -988,7 +988,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         eprintln!("[vk] ext: rsrcs");
     }
     let rsrcs = ctx.srcs(&reduce).to_vec();
-    if rsrcs.len() != 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
+    if rsrcs.len() < 2 || reduce_op(ctx, &reduce) != Some(Ops::Add) {
         // `srcs` is `[value, range, ...]`: a second range is a multi-axis
         // reduction, not a second summand, and the two must not be conflated.
         let desc: Vec<String> = rsrcs
@@ -1008,7 +1008,23 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         ));
         return reject("unsupported-reduce");
     }
-    let red_k = or_reject(range_key(ctx, &rsrcs[1]), "reduce-not-range")?;
+    // One or two reduction axes. A pair is either a genuinely different
+    // computation or, when the operands are contiguous over it in the same
+    // order, a single contraction axis (the `(batch, tokens)` weight-gradient
+    // sum). Extent-1 axes contribute one term and are dropped.
+    let mut red_axes: Vec<RKey> = Vec::new();
+    let mut red_exts: Vec<i64> = Vec::new();
+    for r in &rsrcs[1..] {
+        let key = or_reject(range_key(ctx, r), "reduce-not-range")?;
+        let ext = or_reject(range_extent(ctx, &st, key), "symbolic-extent")?;
+        if ext > 1 {
+            red_axes.push(key);
+            red_exts.push(ext);
+        }
+    }
+    if red_axes.is_empty() {
+        return reject("no-reduce-axis");
+    }
 
     if crate::helpers::env::get("VK_TRACE").is_some() {
         eprintln!("[vk] ext: mul");
@@ -1158,7 +1174,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let mut n_candidates: Vec<RKey> = b_keys
         .iter()
         .copied()
-        .filter(|k| *k != red_k && !a_keys.contains(k) && coeff(&c_map, *k) == 1)
+        .filter(|k| !red_axes.contains(k) && !a_keys.contains(k) && coeff(&c_map, *k) == 1)
         .collect();
     n_candidates.dedup();
     if n_candidates.len() != 1 {
@@ -1178,7 +1194,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let mut m_candidates: Vec<(RKey, i64)> = a_keys
         .iter()
         .copied()
-        .filter(|k| *k != red_k && !b_keys.contains(k))
+        .filter(|k| !red_axes.contains(k) && !b_keys.contains(k))
         .map(|k| (k, coeff(&c_map, k)))
         .filter(|(_, c)| *c >= n)
         .collect();
@@ -1197,15 +1213,44 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     }
     let m_key = m_candidates[0].0;
     let m = or_reject(range_extent(ctx, &st, m_key), "symbolic-extent")?;
-    let k = or_reject(range_extent(ctx, &st, red_k), "symbolic-extent")?;
+    let a_m = coeff(&a_map, m_key);
+    let b_n = coeff(&b_map, n_key);
+    // Collapse the reduction axes into one contraction axis. For both operands
+    // the offset must be linear in the same flattened index, which holds when
+    // one axis's stride is the other's times its extent. A zero stride (a
+    // broadcast term) or a mismatched order is not a GEMM.
+    let (k, a_k, b_k) = match red_axes.len() {
+        1 => (
+            red_exts[0],
+            coeff(&a_map, red_axes[0]),
+            coeff(&b_map, red_axes[0]),
+        ),
+        2 => {
+            let (k1, k2) = (red_exts[0], red_exts[1]);
+            let (a1, a2) = (coeff(&a_map, red_axes[0]), coeff(&a_map, red_axes[1]));
+            let (b1, b2) = (coeff(&b_map, red_axes[0]), coeff(&b_map, red_axes[1]));
+            let first_outer =
+                a1 != 0 && b1 != 0 && a2 == a1.saturating_mul(k1) && b2 == b1.saturating_mul(k1);
+            let second_outer =
+                a2 != 0 && b2 != 0 && a1 == a2.saturating_mul(k2) && b1 == b2.saturating_mul(k2);
+            if first_outer {
+                (k1.saturating_mul(k2), a1, b1)
+            } else if second_outer {
+                (k1.saturating_mul(k2), a2, b2)
+            } else {
+                note_detail(&format!("k_axes={k1}x{k2} a=[{a1},{a2}] b=[{b1},{b2}]"));
+                return reject("reduce-axes-not-contiguous");
+            }
+        }
+        _ => {
+            note_detail(&format!("reduce_axes={}", red_axes.len()));
+            return reject("reduce-axes-many");
+        }
+    };
     if m <= 0 || k <= 0 {
         return reject("degenerate-shape");
     }
 
-    let a_m = coeff(&a_map, m_key);
-    let a_k = coeff(&a_map, red_k);
-    let b_k = coeff(&b_map, red_k);
-    let b_n = coeff(&b_map, n_key);
     let c_m = coeff(&c_map, m_key);
     let c_n = coeff(&c_map, n_key);
     // The CPU blocked kernel stores rows contiguously; anything else keeps the
@@ -1302,7 +1347,10 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     }
     // A and B must not iterate any other range we ignored.
     for (key, _) in a_map.iter().chain(b_map.iter()) {
-        if *key != m_key && *key != n_key && *key != red_k && !batch.iter().any(|(k, ..)| k == key)
+        if *key != m_key
+            && *key != n_key
+            && !red_axes.contains(key)
+            && !batch.iter().any(|(k, ..)| k == key)
         {
             return reject("operand-extra-axis");
         }
