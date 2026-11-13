@@ -147,6 +147,12 @@ pub struct Scheduler<'a> {
     opt_range: i64,
     /// `self.tensor_core` — set by `_apply_tc_opt` (postrange.py:308).
     tensor_core: Option<TensorCore>,
+    /// Cached `rngs(ast)`. Each opt that rewrites the AST invalidates all three
+    /// caches (`set_ast`); between rewrites the range metadata is constant, and
+    /// `full_shape`/`axes_of` are called per candidate in the opt loops.
+    rngs_cache: std::cell::RefCell<Option<Vec<UopId>>>,
+    shape_cache: std::cell::RefCell<Option<Vec<i64>>>,
+    axis_types_cache: std::cell::RefCell<Option<Vec<AxisType>>>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -179,11 +185,26 @@ impl<'a> Scheduler<'a> {
             applied_opts,
             opt_range: base_axis + 1,
             tensor_core: None,
+            rngs_cache: std::cell::RefCell::new(None),
+            shape_cache: std::cell::RefCell::new(None),
+            axis_types_cache: std::cell::RefCell::new(None),
         }
+    }
+
+    /// Replace the kernel AST and drop the cached range metadata (the only
+    /// input those caches depend on).
+    fn set_ast(&mut self, ast: UopId) {
+        self.ast = ast;
+        *self.rngs_cache.borrow_mut() = None;
+        *self.shape_cache.borrow_mut() = None;
+        *self.axis_types_cache.borrow_mut() = None;
     }
 
     /// `rngs` — opt axes in order.
     pub fn rngs(&self, ctx: &mut UOpCtx) -> Vec<UopId> {
+        if let Some(v) = self.rngs_cache.borrow().as_ref() {
+            return v.clone();
+        }
         let mut rngs: Vec<UopId> = ctx
             .backward_slice_with_self(&self.ast)
             .into_iter()
@@ -211,6 +232,7 @@ impl<'a> Scheduler<'a> {
             }
             (axis_to_pos(at), ints)
         });
+        *self.rngs_cache.borrow_mut() = Some(rngs.clone());
         rngs
     }
 
@@ -230,18 +252,30 @@ impl<'a> Scheduler<'a> {
 
     /// `full_shape` — ssimplify of extents.
     pub fn full_shape(&self, ctx: &mut UOpCtx) -> Vec<i64> {
-        self.rngs(ctx)
+        if let Some(v) = self.shape_cache.borrow().as_ref() {
+            return v.clone();
+        }
+        let out: Vec<i64> = self
+            .rngs(ctx)
             .iter()
             .map(|r| self.rng_vmax(ctx, r.clone()) + 1)
-            .collect()
+            .collect();
+        *self.shape_cache.borrow_mut() = Some(out.clone());
+        out
     }
 
     /// Axis type of each opt axis, in order.
     pub fn axis_types(&self, ctx: &mut UOpCtx) -> Vec<AxisType> {
-        self.rngs(ctx)
+        if let Some(v) = self.axis_types_cache.borrow().as_ref() {
+            return v.clone();
+        }
+        let out: Vec<AxisType> = self
+            .rngs(ctx)
             .iter()
             .map(|r| AxisType::range_axis_type(ctx, r.clone()))
-            .collect()
+            .collect();
+        *self.axis_types_cache.borrow_mut() = Some(out.clone());
+        out
     }
 
     /// `output_shape`.
@@ -449,7 +483,13 @@ impl<'a> Scheduler<'a> {
             }
         }
         if !map.is_empty() {
-            self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), map, false, false);
+            self.set_ast(crate::uop::upat::substitute(
+                ctx,
+                self.ast.clone(),
+                map,
+                false,
+                false,
+            ));
         }
     }
 
@@ -505,7 +545,13 @@ impl<'a> Scheduler<'a> {
         };
         let mut map = HashMap::new();
         map.insert(rng, sub_axis);
-        self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), map, false, false);
+        self.set_ast(crate::uop::upat::substitute(
+            ctx,
+            self.ast.clone(),
+            map,
+            false,
+            false,
+        ));
         (replaced, new_rng)
     }
 
@@ -673,7 +719,13 @@ impl<'a> Scheduler<'a> {
                 replaces.insert(b.clone(), wrapped);
             }
         }
-        self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), replaces, false, false);
+        self.set_ast(crate::uop::upat::substitute(
+            ctx,
+            self.ast.clone(),
+            replaces,
+            false,
+            false,
+        ));
         Ok(replaced_rng)
     }
 
@@ -800,7 +852,13 @@ impl<'a> Scheduler<'a> {
                 let tagged = ctx.uop_tag(op, Some(dt), srcs, arg, Arg::Str("TC".into()));
                 let mut m = HashMap::new();
                 m.insert(reduceop.clone(), tagged);
-                self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), m, false, false);
+                self.set_ast(crate::uop::upat::substitute(
+                    ctx,
+                    self.ast.clone(),
+                    m,
+                    false,
+                    false,
+                ));
             }
             // The WMMA tiling loses to the register tiling when the output is
             // very asymmetric (measured: 6312x384x384 -15%, 6312x512x384 -12%;
@@ -994,7 +1052,13 @@ impl<'a> Scheduler<'a> {
                 }
                 let mut m: HashMap<UopId, UopId> = HashMap::new();
                 m.insert(tagged.clone(), tc_final);
-                self.ast = crate::uop::upat::substitute(ctx, self.ast.clone(), m, false, false);
+                self.set_ast(crate::uop::upat::substitute(
+                    ctx,
+                    self.ast.clone(),
+                    m,
+                    false,
+                    false,
+                ));
             }
             self.tensor_core = Some(tc);
             return Ok(axes.to_vec());
@@ -1011,6 +1075,9 @@ impl<'a> Scheduler<'a> {
             applied_opts: self.applied_opts.clone(),
             opt_range: self.opt_range,
             tensor_core: self.tensor_core.clone(),
+            rngs_cache: std::cell::RefCell::new(None),
+            shape_cache: std::cell::RefCell::new(None),
+            axis_types_cache: std::cell::RefCell::new(None),
         }
     }
 
