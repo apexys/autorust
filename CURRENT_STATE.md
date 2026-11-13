@@ -4819,3 +4819,49 @@ Consequence for future work: the HostGemm/annotation A/B in
 `PERFORMANCE_REVIEW.md` can be read directly from the profile tables, and a
 disappearing descriptor is now visible as a changed *reason count*, not merely
 as slower generated kernels.
+
+### 9.55 Two-axis batched cuBLAS, single-lowering capture, and scheduler cleanup (2026-11)
+
+Follow-up to `PERFORMANCE_REVIEW.md`. The review's low-risk items plus the one
+P0 item that fit without an architectural change:
+
+- **Two-axis `(batch, head)` library GEMMs on CUDA.** The split-batch descriptor
+  (`a_bi`/`batch_inner`) was Vulkan-only, so ViT training lost the forward
+  attention GEMMs at every batch > 1. CUDA now runs it as one strided-batched
+  cuBLAS call per outer batch slice (the inner slices are uniformly strided), so
+  `197x64x197x48` and `197x197x64x48` are dispatchable again. Measured,
+  RTX 3060, `vit_train` f32 bs 4, JIT replay (2 warmups + 5 iterations, two
+  processes): **315.5 / 315.7 → 301.1 / 302.1 ms/step (-4.5%)**. bs 1 training
+  and bs 4 inference are unchanged; the layout is covered by
+  `tests/cublas.rs::cublas_handles_two_axis_batch_layout`, which also asserts the
+  dispatch (a new `CUBLAS_GEMMS` counter), not just numerics.
+- **JIT capture reuses the compiled LINEAR.** `realize_tensor`/`realize_many`
+  used to compile and execute the plan, then `Jit::call` compiled the planned
+  LINEAR a second time from its `UopId`. `CaptureEntry::Linear` and
+  `JitStep::Linear` now hold the `Rc<CompiledLinear>` produced by the capturing
+  run. `AUTORUST_PROF=1` on `vit_infer` bs 4 (14 steps): `codegen.ast_nodes`
+  **516 → 270**, `codegen.prepare` **6.5 → 2.4 ms**. End-to-end effect is small
+  (~0.2 ms/step) because the second lowering was all cache hits, but it removes
+  the duplicate hash/walk/interning work the review flagged.
+- **Single AST hash per program.** `global_program_key` re-ran
+  `Graph::content_key` (a full toposort) on the value `prepare_program` had just
+  computed; it now mixes the given key with the device.
+- **LRU bookkeeping is O(1) per hit.** `ProgCache` used a `VecDeque` linear scan
+  on every hit. It now keeps a per-key tick map (hit: one hash-map insert;
+  eviction: one scan, only on overflow) and skips bookkeeping entirely for the
+  uncapped session cache, which never evicts.
+- **Scheduler range metadata is cached.** `rngs`/`full_shape`/`axis_types`
+  rebuilt the backward slice, sorted it, and re-simplified every extent on each
+  call; `upcastable_dims` called `full_shape` once per axis inside a filter. The
+  three are cached on `Scheduler` and invalidated by `set_ast` (the only thing
+  they depend on), which is called by every opt that rewrites the AST.
+- **`realize_many` buffer-map lookup.** Above 8 co-realized roots (optimizer
+  steps) the per-target linear scan becomes a hash map.
+
+Not taken: the 72 remaining `unsupported-reduce` rejections at bs 4 turned out to
+be *two-axis reductions* (`REDUCE(ADD, Mul, Range(Reduce), Range(Reduce))`), not
+"a third summand" — the weight gradient sums over batch and tokens. Treating
+that as a single GEMM would fold a batch sum into a matmul, so it needs an
+accumulating grouped GEMM (`beta = 1` per batch slice), which is a new kernel
+feature rather than an extractor fix. `n-axis-ambiguous` (3-axis outputs) and
+`b-index-not-affine` (moved-staging views) are the next groups after that.

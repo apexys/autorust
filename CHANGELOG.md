@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Two-axis `(batch, head)` GEMMs stay on cuBLAS at batch > 1.** The library
+  path now issues one strided-batched cuBLAS call per outer batch slice instead
+  of rejecting the split layout, so ViT training keeps its forward-attention
+  GEMMs at every batch size. Measured on an RTX 3060: `vit_train` f32 bs 4 JIT
+  **315.5 → 301.6 ms/step (-4.5%)**. `tests/cublas.rs` covers the layout
+  numerically and asserts the dispatch through the new `CUBLAS_GEMMS` counter.
+- **JIT capture no longer lowers the same plan twice.** `CaptureEntry::Linear`
+  and `JitStep::Linear` carry the `Rc<CompiledLinear>` produced by the capturing
+  realize, so replay skips the second AST hash/walk (`codegen.ast_nodes`
+  516 → 270 on `vit_infer` bs 4). `run_linear` now returns the compiled LINEAR.
+- **Cheaper program-cache and scheduler metadata lookups.** `ProgCache` uses an
+  O(1) tick map instead of a `VecDeque` scan per hit and keeps no LRU state when
+  uncapped; `Scheduler` caches `rngs`/`full_shape`/`axis_types` and
+  `realize_many` uses a hash map for large co-realizations.
+
 ### Added
 
 - **Host-GEMM dispatch accounting and keyed CUDA `KPROF` rows.** With
