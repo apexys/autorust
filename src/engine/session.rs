@@ -192,12 +192,14 @@ impl Session {
     }
 }
 
-/// One captured step: a generated LINEAR schedule, or a hand-written kernel
+/// One captured step: a compiled LINEAR schedule, or a hand-written kernel
 /// launch (fused attention) recorded in the same order.
 #[derive(Clone)]
 pub enum CaptureEntry {
-    /// A generated linear schedule.
-    Linear(UopId),
+    /// A generated linear schedule, already lowered and compiled by the realize
+    /// that ran it. Reusing this object is what keeps JIT capture from lowering
+    /// the same plan twice.
+    Linear(std::rc::Rc<crate::engine::realize::CompiledLinear>),
     /// A hand-written kernel launch.
     Host(Box<HostCall>),
 }

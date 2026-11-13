@@ -31,16 +31,17 @@
 
 use std::collections::HashMap;
 
-use crate::engine::realize::{CompiledLinear, compile_linear_cached, exec_linear};
+use crate::engine::realize::{CompiledLinear, exec_linear};
 use crate::engine::session::Session;
 use crate::runtime::buffer::{Buffer, buffer_of};
 use crate::tensor::{Ctx, Tensor};
 use crate::uop::ctx::UOpCtx;
+use std::rc::Rc;
 
 /// One replayed step: a compiled linear schedule or a hand-written launch.
 pub enum JitStep {
-    /// A compiled generated linear.
-    Linear(CompiledLinear),
+    /// A compiled generated linear (the object the capturing realize produced).
+    Linear(Rc<CompiledLinear>),
     /// A hand-written kernel launch (fused attention).
     Host(Box<crate::engine::session::HostCall>),
 }
@@ -120,9 +121,7 @@ impl Jit {
             self.steps = planned
                 .into_iter()
                 .map(|l| match l {
-                    crate::engine::session::CaptureEntry::Linear(u) => {
-                        JitStep::Linear(compile_linear_cached(&mut c, u, &mut sess.cache))
-                    }
+                    crate::engine::session::CaptureEntry::Linear(cl) => JitStep::Linear(cl),
                     crate::engine::session::CaptureEntry::Host(h) => JitStep::Host(h),
                 })
                 .collect();
@@ -173,9 +172,7 @@ impl Jit {
             self.steps = planned
                 .into_iter()
                 .map(|l| match l {
-                    crate::engine::session::CaptureEntry::Linear(u) => {
-                        JitStep::Linear(compile_linear_cached(&mut c, u, &mut sess.cache))
-                    }
+                    crate::engine::session::CaptureEntry::Linear(cl) => JitStep::Linear(cl),
                     crate::engine::session::CaptureEntry::Host(h) => JitStep::Host(h),
                 })
                 .collect();

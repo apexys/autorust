@@ -255,7 +255,9 @@ pub struct CompiledProg {
 /// Optionally LRU-capped so it can't grow unbounded on dynamic-shape workloads.
 pub struct ProgCache {
     map: HashMap<u64, Rc<CompiledProg>>,
-    order: std::collections::VecDeque<u64>,
+    /// Last-use tick per resident key (LRU order). Empty while uncapped.
+    recency: HashMap<u64, u64>,
+    clock: u64,
     cap: usize,
     /// Observability: number of `to_program` lookups that found a cached program.
     pub hits: u64,
@@ -274,7 +276,8 @@ impl ProgCache {
     pub fn new() -> Self {
         ProgCache {
             map: HashMap::new(),
-            order: std::collections::VecDeque::new(),
+            recency: HashMap::new(),
+            clock: 0,
             cap: usize::MAX,
             hits: 0,
             misses: 0,
@@ -285,17 +288,20 @@ impl ProgCache {
     pub fn capped(cap: usize) -> Self {
         ProgCache {
             map: HashMap::new(),
-            order: std::collections::VecDeque::new(),
+            recency: HashMap::new(),
+            clock: 0,
             cap,
             hits: 0,
             misses: 0,
         }
     }
     fn touch(&mut self, key: u64) {
-        if let Some(pos) = self.order.iter().position(|&k| k == key) {
-            self.order.remove(pos);
+        // An uncapped cache never evicts, so it must not keep LRU bookkeeping.
+        if self.cap == usize::MAX {
+            return;
         }
-        self.order.push_back(key);
+        self.clock += 1;
+        self.recency.insert(key, self.clock);
     }
     /// Look up a compiled program, recording the hit/miss and refreshing its LRU position.
     pub fn get(&mut self, key: u64) -> Option<Rc<CompiledProg>> {
@@ -318,18 +324,26 @@ impl ProgCache {
     }
     /// Insert or replace a compiled program, evicting LRU entries past the cap.
     pub fn insert(&mut self, key: u64, cp: Rc<CompiledProg>) {
-        if !self.map.contains_key(&key) {
-            self.order.push_back(key);
-        } else {
-            self.touch(key);
-        }
         self.map.insert(key, cp);
+        // Uncapped: no LRU bookkeeping at all (see `touch`).
+        if self.cap == usize::MAX {
+            return;
+        }
+        self.touch(key);
         while self.map.len() > self.cap {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            } else {
+            // Eviction is the only O(n) operation, and it runs once per miss that
+            // overflows the cap (not once per hit). Keys are unique ticks, so the
+            // minimum is the least-recently used entry.
+            let Some(victim) = self
+                .recency
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(k, _)| *k)
+            else {
                 break;
-            }
+            };
+            self.recency.remove(&victim);
+            self.map.remove(&victim);
         }
     }
 }
@@ -346,11 +360,13 @@ thread_local! {
         std::cell::RefCell::new(ProgCache::capped(1024));
 }
 
-fn global_program_key(ctx: &UOpCtx, dev: &crate::runtime::device::Compiled, ast: &UopId) -> u64 {
+fn global_program_key(dev: &crate::runtime::device::Compiled, content_key: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     dev.device.hash(&mut h);
-    ctx.g.content_key(ast).hash(&mut h);
+    // The JSON content key was already computed by the caller (the AST hash is a
+    // full toposort); hash the value again rather than re-deriving the graph.
+    content_key.hash(&mut h);
     h.finish()
 }
 
@@ -550,7 +566,7 @@ fn prepare_program(
     cache: &mut ProgCache,
 ) -> Prepared {
     let key = ctx.g.content_key(&ast);
-    let gkey = global_program_key(ctx, dev, &ast);
+    let gkey = global_program_key(dev, key);
     if crate::engine::prof::enabled() {
         // Kernel AST size, for comparing against tinygrad (see CURRENT_STATE 8.34).
         crate::engine::prof::acc("codegen.ast_nodes", ctx.toposort(&ast).len() as f64);
@@ -1133,15 +1149,19 @@ pub fn exec_linear(
 }
 
 /// `run_linear` (realize.py:315) — compile then execute every call.
+///
+/// Returns the compiled form so a caller can keep it (the JIT captures the same
+/// `Rc` instead of lowering the planned LINEAR a second time).
 pub fn run_linear(
     ctx: &mut UOpCtx,
     linear: UopId,
     t: &mut BufTable,
     var_vals: &HashMap<String, i64>,
     cache: &mut ProgCache,
-) {
-    let compiled = compile_linear_cached(ctx, linear, cache);
+) -> Rc<CompiledLinear> {
+    let compiled = Rc::new(compile_linear_cached(ctx, linear, cache));
     exec_linear(ctx, t, &compiled, var_vals);
+    compiled
 }
 
 // ---------------- Tensor-level realize ----------------
@@ -1210,12 +1230,15 @@ pub fn realize_many(
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
     let _ = linear;
     let t3 = prof.then(std::time::Instant::now);
+    // Compile once, capture that exact object, then execute it: the JIT replays
+    // the compiled LINEAR instead of lowering the planned one again.
+    let compiled = Rc::new(compile_linear_cached(ctx, planned, cache));
     if let Some(c) = capture.as_mut() {
         c.push(crate::engine::session::CaptureEntry::Linear(
-            planned.clone(),
+            compiled.clone(),
         ));
     }
-    run_linear(ctx, planned, t, &HashMap::new(), cache);
+    exec_linear(ctx, t, &compiled, &HashMap::new());
     if let (Some(a), Some(b), Some(c), Some(d)) = (t0, t1, t2, t3) {
         use crate::engine::prof::add;
         add("realize.materialize", b.duration_since(a).as_secs_f64());
@@ -1225,15 +1248,22 @@ pub fn realize_many(
         add("realize.total", a.elapsed().as_secs_f64());
     }
     // python `_apply_map_to_tensors`: each tensor's uop becomes its final storage
-    // form after the schedule — a leaf aliasing that allocation.
+    // form after the schedule — a leaf aliasing that allocation. Optimizer
+    // co-realization can have hundreds of roots, where the linear scan is
+    // quadratic; build a lookup once above a small threshold.
+    let buffer_lookup: Option<HashMap<UopId, UopId>> =
+        (targets.len() > 8).then(|| buffer_map.iter().cloned().collect());
     let mut bufs = Vec::with_capacity(targets.len());
     let mut leaves = Vec::with_capacity(targets.len());
     for (i, target) in targets.iter().enumerate() {
-        let f = buffer_map
-            .iter()
-            .find(|(a, _)| a == target)
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| target.clone());
+        let f = match &buffer_lookup {
+            Some(m) => m.get(target).cloned(),
+            None => buffer_map
+                .iter()
+                .find(|(a, _)| a == target)
+                .map(|(_, v)| v.clone()),
+        }
+        .unwrap_or_else(|| target.clone());
         let b = buffer_of(ctx, t, f);
         let leaf = buffer_leaf(ctx, t, &b, &tensor_uops[i]);
         bufs.push(b);
@@ -1288,12 +1318,14 @@ pub fn realize_tensor(
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);
     let _ = linear;
+    // Compile once, capture that exact object, then execute it (see realize_many).
+    let compiled = Rc::new(compile_linear_cached(ctx, planned, cache));
     if let Some(c) = capture {
         c.push(crate::engine::session::CaptureEntry::Linear(
-            planned.clone(),
+            compiled.clone(),
         ));
     }
-    run_linear(ctx, planned, t, &HashMap::new(), cache);
+    exec_linear(ctx, t, &compiled, &HashMap::new());
     // python `_apply_map_to_tensors`: the tensor's uop becomes its final
     // storage form after the schedule — that is the buffer the kernel wrote.
     let final_uop = buffer_map
