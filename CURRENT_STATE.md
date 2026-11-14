@@ -5545,3 +5545,39 @@ MNIST bs64 and ResNet-18 bs32 are within noise. Gate:
 generated kernel (f32, `<1e-3`) and asserts the counter incremented, for both
 bias and bias+ReLU. `AUTORUST_CUBLASLT=0` is the escape hatch. bf16/f16 remain
 on the epilogue kernel.
+
+### 9.75 Item 7: inference Conv+BN folding landed; ResNet-18 -17.8% (2026-11-14)
+
+The native ResNet's BN was the blocker for item 2: the conv store was
+`gamma * Reciprocal(Sqrt(running_var + eps))` (a computed per-channel scale),
+which a host-GEMM epilogue cannot consume. `nn::fold_bn_eval(conv, bn, sess)`
+now folds it for inference: `scale = gamma/sqrt(var+eps)`, `W' = W*scale`,
+`b' = (beta - mean)*scale` (+ `conv.bias*scale` when present), materialized as
+parameter leaves; the model skips BN after a successful fold. Training never
+folds.
+
+Three layout fixes were needed to turn the folded store into a plain
+`bias(+ReLU)` host GEMM:
+
+- `HostGemm.c_bo`: the conv's C is `[b][cout][oy][ox]`, so the two batch axes
+  `(b, oy)` have independent C strides; the executor's split counter now uses
+  the outer stride instead of assuming `inner*c_b`.
+- The CUDA epilogue assumed `row*n + col` and a contiguous batch slice (so
+  `c_m == n`). It now takes `c_m`, `batch_inner` and `c_bo` and computes
+  `rel = bo*c_outer + bi*c_b + row*c_m + col` — a latent bug for any pitched C.
+- A transposed-conv size gate (`col_major && bias_m && k < 576`) keeps small
+  1x1 / 7-spatial convs on the generated kernel: ResNet-50's stages are slower
+  through cuBLAS + the epilogue, ResNet-18's 3x3 K>=576 convs are ~18% faster.
+
+Gates: `nn_conv::fold_bn_eval_matches_unfolded_conv` (custom + default stats),
+`cublas::cublas_matches_im2col_conv_transposed_store`, and the benchmark's
+within-process `BENCH_VERIFY_FOLD=1` (same weights, folded vs unfolded): max
+logit diff 2.5e-3 (ResNet-18), 1.5e-8 (ResNet-50), 0 (MobileNet).
+
+Measured (JIT replay, medians): ResNet-18 infer bs32 **317.9 -> 261.2 ms
+(-17.8%)**, MobileNet infer bs8 **13.28 -> 12.06 (-9.2%)**, ResNet-50 infer bs8
+22.93 -> 23.22 (+1.3%, kept unfolded by default), ResNet-18 train unchanged
+(173.8 ms). Accepted host-GEMM descriptors at `resnet18_infer`: **1 -> 13**.
+`AUTORUST_FOLD_BN=0/1` overrides the benchmark's per-model default. The ONNX
+importer part of item 7 (constant folding/prepacking) remains open; the ONNX
+asset already has BN folded.

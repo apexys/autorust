@@ -171,6 +171,65 @@ impl Linear {
     }
 }
 
+/// Fold an eval-mode [`BatchNorm`] into a [`Conv2d`] (inference only).
+///
+/// `W' = W * gamma / sqrt(running_var + eps)` and
+/// `b' = (b - running_mean) * gamma / sqrt(running_var + eps) + beta`
+/// (with `b = 0` when the conv has no bias). The folded weight and bias are
+/// materialized into plain parameter leaves, so the conv operands are buffer
+/// loads again — which is what lets the host GEMM (and cuBLAS) accept the conv
+/// store instead of a computed per-channel scale
+/// (`Reciprocal(Sqrt(Add(running_var, eps)))`).
+///
+/// Returns `false` (leaving the layer untouched) unless the BN is affine with
+/// tracked running statistics. The caller must stop applying `bn` after a
+/// `true` return; training must not fold.
+pub fn fold_bn_eval(conv: &mut Conv2d, bn: &BatchNorm, sess: &mut Session) -> bool {
+    let (Some(gamma), Some(beta), Some(mean), Some(var)) = (
+        bn.weight.as_ref(),
+        bn.bias.as_ref(),
+        bn.running_mean.as_ref(),
+        bn.running_var.as_ref(),
+    ) else {
+        return false;
+    };
+    if !bn.track_running_stats {
+        return false;
+    }
+    let wshape = conv.weight.shape();
+    let sv = |x: &crate::uop::sint::SVal| x.clone().as_i64().unwrap_or(0);
+    let cout = sv(&wshape[0]);
+    if cout <= 0 {
+        return false;
+    }
+    let ctx = conv.weight.ctx().clone();
+    let eps = crate::tensor::Tensor::full_const(
+        &mut ctx.borrow_mut(),
+        &[] as &[i64],
+        crate::dtype::ConstVal::Float(bn.eps),
+        None,
+    );
+    let scale = gamma.mul(&var.add(&eps).sqrt().reciprocal());
+    let mut shp = vec![crate::uop::sint::SVal::I(1); wshape.len()];
+    shp[0] = crate::uop::sint::SVal::I(cout as i128);
+    let scale_b = scale.reshape_ctx(&mut ctx.borrow_mut(), shp);
+    let w = conv.weight.mul(&scale_b);
+    let b0 = match &conv.bias {
+        Some(b) => b.clone(),
+        None => Tensor::zeros(&ctx, [cout]),
+    };
+    let better = b0.sub(mean).mul(&scale).add(beta);
+    // Materialize both into parameter leaves (one-time host round-trip; the
+    // layer's weights are small compared to a step of activations).
+    // One-time materialization into parameter leaves (host round-trip).
+    let _ = sess;
+    let w_leaf = w.to_param();
+    let b_leaf = better.to_param();
+    conv.weight = w_leaf;
+    conv.bias = Some(b_leaf);
+    true
+}
+
 /// `nn::Conv2d`: N-D convolution (nn/__init__.py:80-109). `kernel_size` has one
 /// entry per spatial dim, so a 1-tuple makes this a `Conv1d`.
 /// weight shape: (out_channels, in_channels/groups, *kernel_size).

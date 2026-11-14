@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Host-GEMM epilogue C indexing and outer batch stride.** The epilogue used
+  `row*n + col` with one batch stride, which assumes `c_m == n` and contiguous
+  batch slices; the folded-conv layout (`C[b][cout][oy][ox]`, two batch axes)
+  violates both. `HostGemm` gains `c_bo` (the outer C batch stride) and the
+  epilogue takes `c_m`/`batch_inner`/`c_bo`
+  (`rel = bo*c_outer + bi*c_b + row*c_m + col`). A size gate keeps small
+  transposed convs (1x1 / 7-spatial) on the generated kernel. Gate:
+  `tests/cublas.rs::cublas_matches_im2col_conv_transposed_store`.
 - **Host-GEMM epilogue supports per-row (`m`) affine terms and both orders.**
   A transposed conv store (`C[cout, ox]`) puts the per-channel BN terms on the
   m axis, and a BN store is `C*scale + bias` rather than the transformer's
@@ -79,6 +87,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`nn::fold_bn_eval`: inference Conv+BN folding.** Folds
+  `gamma/sqrt(running_var+eps)` into the conv weight and
+  `beta - mean*gamma/sqrt(running_var+eps)` into its bias, materialized as
+  parameter leaves, so the conv store is a plain bias(+ReLU) GEMM. ResNet-18
+  inference bs32 **317.9 -> 261.2 ms (-17.8%)**, MobileNet bs8 **13.28 ->
+  12.06 ms (-9.2%)**; accepted host-GEMM descriptors 1 -> 13. ResNet-50 is kept
+  unfolded by default (measured +1.3%). Gated by
+  `tests/nn_conv.rs::fold_bn_eval_matches_unfolded_conv` and the benchmark's
+  within-process `BENCH_VERIFY_FOLD=1` (max logit diff 2.5e-3 on ResNet-18).
 - **Fused FA2 training kernels (forward with saved LSE, dQ, dK/dV).**
   `runtime::cuda_flash_train` implements the backward pass as four CUDA
   kernels: `ar_fl_fwd` also writes the per-row log-sum-exp, `ar_fl_prep`

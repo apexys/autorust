@@ -573,6 +573,7 @@ mod tests {
             acc: 1,
             a_acc: 0,
             b_acc: 0,
+            c_bo: 0,
         }
     }
 

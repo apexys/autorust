@@ -202,9 +202,7 @@ fn emit_cases(
     let total: f64 = cases.iter().map(|c| c.1).sum();
     let json_cases: Vec<String> = cases
         .iter()
-        .map(|(name, ms, v)| {
-            format!("{{\"case\":\"{name}\",\"ms\":{ms:.4},\"{metric}\":{v:.4}}}")
-        })
+        .map(|(name, ms, v)| format!("{{\"case\":\"{name}\",\"ms\":{ms:.4},\"{metric}\":{v:.4}}}"))
         .collect();
     for (name, ms, v) in cases {
         println!("{workload} {device} {name}: {ms:.3} ms ({v:.2} {metric})");
@@ -252,6 +250,12 @@ fn run_vision<M: Module>(
     let mut jit = Jit::new();
     let step = |sess: &mut Session| {
         let out = fwd(&model, x, sess, training);
+        if !training && std::env::var("BENCH_OUT").is_ok() {
+            let v = out.cast(dtype::FLOAT32).to_list::<f32>(sess);
+            let sum: f32 = v.iter().sum();
+            let first: f32 = v[0];
+            eprintln!("OUT sum={sum:.6} first={first:.6}");
+        }
         if training {
             let loss = out.sparse_categorical_crossentropy(y, -1, 0.0, "mean");
             loss.backward(&params, None);
@@ -267,6 +271,40 @@ fn run_vision<M: Module>(
         let _ = out.cast(dtype::FLOAT32).to_list::<f32>(sess);
     };
     measure(|| run(&mut jit, sess), warmup, iters)
+}
+
+/// Optional `BENCH_VERIFY_FOLD=1` gate: run the model before and after BN
+/// folding in the same process (same weights/input) and print the max
+/// difference, then leave it folded.
+fn verify_and_fold<M>(
+    sess: &mut Session,
+    model: &mut M,
+    x: &Tensor,
+    forward: impl Fn(&M, &Tensor, &mut Session) -> Tensor,
+    fold: impl Fn(&mut M, &mut Session),
+) {
+    if std::env::var("BENCH_VERIFY_FOLD").is_ok() {
+        // A non-zero probe so the convs do real work (the benchmark input is
+        // zeros); it is identical for the before/after runs.
+        let ctx = x.ctx().clone();
+        let shape: Vec<i64> = x
+            .shape()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let probe = Tensor::rand(&ctx, &shape, None, None);
+        let before = forward(model, &probe, sess).to_list::<f32>(sess);
+        fold(model, sess);
+        let after = forward(model, &probe, sess).to_list::<f32>(sess);
+        let d = before
+            .iter()
+            .zip(&after)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("FOLD_DIFF {d:e}");
+    } else {
+        fold(model, sess);
+    }
 }
 
 fn main() {
@@ -405,11 +443,15 @@ fn main() {
         "gemm" => {
             let warmup = env_i64("BENCH_WARMUP", 1) as usize;
             let iters = env_i64("BENCH_ITERS", 3) as usize;
-            let bf16 = std::env::var("BENCH_BF16").map(|v| v != "0" && !v.is_empty()).unwrap_or(false);
+            let bf16 = std::env::var("BENCH_BF16")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false);
             let only = std::env::var("BENCH_GEMM_ONLY").ok();
             let cases = gemm::run(&ctx, &mut sess, bf16, warmup, iters, only.as_deref());
-            let rows: Vec<(String, f64, f64)> =
-                cases.into_iter().map(|c| (c.name, c.ms, c.tflops)).collect();
+            let rows: Vec<(String, f64, f64)> = cases
+                .into_iter()
+                .map(|c| (c.name, c.ms, c.tflops))
+                .collect();
             emit_cases(
                 "gemm",
                 &device,
@@ -429,7 +471,9 @@ fn main() {
             let cases = memops::run(&ctx, &mut sess, warmup, iters, only.as_deref());
             let rows: Vec<(String, f64, f64)> =
                 cases.into_iter().map(|c| (c.name, c.ms, c.gbs)).collect();
-            emit_cases("memops", &device, 1, "f32", true, warmup, iters, &rows, "gbs");
+            emit_cases(
+                "memops", &device, 1, "f32", true, warmup, iters, &rows, "gbs",
+            );
         }
         "optim" => {
             let warmup = env_i64("BENCH_WARMUP", 2) as usize;
@@ -452,6 +496,16 @@ fn main() {
         "resnet18_train" | "resnet18_infer" | "resnet50_infer" | "mobilenet_infer" => {
             let bs = env_i64("BENCH_BS", 32);
             let training = workload.ends_with("_train");
+            if let Ok(seed) = std::env::var("BENCH_SEED") {
+                Tensor::manual_seed(seed.parse().expect("BENCH_SEED"));
+            }
+            // Measured (RTX 3060): BN folding + the conv host GEMM wins on
+            // ResNet-18 (-17.6%) and MobileNet (-14%), but ResNet-50's 1x1 and
+            // small-spatial stages are slower through cuBLAS (+~17%), so the
+            // benchmark keeps that model unfolded by default.
+            let fold_bn = std::env::var("AUTORUST_FOLD_BN")
+                .map(|v| v != "0")
+                .unwrap_or(workload != "resnet50_infer");
             let warmup = env_i64("BENCH_WARMUP", 3) as usize;
             let iters = env_i64("BENCH_ITERS", if training { 5 } else { 10 }) as usize;
             sess.training(training);
@@ -459,19 +513,76 @@ fn main() {
             let y = Tensor::randint(&ctx, &[bs], 0, 1000, Some(dtype::INT32), None).to_param();
             let (cold, samples) = match workload.as_str() {
                 "resnet18_train" | "resnet18_infer" => {
-                    let model = resnet::ResNet::new(&ctx, 18, 1000, 1.0).into_params();
-                    run_vision(&ctx, &mut sess, model, &x, &y, training, 1e-3, warmup, iters,
-                        |m, x, s, t| m.forward(x, s, t))
+                    let mut model = resnet::ResNet::new(&ctx, 18, 1000, 1.0).into_params();
+                    if !training && fold_bn {
+                        verify_and_fold(
+                            &mut sess,
+                            &mut model,
+                            &x,
+                            |m, x, s| m.forward(x, s, false),
+                            |m, s| m.fold_bn(s),
+                        );
+                    }
+                    run_vision(
+                        &ctx,
+                        &mut sess,
+                        model,
+                        &x,
+                        &y,
+                        training,
+                        1e-3,
+                        warmup,
+                        iters,
+                        |m, x, s, t| m.forward(x, s, t),
+                    )
                 }
                 "resnet50_infer" => {
-                    let model = resnet::ResNet::new(&ctx, 50, 1000, 1.0).into_params();
-                    run_vision(&ctx, &mut sess, model, &x, &y, training, 1e-3, warmup, iters,
-                        |m, x, s, t| m.forward(x, s, t))
+                    let mut model = resnet::ResNet::new(&ctx, 50, 1000, 1.0).into_params();
+                    if !training && fold_bn {
+                        verify_and_fold(
+                            &mut sess,
+                            &mut model,
+                            &x,
+                            |m, x, s| m.forward(x, s, false),
+                            |m, s| m.fold_bn(s),
+                        );
+                    }
+                    run_vision(
+                        &ctx,
+                        &mut sess,
+                        model,
+                        &x,
+                        &y,
+                        training,
+                        1e-3,
+                        warmup,
+                        iters,
+                        |m, x, s, t| m.forward(x, s, t),
+                    )
                 }
                 _ => {
-                    let model = resnet::MobileNet::new(&ctx, 1000).into_params();
-                    run_vision(&ctx, &mut sess, model, &x, &y, training, 1e-3, warmup, iters,
-                        |m, x, s, t| m.forward(x, s, t))
+                    let mut model = resnet::MobileNet::new(&ctx, 1000).into_params();
+                    if !training && fold_bn {
+                        verify_and_fold(
+                            &mut sess,
+                            &mut model,
+                            &x,
+                            |m, x, s| m.forward(x, s, false),
+                            |m, s| m.fold_bn(s),
+                        );
+                    }
+                    run_vision(
+                        &ctx,
+                        &mut sess,
+                        model,
+                        &x,
+                        &y,
+                        training,
+                        1e-3,
+                        warmup,
+                        iters,
+                        |m, x, s, t| m.forward(x, s, t),
+                    )
                 }
             };
             emit(
@@ -500,7 +611,17 @@ fn main() {
                     .to_list::<f32>(sess);
             };
             let (cold, samples) = measure(|| run(&mut jit, &mut sess), warmup, iters);
-            emit("unet_infer", &device, bs, "f32", true, warmup, iters, cold, samples);
+            emit(
+                "unet_infer",
+                &device,
+                bs,
+                "f32",
+                true,
+                warmup,
+                iters,
+                cold,
+                samples,
+            );
         }
         "llm_prefill" => {
             let mut cfg = llm::Config::default();
@@ -592,7 +713,17 @@ fn main() {
                     .to_list::<f32>(m.session_mut());
             };
             let (cold, samples) = measure(&mut step, warmup, iters);
-            emit("onnx_mnist", &device, bs, "f32", true, warmup, iters, cold, samples);
+            emit(
+                "onnx_mnist",
+                &device,
+                bs,
+                "f32",
+                true,
+                warmup,
+                iters,
+                cold,
+                samples,
+            );
         }
         "vit_train_bf16" => {
             let bs = env_i64("BENCH_BS", 1);
@@ -643,9 +774,8 @@ fn main() {
             let bs = env_i64("BENCH_BS", 8);
             let warmup = env_i64("BENCH_WARMUP", 2) as usize;
             let iters = env_i64("BENCH_ITERS", 5) as usize;
-            let path = std::env::var("BENCH_ONNX").unwrap_or_else(|_| {
-                "bench/assets/resnet18w25_bs8.onnx".to_string()
-            });
+            let path = std::env::var("BENCH_ONNX")
+                .unwrap_or_else(|_| "bench/assets/resnet18w25_bs8.onnx".to_string());
             let mut m = autorust::onnx::OnnxModel::load_with_device(&path, Some(&device))
                 .unwrap_or_else(|e| panic!("load {path}: {e}"));
             let x = Tensor::rand(m.ctx(), &[bs, 3, 224, 224], None, None);
@@ -658,7 +788,17 @@ fn main() {
                     .to_list::<f32>(m.session_mut());
             };
             let (cold, samples) = measure(step, warmup, iters);
-            emit("onnx_resnet", &device, bs, "f32", true, warmup, iters, cold, samples);
+            emit(
+                "onnx_resnet",
+                &device,
+                bs,
+                "f32",
+                true,
+                warmup,
+                iters,
+                cold,
+                samples,
+            );
         }
         other => panic!(
             "unknown BENCH_WORKLOAD={other} (mnist_train|vit_infer|vit_train|gemm|memops|\

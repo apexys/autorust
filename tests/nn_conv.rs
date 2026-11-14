@@ -195,3 +195,67 @@ fn one_hot_matches_tinygrad() {
         close(&got, o.out, 0.0, o.name);
     }
 }
+
+/// Inference-time Conv+BN folding must match the unfolded layer exactly (up to
+/// f32), and the folded conv must be a plain bias+weight layer (no BN terms in
+/// the graph).
+#[test]
+fn fold_bn_eval_matches_unfolded_conv() {
+    use autorust::engine::session::Session;
+    use autorust::tensor::nn::{self, BatchNorm, Conv2d};
+
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let conv = Conv2d::new(&ctx, 3, 8, &[3, 3], 1, &[(1, 1), (1, 1)], 1, 1, false);
+    let mut bn = BatchNorm::new(&ctx, 8, 1e-5, true, true, 0.1);
+    // Non-trivial running stats / affine so the fold is not an identity.
+    let stat = |seed: f32, n: usize| {
+        let d: Vec<f32> = (0..n)
+            .map(|i| ((i as f32 + seed) * 0.37).sin() * 0.5 + 1.0)
+            .collect();
+        Tensor::from_slice(&ctx, &d, None, None)
+    };
+    bn.weight = Some(stat(0.0, 8));
+    bn.bias = Some(stat(1.7, 8));
+    bn.running_mean = Some(stat(3.1, 8));
+    bn.running_var = Some(Tensor::from_slice(
+        &ctx,
+        &(0..8).map(|i| 0.5 + i as f32 * 0.1).collect::<Vec<f32>>(),
+        None,
+        None,
+    ));
+
+    let x = Tensor::rand(&ctx, &[2, 3, 9, 9], None, None);
+    let want = bn
+        .forward(&conv.forward(&x), &mut sess, false)
+        .to_list::<f32>(&mut sess);
+
+    let mut folded = conv;
+    assert!(nn::fold_bn_eval(&mut folded, &bn, &mut sess));
+    let got = folded.forward(&x).to_list::<f32>(&mut sess);
+
+    assert_eq!(got.len(), want.len());
+    let d = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(d < 2e-4, "folded conv diff {d:e}");
+
+    // The same with the model's default (identity-like) BN init.
+    let conv = Conv2d::new(&ctx, 3, 16, &[3, 3], 1, &[(1, 1), (1, 1)], 1, 1, false);
+    let bn = BatchNorm::new(&ctx, 16, 1e-5, true, true, 0.1);
+    let x = Tensor::rand(&ctx, &[2, 3, 9, 9], None, None);
+    let want = bn
+        .forward(&conv.forward(&x), &mut sess, false)
+        .to_list::<f32>(&mut sess);
+    let mut folded = conv;
+    assert!(nn::fold_bn_eval(&mut folded, &bn, &mut sess));
+    let got = folded.forward(&x).to_list::<f32>(&mut sess);
+    let d = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(d < 2e-4, "default-init folded conv diff {d:e}");
+}

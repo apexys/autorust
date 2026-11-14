@@ -156,9 +156,13 @@ not a parameter buffer, and a host epilogue can only take buffers.
 So the conv reaches cuBLAS only after **BN is folded into the conv weights**
 (item 7): `W' = W*gamma/sqrt(var+eps)`, `b' = beta - mean*gamma/sqrt(var+eps)`,
 which turns the store into `Max(REDUCE + bias, 0)` — exactly the bias+ReLU
-epilogue that the host GEMM and cuBLASLt already handle. The per-m/order
-primitives are landed and tested, ready for that fold. ResNet-18 is unchanged
-(319.5 ms) because the fold is the missing piece.
+epilogue that the host GEMM and cuBLASLt already handle. **That fold is now
+landed (item 7):** accepted descriptors at `resnet18_infer` go 1 -> 13 and the
+inference step 317.9 -> 261.2 ms (-17.8%). Two additional layout gaps had to be
+closed for it: `HostGemm.c_bo` (the outer C batch stride for the conv's
+`[b][cout][oy][ox]`) and the epilogue's C indexing (`c_m`/`batch_inner`/`c_bo`
+instead of `row*n` and one `stride_c`). The transposed-conv gate keeps small
+1x1/7-spatial convs generated (ResNet-50).
 
 **Attempt (2026-11-14): GPU GEMM plumbing extended, conv still blocked.**
 Landed: (a) the reduce-axis fold is now general — any number of reduction axes
@@ -411,10 +415,50 @@ benefits from item 2.
 `gamma * Reciprocal(Sqrt(running_var + eps))` as a computed per-channel scale,
 which a host-GEMM epilogue cannot consume. (The exported ONNX ResNet has no
 `BatchNormalization` nodes — torch folded them — which is why the ONNX path did
-not show this.) With per-row bias/scale support added to the epilogue (item 2),
-all 12 conv stores now stop at `epilogue-operand` instead of
-`epilogue-layout`; folding BN into the conv weights and bias is what will make
-them plain bias+ReLU stores that reach cuBLAS.
+not show this.)
+
+**Status (2026-11-14): implemented for inference.**
+`nn::fold_bn_eval(conv, bn, sess)` computes `scale = gamma/sqrt(var+eps)`,
+`W' = W*scale`, `b' = (beta - mean)*scale` (plus `conv.bias*scale` when the conv
+has one), and materializes `W'`/`b'` as parameter leaves. The model skips BN
+after a successful fold; training must not fold.
+
+Making the folded conv reach cuBLAS exposed two real gaps, both fixed:
+
+1. The conv store is a **transposed** GEMM (`C[cout, ox]`, per-channel affine on
+   m) with a two-axis batch (`(b, oy)`) whose C slices are not contiguous
+   (`C[b][cout][oy][ox]`). `HostGemm` now carries `c_bo` (the outer C batch
+   stride) and the executor splits the counter with it.
+2. The **epilogue** indexed `row*n + col` and one `stride_c`, assuming
+   `c_m == n` and contiguous batch slices. It now takes `c_m`, `batch_inner`
+   and `c_bo` and computes
+   `rel = bo*c_outer + bi*c_b + row*c_m + col`. This was a latent bug for any
+   pitched C (`c_m > n`).
+3. A transposed-conv size gate (`col_major && bias_m && k < 576`) keeps small
+   1x1 / 7-spatial convs generated: ResNet-50's stages are slower through
+   cuBLAS + epilogue, while ResNet-18's 3x3 K>=576 convs win by ~18%.
+
+Gates: `tests/nn_conv.rs::fold_bn_eval_matches_unfolded_conv` (custom and
+default stats), `tests/cublas.rs::cublas_matches_im2col_conv_transposed_store`
+(the transposed conv layout), and the bench's within-process
+`BENCH_VERIFY_FOLD=1` (folded vs unfolded on the same weights): max logit diff
+**2.5e-3** (ResNet-18, f32 accumulation order), **1.5e-8** (ResNet-50),
+**0** (MobileNet).
+
+Measured, JIT replay, GPU median:
+
+| workload | unfolded | folded | |
+|---|---:|---:|---|
+| ResNet-18 infer bs32 | 317.9 ms | **261.2 ms** | **-17.8%** |
+| MobileNet infer bs8 | 13.28 ms | **12.06 ms** | **-9.2%** |
+| ResNet-50 infer bs8 | 22.93 ms | 23.22 ms | +1.3% (kept unfolded by default) |
+| ResNet-18 train bs32 | 173.8 ms | — | unchanged (inference-only) |
+
+Accepted host-GEMM descriptors at `resnet18_infer` go **1 -> 13**. The
+benchmark enables folding for ResNet-18/MobileNet by default and keeps
+ResNet-50 unfolded (`AUTORUST_FOLD_BN=1/0` overrides). The remaining ONNX part
+of this item (constant folding, weight prepacking in the importer) is still
+open; the ONNX ResNet asset already has BN folded by torch.
 
 **Expected:** fewer kernels and less graph work per capture; 1.3-2x on ONNX
 ResNet, less on MNIST.

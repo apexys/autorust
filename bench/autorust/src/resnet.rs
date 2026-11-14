@@ -19,6 +19,8 @@ fn prefixed<'a>(
 struct Cb {
     conv: Conv2d,
     bn: BatchNorm,
+    /// BN folded into `conv` for inference (see [`Cb::fold`]).
+    folded: bool,
 }
 
 impl Cb {
@@ -36,11 +38,23 @@ impl Cb {
                 false,
             ),
             bn: BatchNorm::new(ctx, cout, 1e-5, true, true, 0.1),
+            folded: false,
         }
     }
 
+    /// Fold the eval-mode BN into the conv (inference only) so the conv store
+    /// is a plain bias(+ReLU) GEMM the host GEMM can accept.
+    fn fold(&mut self, sess: &mut Session) -> bool {
+        self.folded = nn::fold_bn_eval(&mut self.conv, &self.bn, sess);
+        self.folded
+    }
+
     fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {
-        self.bn.forward(&self.conv.forward(x), sess, training)
+        let y = self.conv.forward(x);
+        if self.folded && !training {
+            return y;
+        }
+        self.bn.forward(&y, sess, training)
     }
 
     fn named_params(&self) -> Vec<(String, Tensor)> {
@@ -70,6 +84,14 @@ impl Basic {
             c1: Cb::new(ctx, cin, cout, 3, stride, 1, 1),
             c2: Cb::new(ctx, cout, cout, 3, 1, 1, 1),
             down,
+        }
+    }
+
+    fn fold_bn(&mut self, sess: &mut Session) {
+        self.c1.fold(sess);
+        self.c2.fold(sess);
+        if let Some(d) = &mut self.down {
+            d.fold(sess);
         }
     }
 
@@ -121,6 +143,15 @@ impl Bottleneck {
         }
     }
 
+    fn fold_bn(&mut self, sess: &mut Session) {
+        self.c1.fold(sess);
+        self.c2.fold(sess);
+        self.c3.fold(sess);
+        if let Some(d) = &mut self.down {
+            d.fold(sess);
+        }
+    }
+
     fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {
         let id = match &self.down {
             Some(d) => d.forward(x, sess, training),
@@ -163,6 +194,12 @@ impl Block {
         match self {
             Block::Basic(b) => b.forward(x, sess, training),
             Block::Bottleneck(b) => b.forward(x, sess, training),
+        }
+    }
+    fn fold_bn(&mut self, sess: &mut Session) {
+        match self {
+            Block::Basic(b) => b.fold_bn(sess),
+            Block::Bottleneck(b) => b.fold_bn(sess),
         }
     }
     fn named_params(&self) -> Vec<(String, Tensor)> {
@@ -217,6 +254,16 @@ impl ResNet {
             stem,
             stages,
             fc: Linear::new(ctx, cin, classes, true),
+        }
+    }
+
+    /// Fold every BN into its conv for inference (no-op for training callers).
+    pub fn fold_bn(&mut self, sess: &mut Session) {
+        self.stem.fold(sess);
+        for stage in &mut self.stages {
+            for b in stage {
+                b.fold_bn(sess);
+            }
         }
     }
 
@@ -280,6 +327,14 @@ impl InvRes {
         }
     }
 
+    fn fold_bn(&mut self, sess: &mut Session) {
+        if let Some(e) = &mut self.expand {
+            e.fold(sess);
+        }
+        self.dw.fold(sess);
+        self.project.fold(sess);
+    }
+
     fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {
         let y = match &self.expand {
             Some(e) => nn::relu(&e.forward(x, sess, training)).minimum(6.0),
@@ -323,9 +378,23 @@ impl MobileNet {
         let first = Cb::new(ctx, 3, 32, 3, 2, 1, 1);
         // (expansion, out, stride) per inverted-residual block.
         let cfg: &[(i64, i64, i64)] = &[
-            (1, 16, 1), (6, 24, 2), (6, 24, 1), (6, 32, 2), (6, 32, 1), (6, 32, 1),
-            (6, 64, 2), (6, 64, 1), (6, 64, 1), (6, 64, 1), (6, 96, 1), (6, 96, 1),
-            (6, 96, 1), (6, 160, 2), (6, 160, 1), (6, 160, 1), (6, 320, 1),
+            (1, 16, 1),
+            (6, 24, 2),
+            (6, 24, 1),
+            (6, 32, 2),
+            (6, 32, 1),
+            (6, 32, 1),
+            (6, 64, 2),
+            (6, 64, 1),
+            (6, 64, 1),
+            (6, 64, 1),
+            (6, 96, 1),
+            (6, 96, 1),
+            (6, 96, 1),
+            (6, 160, 2),
+            (6, 160, 1),
+            (6, 160, 1),
+            (6, 320, 1),
         ];
         let mut cin = 32;
         let blocks = cfg
@@ -342,6 +411,15 @@ impl MobileNet {
             last: Cb::new(ctx, 320, 1280, 1, 1, 0, 1),
             fc: Linear::new(ctx, 1280, classes, true),
         }
+    }
+
+    /// Fold every BN into its conv for inference.
+    pub fn fold_bn(&mut self, sess: &mut Session) {
+        self.first.fold(sess);
+        for b in &mut self.blocks {
+            b.fold_bn(sess);
+        }
+        self.last.fold(sess);
     }
 
     pub fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {

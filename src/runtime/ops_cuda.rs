@@ -186,6 +186,7 @@ impl CudaInner {
                 r#"
 extern "C" __global__ void autorust_epi_f32(float* c, const float* b, const float* s, const float* r,
     long long total, long long n, long long m, long long stride_c,
+    long long c_m, long long batch_inner, long long c_bo,
     long long c_off, long long b_off, long long s_off, long long r_off,
     int has_bias, int has_scale, int has_res, int has_relu, int bias_m, int scale_m, int bias_outside) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -193,7 +194,10 @@ extern "C" __global__ void autorust_epi_f32(float* c, const float* b, const floa
   long long col = i % n;
   long long row = (i / n) % m;
   long long bat = i / (n * m);
-  long long rel = bat * stride_c + row * n + col;
+  long long bi = (batch_inner > 1) ? (bat % batch_inner) : 0;
+  long long bo = (batch_inner > 1) ? (bat / batch_inner) : bat;
+  long long c_outer = (batch_inner > 1) ? c_bo : stride_c;
+  long long rel = bo * c_outer + bi * stride_c + row * c_m + col;
   long long ci = c_off + rel;
   float v = c[ci];
   if (bias_outside) {
@@ -215,6 +219,7 @@ extern "C" __global__ void autorust_epi_f32(float* c, const float* b, const floa
 #include <cuda_fp16.h>
 extern "C" __global__ void autorust_epi_f16(__half* c, const __half* b, const __half* s, const __half* r,
     long long total, long long n, long long m, long long stride_c,
+    long long c_m, long long batch_inner, long long c_bo,
     long long c_off, long long b_off, long long s_off, long long r_off,
     int has_bias, int has_scale, int has_res, int has_relu, int bias_m, int scale_m, int bias_outside) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -222,7 +227,10 @@ extern "C" __global__ void autorust_epi_f16(__half* c, const __half* b, const __
   long long col = i % n;
   long long row = (i / n) % m;
   long long bat = i / (n * m);
-  long long rel = bat * stride_c + row * n + col;
+  long long bi = (batch_inner > 1) ? (bat % batch_inner) : 0;
+  long long bo = (batch_inner > 1) ? (bat / batch_inner) : bat;
+  long long c_outer = (batch_inner > 1) ? c_bo : stride_c;
+  long long rel = bo * c_outer + bi * stride_c + row * c_m + col;
   long long ci = c_off + rel;
   float v = __half2float(c[ci]);
   if (bias_outside) {
@@ -244,6 +252,7 @@ extern "C" __global__ void autorust_epi_f16(__half* c, const __half* b, const __
 #include <cuda_bf16.h>
 extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat16* b, const __nv_bfloat16* s, const __nv_bfloat16* r,
     long long total, long long n, long long m, long long stride_c,
+    long long c_m, long long batch_inner, long long c_bo,
     long long c_off, long long b_off, long long s_off, long long r_off,
     int has_bias, int has_scale, int has_res, int has_relu, int bias_m, int scale_m, int bias_outside) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -251,7 +260,10 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
   long long col = i % n;
   long long row = (i / n) % m;
   long long bat = i / (n * m);
-  long long rel = bat * stride_c + row * n + col;
+  long long bi = (batch_inner > 1) ? (bat % batch_inner) : 0;
+  long long bo = (batch_inner > 1) ? (bat / batch_inner) : bat;
+  long long c_outer = (batch_inner > 1) ? c_bo : stride_c;
+  long long rel = bo * c_outer + bi * stride_c + row * c_m + col;
   long long ci = c_off + rel;
   float v = __bfloat162float(c[ci]);
   if (bias_outside) {
@@ -298,6 +310,9 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
         m: i64,
         n: i64,
         stride_c: i64,
+        c_m: i64,
+        batch_inner: i64,
+        c_bo: i64,
         c_off: i64,
         relu: bool,
         bias_m: bool,
@@ -343,6 +358,9 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             .arg(&n)
             .arg(&m)
             .arg(&stride_c)
+            .arg(&c_m)
+            .arg(&batch_inner)
+            .arg(&c_bo)
             .arg(&c_off)
             .arg(&b_off)
             .arg(&s_off)
@@ -465,10 +483,11 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             );
             for o in 0..outer {
                 let (oa, ob, oc) = if inner > 1 {
+                    let c_outer = if g.c_bo != 0 { g.c_bo } else { inner * g.c_b };
                     (
                         as_.wrapping_add((o * g.a_b * isz) as u64),
                         bs_.wrapping_add((o * g.b_b * isz) as u64),
-                        c.wrapping_add((o * inner * g.c_b * isz) as u64),
+                        c.wrapping_add((o * c_outer * isz) as u64),
                     )
                 } else {
                     (as_, bs_, c)
@@ -533,6 +552,9 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
                 g.m,
                 g.n,
                 if g.batch > 1 { g.c_b } else { 0 },
+                g.c_m,
+                g.batch_inner,
+                g.c_bo,
                 g.c_off,
                 g.relu,
                 g.bias_m,

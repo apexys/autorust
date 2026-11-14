@@ -12,7 +12,7 @@
 ))]
 
 use autorust::dtype;
-use autorust::tensor::nn::Linear;
+use autorust::tensor::nn::{Conv2d, Linear};
 use autorust::tensor::{Ctx, Tensor};
 
 fn have_cuda_and_cublas() -> bool {
@@ -613,4 +613,48 @@ fn cublas_matches_per_row_bias_and_scale() {
             "bias_outside={bias_outside}: per-row epilogue diff {d:e}"
         );
     }
+}
+
+/// A 3x3 conv at the im2col gate (K = 576) must match the generated kernel
+/// through the transposed `C[cout, ox]` host-GEMM layout (folded BN stores).
+#[test]
+fn cublas_matches_im2col_conv_transposed_store() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    let (b, cin, cout, h, k) = (2usize, 64usize, 64usize, 28usize, 3usize);
+    let xd = values(1, b * cin * h * h);
+    let wd = values(3, cout * cin * k * k);
+    let bd = values(5, cout);
+    let run_case = |lib: bool| {
+        run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let x = Tensor::from_slice(ctx, &xd, None, Some("CUDA"))
+                    .reshape([b as i64, cin as i64, h as i64, h as i64]);
+                let lin = Conv2d {
+                    weight: Tensor::from_slice(ctx, &wd, None, Some("CUDA")).reshape([
+                        cout as i64,
+                        cin as i64,
+                        k as i64,
+                        k as i64,
+                    ]),
+                    bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CUDA"))),
+                    kernel_size: vec![3, 3],
+                    groups: 1,
+                    stride: 1,
+                    dilation: 1,
+                    padding: vec![1, 1],
+                };
+                vec![lin.forward(&x).relu()]
+            },
+        )
+    };
+    let d = maxdiff(&run_case(false), &run_case(true));
+    assert!(d < 2e-3, "im2col conv: cuBLAS diff {d:e}");
 }

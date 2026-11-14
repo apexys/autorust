@@ -126,6 +126,11 @@ pub struct HostGemm {
     pub a_acc: i64,
     /// Element stride between accumulation slices in `B`.
     pub b_acc: i64,
+    /// C's *outer* batch stride when the batch is split into two axes
+    /// (0 = derive from `batch_inner * c_b`). The conv's `[b][cout][oy][ox]`
+    /// has the m axis between the two batch axes, so the outer slice stride is
+    /// not `inner * c_b`.
+    pub c_bo: i64,
 }
 
 impl HostGemm {
@@ -140,7 +145,7 @@ impl HostGemm {
              a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
              a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
              c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
-             scale_off: {}, res_slot: {}, res_off: {}, relu: {}, bias_m: {}, scale_m: {}, bias_outside: {}, acc: {}, a_acc: {}, b_acc: {} }}",
+             scale_off: {}, res_slot: {}, res_off: {}, relu: {}, bias_m: {}, scale_m: {}, bias_outside: {}, acc: {}, a_acc: {}, b_acc: {}, c_bo: {} }}",
             self.a_slot,
             self.b_slot,
             self.c_slot,
@@ -175,7 +180,8 @@ impl HostGemm {
             self.bias_outside,
             self.acc,
             self.a_acc,
-            self.b_acc
+            self.b_acc,
+            self.c_bo
         )
     }
 
@@ -226,6 +232,7 @@ impl HostGemm {
                 ("acc".into(), int(self.acc)),
                 ("a_acc".into(), int(self.a_acc)),
                 ("b_acc".into(), int(self.b_acc)),
+                ("c_bo".into(), int(self.c_bo)),
             ],
         }
     }
@@ -321,6 +328,7 @@ impl HostGemm {
             acc: i("acc").max(1),
             a_acc: i("a_acc"),
             b_acc: i("b_acc"),
+            c_bo: i("c_bo"),
         };
         Some(desc)
     }
@@ -1523,6 +1531,15 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let (bias_slot, bias_off) = bias;
     let (scale_slot, scale_off) = scale;
     let (res_slot, res_off) = residual;
+    // The transposed conv store (`C[cout, spatial]`, per-row affine) is worth a
+    // library GEMM only when the output tile and contraction are not tiny:
+    // ResNet-50's 1x1 convs (k=16..256) and 7x7 spatial maps (n=7) are slower
+    // through cuBLAS + the epilogue kernel than the generated conv, while
+    // ResNet-18's 56x56/28x28 3x3 convs win by ~18%. Measured on the RTX 3060.
+    if bias_m && col_major && k < 576 {
+        note_detail(&format!("n={n} k={k}"));
+        return reject("conv-too-small");
+    }
     // The fused clamp and the per-row affine are implemented by the CUDA
     // epilogue kernel; other backends keep the generated kernel rather than
     // dropping the term.
@@ -1532,11 +1549,10 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if (bias_m || scale_m) && kind != GemmDevice::Cuda {
         return reject("epi-m-unsupported-backend");
     }
-    // The transposed view swaps the output axes: the epilogue adds along the
-    // original n, which is the new m. Only a plain GEMM is transposed.
-    if col_major && (bias_slot >= 0 || scale_slot >= 0 || res_slot >= 0) {
-        return reject("col-major-epilogue");
-    }
+    // A transposed (column-major) GEMM still writes the same logical C, and the
+    // epilogue records whether each affine term is on m or n (`bias_m`/
+    // `scale_m`), while the residual is checked against the full C layout. So
+    // the swap no longer forbids an epilogue.
 
     // Batch axes: every range in C that is neither m nor n. Fold a contiguous
     // set into one strided batch axis.
@@ -1582,14 +1598,25 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // cuBLAS calls. CLBlast and the CPU kernel read `a_b`/`b_b` alone, so for
     // them a non-contiguous pair must keep the generated kernel.
     let (batch_count, a_b, b_b, c_b, batch_inner, a_bi, b_bi) =
-        if matches!(kind, GemmDevice::Vk | GemmDevice::Cuda)
+        if kind == GemmDevice::Cuda && batch.len() == 2 && batch[0].1 > 1 {
+            let (_, e0, a0, b0, c0) = batch[0];
+            let (_, e1, a1, b1, _c1) = batch[1];
+            // Two independent batch axes: the host splits the counter into
+            // `i = p % e0` and `o = p / e0`, using the inner stride (c0/a0/b0)
+            // and the outer one (c1/a1/b1). C's outer stride need not be
+            // `e0*c0`: the conv's `[b][cout][oy][ox]` puts m between the axes.
+            (e0.saturating_mul(e1), a1, b1, c0, e0, a0, b0)
+        } else if kind == GemmDevice::Vk
             && batch.len() == 2
             && batch[1].4 == batch[0].4.saturating_mul(batch[0].1)
             && batch[0].1 > 1
         {
             let (_, e0, a0, b0, c0) = batch[0];
             let (_, e1, a1, b1, _c1) = batch[1];
-            // C is contiguous over the pair, so its slice stride is the *inner* one.
+            // Two independent batch axes: the host splits the counter into
+            // `i = p % e0` and `o = p / e0`, using the inner stride (c0/a0/b0)
+            // and the outer one (c1/a1/b1). C's outer stride need not be
+            // `e0*c0`: the conv's `[b][cout][oy][ox]` puts m between the axes.
             (e0.saturating_mul(e1), a1, b1, c0, e0, a0, b0)
         } else {
             let (n, ab, bb, cb) = match fold_batches(&mut batch) {
@@ -1604,6 +1631,13 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             };
             (n, ab, bb, cb, 1, ab, bb)
         };
+    // The outer C stride of the split batch; 0 means `batch_inner * c_b`.
+    let c_bo = if kind == GemmDevice::Cuda && batch_inner > 1 {
+        // The outer batch axis of the sorted pair (inner first).
+        batch.get(1).map(|(_, _, _, _, c)| *c).unwrap_or(0)
+    } else {
+        0
+    };
 
     // Kernel-only measurements (2026-11, RTX 3060) show cuBLAS winning f32 at
     // the square and batch-8 projection shapes and tying/winning elsewhere;
@@ -1727,6 +1761,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         acc: acc.map(|(n, _, _)| n).unwrap_or(1),
         a_acc: acc.map(|(_, a, _)| a).unwrap_or(0),
         b_acc: acc.map(|(_, _, b)| b).unwrap_or(0),
+        c_bo,
     };
     // The cooperative-matrix module is the only VK library GEMM, so it has to
     // accept the descriptor (f16 operands, f32 accumulate, contiguous row-major,
@@ -1854,6 +1889,7 @@ mod tests {
             acc: 1,
             a_acc: 0,
             b_acc: 0,
+            c_bo: 0,
         }
     }
 
