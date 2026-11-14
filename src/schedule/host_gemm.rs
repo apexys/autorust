@@ -108,6 +108,15 @@ pub struct HostGemm {
     pub res_off: i64,
     /// `max(C, 0)` applied after the epilogue (a fused ReLU).
     pub relu: bool,
+    /// Number of outer reduction slices accumulated into the same `C` (>= 1).
+    /// A two-axis reduction that is not contiguous in both operands is a sum of
+    /// per-slice GEMMs; slice `s` starts at `a_acc`/`b_acc` elements and is
+    /// accumulated with `beta = 1` after the first.
+    pub acc: i64,
+    /// Element stride between accumulation slices in `A`.
+    pub a_acc: i64,
+    /// Element stride between accumulation slices in `B`.
+    pub b_acc: i64,
 }
 
 impl HostGemm {
@@ -122,7 +131,7 @@ impl HostGemm {
              a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
              a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
              c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
-             scale_off: {}, res_slot: {}, res_off: {}, relu: {} }}",
+             scale_off: {}, res_slot: {}, res_off: {}, relu: {}, acc: {}, a_acc: {}, b_acc: {} }}",
             self.a_slot,
             self.b_slot,
             self.c_slot,
@@ -151,7 +160,10 @@ impl HostGemm {
             self.scale_off,
             self.res_slot,
             self.res_off,
-            self.relu
+            self.relu,
+            self.acc,
+            self.a_acc,
+            self.b_acc
         )
     }
 
@@ -196,6 +208,9 @@ impl HostGemm {
                 ("res_slot".into(), int(self.res_slot)),
                 ("res_off".into(), int(self.res_off)),
                 ("relu".into(), Arg::Bool(self.relu)),
+                ("acc".into(), int(self.acc)),
+                ("a_acc".into(), int(self.a_acc)),
+                ("b_acc".into(), int(self.b_acc)),
             ],
         }
     }
@@ -285,6 +300,9 @@ impl HostGemm {
             },
             res_off: i("res_off"),
             relu: matches!(d.get("relu"), Arg::Bool(true)),
+            acc: i("acc").max(1),
+            a_acc: i("a_acc"),
+            b_acc: i("b_acc"),
         };
         Some(desc)
     }
@@ -1330,7 +1348,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // convolution reduces over `(cin, ky, kx)`, so this is now an ordered fold
     // rather than the previous one/two-axis special case. A zero stride (a
     // broadcast term) or a mismatched order is not a GEMM.
-    let (k, a_k, b_k) = {
+    let ((k, a_k, b_k), acc) = {
         let axes: Vec<(i64, i64, i64)> = red_exts
             .iter()
             .zip(red_axes.iter())
@@ -1369,13 +1387,32 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             }
         }
         match found {
-            Some(v) => v,
+            Some(v) => (v, None),
             None => {
-                note_detail(&format!(
-                    "axes={:?}",
-                    axes.iter().map(|(e, a, b)| (e, a, b)).collect::<Vec<_>>()
-                ));
-                return reject("reduce-axes-not-contiguous");
+                // Two-axis reduction that is not contiguous in both operands is
+                // a sum of per-slice GEMMs: one axis is the contraction, the
+                // other an outer loop accumulating into the same C (beta=1).
+                if axes.len() == 2 && axes[0].0 > 1 && axes[1].0 > 1 {
+                    let pick = |i: usize| -> i64 { axes[i].1.abs() + axes[i].2.abs() };
+                    let kax = if pick(0) <= pick(1) { 0 } else { 1 };
+                    let (n_e, a_acc, b_acc) = axes[1 - kax];
+                    let (k_e, a_k, b_k) = axes[kax];
+                    if a_acc != 0 && b_acc != 0 {
+                        ((k_e, a_k, b_k), Some((n_e, a_acc, b_acc)))
+                    } else {
+                        note_detail(&format!(
+                            "axes={:?}",
+                            axes.iter().map(|(e, a, b)| (e, a, b)).collect::<Vec<_>>()
+                        ));
+                        return reject("reduce-axes-not-contiguous");
+                    }
+                } else {
+                    note_detail(&format!(
+                        "axes={:?}",
+                        axes.iter().map(|(e, a, b)| (e, a, b)).collect::<Vec<_>>()
+                    ));
+                    return reject("reduce-axes-not-contiguous");
+                }
             }
         }
     };
@@ -1650,6 +1687,9 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         res_slot,
         res_off,
         relu,
+        acc: acc.map(|(n, _, _)| n).unwrap_or(1),
+        a_acc: acc.map(|(_, a, _)| a).unwrap_or(0),
+        b_acc: acc.map(|(_, _, b)| b).unwrap_or(0),
     };
     // The cooperative-matrix module is the only VK library GEMM, so it has to
     // accept the descriptor (f16 operands, f32 accumulate, contiguous row-major,
@@ -1771,6 +1811,9 @@ mod tests {
             res_slot: -1,
             res_off: 0,
             relu: false,
+            acc: 1,
+            a_acc: 0,
+            b_acc: 0,
         }
     }
 

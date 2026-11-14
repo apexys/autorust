@@ -431,12 +431,10 @@ fn cublas_collapses_three_reduce_axes() {
                 autorust::settings::LibraryGemm::Never
             },
             |ctx| {
-                let x = Tensor::from_slice(ctx, &xd, None, Some("CUDA")).reshape([
-                    b as i64, t1 as i64, t2 as i64, k as i64,
-                ]);
-                let dy = Tensor::from_slice(ctx, &dd, None, Some("CUDA")).reshape([
-                    b as i64, t1 as i64, t2 as i64, n as i64,
-                ]);
+                let x = Tensor::from_slice(ctx, &xd, None, Some("CUDA"))
+                    .reshape([b as i64, t1 as i64, t2 as i64, k as i64]);
+                let dy = Tensor::from_slice(ctx, &dd, None, Some("CUDA"))
+                    .reshape([b as i64, t1 as i64, t2 as i64, n as i64]);
                 let prod = x.unsqueeze(4).mul(dy.unsqueeze(3));
                 vec![prod.sum(Some(&[0, 1, 2]), false, None)]
             },
@@ -455,4 +453,51 @@ fn cublas_collapses_three_reduce_axes() {
     );
     let d = maxdiff(&want, &got);
     assert!(d < 1e-3, "three-axis reduction: cuBLAS diff {d:e}");
+}
+
+#[test]
+fn cublas_accumulates_strided_two_axis_reduction() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    // `dW[k,n] = sum_{b,t} x[b,t,k] * dy[b,t,n]` with `dy` stored as [b,n,t]
+    // (transposed): the reduce axes are not contiguous in both operands, so
+    // this is one GEMM per batch slice accumulating into C with beta=1.
+    let (b, t, k, n) = (4usize, 197usize, 48usize, 40usize);
+    let xd = values(1, b * t * k);
+    let dd = values(7, b * n * t);
+    let run_case = |lib: bool| {
+        autorust::runtime::ops_cuda::CUBLAS_GEMMS.store(0, Ordering::Relaxed);
+        let out = run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let x = Tensor::from_slice(ctx, &xd, None, Some("CUDA"))
+                    .reshape([b as i64, t as i64, k as i64]);
+                let dy = Tensor::from_slice(ctx, &dd, None, Some("CUDA"))
+                    .reshape([b as i64, n as i64, t as i64])
+                    .transpose(1, 2);
+                let prod = x.unsqueeze(3).mul(dy.unsqueeze(2));
+                vec![prod.sum(Some(&[0, 1]), false, None)]
+            },
+        );
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLAS_GEMMS.load(Ordering::Relaxed),
+        )
+    };
+    let (want, calls_never) = run_case(false);
+    let (got, calls_always) = run_case(true);
+    assert_eq!(calls_never, 0, "Never policy must stay generated");
+    assert!(
+        calls_always > 0,
+        "a strided two-axis reduction must accumulate through cuBLAS"
+    );
+    let d = maxdiff(&want, &got);
+    assert!(d < 1e-3, "accumulated reduction: cuBLAS diff {d:e}");
 }

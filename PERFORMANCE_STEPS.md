@@ -245,6 +245,19 @@ fallback, and gate on masks/GQA/odd lengths/dtypes. Reuse the existing
 
 ## 6. HostGemm staging and per-slice accumulation
 
+**Status (2026-11-14): the `beta = 1` half is done.** A two-axis reduction that
+is not contiguous in both operands is now a sum of per-slice GEMMs: the
+descriptor carries `acc`/`a_acc`/`b_acc`, and the CUDA host GEMM loops the
+outer slices with `beta = 0` on the first and `beta = 1` afterwards. At ViT
+train bs 4 the accepted descriptors go 170 → **182** and the step **212.4 →
+200.6/201.2 ms (-5.5%)** (alternating builds). Numeric gate:
+`tests/cublas.rs::cublas_accumulates_strided_two_axis_reduction` (the `[b,n,t]`
+weight-gradient shape vs the generated kernel, `<1e-3`); the end-to-end loss
+with `AUTORUST_CUBLAS=0` vs default matches to ~5e-4 after two steps.
+Staging (a destination with no unit-stride axis / a merged `(h,d)` operand) is
+still open.
+
+
 **Evidence:** 170 descriptors are accepted at ViT train bs 4; the remaining
 GEMM-shaped rejections are 48 `b-index-not-affine` (merged `(h,d)` axis +
 strided destination), 12 `reduce-axes-not-contiguous` (needs `beta = 1` per

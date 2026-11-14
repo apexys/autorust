@@ -360,6 +360,8 @@ pub struct GemmDesc {
     pub ldb: i64,
     /// Leading dimension of `C`.
     pub ldc: i64,
+    /// `C = alpha*op(A)*op(B) + beta*C` (0 to overwrite, 1 to accumulate).
+    pub beta: f32,
     /// Scalar multiplier.
     pub alpha: f32,
 }
@@ -397,7 +399,7 @@ pub unsafe fn gemm(
         i32::try_from(desc.ldb).map_err(|_| "cublas: ldb too large")?,
         i32::try_from(desc.ldc).map_err(|_| "cublas: ldc too large")?,
     );
-    let beta = 0.0f32;
+    let beta = desc.beta;
     let rc = unsafe {
         match desc.elem {
             Elem::F32 => {

@@ -53,6 +53,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-slice accumulation for strided two-axis reductions.** A contraction
+  whose two reduction axes are not contiguous in both operands (the ViT
+  weight-gradient shapes) is now a sum of per-slice GEMMs: `HostGemm` carries
+  `acc`/`a_acc`/`b_acc` and cuBLAS runs the outer slices with `beta = 0/1`.
+  ViT-B/16 train bs 4: **212.4 → 200.6/201.2 ms (-5.5%)**, accepted descriptors
+  170 → 182. Gate: `cublas_accumulates_strided_two_axis_reduction` plus the
+  end-to-end loss parity (~5e-4 over two steps).
 - **ReLU epilogue and arbitrary reduce-axis folds for the host GEMM.** A store
   `Max(REDUCE(...), 0)` now peels the clamp into a `relu` descriptor flag that
   the CUDA epilogue kernel applies (numeric gate:

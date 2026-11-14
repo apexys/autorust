@@ -567,6 +567,9 @@ mod tests {
             res_slot: -1,
             res_off: 0,
             relu: false,
+            acc: 1,
+            a_acc: 0,
+            b_acc: 0,
         }
     }
 

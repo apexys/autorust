@@ -5364,3 +5364,34 @@ Separately, `MIN_ELEMS` for the fused optimizer dropped 1024 → 256 so ViT-B/16
 and 2,287 → 1,487 launches/step. The graph optimizer was already one fused
 kernel per parameter for these shapes, so the gain is launch count, not
 bandwidth.
+
+### 9.70 Item 6: per-slice accumulation (`beta = 1`) for strided reductions (2026-11-14)
+
+The last 12 GEMM-shaped rejects at ViT train bs 4 were
+`reduce-axes-not-contiguous` (`k_axes=4x197 a=[151296,768] b=[151296,1]`): a
+weight gradient whose `(batch, token)` reduction is contiguous in A but not in
+the `[b,n,t]`-stored B. Mathematically it is a sum of per-batch-slice GEMMs.
+
+Changes:
+
+- `HostGemm` gained `acc`, `a_acc`, `b_acc` (outer slice count and per-operand
+  element strides), serialized in `to_data`/`from_arg`/`to_rust_literal`.
+- `host_gemm::extract` no longer rejects a two-axis non-contiguous reduction:
+  it picks the axis with the smaller stride pair as K and the other as the
+  accumulation axis (zero strides still reject).
+- `cublas::GemmDesc` gained `beta`; the CUDA host GEMM loops the outer slices,
+  `beta = 0` on the first and `beta = 1` after, nested correctly with the
+  existing batch-split loop.
+- Numeric gate: `tests/cublas.rs::cublas_accumulates_strided_two_axis_reduction`
+  builds the `[b,n,t]` weight-gradient shape and matches the generated kernel
+  (`<1e-3`) while asserting the dispatch.
+
+Measured, ViT train bs 4, alternating builds: **212.36/212.49 → 200.64/201.16 ms
+(-5.5%)**; accepted descriptors 170 → 182. End-to-end loss with
+`AUTORUST_CUBLAS=0` vs default at `BENCH_SEED=7 BENCH_LOSS=1`:
+`6.907755 / 3.669463 / 43.980694` vs `6.907755 / 3.669471 / 43.981239`
+(accumulation-order noise, ~5e-4 after two steps).
+
+Staging remains open: the 48 `b-index-not-affine` cases have a merged `(h,d)`
+operand and a destination with no unit-stride axis, which needs a temporary
+buffer + copy, not accumulation.

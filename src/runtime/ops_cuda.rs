@@ -382,6 +382,7 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             ldb: if trans_b { g.a_k } else { g.a_m },
             ldc: g.c_m,
             alpha: g.alpha,
+            beta: 0.0,
         };
         self.ctx.bind_to_thread().ok();
         let mut handle = self.cublas.borrow_mut();
@@ -406,34 +407,47 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
         } else {
             (g.b_b, g.a_b)
         };
-        for o in 0..outer {
-            let (oa, ob, oc) = if inner > 1 {
-                (
-                    a.wrapping_add((o * g.a_b * isz) as u64),
-                    b.wrapping_add((o * g.b_b * isz) as u64),
-                    c.wrapping_add((o * inner * g.c_b * isz) as u64),
-                )
-            } else {
-                (a, b, c)
-            };
-            let rc = unsafe {
-                crate::runtime::cublas::gemm(
-                    handle,
-                    &gemm,
-                    ob as *const std::ffi::c_void,
-                    oa as *const std::ffi::c_void,
-                    oc as *mut std::ffi::c_void,
-                    if inner > 1 { inner } else { g.batch },
-                    stride_a,
-                    stride_b,
-                    g.c_b,
-                )
-            };
-            if let Err(e) = rc {
-                panic!(
-                    "TGERR: {e} (m={} n={} k={} batch={} inner={} outer={})",
-                    g.m, g.n, g.k, g.batch, inner, outer
-                );
+        // `acc` outer reduction slices accumulate into the same C: the first
+        // overwrites (beta=0), the rest add (beta=1). A contiguous two-axis
+        // reduction folds into one GEMM at extraction time; a strided one (the
+        // weight-gradient shapes) is a sum of per-slice GEMMs.
+        let acc = g.acc.max(1);
+        for s in 0..acc {
+            let mut gemm = gemm;
+            gemm.beta = if s == 0 { 0.0 } else { 1.0 };
+            let (as_, bs_) = (
+                a.wrapping_add((s * g.a_acc * isz) as u64),
+                b.wrapping_add((s * g.b_acc * isz) as u64),
+            );
+            for o in 0..outer {
+                let (oa, ob, oc) = if inner > 1 {
+                    (
+                        as_.wrapping_add((o * g.a_b * isz) as u64),
+                        bs_.wrapping_add((o * g.b_b * isz) as u64),
+                        c.wrapping_add((o * inner * g.c_b * isz) as u64),
+                    )
+                } else {
+                    (as_, bs_, c)
+                };
+                let rc = unsafe {
+                    crate::runtime::cublas::gemm(
+                        handle,
+                        &gemm,
+                        ob as *const std::ffi::c_void,
+                        oa as *const std::ffi::c_void,
+                        oc as *mut std::ffi::c_void,
+                        if inner > 1 { inner } else { g.batch },
+                        stride_a,
+                        stride_b,
+                        g.c_b,
+                    )
+                };
+                if let Err(e) = rc {
+                    panic!(
+                        "TGERR: {e} (m={} n={} k={} batch={} inner={} outer={} acc={})",
+                        g.m, g.n, g.k, g.batch, inner, outer, acc
+                    );
+                }
             }
         }
         let opt = |slot: i64, off: i64| -> Option<(u64, i64)> {
