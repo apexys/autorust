@@ -310,12 +310,10 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
                                 let cbase = c.offset(
                                     (m0 + ip * MR) as isize * c_m + (n0 + jp * NR) as isize,
                                 );
-                                let ap = a.offset(
-                                    (m0 + ip * MR) as isize * a_m + k0 as isize,
-                                ) as *const f32;
+                                let ap = a.offset((m0 + ip * MR) as isize * a_m + k0 as isize)
+                                    as *const f32;
                                 let bp = bf.offset(
-                                    (k0 as isize) * b_fast_ks as isize
-                                        + (n0 + jp * NR) as isize,
+                                    (k0 as isize) * b_fast_ks as isize + (n0 + jp * NR) as isize,
                                 );
                                 if mr == MR && nr == NR && avx {
                                     #[cfg(target_arch = "x86_64")]
@@ -404,11 +402,9 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
                                     for jj in 0..NR {
                                         let dst = bp_all.add(jp * kc * NR + jj);
                                         if jj < cols {
-                                            let src =
-                                                b.offset((n0 + jp * NR + jj) as isize * b_n);
+                                            let src = b.offset((n0 + jp * NR + jj) as isize * b_n);
                                             for kk in 0..kc {
-                                                *dst.add(kk * NR) =
-                                                    *src.offset((k0 + kk) as isize);
+                                                *dst.add(kk * NR) = *src.offset((k0 + kk) as isize);
                                             }
                                         } else {
                                             for kk in 0..kc {
@@ -440,24 +436,49 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
                                 for jp in 0..npan {
                                     let nr = NR.min(n_cnt - jp * NR);
                                     let cbase = c.offset(
-                                        (m0 + ip * MR) as isize * c_m
-                                            + (n0 + jp * NR) as isize,
+                                        (m0 + ip * MR) as isize * c_m + (n0 + jp * NR) as isize,
                                     );
                                     let ap = ap_all.add(ip * kc * MR);
                                     let bp = bp_all.add(jp * kc * NR);
                                     if mr == MR && nr == NR && avx {
                                         #[cfg(target_arch = "x86_64")]
                                         micro_6x16(
-                                            kc, ap, 1, MR, bp, NR, cbase, c_m as usize, first,
+                                            kc,
+                                            ap,
+                                            1,
+                                            MR,
+                                            bp,
+                                            NR,
+                                            cbase,
+                                            c_m as usize,
+                                            first,
                                         );
                                         #[cfg(not(target_arch = "x86_64"))]
                                         micro_gen(
-                                            mr, nr, kc, ap, 1, MR, bp, NR, cbase, c_m as usize,
+                                            mr,
+                                            nr,
+                                            kc,
+                                            ap,
+                                            1,
+                                            MR,
+                                            bp,
+                                            NR,
+                                            cbase,
+                                            c_m as usize,
                                             first,
                                         );
                                     } else {
                                         micro_gen(
-                                            mr, nr, kc, ap, 1, MR, bp, NR, cbase, c_m as usize,
+                                            mr,
+                                            nr,
+                                            kc,
+                                            ap,
+                                            1,
+                                            MR,
+                                            bp,
+                                            NR,
+                                            cbase,
+                                            c_m as usize,
                                             first,
                                         );
                                     }
@@ -474,12 +495,12 @@ pub unsafe fn run_raw(g: &HostGemm, ptrs: &[*mut u8]) -> Result<(), String> {
                 g.alpha != 1.0 || g.bias_slot >= 0 || g.scale_slot >= 0 || g.res_slot >= 0;
             if needs_epi {
                 let c = c_addr as *mut f32;
-                let bias = (g.bias_slot >= 0)
-                    .then(|| base(g.bias_slot, g.bias_off) as *const f32);
-                let scale = (g.scale_slot >= 0)
-                    .then(|| base(g.scale_slot, g.scale_off) as *const f32);
-                let res = (g.res_slot >= 0)
-                    .then(|| unsafe { (base(g.res_slot, g.res_off) as *const f32).offset(batch_rel) });
+                let bias = (g.bias_slot >= 0).then(|| base(g.bias_slot, g.bias_off) as *const f32);
+                let scale =
+                    (g.scale_slot >= 0).then(|| base(g.scale_slot, g.scale_off) as *const f32);
+                let res = (g.res_slot >= 0).then(|| unsafe {
+                    (base(g.res_slot, g.res_off) as *const f32).offset(batch_rel)
+                });
                 unsafe {
                     for i in 0..m_cnt {
                         for j in 0..n_cnt {
@@ -545,6 +566,7 @@ mod tests {
             scale_off: 0,
             res_slot: -1,
             res_off: 0,
+            relu: false,
         }
     }
 
@@ -554,8 +576,12 @@ mod tests {
     #[test]
     fn matches_naive_weight_layout_with_epilogue() {
         let (m, n, k) = (197usize, 96usize, 768usize);
-        let a: Vec<f32> = (0..m * k).map(|i| ((i % 131) as f32) * 0.0078125 - 0.5).collect();
-        let bt: Vec<f32> = (0..n * k).map(|i| ((i % 127) as f32) * 0.0078125 - 0.5).collect();
+        let a: Vec<f32> = (0..m * k)
+            .map(|i| ((i % 131) as f32) * 0.0078125 - 0.5)
+            .collect();
+        let bt: Vec<f32> = (0..n * k)
+            .map(|i| ((i % 127) as f32) * 0.0078125 - 0.5)
+            .collect();
         let bias: Vec<f32> = (0..n).map(|j| j as f32 * 0.01).collect();
         let res: Vec<f32> = (0..m * n).map(|i| ((i % 17) as f32) * 0.001).collect();
         let mut c: Vec<f32> = (0..m * n).map(|i| ((i % 19) as f32) * 0.002).collect();

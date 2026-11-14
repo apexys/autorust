@@ -53,6 +53,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ReLU epilogue and arbitrary reduce-axis folds for the host GEMM.** A store
+  `Max(REDUCE(...), 0)` now peels the clamp into a `relu` descriptor flag that
+  the CUDA epilogue kernel applies (numeric gate:
+  `tests/cublas.rs::cublas_matches_relu_epilogue`), and reduction axes fold
+  generically (not just one/two), so a convolution's `(cin, ky, kx)` can be a
+  single K axis when the operands are contiguous. ResNet-18 convs still stay
+  generated: the remaining rejects are multi-axis output layouts
+  (`epilogue-layout c_axes=4`), not the epilogue.
 - **Fused Adam/AdamW/LAMB kernel for OpenCL.** `runtime::cl_optim` is the CL
   port of the CUDA kernel: the 100M-parameter / 32-tensor benchmark goes
   **96.9 → 26.4 ms (107 GB/s), level with CUDA's 25.4 ms**. Gated like CUDA

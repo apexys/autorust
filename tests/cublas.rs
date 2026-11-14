@@ -365,3 +365,47 @@ fn cublas_matches_scale_and_residual_epilogue() {
     let d = maxdiff(&run_case(false), &run_case(true));
     assert!(d < 1e-3, "scale+residual: cuBLAS diff {d:e}");
 }
+
+#[test]
+fn cublas_matches_relu_epilogue() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    // `relu(A @ B)`: the clamp used to hide the contraction (the store was not
+    // a bare REDUCE); it is peeled into the host-GEMM epilogue now.
+    let (m, n, k) = (37usize, 48usize, 64usize);
+    let ad = values(1, m * k);
+    let bd = values(7, k * n);
+    let run_case = |lib: bool| {
+        autorust::runtime::ops_cuda::CUBLAS_GEMMS.store(0, Ordering::Relaxed);
+        let out = run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let a =
+                    Tensor::from_slice(ctx, &ad, None, Some("CUDA")).reshape([m as i64, k as i64]);
+                let b =
+                    Tensor::from_slice(ctx, &bd, None, Some("CUDA")).reshape([k as i64, n as i64]);
+                vec![a.dot(&b).relu()]
+            },
+        );
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLAS_GEMMS.load(Ordering::Relaxed),
+        )
+    };
+    let (want, calls_never) = run_case(false);
+    let (got, calls_always) = run_case(true);
+    assert_eq!(calls_never, 0, "Never policy must stay generated");
+    assert!(
+        calls_always > 0,
+        "a fused ReLU must stay on the library GEMM"
+    );
+    let d = maxdiff(&want, &got);
+    assert!(d < 1e-4, "relu epilogue: cuBLAS diff {d:e}");
+}

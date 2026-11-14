@@ -133,6 +133,21 @@ implicit kernel can reuse that index logic.
 **Expected:** 2-4x on the conv share → ResNet-18 CUDA 323 → 100-160 ms; the gap
 to torch drops from 17x to 5-8x. Also helps UNet/MobileNet/ONNX ResNet.
 
+**Attempt (2026-11-14): GPU GEMM plumbing extended, conv still blocked.**
+Landed: (a) the reduce-axis fold is now general — any number of reduction axes
+folds when the operands are contiguous in one order, so `(cin, ky, kx)` can be
+one K axis; (b) the epilogue peeler handles `Max(x, 0)` and the descriptor
+carries a `relu` flag applied by the CUDA epilogue kernel, with a numeric test
+(`tests/cublas.rs::cublas_matches_relu_epilogue`). That removes the 15
+`Max<Add<...>` "not a contraction" rejects on ResNet. The remaining conv stores
+now fail at **`epilogue-layout` (12, `c_axes=4`)** and `epilogue-not-reduce
+op=Add<Add<Mul` (3): the output has four axes (`batch, cout, oy, ox`) while the
+descriptor model has one `m` plus shared batch axes, and the BN residual/scale
+maps do not line up with the chosen m. End-to-end ResNet-18 is unchanged
+(319-321 ms). **Next:** fold the two spatial output axes into one `m` (they are
+C-contiguous) and accept the residual only when its map matches that folded
+axis; otherwise stage. This is the smallest remaining step toward item 2's win.
+
 **Effort/risk:** large. Do not attempt without a per-kernel numeric gate against
 the current generated conv and a fallback for unsupported layouts.
 

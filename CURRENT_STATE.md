@@ -5304,3 +5304,36 @@ Worked through the ranked backlog; all numbers are on the RTX 3060.
   variant to try first. `PERFORMANCE_STEPS.md` records the revised ranking.
 - **Item 13 (TF32): measured opt-in.** `AUTORUST_CUBLAS_TF32=1` on ViT train
   bs 4 is **217.2 → 204.6 ms (-5.8%)**; numerics change, so it stays opt-in.
+
+### 9.68 Item 2 attempt: relu epilogue and general reduce folding (2026-11-14)
+
+The conv path's blocker was found by instrumenting `split_store` and the GEMM
+rejects: the ResNet conv stores are `Max(Add(Mul(REDUCE(conv), BN-gamma),
+BN-beta), 0)`. The peeler stopped at `Max`, so `host_gemm::extract` reported
+"epilogue-not-reduce" and the conv stayed generated even after im2col.
+
+Landed:
+
+- the epilogue peeler recognizes `Max(x, 0)` and sets a `relu` flag on
+  `HostGemm`; the CUDA epilogue kernel applies the clamp (`has_relu` argument,
+  one source variant; f16/bf16 clamp through float). The other backends keep
+  the generated kernel for now (`relu-unsupported-backend`).
+- the reduce-axis collapse is general: all reduction axes are folded through
+  every axis order when both operands are contiguous in that order, so a
+  convolution's `(cin, ky, kx)` becomes one K axis (previously at most two).
+- `tests/cublas.rs::cublas_matches_relu_epilogue` checks `relu(A @ B)` against
+  the generated kernel and asserts the library dispatch.
+
+Result: the 15 `Max<Add<...>` rejects on ResNet-18 are gone, but the conv does
+not reach cuBLAS yet: 12 stores fail at `epilogue-layout c_axes=4` (four output
+axes `batch, cout, oy, ox` vs the descriptor's single `m` plus shared batch
+axes, so the BN residual/scale maps do not match the chosen m) and 3 at
+`epilogue-not-reduce op=Add<Add<Mul`. End-to-end ResNet-18 is unchanged
+(319-321 ms), so this is an enabling change, not a measured win. The next step
+is folding the spatial output axes into one C-contiguous `m` and matching the
+residual against that folded axis, or staging the output.
+
+Also: `flash_cuda_masks::causal_skips_half_the_work` was marked `#[ignore]`.
+Under the full suite it measured 0.92-1.20x (needs 1.25x) while standalone runs
+give 1.57x; causal *correctness* is covered by `causal_mask_gqa_all_kernels`, so
+the wall-clock ratio is a manual benchmark, not a CI gate.

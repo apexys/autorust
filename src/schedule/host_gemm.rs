@@ -106,6 +106,8 @@ pub struct HostGemm {
     pub res_slot: i64,
     /// Element offset of the residual tensor.
     pub res_off: i64,
+    /// `max(C, 0)` applied after the epilogue (a fused ReLU).
+    pub relu: bool,
 }
 
 impl HostGemm {
@@ -120,7 +122,7 @@ impl HostGemm {
              a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
              a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
              c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
-             scale_off: {}, res_slot: {}, res_off: {} }}",
+             scale_off: {}, res_slot: {}, res_off: {}, relu: {} }}",
             self.a_slot,
             self.b_slot,
             self.c_slot,
@@ -148,7 +150,8 @@ impl HostGemm {
             self.scale_slot,
             self.scale_off,
             self.res_slot,
-            self.res_off
+            self.res_off,
+            self.relu
         )
     }
 
@@ -192,6 +195,7 @@ impl HostGemm {
                 ("scale_off".into(), int(self.scale_off)),
                 ("res_slot".into(), int(self.res_slot)),
                 ("res_off".into(), int(self.res_off)),
+                ("relu".into(), Arg::Bool(self.relu)),
             ],
         }
     }
@@ -280,6 +284,7 @@ impl HostGemm {
                 -1
             },
             res_off: i("res_off"),
+            relu: matches!(d.get("relu"), Arg::Bool(true)),
         };
         Some(desc)
     }
@@ -879,6 +884,24 @@ pub fn extract(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     out
 }
 
+/// Append every permutation of `0..n` (n is at most 4 for a contraction).
+fn permutations(n: usize, cur: &mut Vec<usize>, used: &mut [bool], out: &mut Vec<Vec<usize>>) {
+    if cur.len() == n {
+        out.push(cur.clone());
+        return;
+    }
+    for i in 0..n {
+        if used[i] {
+            continue;
+        }
+        used[i] = true;
+        cur.push(i);
+        permutations(n, cur, used, out);
+        cur.pop();
+        used[i] = false;
+    }
+}
+
 fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // Cheap reject for elementwise kernels: only the store value matters, and
     // we must not descend into AFTER (which embeds whole earlier kernels).
@@ -955,11 +978,26 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         expr: UopId,
     }
     let mut alpha = 1.0f32;
+    let mut relu = false;
     let mut extras: Vec<Extra> = Vec::new();
     let mut value = ctx.srcs(&st)[1].clone();
     for _ in 0..12 {
         match ctx.op_of(&value) {
             Ops::Cast | Ops::Bitcast => value = ctx.srcs(&value)[0].clone(),
+            // `Max(x, 0)` is a fused ReLU; keep it as an epilogue flag rather
+            // than letting it hide the contraction (conv+BN+ReLU stores).
+            Ops::Max => {
+                let srcs = ctx.srcs(&value).to_vec();
+                if srcs.len() == 2 && const_float(ctx, &srcs[1]) == Some(0.0) {
+                    relu = true;
+                    value = srcs[0].clone();
+                } else if srcs.len() == 2 && const_float(ctx, &srcs[0]) == Some(0.0) {
+                    relu = true;
+                    value = srcs[1].clone();
+                } else {
+                    break;
+                }
+            }
             Ops::Mul => {
                 let srcs = ctx.srcs(&value).to_vec();
                 let (sa, sb) = (srcs[0].clone(), srcs[1].clone());
@@ -1286,36 +1324,59 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let m = or_reject(range_extent(ctx, &st, m_key), "symbolic-extent")?;
     let a_m = coeff(&a_map, m_key);
     let b_n = coeff(&b_map, n_key);
-    // Collapse the reduction axes into one contraction axis. For both operands
-    // the offset must be linear in the same flattened index, which holds when
-    // one axis's stride is the other's times its extent. A zero stride (a
+    // Collapse *all* reduction axes into one contraction axis. For both
+    // operands the offset must be linear in the same flattened index, which
+    // holds when one axis's stride is the other's times its extent; a
+    // convolution reduces over `(cin, ky, kx)`, so this is now an ordered fold
+    // rather than the previous one/two-axis special case. A zero stride (a
     // broadcast term) or a mismatched order is not a GEMM.
-    let (k, a_k, b_k) = match red_axes.len() {
-        1 => (
-            red_exts[0],
-            coeff(&a_map, red_axes[0]),
-            coeff(&b_map, red_axes[0]),
-        ),
-        2 => {
-            let (k1, k2) = (red_exts[0], red_exts[1]);
-            let (a1, a2) = (coeff(&a_map, red_axes[0]), coeff(&a_map, red_axes[1]));
-            let (b1, b2) = (coeff(&b_map, red_axes[0]), coeff(&b_map, red_axes[1]));
-            let first_outer =
-                a1 != 0 && b1 != 0 && a2 == a1.saturating_mul(k1) && b2 == b1.saturating_mul(k1);
-            let second_outer =
-                a2 != 0 && b2 != 0 && a1 == a2.saturating_mul(k2) && b1 == b2.saturating_mul(k2);
-            if first_outer {
-                (k1.saturating_mul(k2), a1, b1)
-            } else if second_outer {
-                (k1.saturating_mul(k2), a2, b2)
-            } else {
-                note_detail(&format!("k_axes={k1}x{k2} a=[{a1},{a2}] b=[{b1},{b2}]"));
-                return reject("reduce-axes-not-contiguous");
+    let (k, a_k, b_k) = {
+        let axes: Vec<(i64, i64, i64)> = red_exts
+            .iter()
+            .zip(red_axes.iter())
+            .map(|(e, key)| (*e, coeff(&a_map, *key), coeff(&b_map, *key)))
+            .collect();
+        if axes.iter().any(|(_, a, b)| *a == 0 || *b == 0) {
+            note_detail(&format!(
+                "axes={:?}",
+                axes.iter().map(|(e, a, b)| (e, a, b)).collect::<Vec<_>>()
+            ));
+            return reject("reduce-axis-broadcast");
+        }
+        if axes.len() > 4 {
+            note_detail(&format!("reduce_axes={}", axes.len()));
+            return reject("reduce-axes-many");
+        }
+        // Try every ORDER; the fold requires (for each adjacency, outer→inner)
+        // stride_outer == stride_inner * ext_inner in both operands.
+        let mut perms: Vec<Vec<usize>> = Vec::new();
+        let mut cur = Vec::new();
+        let mut used = vec![false; axes.len()];
+        permutations(axes.len(), &mut cur, &mut used, &mut perms);
+        let mut found: Option<(i64, i64, i64)> = None;
+        for p in &perms {
+            let contiguous = (1..axes.len()).all(|i| {
+                let (outer, inner) = (axes[p[i - 1]], axes[p[i]]);
+                outer.1 == inner.1.saturating_mul(inner.0)
+                    && outer.2 == inner.2.saturating_mul(inner.0)
+            });
+            if contiguous {
+                let k = p.iter().map(|&i| axes[i].0).product::<i64>();
+                let a_k = axes[*p.last().unwrap()].1;
+                let b_k = axes[*p.last().unwrap()].2;
+                found = Some((k, a_k, b_k));
+                break;
             }
         }
-        _ => {
-            note_detail(&format!("reduce_axes={}", red_axes.len()));
-            return reject("reduce-axes-many");
+        match found {
+            Some(v) => v,
+            None => {
+                note_detail(&format!(
+                    "axes={:?}",
+                    axes.iter().map(|(e, a, b)| (e, a, b)).collect::<Vec<_>>()
+                ));
+                return reject("reduce-axes-not-contiguous");
+            }
         }
     };
     if m <= 0 || k <= 0 {
@@ -1395,6 +1456,11 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let (bias_slot, bias_off) = bias;
     let (scale_slot, scale_off) = scale;
     let (res_slot, res_off) = residual;
+    // The fused clamp is implemented by the CUDA epilogue kernel; other
+    // backends keep the generated kernel rather than dropping the ReLU.
+    if relu && kind != GemmDevice::Cuda {
+        return reject("relu-unsupported-backend");
+    }
     // The transposed view swaps the output axes: the epilogue adds along the
     // original n, which is the new m. Only a plain GEMM is transposed.
     if col_major && (bias_slot >= 0 || scale_slot >= 0 || res_slot >= 0) {
@@ -1583,6 +1649,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         scale_off,
         res_slot,
         res_off,
+        relu,
     };
     // The cooperative-matrix module is the only VK library GEMM, so it has to
     // accept the descriptor (f16 operands, f32 accumulate, contiguous row-major,
@@ -1703,6 +1770,7 @@ mod tests {
             scale_off: 0,
             res_slot: -1,
             res_off: 0,
+            relu: false,
         }
     }
 
