@@ -5610,3 +5610,42 @@ transposed attention output (`contiguous()` before the reshape) is neutral:
 accepted stays 182 and the step is 199.5/200.0 vs 199.4/200.0 ms (the scheduler
 folds the copy). A true in-GEMM staging path (temp + gather + copy-out) has no
 measured win over the generated kernel, so it is recorded as a skip.
+
+### 9.77 Item 7 (ONNX side): measured skip, the replayed graph is already clean (2026-11-14)
+
+Inspected the ONNX importer/runner and profiled the replayed plans for
+`onnx_mnist` (bs32, 1.84 ms) and `onnx_resnet` (bs8, 11.11 ms):
+
+- 0 `Constant` nodes in both assets; nothing to constant-fold.
+- 16 `Identity` nodes in the ResNet, but the importer aliases them
+  (`inp(ins,0).clone()`) and they emit no kernels. The ResNet replay is
+  **29 kernels/step**: 5 host GEMMs + 24 conv/reduction kernels, with no
+  copy/transpose kernels.
+- The accepted host GEMMs consume the initializers via strides (e.g. `Gemm`'s
+  `transB` view), so weight prepacking would only change the capture graph.
+- The ResNet has no `BatchNormalization` nodes (torch folded them). MNIST's 4
+  BN nodes are already fused into the conv stores (12 kernels/step, no separate
+  BN kernel); its convs are below the host-GEMM size gate (`k < 576`), so folding
+  them changes neither kernels nor GEMMs.
+- The steady ONNX gap is therefore conv lowering/efficiency (item 2), not graph
+  preprocessing. The capture is a one-off: `ms_cold` 25.1 ms (MNIST) and 242 ms
+  (ResNet), which is item 1/10's territory.
+
+The native Conv+BN fold from item 7 is landed and measured (ResNet-18 infer
+317.9 -> 261.2 ms, §9.75); the ONNX half is a measured skip.
+
+### 9.78 Item 13 (bf16 epilogue): measured skip (2026-11-14)
+
+The cuBLASLt bias epilogue was extended experimentally to f16/bf16 operands and
+a mixed f32 accumulator/output. Inspecting the bf16 workloads showed there is
+nothing to fuse:
+
+- `vit_infer_bf16` bs4 (44.7 ms): **0 of 285** host-GEMM attempts are accepted
+  (`operand-dtype` 49, `no-reduce` 161, ...), so no biased library GEMM exists.
+- `vit_train_bf16` bs4 (203.5 ms): the 97 accepted descriptors are all
+  **bias-free** attention contractions; the biased linears are 73
+  `dtype-mismatch` cases with **f32 multiply + f32 reduce + bf16 store** (f32
+  compute, 16-bit store), not bf16 GEMMs. A bf16 cuBLASLt epilogue has no target.
+
+The experimental extension was reverted; bf16 inference/training are unchanged.
+The f32 bias(+ReLU) cuBLASLt path (98/182 host GEMMs, §9.73) remains.

@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Measured the ONNX preprocessing and bf16-epilogue items (both skips).** The
+  ONNX assets are already clean (0 `Constant` nodes; `Identity` aliases emit no
+  kernels; the ResNet has no BN; MNIST's BN is fused into the conv stores) and
+  the steady replays are 29/12 kernels, so the gap is conv lowering (item 2).
+  On bf16, `vit_infer_bf16` accepts 0 host GEMMs and `vit_train_bf16`'s accepted
+  descriptors are bias-free attention contractions; the biased linears are f32
+  compute with a bf16 store, so a bf16 cuBLASLt epilogue has no target. Both are
+  recorded in `PERFORMANCE_STEPS.md` items 7 and 13.
+- **Measured the ONNX preprocessing item (skip).** The exported assets have no
+  `Constant` nodes, `Identity` nodes emit no kernels, host-GEMM weights are
+  already consumed through strides (no pack/transpose kernels in the replay),
+  and the ResNet has no BN nodes (MNIST's are fused into the conv stores). The
+  steady replays are 29 (ResNet) and 12 (MNIST) kernels; the remaining gap is
+  conv lowering (item 2), not graph preprocessing. Recorded in
+  `PERFORMANCE_STEPS.md` item 7.
 - **Host-GEMM epilogue C indexing and outer batch stride.** The epilogue used
   `row*n + col` with one batch stride, which assumes `c_m == n` and contiguous
   batch slices; the folded-conv layout (`C[b][cout][oy][ox]`, two batch axes)

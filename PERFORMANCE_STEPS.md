@@ -442,6 +442,37 @@ pre-transpose/repack weights for the GEMM path, drop identity/no-op nodes, and
 co-realize the model into as few LINEARS as possible. The conv part also
 benefits from item 2.
 
+**Attempt (2026-11-14): the ONNX steady-state graph has nothing left to
+preprocess.** Inspected the importer/runner and profiled the replayed plans:
+
+- **Constants:** both assets have **0** `Constant` nodes (torch exports plain
+  graphs), so there is nothing to constant-fold.
+- **No-op nodes:** the ResNet asset has 16 `Identity` nodes, but the importer
+  aliases them (`"Identity" => inp(ins,0).clone()` in `onnx/ops.rs`) and they
+  emit **no kernels** — the whole replay is **29 kernels/step** (5 host GEMMs +
+  24 conv/reduction kernels; no copy/transpose kernels).
+- **Weight prepacking:** the 5 accepted host GEMMs already consume the
+  initializers through strides (e.g. `Gemm`'s `transB` view), and the replay has
+  no transpose/pack kernels for them; prepacking would only change the capture
+  graph, not the replay.
+- **Conv+BN:** the ResNet asset has **0** `BatchNormalization` nodes (torch
+  folded them). MNIST has 4, but they are already fused into the conv stores —
+  its replay is **12 kernels/step** with no separate BN kernel — and its convs
+  are below the host-GEMM size gate (`k < 576`), so folding them changes
+  neither the kernel set nor the GEMM count. Measured: `onnx_mnist` 1.84 ms.
+- **Where the ONNX gap actually is:** the steady replay is kernel-bound (the
+  29 conv/reduction kernels), i.e. conv lowering/efficiency (item 2). The graph
+  build/capture is a one-off (cold `ms_cold` 25.1 ms for MNIST, **242 ms** for
+  ResNet) and is item 1/10's target, not the steady benchmark.
+- **What did land from this item:** the native-model Conv+BN fold
+  (`nn::fold_bn_eval`) below; the ONNX side has nothing to fold because the
+  exporter already folded it.
+
+So the ONNX preprocessing/prepacking half is a **measured skip**: the exported
+graphs are already folded/clean, and the replay contains only the conv and GEMM
+kernels that item 2 has to make faster. If the `onnx_*` numbers are to move,
+it is through conv lowering, not graph preprocessing.
+
 **Measured (2026-11-14): BN folding is the actual blocker for item 2.** The
 *native* ResNet model's BN is **not** folded: the conv store contains
 `gamma * Reciprocal(Sqrt(running_var + eps))` as a computed per-channel scale,
@@ -660,6 +691,21 @@ and `acc > 1` accumulation (the bias would be added once per slice). Gate:
 `tests/cublas.rs::cublas_lt_fuses_bias_and_relu` (numeric vs the generated
 kernel and the `CUBLASLT_EPILOGUES` counter). `AUTORUST_CUBLASLT=0` reverts to
 the separate epilogue. bf16/f16 stay on the epilogue kernel for now.
+
+**Attempt (2026-11-14): the bf16 epilogue has no target workload.** The
+cuBLASLt path was extended experimentally to f16/bf16 operands (and a mixed
+f32 accumulator/output), then the bf16 workloads were inspected:
+
+- `vit_infer_bf16` bs 4 (44.7 ms): the host GEMM accepts **0 of 285** attempts
+  (rejects `operand-dtype` 49, `no-reduce` 161, ...), so there is no biased
+  library GEMM to fuse at all.
+- `vit_train_bf16` bs 4 (203.5 ms): the 97 accepted descriptors are all
+  **bias-free attention contractions** (`bias=-1`); the biased linears are the
+  73 `dtype-mismatch` cases with **f32 multiply + f32 reduce + bf16 store** —
+  i.e. the model computes in f32 and casts the store to bf16, not a bf16 GEMM.
+  A cuBLASLt bf16 bias epilogue has no target, and those linears are not 16-bit
+  GEMMs. The experimental extension was reverted; the f32 bias(+ReLU) path
+  (98/182 host GEMMs) stays. bf16 inference/training are unchanged.
 
 **Effort/risk:** medium; numerics changes must stay opt-in.
 
