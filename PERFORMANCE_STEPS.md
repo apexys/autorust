@@ -379,8 +379,11 @@ Where the 570 ms warm-cache first step goes (measured or derived):
 | rendering (warm render cache hits) | ~5 ms (83 ms fresh) | yes (disk) | item 10: parallel rendering for the fresh case |
 | NVRTC | 0 warm (268 ms fresh) | yes (PTX disk cache) | — |
 | module load | 1.9 ms | yes (driver) | cubin cache not worth it |
-| first execution (the step itself) | ~186 ms | no | inherent compute |
-| host/library submission (`kx.host`) | ~130 ms measured as submission | — | KPROF syncs; see item 16 (CUDA events) |
+| first execution (the step itself) | 38-190 ms (first-launch driver work at the high end; steady replay is 38.5) | no | inherent compute |
+| host/library submission (`kx.host`) | ~130 ms as measured by the review (submission, not GPU time) | — | KPROF syncs; see item 16 (CUDA events) |
+
+The components overlap and should not be summed; the point is which of them has
+no cache today. Only two do: plan construction and the first execution.
 
 The actionable gap is therefore **plan construction**, not compilation: the
 schedule/lowering is the only large piece with no cache. Two ways to attack it:
@@ -393,6 +396,23 @@ schedule/lowering is the only large piece with no cache. Two ways to attack it:
 
 For warm *processes* the plan already exists; the remaining cold-warm cost is
 the first-step execution itself, which no cache can remove.
+
+Three more construction-cost levers beyond parallel rendering, in increasing
+scope:
+
+- **SINK-content schedule cache.** Hash the callified SINK (the kernel graph) and
+  reuse the *schedule* — kernel split, per-kernel AST content keys and the
+  memory plan — for identical graphs in the same process or from disk. This is
+  item 1 without serializing the full CALL/ProgramInfo structure; it removes the
+  `rangeify`/`split`/bufferize cost even when the plan rebuild still happens.
+- **Fewer realizes/LINEARS.** Each realize pays a schedule; the optimizer now
+  needs two and ONNX three. Co-realize forward/backward/optimizer roots where
+  semantics allow; every merged linear removes one `create_linear_with_vars`.
+- **Pass elision for static BUFFER graphs.** `callify` and parts of bufferize do
+  work (shape/index materialization) that is identity when the graph is already
+  all BUFFER leaves with static shapes; detect and skip those passes. This is a
+  smaller, safer version of "don't refactor the scheduler": cache decisions
+  rather than the graph.
 
 ---
 
