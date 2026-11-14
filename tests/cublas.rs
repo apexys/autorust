@@ -409,3 +409,50 @@ fn cublas_matches_relu_epilogue() {
     let d = maxdiff(&want, &got);
     assert!(d < 1e-4, "relu epilogue: cuBLAS diff {d:e}");
 }
+
+#[test]
+fn cublas_collapses_three_reduce_axes() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    // `dW = sum_{b,t1,t2} x[b,t1,t2,:] (x) dy[b,t1,t2,:]`: three reduction axes,
+    // contiguous in both operands, so they fold into one K axis.
+    let (b, t1, t2, k, n) = (2usize, 7usize, 5usize, 33usize, 17usize);
+    let xd = values(1, b * t1 * t2 * k);
+    let dd = values(7, b * t1 * t2 * n);
+    let run_case = |lib: bool| {
+        autorust::runtime::ops_cuda::CUBLAS_GEMMS.store(0, Ordering::Relaxed);
+        let out = run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let x = Tensor::from_slice(ctx, &xd, None, Some("CUDA")).reshape([
+                    b as i64, t1 as i64, t2 as i64, k as i64,
+                ]);
+                let dy = Tensor::from_slice(ctx, &dd, None, Some("CUDA")).reshape([
+                    b as i64, t1 as i64, t2 as i64, n as i64,
+                ]);
+                let prod = x.unsqueeze(4).mul(dy.unsqueeze(3));
+                vec![prod.sum(Some(&[0, 1, 2]), false, None)]
+            },
+        );
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLAS_GEMMS.load(Ordering::Relaxed),
+        )
+    };
+    let (want, calls_never) = run_case(false);
+    let (got, calls_always) = run_case(true);
+    assert_eq!(calls_never, 0, "Never policy must stay generated");
+    assert!(
+        calls_always > 0,
+        "three contiguous reduce axes must fold into one GEMM"
+    );
+    let d = maxdiff(&want, &got);
+    assert!(d < 1e-3, "three-axis reduction: cuBLAS diff {d:e}");
+}
