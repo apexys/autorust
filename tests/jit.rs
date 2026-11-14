@@ -132,6 +132,38 @@ fn jit_matches_non_jit() {
     }
 }
 
+/// The automatic eager `StepPlan` must reproduce the unplanned parameter
+/// trajectory exactly, including the optimizer's in-place updates (captured and
+/// replayed, not re-run by the closure).
+#[test]
+fn step_plan_matches_non_jit_stateful() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let w0 = Tensor::from_slice(&ctx, &[0.5f32, -0.25, 3.0], None, None).to_param();
+    let x0 = Tensor::from_slice(&ctx, &[2.0f32, 5.0, -1.0], None, None).to_param();
+    let mut plain = Vec::new();
+    for _ in 0..4 {
+        let l = step(&ctx, &mut sess, &w0, &x0);
+        plain.push(l.to_list::<f32>(&mut sess)[0]);
+    }
+
+    let mut sess2 = Session::new();
+    let w1 = Tensor::from_slice(&ctx, &[0.5f32, -0.25, 3.0], None, None).to_param();
+    let x1 = Tensor::from_slice(&ctx, &[2.0f32, 5.0, -1.0], None, None).to_param();
+    let mut plan = StepPlan::new();
+    let mut planned = Vec::new();
+    for _ in 0..4 {
+        let mut out = plan.run(&ctx, &mut sess2, &[], |ctx, sess, _| {
+            vec![step(ctx, sess, &w1, &x1)]
+        });
+        let l = out.pop().expect("step returned no loss");
+        planned.push(l.to_list::<f32>(&mut sess2)[0]);
+    }
+    for (a, b) in plain.iter().zip(&planned) {
+        assert!((a - b).abs() < 1e-5, "plan {planned:?} != plain {plain:?}");
+    }
+}
+
 /// On hardware the RNG is a device graph (§8.23), so replaying a JIT step must
 /// advance the counter and yield the *same* sequence as a non-JIT run. (INTERP
 /// uses the host RNG, whose `from_slice` is baked into the captured graph, so

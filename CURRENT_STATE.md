@@ -5581,3 +5581,32 @@ Measured (JIT replay, medians): ResNet-18 infer bs32 **317.9 -> 261.2 ms
 `AUTORUST_FOLD_BN=0/1` overrides the benchmark's per-model default. The ONNX
 importer part of item 7 (constant folding/prepacking) remains open; the ONNX
 asset already has BN folded.
+
+### 9.76 Item 3: automatic eager plans (StepPlan) (2026-11-14)
+
+`StepPlan` is now **on by default**: `StepPlan::new()` checks `AUTORUST_PLAN`
+(any value except `0` enables; `0` is the escape hatch that makes `run` call
+the step directly). It keeps one plan per input signature with an LRU
+(`set_capacity`, default 4). The benchmark's eager path (`BENCH_JIT=0`) wraps
+the step in a plan: a fixed-input stateful step is captured once with an empty
+signature and replayed, and inference feeds its output the same way.
+
+Measured (JIT replay in the last column):
+
+| workload | eager, no plan | eager + plan | JIT |
+|---|---:|---:|---:|
+| ViT train bs 1 | 1318 ms | **75.5 ms** | - |
+| ViT train bs 4 | 1340 ms | **199.2 ms** | 199.2 ms |
+| ViT infer bs 8 | 402.3 ms | **97.5 ms** | - |
+
+Gate: `tests/jit.rs::step_plan_matches_non_jit_stateful` (four stateful update
+steps, plan vs plain, same loss trajectory; the optimizer's in-place updates
+are captured, not re-run). Changing inputs should be passed in
+`StepPlan::run`'s `inputs` so the signature/LRU selects the plan.
+
+**Item 6 staging (attempted):** the 48 `b-index-not-affine` cases are the
+out-projection weight gradient with a merged `(h,d)` operand. Materialising the
+transposed attention output (`contiguous()` before the reshape) is neutral:
+accepted stays 182 and the step is 199.5/200.0 vs 199.4/200.0 ms (the scheduler
+folds the copy). A true in-GEMM staging path (temp + gather + copy-out) has no
+measured win over the generated kernel, so it is recorded as a skip.

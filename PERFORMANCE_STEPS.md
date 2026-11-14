@@ -201,10 +201,27 @@ aliasing contract.
 train). This is also the prerequisite for making "no JIT" a reasonable default
 for inference.
 
-**Status (2026-11-14):** `StepPlan` now keeps one plan per input signature with
-an LRU (`StepPlan::set_capacity`, default 4) and a test for two shapes
-(`tests/jit.rs::step_plan_keeps_one_plan_per_shape`). Remaining: wiring it into
-the default eager path or documenting the opt-in API.
+**Status (2026-11-14): implemented and measured.** `StepPlan` is on by default
+(`AUTORUST_PLAN=0` is the escape hatch back to running the step directly) and
+keeps one plan per input signature with an LRU (`set_capacity`, default 4; test
+`step_plan_keeps_one_plan_per_shape`). The benchmark's eager path
+(`BENCH_JIT=0`) now wraps the step in a plan: a stateful step with no external
+inputs is captured once with an empty signature and replayed, and inference
+feeds the transposed output the same way. Measured (JIT replay path in the
+last column):
+
+| workload | eager, no plan | eager + plan | JIT |
+|---|---:|---:|---:|
+| ViT train bs 1 | 1318 ms | **75.5 ms** | — |
+| ViT train bs 4 | 1340 ms | **199.2 ms** | 199.2 ms |
+| ViT infer bs 8 | 402.3 ms | **97.5 ms** | — |
+
+Gate: `tests/jit.rs::step_plan_matches_non_jit_stateful` runs a stateful
+parameter-update step four times with and without the plan and compares the loss
+trajectory (the optimizer's in-place updates are captured, not re-run by the
+closure). For changing inputs, pass them in `StepPlan::run`'s `inputs` so the
+signature (and the LRU) selects the right plan; a fixed-input step can pass
+`&[]`.
 
 **Effort/risk:** small-medium; the machinery is done, this is API + lifecycle.
 
@@ -397,6 +414,21 @@ updated) and a numeric gate against the generated kernel.
 
 **Expected:** a few more percent on ViT training, and it removes a class of
 "library GEMM silently unavailable" cases for other models.
+
+**Attempt (2026-11-14): the graph-level staging is neutral.** The 48 remaining
+`b-index-not-affine` cases are the out-projection **weight gradient**, whose B
+operand is the attention output viewed as `[b, n, h*d]` while it is stored
+`[b, h, n, d]` (the merged `(h,d)` axis interleaves `n`: `h` stride `n*d`, `d`
+stride 1). The "temporary buffer + copy" form of staging is to materialise the
+transposed attention output once:
+`attention.transpose(1,2).contiguous()` before the reshape. Measured on the
+current tree, it is **neutral**: accepted descriptors stay 182 (the 48 are
+unchanged — the scheduler folds the contiguous op into its consumer), and the
+step is 199.5/200.0 ms vs 199.4/200.0 ms without it. A real staging path would
+have to happen **inside** the host GEMM (allocate a temp, gather the non-affine
+operand, run the GEMM, copy out), which is a scheduler/executor change with no
+measured win to justify it; the generated kernels it would replace are already
+cheaper than the copy for this size. Recorded as a measured skip.
 
 **Effort/risk:** medium; the descriptor/freeze surface is the main cost.
 

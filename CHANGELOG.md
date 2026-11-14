@@ -87,6 +87,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Automatic eager plans.** `StepPlan` is enabled by default (`AUTORUST_PLAN=0`
+  disables) and the benchmark's eager path wraps its step in one: a fixed-input
+  step is captured with an empty signature and replayed. ViT train bs1
+  **1318 -> 75.5 ms**, bs4 **1340 -> 199.2 ms** (JIT parity), ViT infer bs8
+  **402.3 -> 97.5 ms**. Gate:
+  `tests/jit.rs::step_plan_matches_non_jit_stateful` (stateful updates, plan vs
+  plain, same loss trajectory).
 - **`nn::fold_bn_eval`: inference Conv+BN folding.** Folds
   `gamma/sqrt(running_var+eps)` into the conv weight and
   `beta - mean*gamma/sqrt(running_var+eps)` into its bias, materialized as

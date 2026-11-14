@@ -13,7 +13,7 @@
 use std::time::Instant;
 
 use autorust::dtype;
-use autorust::engine::jit::Jit;
+use autorust::engine::jit::{Jit, StepPlan};
 use autorust::engine::session::Session;
 use autorust::models::vit::ViT;
 use autorust::tensor::ix::Ix;
@@ -341,14 +341,23 @@ fn main() {
                 opt.zero_grad();
                 loss
             };
-            let run = |jit: &mut Jit, sess: &mut Session| {
-                let loss = jit.call(&ctx, sess, |_c, s| step(s));
+            let mut plan = StepPlan::new();
+            let run = |jit: &mut Jit, plan: &mut StepPlan, sess: &mut Session| {
+                let loss = if jit_on {
+                    jit.call(&ctx, sess, |_c, s| step(s))
+                } else {
+                    // Eager path + automatic plan: capture on the first call,
+                    // keyed by the (empty) input signature, then replay.
+                    let mut out = plan.run(&ctx, sess, &[], |_c, s, _| vec![step(s)]);
+                    out.pop().expect("step returned no loss")
+                };
                 let l = loss.item::<f32>(sess);
                 if std::env::var("BENCH_LOSS").is_ok() {
                     eprintln!("LOSS {l:.6}");
                 }
             };
-            let (cold, samples) = measure(|| run(&mut jit, &mut sess), warmup, iters);
+            let (cold, samples) =
+                measure(|| run(&mut jit, &mut plan, &mut sess), warmup, iters);
             emit(
                 "mnist_train",
                 &device,
@@ -375,13 +384,21 @@ fn main() {
             let model = ViT::build(&ctx, layers, embed, heads, 3, img, 16, 1000).into_params();
             let x = Tensor::zeros(&ctx, [bs, 3, img, img]).to_param();
             let mut jit = Jit::new();
-            let run = |jit: &mut Jit, sess: &mut Session| {
-                let out = jit.call(&ctx, sess, |_c, s| model.forward_with(&x, s));
+            let mut plan = StepPlan::new();
+            let run = |jit: &mut Jit, plan: &mut StepPlan, sess: &mut Session| {
+                let out = if jit_on {
+                    jit.call(&ctx, sess, |_c, s| model.forward_with(&x, s))
+                } else {
+                    let mut o =
+                        plan.run(&ctx, sess, &[], |_c, s, _| vec![model.forward_with(&x, s)]);
+                    o.pop().expect("forward returned no output")
+                };
                 // Force completion in the *same* session: a fresh session would
                 // re-schedule the output and measure that instead of the step.
                 let _ = out.to_list::<f32>(sess);
             };
-            let (cold, samples) = measure(|| run(&mut jit, &mut sess), warmup, iters);
+            let (cold, samples) =
+                measure(|| run(&mut jit, &mut plan, &mut sess), warmup, iters);
             emit(
                 "vit_infer",
                 &device,
@@ -420,14 +437,23 @@ fn main() {
                 opt.zero_grad();
                 loss
             };
-            let run = |jit: &mut Jit, sess: &mut Session| {
-                let loss = jit.call(&ctx, sess, |_c, s| step(s));
+            let mut plan = StepPlan::new();
+            let run = |jit: &mut Jit, plan: &mut StepPlan, sess: &mut Session| {
+                let loss = if jit_on {
+                    jit.call(&ctx, sess, |_c, s| step(s))
+                } else {
+                    // Eager path + automatic plan: capture on the first call,
+                    // keyed by the (empty) input signature, then replay.
+                    let mut out = plan.run(&ctx, sess, &[], |_c, s, _| vec![step(s)]);
+                    out.pop().expect("step returned no loss")
+                };
                 let l = loss.item::<f32>(sess);
                 if std::env::var("BENCH_LOSS").is_ok() {
                     eprintln!("LOSS {l:.6}");
                 }
             };
-            let (cold, samples) = measure(|| run(&mut jit, &mut sess), warmup, iters);
+            let (cold, samples) =
+                measure(|| run(&mut jit, &mut plan, &mut sess), warmup, iters);
             emit(
                 "vit_train",
                 &device,

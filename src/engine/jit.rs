@@ -266,10 +266,16 @@ struct PlanEntry {
 impl StepPlan {
     /// An empty plan cache; the first [`StepPlan::run`] for a signature captures.
     pub fn new() -> Self {
+        // On by default: a caller that wraps its eager step in a `StepPlan`
+        // gets capture+replay without further setup. `AUTORUST_PLAN=0` is the
+        // escape hatch back to running the step directly.
+        let enabled = crate::helpers::env::get("AUTORUST_PLAN")
+            .map(|v| v != "0")
+            .unwrap_or(true);
         StepPlan {
             plans: Vec::new(),
             cap: 4,
-            enabled: true,
+            enabled,
         }
     }
 
