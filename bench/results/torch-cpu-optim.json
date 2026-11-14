@@ -9,20 +9,20 @@
   "warmup": 2,
   "iters": 10,
   "ms_cold": 0.0,
-  "ms_median": 295.7799,
+  "ms_median": 323.7321,
   "ms_min": 0.0,
   "ms_iqr": 0.0,
   "images_per_s": 0.0,
   "cases": [
     {
       "case": "adamw 100000000 params, 32 tensors",
-      "ms": 295.7799,
-      "gbs": 9.4665
+      "ms": 323.7321,
+      "gbs": 8.6491
     }
   ],
   "name": "torch-cpu-optim",
   "variant": "cpu",
-  "commit": "40ead06",
-  "date": "2026-11-11T21:05:32",
+  "commit": "63cfeaf",
+  "date": "2026-11-14T13:07:39",
   "notes": ""
 }

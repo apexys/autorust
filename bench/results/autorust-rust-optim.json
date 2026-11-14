@@ -9,20 +9,20 @@
   "warmup": 2,
   "iters": 10,
   "ms_cold": 0.0,
-  "ms_median": 231.9636,
+  "ms_median": 246.0845,
   "ms_min": 0.0,
   "ms_iqr": 0.0,
   "images_per_s": 0.0,
   "cases": [
     {
       "case": "adamw 100000000 params, 32 tensors",
-      "ms": 231.9636,
-      "gbs": 12.0709
+      "ms": 246.0845,
+      "gbs": 11.3782
     }
   ],
   "name": "autorust-rust-optim",
   "variant": "RUST",
-  "commit": "40ead06",
-  "date": "2026-11-11T21:05:21",
+  "commit": "63cfeaf",
+  "date": "2026-11-14T13:09:18",
   "notes": ""
 }

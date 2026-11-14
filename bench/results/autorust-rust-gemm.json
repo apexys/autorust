@@ -9,55 +9,55 @@
   "warmup": 1,
   "iters": 3,
   "ms_cold": 0.0,
-  "ms_median": 485.1856,
+  "ms_median": 506.0898,
   "ms_min": 0.0,
   "ms_iqr": 0.0,
   "images_per_s": 0.0,
   "cases": [
     {
       "case": "f32 1024\u00b3",
-      "ms": 4.6574,
-      "tflops": 0.4611
+      "ms": 3.7479,
+      "tflops": 0.573
     },
     {
       "case": "f32 2048\u00b3",
-      "ms": 32.7577,
-      "tflops": 0.5245
+      "ms": 32.4733,
+      "tflops": 0.529
     },
     {
       "case": "f32 4096\u00b3",
-      "ms": 329.8564,
-      "tflops": 0.4167
+      "ms": 350.2646,
+      "tflops": 0.3924
     },
     {
       "case": "f32 1024x1024x4096",
-      "ms": 16.8902,
-      "tflops": 0.5086
+      "ms": 19.0419,
+      "tflops": 0.4511
     },
     {
       "case": "f32 4096x1024x1024",
-      "ms": 14.2672,
-      "tflops": 0.6021
+      "ms": 13.2807,
+      "tflops": 0.6468
     },
     {
       "case": "f32 TN 2048\u00b3",
-      "ms": 49.4259,
-      "tflops": 0.3476
+      "ms": 47.4589,
+      "tflops": 0.362
     },
     {
       "case": "f32 NT 2048\u00b3",
-      "ms": 32.6442,
-      "tflops": 0.5263
+      "ms": 34.5699,
+      "tflops": 0.497
     },
     {
       "case": "f32 batched 8x512\u00b3",
-      "ms": 4.6866,
-      "tflops": 0.4582
+      "ms": 5.2526,
+      "tflops": 0.4088
     }
   ],
   "name": "autorust-rust-gemm",
   "variant": "RUST",
-  "commit": "40ead06",
-  "date": "2026-11-11T21:04:47",
+  "commit": "63cfeaf",
+  "date": "2026-11-14T13:09:01",
   "notes": ""
 }

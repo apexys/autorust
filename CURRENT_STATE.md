@@ -5222,3 +5222,38 @@ training **289 ms** (was 449 ms before im2col), and ONNX ResNet-0.25 is 9.7 ms �
 better than its pre-im2col 11.5 ms, because the layers that do pass the floor
 still benefit. `K = 1152` regressed ResNet-18 inference to 341 ms, so 576 is the
 measured optimum on this machine.
+
+### 9.65 Re-run of the cross-framework matrix (2026-11-14)
+
+`bench/run.py` re-ran the comparison subset and the four available backends on
+the RTX 3060 (24-thread Ryzen host). Numbers are the JSON medians in
+`bench/results/` (protocol: `bench/README.md`).
+
+Gap to PyTorch (f32, medians; CUDA and CPU):
+
+| workload | autorust CUDA | torch CUDA | ratio | autorust CPU (RUST) | torch CPU | ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| MNIST bs 64 | 3.49 ms | 2.34 ms | 1.49x | 19.01 ms | 17.53 ms | 1.08x |
+| ViT-B/16 infer bs 8 | 69.8 ms | 48.6 ms | 1.44x | 1103 ms | 827 ms | 1.33x |
+| ViT-B/16 train bs 4 | 217 ms | 100 ms | 2.16x | 3861 ms | 1470 ms | 2.63x |
+| ResNet-18 infer bs 32 | 323 ms | 18.8 ms | **17.2x** | 1196 ms | 374 ms | 3.20x |
+| AdamW 100M | 25.7 ms | 25.4 ms | 1.01x | 246 ms | 324 ms | **0.76x** |
+| ONNX MNIST bs 32 | 1.80 ms | 0.34 ms | 5.33x | 9.72 ms | 4.20 ms | 2.31x |
+| ONNX ResNet-0.25 bs 8 | 9.68 ms | 1.81 ms | 5.35x | 127 ms | 17.4 ms | 7.26x |
+
+Backends on this machine (same workloads):
+
+| workload | CUDA | CL | VK | RUST |
+|---|---:|---:|---:|---:|
+| MNIST bs 512 | 22.4 ms | 22.2 ms | 23.4 ms | 63.2 ms |
+| ViT-B/16 infer bs 8 | 69.8 ms | 179 ms | 116 ms | 1103 ms |
+| GEMM sweep (8 cases) | 27.4 ms | 52.8 ms | 56.6 ms | 506 ms |
+| memops sweep (8) | 5.03 ms | 7.97 ms | 4.79 ms | 70.8 ms |
+| AdamW 100M | 25.7 ms | 96.9 ms | 94.7 ms | 246 ms |
+
+Readings: CUDA and CL are at parity on MNIST; VK is +5% there and ahead of both
+on the memops sweep. On ViT/VK is 1.7x CUDA and CL 2.6x. The AdamW gap is
+structural: the fused optimizer kernel (§9.59) is CUDA-only, so CL/VK still pay
+the tensor-graph update (~95 ms); porting `runtime::cuda_optim` to CL/VK is the
+obvious follow-up. ResNet-18 conv remains the largest CUDA gap (17x) even after
+the im2col gate (§9.64); CPU ResNet is 3.2x torch.
