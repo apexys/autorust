@@ -115,6 +115,30 @@ here is ~100 ms per cold process, not 470 ms. The cheaper variant is the
 from removing the scheduling on *every* new shape/process, not from the first
 step's GPU ramp. Do the SINK-content cache first.
 
+**Attempt (2026-11-14): the cheaper (SINK-content) variant still needs the
+buffer/plan re-interning the full item has.** What already exists is the
+per-kernel cache, not the schedule:
+
+- `ProgCache` (content-keyed `CompiledProg`), the render cache and the CUDA PTX
+  cache mean a second capture does **not** re-render/re-compile unchanged
+  kernels.
+- The **schedule** is recomputed on every capture. Current profile of
+  `vit_infer` bs 8: `realize.schedule` **61 ms** (24 calls) and
+  `realize.callify` **11.5 ms**; the whole cold start is 494/619/726 ms at
+  bs 1/4/8 (replay 12.8/37.8/68.2 ms).
+- A cache keyed by the callified SINK content would have to return the LINEAR's
+  **CALL list and buffer map**, whose buffer uops are arena-local and whose
+  `Buffer` slots are allocated by the schedule. Reusing them across captures
+  requires re-interning the plan into the current arena (or persisting the
+  slot/ProgramInfo structure) — i.e. the serialized-plan work and its
+  buffer-slot risk, not a small hash map. The benchmark also captures exactly
+  once per process, so a same-process schedule cache has no consumer to
+  measure; the win is the ~73 ms schedule+callify slice of a ~500-730 ms cold
+  start.
+
+Recorded as a measured skip for the SINK-content variant; the full serialized
+plan remains the item.
+
 **Effort/risk:** medium-large. The risk is buffer-slot and arena-id reuse; the
 existing content-keyed `CompiledProg` reuse path is the precedent, and the plan
 validation gate catches mismatches.
@@ -767,13 +791,27 @@ the review's "larger project, not a cache tweak".
 
 **Expected:** no recapture on batch/shape changes; mostly serving-oriented.
 
-**Measured (2026-11-14).** Every shape still recaptures: `vit_infer`
-`ms_cold` (model build + capture + first step) is **507 ms at bs 1, 568 ms at
-bs 4, 863 ms at bs 8**, while the steady replay is ~33-38 ms. The plan is keyed
-by the input signature (`StepPlan` LRU), so a new batch is a full plan build.
-Symbolic `var_vals` resolution is the fix the item names; it touches launch
-dims, buffer sizes and every index expression, so it is not started. The
-measured ceiling is the recapture cost (~0.5 s per new shape) for serving.
+**Attempt (2026-11-14): the port has no symbolic-variable machinery, so the
+item is a compiler feature, not a plan tweak.** Code-level evidence:
+
+- `ProgramInfo::launch_dims(&self, _var_vals)` **ignores `var_vals`** and reads
+  the constant `global_size`/`local_size`; `ProgramInfo::vals` returns `Vec::new()`
+  (`"corpus has no Variables"`).
+- `Session.var_vals` is never written or read anywhere, `Jit::replay` passes
+  `&HashMap::new()` to every `exec_linear`, `SInt::U` (the symbolic variant) is
+  **never constructed**, and there is no `Variable`/`DefineVar` uop.
+- Consequently every shape is specialized at graph-build time: re-measured
+  `vit_infer` `ms_cold` is **494 ms at bs 1, 619 ms at bs 4, 726 ms at bs 8**
+  against replay medians of **12.8 / 37.8 / 68.2 ms**. A new shape is a full
+  plan build.
+
+Resolving launch dims, buffer sizes and index expressions from `var_vals`
+therefore requires first building the symbolic subsystem (a `Variable` uop,
+symbolic shape arithmetic, symbolic `ProgramInfo`, per-`var_vals` buffer
+allocation, and dynamic extents in codegen or a re-render per shape). That is
+the "larger project, not a cache tweak" the review names; recorded as an
+explicit measured skip. The measured ceiling remains the ~0.5-0.7 s recapture
+per new shape.
 
 **Effort/risk:** large; correctness of symbolic bounds is the risk.
 

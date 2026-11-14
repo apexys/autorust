@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Measured items 15 (symbolic plans) and 1 (schedule cache) as explicit
+  skips.** The port has no symbolic-variable machinery at all (`SInt::U` is
+  never built, there is no `Variable` op, `Session.var_vals` is unused,
+  `ProgramInfo::launch_dims` ignores its `var_vals` argument, `Jit::replay`
+  passes an empty map), so `var_vals` resolution is the review's larger
+  compiler project; recapture is 494/619/726 ms at bs 1/4/8 vs 12.8/37.8/68.2 ms
+  replay. The kernel caches already exist, but `create_linear_with_vars` is
+  re-run per capture (`realize.schedule` 61 ms + `callify` 11.5 ms); a
+  SINK-content cache needs the CALL/buffer-map re-interning of the serialized
+  plan. Both are recorded in `PERFORMANCE_STEPS.md`.
 - **Measured the ONNX preprocessing and bf16-epilogue items (both skips).** The
   ONNX assets are already clean (0 `Constant` nodes; `Identity` aliases emit no
   kernels; the ResNet has no BN; MNIST's BN is fused into the conv stores) and

@@ -5649,3 +5649,29 @@ nothing to fuse:
 
 The experimental extension was reverted; bf16 inference/training are unchanged.
 The f32 bias(+ReLU) cuBLASLt path (98/182 host GEMMs, §9.73) remains.
+
+### 9.79 Items 15 and 1: explicit measured skips (2026-11-14)
+
+**Item 15 (symbolic plans): the port has no symbolic-variable machinery.**
+`SInt::U` is never constructed, there is no `Variable`/`DefineVar` uop,
+`Session.var_vals` is never written or read, `ProgramInfo::launch_dims` ignores
+its `var_vals` argument and reads constant launch sizes, `ProgramInfo::vals`
+returns empty, and `Jit::replay` passes `&HashMap::new()`. Shapes are
+specialized at graph build. Re-measured `vit_infer` `ms_cold`: **494 / 619 /
+726 ms** at bs 1/4/8 vs replay **12.8 / 37.8 / 68.2 ms**. Implementing
+`var_vals` resolution therefore means building the symbolic subsystem (Variable
+uop, symbolic shape arithmetic, symbolic `ProgramInfo`, per-vals buffer sizing,
+dynamic extents in codegen) - the review's larger project, recorded as an
+explicit skip.
+
+**Item 1 (SINK-content schedule cache): the schedules are not cached, only the
+kernels.** `ProgCache`, the render cache and the PTX cache already avoid
+re-rendering/re-compiling unchanged kernels, but `create_linear_with_vars`
+(re-)schedules every capture: `realize.schedule` **61 ms** (24 calls) +
+`realize.callify` **11.5 ms** in the current `vit_infer` bs8 cold profile. A
+SINK-content cache would have to re-intern the LINEAR's CALL list and buffer
+map into the current arena (buffer uops are arena-local and slots are allocated
+by the schedule) - i.e. the serialized-plan work and its buffer-slot risk. The
+benchmark captures once per process, so a same-process instruction cache has no
+consumer to measure; the cacheable slice is the ~73 ms schedule+callify of a
+~500-730 ms cold start. Recorded as a measured skip for the cheaper variant.
