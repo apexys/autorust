@@ -5395,3 +5395,51 @@ Measured, ViT train bs 4, alternating builds: **212.36/212.49 → 200.64/201.16 
 Staging remains open: the 48 `b-index-not-affine` cases have a merged `(h,d)`
 operand and a destination with no unit-stride axis, which needs a temporary
 buffer + copy, not accumulation.
+
+### 9.71 Item 5 measured in situ: attention is 44% of the ViT training GPU time (2026-11-14)
+
+Item 5 (fused attention backward) was measured before implementing. The first
+pass used Nsight Compute and produced two wrong conclusions; the corrected
+measurement below uses a captured CUDA graph, which replays the same launches
+on the GPU with no host submission in between.
+
+**The step is GPU-bound.** A captured graph of one ViT-B/16 train bs 4 step
+replays in **196.1-199.4 ms** (the wall is ~200 ms), and `BENCH_LAYERS=10/11/12`
+gives 163.6/179.4/196.4 ms: **~16 ms of GPU time per layer**. The host is only
+~4 ms ahead, so host-launch batching is worth ~4 ms here (it should matter on
+`llm_decode`); this is not a host-bound workload.
+
+**Attention is 86 ms of that 196 ms (44%).** One plan with 12 distinct attention
+modules at the ViT shape (B=4, H=12, N=197, D=64) replays in **86.0 ms**; the
+forward alone (no gradient) is **28.9 ms**, so the **backward is 57 ms** (66% of
+attention). That is the in-situ target: a fused FA2 forward plus dQ and dK/dV
+kernels should land at 25-35 ms, i.e. **-50-60 ms/step (25-30%)**.
+
+**The Nsight numbers were an artifact.** ncu attributed 35.8 ms to the attention
+`dS` kernel (`E_591_197_16`, thread axis on the stride-197 row axis). A
+scheduler change that coalesces it (`E_9456_197`) drops the ncu time to 2.3 ms
+(-33.5 ms), but **in situ it changes nothing**: the 12-module graph replay is
+86.11 vs 86.02 ms and the ViT step is 196.6 vs 196.7 ms. ncu flushes caches
+between kernels, which inflated the uncoalesced version ~15x; it is only useful
+for finding *which* programs exist. The `q+k+v` ablation is also unusable for
+the win: with the graph it is 196.4 vs 193.2 ms, because the fallback's own
+projection-weight-gradient kernel costs almost as much as the removed attention.
+
+**Why the fused backward is not landed.** The fused forward is a session
+`HostCall`, not a graph op: `ViT::forward_with` falls back to SDPA in training
+("cuts autograd"), `Ops::CustomFunction` has no lowering, and `capture_host` is
+only called from Rust, never by the scheduler. A correct implementation needs an
+LSE-saving forward, dQ/dK/dV kernels, a graph op with a `grad_of_op` rule, a
+scheduler->HostCall lowering, and freeze serialization - cross-cutting. The
+measured payoff, decomposition and gates are recorded in `PERFORMANCE_STEPS.md`
+item 5.
+
+**Item 14 was attempted as part of this.** Opt-in CUDA-graph capture was
+implemented end to end (non-default stream, capture on the second replay,
+host calls with `wait=false`). It measures the GPU correctly and saves 3.8 ms of
+wall, but it is numerically wrong for training: the loss diverges after step 1
+(`6.91, 2.05, 2.05, 83.8` vs `6.91, 3.99, 33.1, 68.7`) because the AdamW
+bias-correction `b1_t`/`b2_t` update is host-side per-step state, not part of
+the pinned plan's stable buffers. The capture was reverted; the state-explicit
+design (keep the bias-correction multiply/assign in stable buffers, or exclude
+the optimizer from the graph) is recorded in item 14.

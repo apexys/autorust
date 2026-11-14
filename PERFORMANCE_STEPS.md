@@ -23,14 +23,22 @@ done for CL (96.9 → 26.4 ms) with VK remaining, item 9 landed with no measurab
 step-time change, item 3's per-shape LRU landed, and TF32 (item 13) measured
 −5.8% on ViT training. The impact order is therefore now:
 
-1. **#2 conv** (~300 ms available, 17x gap)
-2. **#3 automatic eager plans** (~1.5 s per eager step)
-3. **#4 elementwise fusion** (~40% of generated kernels)
-4. **#5 attention backward** (training gap)
+1. **#2 conv** (~300 ms of GPU work available, 17x gap)
+2. **#5 attention backward** (86 ms of the 196 ms ViT train step, measured in
+   situ; a fused fwd+bwd targets 25-35 ms, i.e. -50-60 ms/step). See the item.
+3. **#3 automatic eager plans** (~1.5 s per eager step)
+4. **#4 elementwise fusion** (7,910 elementwise launches; the step is
+   GPU-bound, so fewer/cheaper kernels help, but the earlier composition
+   measurement found mostly fills and copies)
 5. **#1/#10 cold construction** (~100 ms one-off; the SINK-content schedule
    cache is the cheaper variant of #1)
 6. **#6 HostGemm staging**, **#7 ONNX preprocessing**
 7. **#8 VK optimizer**, **#13 TF32/bf16 opt-ins**, **#11/#12/#14/#15**
+
+Measurement note: the ViT train step is **GPU-bound** (a captured CUDA graph
+replays it in 196 ms against a 200 ms wall). Prefer in-situ measurements (a
+graph replay, or a plan with one part removed) over Nsight Compute absolute
+times: ncu flushes caches and inflated the attention `dS` kernel by ~15x.
 
 Item numbers below are kept stable so cross-references continue to work.
 
@@ -233,17 +241,75 @@ does not justify it now.
 graph SDPA plus generated backward kernels; flash attention is forward-only.
 The review lists a fused backward kernel explicitly.
 
+**Measured (2026-11-14).** Attention is the single largest share of the ViT
+training step, and the step is GPU-bound, so the win is real.
+
+*How it was measured.* Plain Nsight Compute per-kernel times are **not** the
+in-situ cost: it flushes caches between kernels. The reliable instrument is a
+captured CUDA graph around a JIT plan, because a graph replay is exactly the
+GPU execution of the same launches with no host submission in between. (The
+capture is numerically unusable for training — the optimizer's host-side state
+does not replay, see item 14 — but the launch sequence is the same, so the
+replay duration is a valid GPU-time measurement.)
+
+- one ViT-B/16 train bs 4 step: **196.1-199.4 ms of GPU time** (graph replay);
+  `BENCH_LAYERS=10/11/12` gives 163.6 / 179.4 / 196.4 ms -> **~16 ms per layer**;
+- one attention module at the ViT shape (B=4, H=12, N=197, D=64, 12 distinct
+  copies in one plan): **86.0 ms for 12 modules = 7.2 ms/module**, so attention
+  is **~44% of the training GPU time**;
+- forward only (realize the output, no gradient): **28.9 ms**, so the backward
+  is **57 ms** (66% of attention). The backward is the target.
+
+*The ncu breakdown was misleading.* Nsight attributed 35.8 ms to
+`E_591_197_16` (softmax backward `dS = P*(dP - D)` over 48x197x197, thread axis
+on the stride-197 row axis). Coalescing it to `E_9456_197` (thread axis on the
+contiguous 197 axis) reduces the ncu time to 2.3 ms, but **in situ it changes
+nothing**: the 12-module graph replay is 86.11 vs 86.02 ms, and the ViT step
+196.6 vs 196.7 ms (same launch count). The uncoalesced kernel is cheap when its
+operands are already hot; ncu's cache flush inflates it ~15x. Use ncu to find
+*which* programs exist, not how much they cost.
+
+*The q+k+v ablation is not usable for the win either.* With a captured graph,
+the ViT step is 196.4 ms with attention and 193.2 ms with `q+k+v`: only 3.2 ms
+less, because the fallback computes the q/k/v projection weight gradients with
+one very slow generated reduction, almost exactly cancelling the removed
+attention. The microbenchmark above is the clean number.
+
+*Payoff.* Replacing 86 ms of graph SDPA (four N x N passes plus several
+generated reductions per layer) with a fused FA2 forward (one kernel per
+`(b,h,q-tile)`) and a fused backward (the standard dQ kernel plus a dK/dV
+kernel) should land in the **25-35 ms** range: the forward alone is 29 ms and
+is the cheaper half, and the fused kernels are the same arithmetic without the
+score-matrix round trips. That is **50-60 ms off a 196 ms step (25-30%)**, and
+it removes ~300 kernels/step as well. This is now the second-largest measured
+item after convolution.
+
+**Why it was not implemented in this round.** The fused forward is not a graph
+op: `fused_attention_ex` runs it as a session `HostCall` injected between
+LINEARS, and `ViT::forward_with` explicitly falls back to graph SDPA in training
+because "the fused path hands back a realized buffer and cuts autograd". There
+is no custom-autograd op: `Ops::CustomFunction` is a variant with no lowering,
+and `Session::capture_host` is only called from Rust (the optimizer), never by
+the scheduler. A correct fused backward therefore needs: (1) an FA2 forward
+variant that writes `LSE[b,h,n]`; (2) `dQ` and `dK/dV` kernels (recompute S
+from Q/K, dP from dO/V, `dS = P*(dP - D)`, deterministic across q-tiles, GQA);
+(3) a graph op with a `grad_of_op` rule returning the three kernels' outputs;
+(4) scheduler/session lowering of that op to a `HostCall` inside a LINEAR;
+(5) freeze serialization and the mask/GQA/odd-length/dtype differential gates.
+That is cross-cutting (uop enum, scheduler, autograd, session, runtime,
+freeze).
+
 **Change:** implement backward for the fused FA2 path (dQ/dK/dV from the saved
 output/softmax statistics), keep the graph SDPA path as the reference and
 fallback, and gate on masks/GQA/odd lengths/dtypes. Reuse the existing
 `host_call` seam.
 
-**Expected:** removes a large share of the training attention cost; a plausible
-10-20% off ViT training, more for long sequences.
+**Expected:** attention 86 -> 25-35 ms, i.e. **-50-60 ms/step (25-30%)** on
+ViT-B/16 train bs 4, plus ~300 fewer launches; larger on longer sequences
+(attention is quadratic).
 
-**Effort/risk:** large, but self-contained and numerically gateable.
-
-## 6. HostGemm staging and per-slice accumulation
+**Effort/risk:** large: new graph op + autograd rule + scheduler host-call
+lowering + three kernels + freeze. Numerically gateable, but cross-cutting.## 6. HostGemm staging and per-slice accumulation
 
 **Status (2026-11-14): the `beta = 1` half is done.** A two-axis reduction that
 is not contiguous in both operands is now a sum of per-slice GEMMs: the
@@ -425,10 +491,42 @@ step; the optimizer that motivated this is already one kernel per parameter.
 per token, and fall back when buffers/scalars change. Requires replay-safe
 buffer lifetimes and scalar updates (the JIT plan already pins buffers).
 
-**Expected:** decode launch gaps shrink; the review calls it the main lever for
-decode.
+**Attempt (2026-11-14): implemented, correct as a timer, not yet correct for
+training.** The capture path was built end to end: the device moved to a
+non-default stream (the legacy default stream rejects capture with
+`CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`), `Jit::replay` captures on the second
+replay (the first warms cuBLAS workspaces), `HostCall` gained an `exec_now(false)`
+so the optimizer's 200 host launches skip their stream sync during capture, and
+the graph is launched on later replays (`AUTORUST_CUDA_GRAPH=1`).
 
-**Effort/risk:** large.
+Results:
+
+- **It is the right instrument.** One ViT train bs 4 step replays in
+  **196.1-199.4 ms**, i.e. the step is GPU-bound (the wall is 200 ms), and
+  `BENCH_LAYERS=10/11/12` gives 163.6/179.4/196.4 ms (~16 ms/layer). All of
+  the in-situ attention numbers in item 5 come from this.
+- **The wall win is small here:** 201.7 -> 197.9 ms (-3.8 ms), because the host
+  was already only ~4 ms behind the GPU. The decode workload (1,660 launches
+  with far less GPU work per launch) is where it should pay.
+- **Numerically wrong for training:** with the graph, the loss sequence diverges
+  after step 1 (`6.91, 2.05, 2.05, 83.8, ...` vs `6.91, 3.99, 33.1, 68.7, ...`).
+  The step contains host-side per-step state - the AdamW bias-correction update
+  (`b1_t`/`b2_t` multiplied and re-assigned each step) - which is not part of
+  the pinned plan's stable buffers, so the captured graph replays stale values.
+
+**Next step for a landing:** make the captured region state-explicit. Either
+(a) keep the bias-correction multiply/assign inside a stable buffer pair that
+the graph writes and reads (so the graph is self-contained), or (b) capture only
+the forward/backward LINEARS and execute the optimizer host calls and the
+bias-correction linears outside the graph. (a) is preferable and also makes the
+plan replayable for inference unchanged. Gate with the loss-parity check above
+over >=5 steps plus the JIT/nn_optim suites.
+
+**Expected:** decode launch gaps shrink; the review calls it the main lever for
+decode. For ViT training it is only ~4 ms until the state bug is fixed.
+
+**Effort/risk:** large; the state-capture requirement above is the specific
+blocker found, not the graph API.
 
 ## 15. Symbolic / shape-generic plans
 
@@ -465,9 +563,19 @@ the review's "larger project, not a cache tweak".
   would let prime/odd extents (ViT's 197) use 32-thread blocks instead of the
   2/8-thread blocks the divisibility heuristic forces; this is the generic form
   of the optimizer problem fixed by the dedicated kernel.
-- **Host launch batching:** each CALL is one `cuLaunchKernel`; a launch-list or
-  graph capture would cut per-kernel host cost in launch-heavy graphs (related
-  to item 14 but usable without full graph capture).
+- **Host launch batching:** each CALL is one `cuLaunchKernel`. The measured
+  gap is small at ViT train bs 4: a captured graph (item 14) replays the step
+  in 196 ms against a 200 ms wall, so the host is only ~4 ms ahead and batching
+  buys at most that there. It should matter on `llm_decode` (1,660 launches,
+  little GPU work per launch); CPU time is not a usable signal because
+  `cuStreamSynchronize` spin-waits.
+- **Coalesce prime-extent elementwise kernels: tested, no in-situ win.** The
+  attention `dS` kernel runs as `E_591_197_16` (thread axis = the stride-197 row
+  axis, uncoalesced); allowing `LOCAL = full extent` on a prime inner axis
+  renders `E_9456_197`, and ncu reports 35.8 -> 2.3 ms. In situ it changes
+  nothing (12-module graph replay 86.11 vs 86.02 ms, ViT step 196.6 vs
+  196.7 ms): ncu flushed the cache between kernels and inflated the uncoalesced
+  version. Do not pursue without an in-situ measurement.
 - **`DEFAULT_DEVICE=auto`:** runs three benchmark cases at first tensor
   creation; make sure it is not accidentally enabled in cold-start-sensitive
   services (it is not the default).

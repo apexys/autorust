@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Measured the training attention path in situ.** A captured CUDA graph
+  replays a ViT-B/16 train bs 4 step in 196 ms of GPU time, so the step is
+  GPU-bound; attention forward+backward is 86 ms of it (forward 29 ms, backward
+  57 ms), i.e. 44% and the second-largest measured item after convolution.
+  Nsight Compute absolute times are not in-situ (cache flushing inflated the
+  attention `dS` kernel ~15x), so the graph-replay method is recorded for
+  future measurements. No behavior change in this commit.
 - **Transposed (column-major) GEMM outputs stay on cuBLAS.** A store through a
   transposed view (`assign` into `p.transpose()`, the backward weight-gradient
   path) used to keep the generated kernel. `extract` now describes the
