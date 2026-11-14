@@ -32,6 +32,11 @@ pub mod cuda_flash;
     feature = "backend_cuda",
     any(target_os = "linux", target_os = "windows")
 ))]
+pub mod cuda_flash_train;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub mod cuda_optim;
 #[cfg(all(
     feature = "backend_cuda",

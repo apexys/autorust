@@ -284,8 +284,32 @@ score-matrix round trips. That is **50-60 ms off a 196 ms step (25-30%)**, and
 it removes ~300 kernels/step as well. This is now the second-largest measured
 item after convolution.
 
-**Why it was not implemented in this round.** The fused forward is not a graph
-op: `fused_attention_ex` runs it as a session `HostCall` injected between
+**Implementation (2026-11-14): landed and gated, but at parity.** The scalar
+FA2 training kernels are in `runtime::cuda_flash_train` (`ar_fl_fwd` with saved
+LSE, `ar_fl_prep` for `D = O.dO`, `ar_fl_bwd_dq`, `ar_fl_bwd_dkv`), exposed as
+`models::flash_attention::{fused_attention_train, fused_attention_backward}`.
+`tests/flash_train_cuda.rs` checks forward + dQ/dK/dV against the graph SDPA's
+autograd at B=2/H=4, odd length 37 and ViT length 197, plain/causal/additive
+mask, and GQA (h_kv=1/2), all within 4e-7.
+
+Measured with preallocated buffers and one sync (GPU time, 12 modules):
+
+| N | fused fwd+bwd | graph SDPA | fused per module | graph per module |
+|---:|---:|---:|---:|---:|
+| 197 | 86.9 ms | 86.0 ms | 7.24 ms | 7.17 ms |
+| 512 | 276.6 ms | 280.3 ms (12x23.36) | 23.05 ms | 23.36 ms |
+| 1024 | 1050.7 ms | 1111 ms (12x92.56) | 87.6 ms | 92.6 ms |
+
+So the scalar implementation is **1% worse at the ViT length, 1% better at 512,
+5% better at 1024**: the graph's backward is already batched cuBLAS GEMMs, which
+beat a scalar dot-product loop. The 57 ms does not disappear; a real win needs a
+**tensor-core** backward (the TC forward `runtime::cuda_flash_tc` is a separate
+mma module; its backward would be a similar-sized kernel project). That, plus
+the autograd/scheduler integration below, is what keeps this from being wired
+in. The API is landed and tested so the future TC kernel has a reference and a
+numeric gate.
+
+**Why it is not wired into training.** The fused forward is not a graph op: `fused_attention_ex` runs it as a session `HostCall` injected between
 LINEARS, and `ViT::forward_with` explicitly falls back to graph SDPA in training
 because "the fused path hands back a realized buffer and cuts autograd". There
 is no custom-autograd op: `Ops::CustomFunction` is a variant with no lowering,
@@ -304,9 +328,10 @@ output/softmax statistics), keep the graph SDPA path as the reference and
 fallback, and gate on masks/GQA/odd lengths/dtypes. Reuse the existing
 `host_call` seam.
 
-**Expected:** attention 86 -> 25-35 ms, i.e. **-50-60 ms/step (25-30%)** on
-ViT-B/16 train bs 4, plus ~300 fewer launches; larger on longer sequences
-(attention is quadratic).
+**Expected (revised after the implementation):** a *tensor-core* backward could
+reach 25-35 ms, i.e. **-50-60 ms/step (25-30%)**; the landed scalar version is
+at parity and is not wired in. Larger sequences favour the tiled form (5% at
+N=1024 with scalar code), so the TC work should be judged there too.
 
 **Effort/risk:** large: new graph op + autograd rule + scheduler host-call
 lowering + three kernels + freeze. Numerically gateable, but cross-cutting.## 6. HostGemm staging and per-slice accumulation

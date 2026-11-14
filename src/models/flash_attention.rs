@@ -745,3 +745,233 @@ impl AttentionKind {
         self
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fused training path (forward with saved statistics + dQ/dK/dV)
+// ---------------------------------------------------------------------------
+
+/// `(b, h, n, d, h_kv)` for a supported 4-D attention triple, or `None`.
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn train_shape(q: &Tensor, k: &Tensor, v: &Tensor) -> Option<(i64, i64, i64, i64, i64)> {
+    let i = |x: &crate::uop::sint::SVal| x.clone().as_i64().unwrap_or(0);
+    let qs = q.shape();
+    let ks = k.shape();
+    let vs = v.shape();
+    if qs.len() != 4 || ks.len() != 4 || vs.len() != 4 {
+        return None;
+    }
+    let (b, h, n, d) = (i(&qs[0]), i(&qs[1]), i(&qs[2]), i(&qs[3]));
+    let (hk, nk, dk) = (i(&ks[1]), i(&ks[2]), i(&ks[3]));
+    let (hv, nv, dv) = (i(&vs[1]), i(&vs[2]), i(&vs[3]));
+    if nk != n || nv != n || dk != d || dv != d || hk != hv || hk <= 0 || h % hk != 0 {
+        return None;
+    }
+    Some((b, h, n, d, hk))
+}
+
+/// Fused FA2 forward for training: returns `(O, LSE)`.
+///
+/// `LSE` is the `[b*h, n]` log-sum-exp of each query row, which the backward
+/// needs to recompute `p = exp(s - lse)` without materializing the score
+/// matrix. This is the forward half of the fused training path; it is not
+/// wired into autograd (see `PERFORMANCE_STEPS.md` item 5), so callers that
+/// want gradients use [`fused_attention_backward`] explicitly.
+///
+/// Returns `None` (caller keeps the graph path) unless the device is CUDA, the
+/// dtype is f32, `d == 64`, and the mask is a dense additive f32 `[n, n]`.
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+pub fn fused_attention_train(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attn_mask: Option<&Tensor>,
+    is_causal: bool,
+    sess: &mut crate::engine::session::Session,
+) -> Option<(Tensor, Tensor)> {
+    let (b, h, n, d, hk) = train_shape(q, k, v)?;
+    if !crate::runtime::cuda_flash_train::supports(n, d) {
+        return None;
+    }
+    let dev = q.device().unwrap_or_default();
+    if !dev.starts_with("CUDA") || q.dtype() != dtype::FLOAT32 {
+        return None;
+    }
+    if k.dtype() != dtype::FLOAT32 || v.dtype() != dtype::FLOAT32 {
+        return None;
+    }
+    if let Some(m) = attn_mask {
+        let ms = m.shape();
+        let sv = |x: &crate::uop::sint::SVal| x.clone().as_i64().unwrap_or(-1);
+        if m.dtype() != dtype::FLOAT32 || ms.len() != 2 || sv(&ms[0]) != n || sv(&ms[1]) != n {
+            return None;
+        }
+    }
+    let mask = attn_mask.map(|m| m.contiguous());
+    {
+        let mut c = q.ctx().borrow_mut();
+        let mut ts: Vec<&Tensor> = vec![q, k, v];
+        if let Some(m) = &mask {
+            ts.push(m);
+        }
+        Tensor::realize_many(&mut c, sess, ts);
+    }
+    let ctx = q.ctx().clone();
+    let (o, lse) = {
+        let mut c = ctx.borrow_mut();
+        let o = Tensor::zeros_param(&mut *c, [b, h, n, d], Some(dtype::FLOAT32), Some(&dev));
+        let lse = Tensor::zeros_param(&mut *c, [b * h, n], Some(dtype::FLOAT32), Some(&dev));
+        o.realize_device_ctx(&mut c, sess);
+        lse.realize_device_ctx(&mut c, sess);
+        (o, lse)
+    };
+    let dev_c = crate::runtime::device::device(&dev);
+    let qb = q.realized_buffer()?.get_buf(&dev_c);
+    let kb = k.realized_buffer()?.get_buf(&dev_c);
+    let vb = v.realized_buffer()?.get_buf(&dev_c);
+    let ob = o.realized_buffer()?.get_buf(&dev_c);
+    let lb = lse.realized_buffer()?.get_buf(&dev_c);
+    let mb = mask
+        .as_ref()
+        .and_then(|m| m.realized_buffer())
+        .map(|m| m.get_buf(&dev_c));
+    crate::runtime::cuda_flash_train::run_fwd(
+        &dev_c,
+        &qb,
+        &kb,
+        &vb,
+        &ob,
+        &lb,
+        mb.as_ref(),
+        b,
+        h,
+        n,
+        crate::runtime::cuda_flash_train::Options {
+            causal: is_causal,
+            has_mask: mask.is_some(),
+            h_kv: hk,
+        },
+    );
+    Some((o, lse))
+}
+
+/// Fused FA2 backward: returns `(dQ, dK, dV)` from `O`, `LSE` and `dO`.
+///
+/// `q`/`k`/`v`/`o`/`dout` must be realized contiguous CUDA f32 tensors in the
+/// same `[b, h, n, 64]` layout the forward used, and `lse` must be the forward's
+/// `[b*h, n]` output. `dK`/`dV` have `h_kv` heads (GQA accumulates the group).
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn fused_attention_backward(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    o: &Tensor,
+    lse: &Tensor,
+    dout: &Tensor,
+    attn_mask: Option<&Tensor>,
+    is_causal: bool,
+    sess: &mut crate::engine::session::Session,
+) -> Option<(Tensor, Tensor, Tensor)> {
+    let (b, h, n, d, hk) = train_shape(q, k, v)?;
+    if !crate::runtime::cuda_flash_train::supports(n, d) {
+        return None;
+    }
+    let dev = q.device().unwrap_or_default();
+    if !dev.starts_with("CUDA") {
+        return None;
+    }
+    let ds = dout.shape();
+    let sd = |x: &crate::uop::sint::SVal| x.clone().as_i64().unwrap_or(-1);
+    if dout.dtype() != dtype::FLOAT32
+        || ds.len() != 4
+        || sd(&ds[0]) != b
+        || sd(&ds[1]) != h
+        || sd(&ds[2]) != n
+        || sd(&ds[3]) != d
+    {
+        return None;
+    }
+    let mask = attn_mask.map(|m| m.contiguous());
+    {
+        let mut c = q.ctx().borrow_mut();
+        let mut ts: Vec<&Tensor> = vec![q, k, v, o, lse, dout];
+        if let Some(m) = &mask {
+            ts.push(m);
+        }
+        Tensor::realize_many(&mut c, sess, ts);
+    }
+    let ctx = q.ctx().clone();
+    let (drow, dq, dk, dv) = {
+        let mut c = ctx.borrow_mut();
+        let drow = Tensor::zeros_param(&mut *c, [b * h, n], Some(dtype::FLOAT32), Some(&dev));
+        let dq = Tensor::zeros_param(&mut *c, [b, h, n, d], Some(dtype::FLOAT32), Some(&dev));
+        let dk = Tensor::zeros_param(&mut *c, [b, hk, n, d], Some(dtype::FLOAT32), Some(&dev));
+        let dv = Tensor::zeros_param(&mut *c, [b, hk, n, d], Some(dtype::FLOAT32), Some(&dev));
+        for t in [&drow, &dq, &dk, &dv] {
+            t.realize_device_ctx(&mut c, sess);
+        }
+        (drow, dq, dk, dv)
+    };
+    let dev_c = crate::runtime::device::device(&dev);
+    let qb = q.realized_buffer()?.get_buf(&dev_c);
+    let kb = k.realized_buffer()?.get_buf(&dev_c);
+    let vb = v.realized_buffer()?.get_buf(&dev_c);
+    let ob = o.realized_buffer()?.get_buf(&dev_c);
+    let lb = lse.realized_buffer()?.get_buf(&dev_c);
+    let dob = dout.realized_buffer()?.get_buf(&dev_c);
+    let drb = drow.realized_buffer()?.get_buf(&dev_c);
+    let dqb = dq.realized_buffer()?.get_buf(&dev_c);
+    let dkb = dk.realized_buffer()?.get_buf(&dev_c);
+    let dvb = dv.realized_buffer()?.get_buf(&dev_c);
+    let mb = mask
+        .as_ref()
+        .and_then(|m| m.realized_buffer())
+        .map(|m| m.get_buf(&dev_c));
+    let opts = crate::runtime::cuda_flash_train::Options {
+        causal: is_causal,
+        has_mask: mask.is_some(),
+        h_kv: hk,
+    };
+    crate::runtime::cuda_flash_train::run_prep(&dev_c, &ob, &dob, &drb, b, h, n);
+    crate::runtime::cuda_flash_train::run_dq(
+        &dev_c,
+        &qb,
+        &kb,
+        &vb,
+        &dob,
+        &lb,
+        &drb,
+        mb.as_ref(),
+        &dqb,
+        b,
+        h,
+        n,
+        opts,
+    );
+    crate::runtime::cuda_flash_train::run_dkv(
+        &dev_c,
+        &qb,
+        &kb,
+        &vb,
+        &dob,
+        &lb,
+        &drb,
+        mb.as_ref(),
+        &dkb,
+        &dvb,
+        b,
+        h,
+        n,
+        opts,
+    );
+    Some((dq, dk, dv))
+}

@@ -5412,8 +5412,22 @@ gives 163.6/179.4/196.4 ms: **~16 ms of GPU time per layer**. The host is only
 **Attention is 86 ms of that 196 ms (44%).** One plan with 12 distinct attention
 modules at the ViT shape (B=4, H=12, N=197, D=64) replays in **86.0 ms**; the
 forward alone (no gradient) is **28.9 ms**, so the **backward is 57 ms** (66% of
-attention). That is the in-situ target: a fused FA2 forward plus dQ and dK/dV
-kernels should land at 25-35 ms, i.e. **-50-60 ms/step (25-30%)**.
+attention). That was the target for a fused FA2 forward plus dQ and dK/dV
+kernels (25-35 ms, i.e. -50-60 ms/step), provided the backward used tensor
+cores.
+
+**The scalar implementation was then built and measured: it is at parity, not
+faster.** `runtime::cuda_flash_train` has the forward with saved LSE, the
+`D = O.dO` prep and the dQ/dK/dV kernels, exposed through
+`models::flash_attention::{fused_attention_train, fused_attention_backward}` and
+gated by `tests/flash_train_cuda.rs` (plain/causal/mask/GQA, odd length 37 and
+ViT length 197; all within 4e-7 of the graph). GPU time for 12 modules: 86.9 ms
+at N=197 (graph 86.0), 276.6 at N=512 (graph 280.3), 1050.7 at N=1024 (graph
+1111). The graph backward is already batched cuBLAS GEMMs and beats scalar dot
+products at the ViT length; the tiled form only wins ~5% at N=1024. A real win
+needs a tensor-core backward, which is a separate mma kernel project on the
+scale of `cuda_flash_tc`. The API is therefore landed and tested but not wired
+into autograd (that also still needs the graph-op/scheduler-host-call seam).
 
 **The Nsight numbers were an artifact.** ncu attributed 35.8 ms to the attention
 `dS` kernel (`E_591_197_16`, thread axis on the stride-197 row axis). A

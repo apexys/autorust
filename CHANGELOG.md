@@ -60,6 +60,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fused FA2 training kernels (forward with saved LSE, dQ, dK/dV).**
+  `runtime::cuda_flash_train` implements the backward pass as four CUDA
+  kernels: `ar_fl_fwd` also writes the per-row log-sum-exp, `ar_fl_prep`
+  computes `D = O . dO`, and `ar_fl_bwd_dq` / `ar_fl_bwd_dkv` recompute
+  `p = exp(s - lse)` and accumulate `dQ`/`dK`/`dV` without atomics. Exposed as
+  `models::flash_attention::{fused_attention_train, fused_attention_backward}`
+  and gated against the graph SDPA autograd by `tests/flash_train_cuda.rs`
+  (plain/causal/additive mask/GQA, odd lengths, max diff 4e-7). The scalar
+  kernels are at parity with the graph's cuBLAS-based backward (7.24 vs
+  7.17 ms/module at N=197; +5% at N=1024), so they are not wired into training;
+  a tensor-core backward is the remaining step.
 - **Per-slice accumulation for strided two-axis reductions.** A contraction
   whose two reduction axes are not contiguous in both operands (the ViT
   weight-gradient shapes) is now a sum of per-slice GEMMs: `HostGemm` carries
