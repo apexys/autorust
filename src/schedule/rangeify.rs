@@ -1114,7 +1114,7 @@ fn remove_bufferize(ctx: &mut UOpCtx, src: UopId, buf: UopId, idx: UopId) -> Opt
         replaced.insert(k.clone(), v.clone());
     }
     let t = crate::engine::prof::enabled().then(std::time::Instant::now);
-    let out = crate::uop::upat::substitute(ctx, src, replaced, false, false);
+    let out = crate::uop::upat::substitute_local(ctx, src, replaced);
     if let Some(t) = t {
         crate::engine::prof::add("rb.substitute", t.elapsed().as_secs_f64());
     }

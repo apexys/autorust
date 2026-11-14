@@ -5177,3 +5177,36 @@ by numbers, and four were judged out of scope.
     scheduling for opted-in users, so the remaining value is for unplanned eager
     and ONNX-without-a-plan. The rewrite needs a shared traversal and the
     kernel-multiset gate, and was not attempted this pass.
+
+### 9.63 Item 10: substitution traversal pruning (2026-11)
+
+`remove_bufferize` calls `substitute` once per accepted bufferize site (5,272
+calls on one eager ViT training step) over the producer expression. The
+producer's subtree can contain `AFTER` nodes whose subtrees belong to earlier
+realized kernels; those subtrees cannot contain a range created in the current
+schedule, yet the DFS walked them. New `upat::substitute_local` (used by
+`remove_bufferize`) stops at `AFTER`; the general `substitute` is unchanged.
+
+Measured, eager `vit_train` bs 1 (alternating builds, `AUTORUST_PROF=1`):
+
+| | before | after |
+|---|---:|---:|
+| `subst.nodes` | 17,210,080 | **12,209,346 (-29%)** |
+| `rb.substitute` (same profile window) | 0.7152 s | **0.4783 s (-33%)** |
+| step median, `JIT=0` | 1770 / 1829 ms | **1619 / 1626 ms (-8.4%)** |
+
+The next step proposed for this item was key-presence pruning. Measured with a
+temporary relevance marker: only **45,970 of the 12.15M visited nodes (0.38%)**
+are keys or ancestors of keys, so a cached per-node range-set index would remove
+almost all of the remaining traversal. It is not landed because the cache needs
+a compact set representation and a lifecycle tied to the schedule: eager mode
+rebuilds the arena every step, so a ctx-wide `node -> ranges` map grows without
+bound unless it is cleared at a schedule boundary that does not exist yet. That
+is a scheduler-lifetime change, not a tweak to `substitute`.
+
+Item 6 grounding (why epilogue fusion is not contained): `AUTORUST_KPROF=1` on
+`vit_train` bs 4 attributes **7,910 `E_*` launches / 172.5 ms (39.7% of KPROF
+time, 60.6% of generated `E_*`+`r_*` time)**, against 415 `r_*` / 111.9 ms.
+The elementwise share is real but spread over thousands of sub-100 µs launches;
+fusing it is a scheduler/fusion project with the kernel-multiset gate the review
+asks for, not a local change.

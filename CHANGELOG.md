@@ -38,6 +38,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uncapped; `Scheduler` caches `rngs`/`full_shape`/`axis_types` and
   `realize_many` uses a hash map for large co-realizations.
 
+### Changed
+
+- **`remove_bufferize` substitution stops at `AFTER`.** The range-remapping DFS
+  used to walk subtrees that belong to previously realized kernels and cannot
+  contain the current schedule's ranges. `upat::substitute_local` prunes them:
+  eager ViT training bs 1 `subst.nodes` **17.2M → 12.2M (-29%)**,
+  `rb.substitute` **0.72 → 0.48 s (-33%)**, step **1.80 → 1.62 s (-8.4%)**.
+
 ### Added
 
 - **`StepPlan`: a reusable eager plan.** `engine::jit::StepPlan` captures a step

@@ -1795,6 +1795,28 @@ pub fn substitute(
         )
         .unwrap_or_else(|e| panic!("TGERR: substitute failed: {e}"));
     }
+    substitute_dfs(ctx, root, dvars, false)
+}
+
+/// [`substitute`] for a map of **kernel-local** keys (e.g. the ranges
+/// `remove_bufferize` rewires): stops at `AFTER`, whose subtree belongs to a
+/// previously realized kernel and cannot contain a range created in this
+/// schedule. Walking those subtrees was the bulk of the 8.5M `subst.nodes`
+/// visits per eager step.
+pub fn substitute_local(ctx: &mut UOpCtx, root: UopId, dvars: HashMap<UopId, UopId>) -> UopId {
+    let dvars: FastMap<UopId, UopId> = dvars.into_iter().filter(|(k, v)| k != v).collect();
+    if dvars.is_empty() {
+        return root;
+    }
+    substitute_dfs(ctx, root, dvars, true)
+}
+
+fn substitute_dfs(
+    ctx: &mut UOpCtx,
+    root: UopId,
+    dvars: FastMap<UopId, UopId>,
+    stop_after: bool,
+) -> UopId {
     // Direct bottom-up DFS with a memo. `remove_bufferize` runs this once per
     // bufferize on subtrees of the whole model graph; the generic rewrite
     // (rule match + waitlist) made that O(n^2) (17 s of a 20 s schedule).
@@ -1823,7 +1845,9 @@ pub fn substitute(
             continue;
         }
         let op = ctx.op_of(&u);
-        let skip = |i: usize| op == Ops::Function || (op == Ops::Call && i == 0);
+        let skip = |i: usize| {
+            op == Ops::Function || (op == Ops::Call && i == 0) || (stop_after && op == Ops::After)
+        };
         if !ready {
             stack.push((u.clone(), true));
             for (i, s) in ctx.srcs(&u).iter().enumerate() {
@@ -1840,6 +1864,9 @@ pub fn substitute(
             .iter()
             .enumerate()
             .any(|(i, s)| !skip(i) && memo.get(s).is_some_and(|v| v != s));
+        if changed && prof {
+            crate::engine::prof::count("subst.changed");
+        }
         let out = if changed {
             let new_srcs: Vec<UopId> = ctx
                 .srcs(&u)
