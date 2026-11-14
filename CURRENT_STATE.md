@@ -5495,3 +5495,27 @@ is NVRTC, which needs the same owned-IR work as item 10.
 (to fix the 48 `b-index-not-affine` GEMM rejects) reduces accepted descriptors
 182 → 170 and costs +1.9 ms, so it is reverted; and the item-5 scalar fused
 backward is at parity rather than the projected -50 ms.
+
+### 9.73 Item 13: cuBLASLt bias(+ReLU) epilogue fused (2026-11-14)
+
+`runtime::cublas` now dlopens `libcublasLt` (separate from `libcublas`) and
+runs eligible host GEMMs through `cublasLtMatmul` with the bias fused into the
+epilogue (`CUBLASLT_EPILOGUE_BIAS` / `BIAS_RELU`), so the separate
+`autorust_epi_*` launch is skipped. A `cublasLtHandle_t` lives on the cached
+cuBLAS `Handle`; the matrix layouts carry the strided-batch attributes, and the
+bias pointer is per column (length `n`, matching D's row count in the
+column-major view).
+
+Eligibility is conservative: f32, bias present, no per-column scale, no
+elementwise residual, and `acc == 1` (an accumulation slice would add the bias
+once per slice). Everything else keeps the epilogue kernel. At ViT train bs 4,
+**98 of 182 host GEMMs per step** fuse (`AUTORUST_PROF` row `host_gemm.lt`),
+the other 84 are scale/residual or accumulation cases.
+
+Measured, three alternating rounds: ViT train bs4 **200.9/201.3/202.0 →
+199.6/200.6/200.4 ms (-0.6%)**; `vit_infer` bs4 38.03 → 37.65 ms (-1.0%);
+MNIST bs64 and ResNet-18 bs32 are within noise. Gate:
+`tests/cublas.rs::cublas_lt_fuses_bias_and_relu` compares the fused path to the
+generated kernel (f32, `<1e-3`) and asserts the counter incremented, for both
+bias and bias+ReLU. `AUTORUST_CUBLASLT=0` is the escape hatch. bf16/f16 remain
+on the epilogue kernel.

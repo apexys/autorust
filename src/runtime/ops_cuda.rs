@@ -36,6 +36,9 @@ use crate::uop::ctx::UOpCtx;
 
 /// Number of host GEMMs dispatched through cuBLAS (diagnostics/tests).
 pub static CUBLAS_GEMMS: AtomicUsize = AtomicUsize::new(0);
+/// Number of host GEMMs whose bias(+ReLU) epilogue ran inside cuBLASLt
+/// instead of the separate `autorust_epi_*` kernel.
+pub static CUBLASLT_EPILOGUES: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     /// SM version of the open device, as `major * 10 + minor` (86 for sm_86).
@@ -412,6 +415,21 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
         // reduction folds into one GEMM at extraction time; a strided one (the
         // weight-gradient shapes) is a sum of per-slice GEMMs.
         let acc = g.acc.max(1);
+        // cuBLASLt can fuse a per-column bias and an optional ReLU. It cannot
+        // express the per-column multiplicative scale or the elementwise
+        // residual, so those keep the separate epilogue kernel; accumulation
+        // (`acc > 1`) also stays out because the bias would be added per slice.
+        let fuse_bias = acc == 1
+            && g.bias_slot >= 0
+            && g.scale_slot < 0
+            && g.res_slot < 0
+            && g.dtype == crate::dtype::FLOAT32
+            && crate::runtime::cublas::lt_available();
+        let bias_ptr = if fuse_bias {
+            ptr(g.bias_slot, g.bias_off)
+        } else {
+            0
+        };
         for s in 0..acc {
             let mut gemm = gemm;
             gemm.beta = if s == 0 { 0.0 } else { 1.0 };
@@ -429,18 +447,39 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
                 } else {
                     (as_, bs_, c)
                 };
-                let rc = unsafe {
-                    crate::runtime::cublas::gemm(
-                        handle,
-                        &gemm,
-                        ob as *const std::ffi::c_void,
-                        oa as *const std::ffi::c_void,
-                        oc as *mut std::ffi::c_void,
-                        if inner > 1 { inner } else { g.batch },
-                        stride_a,
-                        stride_b,
-                        g.c_b,
-                    )
+                let batch = if inner > 1 { inner } else { g.batch };
+                let rc = if fuse_bias {
+                    CUBLASLT_EPILOGUES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::engine::prof::count("host_gemm.lt");
+                    unsafe {
+                        crate::runtime::cublas::gemm_bias_lt(
+                            handle,
+                            &gemm,
+                            ob as *const std::ffi::c_void,
+                            oa as *const std::ffi::c_void,
+                            oc as *mut std::ffi::c_void,
+                            bias_ptr as *const std::ffi::c_void,
+                            batch,
+                            stride_a,
+                            stride_b,
+                            g.c_b,
+                            g.relu,
+                        )
+                    }
+                } else {
+                    unsafe {
+                        crate::runtime::cublas::gemm(
+                            handle,
+                            &gemm,
+                            ob as *const std::ffi::c_void,
+                            oa as *const std::ffi::c_void,
+                            oc as *mut std::ffi::c_void,
+                            batch,
+                            stride_a,
+                            stride_b,
+                            g.c_b,
+                        )
+                    }
                 };
                 if let Err(e) = rc {
                     panic!(
@@ -457,19 +496,21 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
                 None
             }
         };
-        self.epilogue_apply(
-            g.dtype,
-            c,
-            opt(g.bias_slot, g.bias_off),
-            opt(g.scale_slot, g.scale_off),
-            opt(g.res_slot, g.res_off),
-            g.batch,
-            g.m,
-            g.n,
-            if g.batch > 1 { g.c_b } else { 0 },
-            g.c_off,
-            g.relu,
-        );
+        if !fuse_bias {
+            self.epilogue_apply(
+                g.dtype,
+                c,
+                opt(g.bias_slot, g.bias_off),
+                opt(g.scale_slot, g.scale_off),
+                opt(g.res_slot, g.res_off),
+                g.batch,
+                g.m,
+                g.n,
+                if g.batch > 1 { g.c_b } else { 0 },
+                g.c_off,
+                g.relu,
+            );
+        }
         if let Some(t) = trace {
             self.synchronize();
             // Keyed by the shape/layout family, not the SSA kernel name: every

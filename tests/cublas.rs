@@ -501,3 +501,57 @@ fn cublas_accumulates_strided_two_axis_reduction() {
     let d = maxdiff(&want, &got);
     assert!(d < 1e-3, "accumulated reduction: cuBLAS diff {d:e}");
 }
+
+/// The bias(+ReLU) epilogue must be fused into cuBLASLt and match the
+/// generated kernel. `CUBLASLT_EPILOGUES` proves the fused path ran (the
+/// separate `autorust_epi_f32` kernel is skipped for this descriptor).
+#[test]
+fn cublas_lt_fuses_bias_and_relu() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    let (m, k, n) = (37usize, 64usize, 48usize);
+    let ad = values(1, m * k);
+    let wd = values(3, n * k);
+    let bd = values(5, n);
+    let run_case = |lib: bool, relu: bool| {
+        autorust::runtime::ops_cuda::CUBLASLT_EPILOGUES.store(0, Ordering::Relaxed);
+        let out = run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let a =
+                    Tensor::from_slice(ctx, &ad, None, Some("CUDA")).reshape([m as i64, k as i64]);
+                let lin = Linear {
+                    weight: Tensor::from_slice(ctx, &wd, None, Some("CUDA"))
+                        .reshape([n as i64, k as i64]),
+                    bias: Some(Tensor::from_slice(ctx, &bd, None, Some("CUDA"))),
+                };
+                let y = lin.forward(&a);
+                vec![if relu { y.relu() } else { y }]
+            },
+        );
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLASLT_EPILOGUES.load(Ordering::Relaxed),
+        )
+    };
+    for relu in [false, true] {
+        let (want, never) = run_case(false, relu);
+        let (got, fused) = run_case(true, relu);
+        assert_eq!(never, 0, "Never policy must stay generated");
+        let d = maxdiff(&want, &got);
+        assert!(d < 1e-3, "relu={relu}: cuBLASLt diff {d:e}");
+        if autorust::runtime::cublas::lt_available() {
+            assert!(
+                fused > 0,
+                "relu={relu}: bias epilogue was not fused into cuBLASLt"
+            );
+        }
+    }
+}

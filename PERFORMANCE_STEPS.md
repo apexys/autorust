@@ -540,8 +540,21 @@ precision is adopted.
 
 **Measured (2026-11-14):** `AUTORUST_CUBLAS_TF32=1` on ViT train bs 4 gives
 **217.2 → 204.6 ms (-5.8%)**; it changes numerics, so it stays an explicit
-opt-in. The cuBLASLt epilogue fusion (removing the separate epilogue kernel) is
-still open.
+opt-in.
+
+**cuBLASLt bias(+ReLU) epilogue: landed.** `runtime::cublas` loads
+`libcublasLt` and runs eligible host GEMMs through `cublasLtMatmul` with the
+bias fused (`CUBLASLT_EPILOGUE_BIAS`, or `BIAS_RELU`), so the separate
+`autorust_epi_f32` launch disappears. At ViT train bs 4 **98 of 182 host GEMMs
+per step** take it (`host_gemm.lt`); wall 200.9/201.3/202.0 → **199.6/200.6/200.4
+ms (-0.6%**, three alternating rounds); `vit_infer` bs 4 38.03 → 37.65 ms
+(-1.0%); MNIST and ResNet-18 are neutral. What cannot be expressed in a
+cuBLASLt epilogue stays on the kernel: the per-column multiplicative scale and
+the elementwise residual (so conv+BN stores, which have both, are not fused),
+and `acc > 1` accumulation (the bias would be added once per slice). Gate:
+`tests/cublas.rs::cublas_lt_fuses_bias_and_relu` (numeric vs the generated
+kernel and the `CUBLASLT_EPILOGUES` counter). `AUTORUST_CUBLASLT=0` reverts to
+the separate epilogue. bf16/f16 stay on the epilogue kernel for now.
 
 **Effort/risk:** medium; numerics changes must stay opt-in.
 

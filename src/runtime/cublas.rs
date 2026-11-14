@@ -126,8 +126,63 @@ type CublasGemmStridedBatchedEx = unsafe extern "C" fn(
     i32,
 ) -> i32;
 
+// ---- cuBLASLt (fused bias/ReLU epilogue) ----
+type LtCreate = unsafe extern "C" fn(*mut *mut c_void) -> i32;
+type LtDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
+type LtMatmulDescCreate = unsafe extern "C" fn(*mut *mut c_void, i32, i32) -> i32;
+type LtMatmulDescDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
+type LtMatmulDescSetAttr = unsafe extern "C" fn(*mut c_void, i32, *const c_void, usize) -> i32;
+type LtMatrixLayoutCreate = unsafe extern "C" fn(*mut *mut c_void, i32, u64, u64, i64) -> i32;
+type LtMatrixLayoutDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
+type LtMatrixLayoutSetAttr = unsafe extern "C" fn(*mut c_void, i32, *const c_void, usize) -> i32;
+#[allow(clippy::too_many_arguments)]
+type LtMatmul = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_void,
+    *const c_void,
+    *const c_void,
+    *mut c_void,
+    *const c_void,
+    *mut c_void,
+    *const c_void,
+    *const c_void,
+    *mut c_void,
+    *mut c_void,
+    *mut c_void,
+    *const c_void,
+    *mut c_void,
+    usize,
+    *mut c_void,
+) -> i32;
+
+/// `cublasLtMatmulDescAttributes_t` values used here.
+const LT_TRANSA: i32 = 3;
+const LT_TRANSB: i32 = 4;
+const LT_EPILOGUE: i32 = 7;
+const LT_BIAS_POINTER: i32 = 8;
+/// `cublasLtEpilogue_t`: bias plus optional ReLU.
+const LT_EPILOGUE_BIAS: u32 = 4;
+const LT_EPILOGUE_BIAS_RELU: u32 = 6;
+/// `cublasLtMatrixLayoutAttributes_t` values used here.
+const LT_LAYOUT_BATCH_COUNT: i32 = 5;
+const LT_LAYOUT_STRIDED_OFFSET: i32 = 6;
+
+struct LtFns {
+    create: LtCreate,
+    destroy: LtDestroy,
+    desc_create: LtMatmulDescCreate,
+    desc_destroy: LtMatmulDescDestroy,
+    desc_set_attr: LtMatmulDescSetAttr,
+    layout_create: LtMatrixLayoutCreate,
+    layout_destroy: LtMatrixLayoutDestroy,
+    layout_set_attr: LtMatrixLayoutSetAttr,
+    matmul: LtMatmul,
+}
+
 struct CublasLib {
     _lib: Library,
+    _lt_lib: Option<Library>,
+    lt: Option<LtFns>,
     create: CublasCreate,
     destroy: CublasDestroy,
     set_stream: CublasSetStream,
@@ -161,6 +216,46 @@ fn candidates() -> Vec<String> {
     out
 }
 
+/// Load `libcublasLt` (the epilogue-fusion API lives in its own library).
+fn load_lt() -> Option<(Library, LtFns)> {
+    let mut names = crate::runtime::libfind::env_overrides(&["AUTORUST_CUBLASLT_LIB"]);
+    names.extend(crate::runtime::libfind::scanned_libraries("cublasLt"));
+    names.push(crate::runtime::libfind::unversioned_name("cublasLt"));
+    for major in (9..=20).rev() {
+        names.push(crate::runtime::libfind::versioned_name("cublasLt", major));
+    }
+    names.dedup();
+    for name in names {
+        let lib = match unsafe { Library::new(&name) } {
+            Ok(lib) => lib,
+            Err(_) => continue,
+        };
+        unsafe {
+            macro_rules! sym {
+                ($name:literal, $ty:ty) => {
+                    match lib.get::<*const c_void>($name.as_bytes()) {
+                        Ok(s) => std::mem::transmute_copy::<*const c_void, $ty>(&*s),
+                        Err(_) => continue,
+                    }
+                };
+            }
+            let fns = LtFns {
+                create: sym!("cublasLtCreate", LtCreate),
+                destroy: sym!("cublasLtDestroy", LtDestroy),
+                desc_create: sym!("cublasLtMatmulDescCreate", LtMatmulDescCreate),
+                desc_destroy: sym!("cublasLtMatmulDescDestroy", LtMatmulDescDestroy),
+                desc_set_attr: sym!("cublasLtMatmulDescSetAttribute", LtMatmulDescSetAttr),
+                layout_create: sym!("cublasLtMatrixLayoutCreate", LtMatrixLayoutCreate),
+                layout_destroy: sym!("cublasLtMatrixLayoutDestroy", LtMatrixLayoutDestroy),
+                layout_set_attr: sym!("cublasLtMatrixLayoutSetAttribute", LtMatrixLayoutSetAttr),
+                matmul: sym!("cublasLtMatmul", LtMatmul),
+            };
+            return Some((lib, fns));
+        }
+    }
+    None
+}
+
 fn load() -> Option<CublasLib> {
     for name in candidates() {
         // SAFETY: loading an arbitrary shared library is inherently unsafe; a
@@ -191,8 +286,15 @@ fn load() -> Option<CublasLib> {
                 .get::<*const c_void>(b"cublasSetMathMode")
                 .ok()
                 .map(|s| std::mem::transmute_copy::<*const c_void, CublasSetMathMode>(&*s));
+            let loaded_lt = load_lt();
+            let (lt_lib, lt) = match loaded_lt {
+                Some((l, f)) => (Some(l), Some(f)),
+                None => (None, None),
+            };
             return Some(CublasLib {
                 _lib: lib,
+                _lt_lib: lt_lib,
+                lt,
                 create,
                 destroy,
                 set_stream,
@@ -215,6 +317,183 @@ fn lib() -> Option<&'static CublasLib> {
 /// Whether the cuBLAS library loaded (ignoring the user toggle).
 pub fn library_present() -> bool {
     lib().is_some()
+}
+
+/// Whether the fused bias/ReLU epilogue is available and enabled.
+///
+/// `AUTORUST_CUBLASLT=0` forces the separate-epilogue path (A/B testing and an
+/// escape hatch for a driver-specific issue).
+pub fn lt_available() -> bool {
+    if crate::helpers::env::get("AUTORUST_CUBLASLT").is_some_and(|v| v == "0") {
+        return false;
+    }
+    lib().is_some_and(|l| l.lt.is_some())
+}
+
+fn lt_check(rc: i32) -> Result<(), String> {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("cublasLt status {rc}"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn lt_layout(
+    lt: &LtFns,
+    rows: i64,
+    cols: i64,
+    ld: i64,
+    batch: i64,
+    stride: i64,
+) -> Result<*mut c_void, String> {
+    let mut l: *mut c_void = std::ptr::null_mut();
+    unsafe {
+        lt_check((lt.layout_create)(
+            &mut l,
+            CUDA_R_32F,
+            rows as u64,
+            cols as u64,
+            ld,
+        ))?
+    };
+    if batch > 1 {
+        let bc: i32 = i32::try_from(batch).map_err(|_| "cublasLt: batch too large")?;
+        let so: i64 = stride;
+        unsafe {
+            lt_check((lt.layout_set_attr)(
+                l,
+                LT_LAYOUT_BATCH_COUNT,
+                &bc as *const i32 as *const c_void,
+                4,
+            ))?;
+            lt_check((lt.layout_set_attr)(
+                l,
+                LT_LAYOUT_STRIDED_OFFSET,
+                &so as *const i64 as *const c_void,
+                8,
+            ))?;
+        }
+    }
+    Ok(l)
+}
+
+/// Run `C = alpha*op(A)*op(B) + bias[col]` with an optional ReLU, fused into
+/// the cuBLASLt epilogue.
+///
+/// The separate epilogue kernel (`autorust_epi_f32`) is skipped by the caller
+/// when this succeeds. Only f32 and the plain bias / bias+ReLU shapes are
+/// handled; the per-column multiplicative scale and the elementwise residual
+/// are not expressible in a cuBLASLt epilogue and stay on the kernel.
+///
+/// # Safety
+/// The pointers and layouts must describe in-bounds device memory on
+/// `handle`'s stream, with the bias vector holding `desc.n` elements.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn gemm_bias_lt(
+    handle: &Handle,
+    desc: &GemmDesc,
+    a: *const c_void,
+    b: *const c_void,
+    c: *mut c_void,
+    bias: *const c_void,
+    batch: i64,
+    stride_a: i64,
+    stride_b: i64,
+    stride_c: i64,
+    relu: bool,
+) -> Result<(), String> {
+    let lib = handle.lib;
+    let Some(lt) = lib.lt.as_ref() else {
+        return Err("cublasLt not loaded".into());
+    };
+    let Some(lt_raw) = handle.lt_raw else {
+        return Err("cublasLt handle missing".into());
+    };
+    if desc.elem != Elem::F32 {
+        return Err("cublasLt epilogue: f32 only".into());
+    }
+    let mut md: *mut c_void = std::ptr::null_mut();
+    unsafe { lt_check((lt.desc_create)(&mut md, COMPUTE_32F, CUDA_R_32F))? };
+    let res = (|| -> Result<(), String> {
+        let ta: i32 = if desc.trans_a { OP_T } else { OP_N };
+        let tb: i32 = if desc.trans_b { OP_T } else { OP_N };
+        let ep: u32 = if relu {
+            LT_EPILOGUE_BIAS_RELU
+        } else {
+            LT_EPILOGUE_BIAS
+        };
+        unsafe {
+            lt_check((lt.desc_set_attr)(
+                md,
+                LT_TRANSA,
+                &ta as *const i32 as *const c_void,
+                4,
+            ))?;
+            lt_check((lt.desc_set_attr)(
+                md,
+                LT_TRANSB,
+                &tb as *const i32 as *const c_void,
+                4,
+            ))?;
+            lt_check((lt.desc_set_attr)(
+                md,
+                LT_EPILOGUE,
+                &ep as *const u32 as *const c_void,
+                4,
+            ))?;
+            lt_check((lt.desc_set_attr)(
+                md,
+                LT_BIAS_POINTER,
+                &bias as *const *const c_void as *const c_void,
+                std::mem::size_of::<*const c_void>(),
+            ))?;
+        }
+        // Stored dimensions of each operand (column-major layouts).
+        let (ar, ac) = if desc.trans_a {
+            (desc.k, desc.m)
+        } else {
+            (desc.m, desc.k)
+        };
+        let (br, bc) = if desc.trans_b {
+            (desc.n, desc.k)
+        } else {
+            (desc.k, desc.n)
+        };
+        let ad = unsafe { lt_layout(lt, ar, ac, desc.lda, batch, stride_a)? };
+        let bd = unsafe { lt_layout(lt, br, bc, desc.ldb, batch, stride_b)? };
+        let cd = unsafe { lt_layout(lt, desc.m, desc.n, desc.ldc, batch, stride_c)? };
+        let alpha = desc.alpha;
+        let beta = desc.beta;
+        let rc = unsafe {
+            (lt.matmul)(
+                lt_raw,
+                md,
+                &alpha as *const f32 as *const c_void,
+                a,
+                ad,
+                b,
+                bd,
+                &beta as *const f32 as *const c_void,
+                c as *const c_void,
+                cd,
+                c,
+                cd,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+                handle.stream,
+            )
+        };
+        unsafe {
+            (lt.layout_destroy)(ad);
+            (lt.layout_destroy)(bd);
+            (lt.layout_destroy)(cd);
+        }
+        lt_check(rc)
+    })();
+    unsafe { (lt.desc_destroy)(md) };
+    res
 }
 
 /// Cached result of [`probe_current_context`]: `None` until a CUDA context has
@@ -270,6 +549,11 @@ fn tf32_enabled() -> bool {
 /// An owned cuBLAS handle bound to one CUDA stream.
 pub struct Handle {
     raw: *mut c_void,
+    /// The stream bound with `cublasSetStream`; `cublasLtMatmul` takes it
+    /// explicitly.
+    stream: *mut c_void,
+    /// `cublasLtHandle_t`, created once when the Lt library is present.
+    lt_raw: Option<*mut c_void>,
     lib: &'static CublasLib,
 }
 
@@ -298,12 +582,29 @@ impl Handle {
             let mode = if tf32_enabled() { 3 } else { 2 };
             let _ = unsafe { set_math(raw, mode) };
         }
-        Some(Handle { raw, lib })
+        let lt_raw = lib.lt.as_ref().and_then(|lt| {
+            let mut l: *mut c_void = std::ptr::null_mut();
+            let rc = unsafe { (lt.create)(&mut l) };
+            if rc == 0 && !l.is_null() {
+                Some(l)
+            } else {
+                None
+            }
+        });
+        Some(Handle {
+            raw,
+            stream,
+            lt_raw,
+            lib,
+        })
     }
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
+        if let (Some(lt), Some(raw)) = (&self.lib.lt, self.lt_raw) {
+            unsafe { (lt.destroy)(raw) };
+        }
         unsafe { (self.lib.destroy)(self.raw) };
     }
 }

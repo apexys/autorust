@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **cuBLASLt fused bias(+ReLU) epilogue for host GEMMs.** `runtime::cublas`
+  loads `libcublasLt` and runs eligible f32 host GEMMs with the bias fused
+  into the matmul (`CUBLASLT_EPILOGUE_BIAS` / `BIAS_RELU`), skipping the
+  separate `autorust_epi_*` launch. At ViT-B/16 train bs 4, 98 of 182 host
+  GEMMs per step take it and the step goes **200.9/201.3/202.0 →
+  199.6/200.6/200.4 ms (-0.6%)**; ViT inference -1.0%; MNIST/ResNet neutral.
+  The per-column scale, elementwise residual and `beta = 1` accumulation cases
+  cannot be expressed in a cuBLASLt epilogue and keep the kernel. Numeric gate:
+  `tests/cublas.rs::cublas_lt_fuses_bias_and_relu`; `AUTORUST_CUBLASLT=0`
+  reverts.
 - **Measured the training attention path in situ.** A captured CUDA graph
   replays a ViT-B/16 train bs 4 step in 196 ms of GPU time, so the step is
   GPU-bound; attention forward+backward is 86 ms of it (forward 29 ms, backward

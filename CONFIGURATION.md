@@ -291,3 +291,5 @@ Defaults match the port; normally leave them alone.
 - **Benchmark knobs** such as `JIT`, `ITERS`, `SYNC`, `NOSYNC`, `BIAS` belong to
   the `examples/*` programs, not the library; see
   [`PERFORMANCE.md`](PERFORMANCE.md#measuring).
+
+| `AUTORUST_CUBLASLT=0` | Disable the cuBLASLt fused bias/ReLU epilogue and use the separate `autorust_epi_*` kernel (the numeric reference). |
