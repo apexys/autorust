@@ -141,6 +141,25 @@ implicit kernel can reuse that index logic.
 **Expected:** 2-4x on the conv share → ResNet-18 CUDA 323 → 100-160 ms; the gap
 to torch drops from 17x to 5-8x. Also helps UNet/MobileNet/ONNX ResNet.
 
+**Attempt 2 (2026-11-14): the blocker is unfolded BatchNorm, not the axis
+fold.** The 12 remaining conv stores are already described as a transposed GEMM
+(`C[cout, ox]`, i.e. n = the spatial axis and m = the output channel), and the
+BN affine (`gamma`, `beta`) is indexed by **m**, not n. The extractor now
+supports a per-row (`m`) bias/scale and both application orders —
+`(C + bias)*scale` for a transformer and `C*scale + bias` for a BN store
+(`HostGemm::{bias_m, scale_m, bias_outside}`, CUDA epilogue with row indexing;
+numeric gates `tests/cublas.rs::cublas_matches_per_row_bias_and_scale` in both
+orders). That moves all 12 rejects one step further, to `epilogue-operand`: the
+scale is **computed** on the graph (`Reciprocal(Sqrt(Add(running_var, eps)))`),
+not a parameter buffer, and a host epilogue can only take buffers.
+
+So the conv reaches cuBLAS only after **BN is folded into the conv weights**
+(item 7): `W' = W*gamma/sqrt(var+eps)`, `b' = beta - mean*gamma/sqrt(var+eps)`,
+which turns the store into `Max(REDUCE + bias, 0)` — exactly the bias+ReLU
+epilogue that the host GEMM and cuBLASLt already handle. The per-m/order
+primitives are landed and tested, ready for that fold. ResNet-18 is unchanged
+(319.5 ms) because the fold is the missing piece.
+
 **Attempt (2026-11-14): GPU GEMM plumbing extended, conv still blocked.**
 Landed: (a) the reduce-axis fold is now general — any number of reduction axes
 folds when the operands are contiguous in one order, so `(cin, ky, kx)` can be
@@ -386,6 +405,16 @@ The importer currently executes the graph node-by-node as written.
 pre-transpose/repack weights for the GEMM path, drop identity/no-op nodes, and
 co-realize the model into as few LINEARS as possible. The conv part also
 benefits from item 2.
+
+**Measured (2026-11-14): BN folding is the actual blocker for item 2.** The
+*native* ResNet model's BN is **not** folded: the conv store contains
+`gamma * Reciprocal(Sqrt(running_var + eps))` as a computed per-channel scale,
+which a host-GEMM epilogue cannot consume. (The exported ONNX ResNet has no
+`BatchNormalization` nodes — torch folded them — which is why the ONNX path did
+not show this.) With per-row bias/scale support added to the epilogue (item 2),
+all 12 conv stores now stop at `epilogue-operand` instead of
+`epilogue-layout`; folding BN into the conv weights and bias is what will make
+them plain bias+ReLU stores that reach cuBLAS.
 
 **Expected:** fewer kernels and less graph work per capture; 1.3-2x on ONNX
 ResNet, less on MNIST.

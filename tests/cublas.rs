@@ -555,3 +555,62 @@ fn cublas_lt_fuses_bias_and_relu() {
         }
     }
 }
+
+/// A per-`m` (row) bias and scale must stay on cuBLAS with the epilogue applied
+/// along the row axis, in both application orders: the transformer's
+/// `(C + bias)*scale` and a BN store's `C*scale + bias`.
+#[test]
+fn cublas_matches_per_row_bias_and_scale() {
+    let _guard = LOCK.lock().unwrap();
+    if !have_cuda_and_cublas() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    let (m, k, n) = (48usize, 37usize, 29usize);
+    let ad = values(1, m * k);
+    let bd = values(7, k * n);
+    let sd = values(12, m);
+    let bsd = values(13, m);
+    let run_case = |lib: bool, bias_outside: bool| {
+        autorust::runtime::ops_cuda::CUBLAS_GEMMS.store(0, Ordering::Relaxed);
+        let out = run(
+            if lib {
+                autorust::settings::LibraryGemm::Always
+            } else {
+                autorust::settings::LibraryGemm::Never
+            },
+            |ctx| {
+                let a =
+                    Tensor::from_slice(ctx, &ad, None, Some("CUDA")).reshape([m as i64, k as i64]);
+                let b =
+                    Tensor::from_slice(ctx, &bd, None, Some("CUDA")).reshape([k as i64, n as i64]);
+                let s = Tensor::from_slice(ctx, &sd, None, Some("CUDA")).reshape([m as i64, 1]);
+                let bias = Tensor::from_slice(ctx, &bsd, None, Some("CUDA")).reshape([m as i64, 1]);
+                let y = a.dot(&b);
+                vec![if bias_outside {
+                    y.mul(&s).add(&bias)
+                } else {
+                    y.add(&bias).mul(&s)
+                }]
+            },
+        );
+        (
+            out,
+            autorust::runtime::ops_cuda::CUBLAS_GEMMS.load(Ordering::Relaxed),
+        )
+    };
+    for bias_outside in [false, true] {
+        let (want, never) = run_case(false, bias_outside);
+        let (got, used) = run_case(true, bias_outside);
+        assert_eq!(never, 0, "Never policy must stay generated");
+        assert!(
+            used > 0,
+            "bias_outside={bias_outside}: per-row affine must stay on the library GEMM"
+        );
+        let d = maxdiff(&want, &got);
+        assert!(
+            d < 1e-3,
+            "bias_outside={bias_outside}: per-row epilogue diff {d:e}"
+        );
+    }
+}

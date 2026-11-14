@@ -187,7 +187,7 @@ impl CudaInner {
 extern "C" __global__ void autorust_epi_f32(float* c, const float* b, const float* s, const float* r,
     long long total, long long n, long long m, long long stride_c,
     long long c_off, long long b_off, long long s_off, long long r_off,
-    int has_bias, int has_scale, int has_res, int has_relu) {
+    int has_bias, int has_scale, int has_res, int has_relu, int bias_m, int scale_m, int bias_outside) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   long long col = i % n;
@@ -196,8 +196,13 @@ extern "C" __global__ void autorust_epi_f32(float* c, const float* b, const floa
   long long rel = bat * stride_c + row * n + col;
   long long ci = c_off + rel;
   float v = c[ci];
-  if (has_bias) v += b[b_off + col];
-  if (has_scale) v *= s[s_off + col];
+  if (bias_outside) {
+    if (has_scale) v *= s[s_off + (scale_m ? row : col)];
+    if (has_bias) v += b[b_off + (bias_m ? row : col)];
+  } else {
+    if (has_bias) v += b[b_off + (bias_m ? row : col)];
+    if (has_scale) v *= s[s_off + (scale_m ? row : col)];
+  }
   if (has_res) v += r[r_off + rel];
   if (has_relu && v < 0.0f) v = 0.0f;
   c[ci] = v;
@@ -211,7 +216,7 @@ extern "C" __global__ void autorust_epi_f32(float* c, const float* b, const floa
 extern "C" __global__ void autorust_epi_f16(__half* c, const __half* b, const __half* s, const __half* r,
     long long total, long long n, long long m, long long stride_c,
     long long c_off, long long b_off, long long s_off, long long r_off,
-    int has_bias, int has_scale, int has_res, int has_relu) {
+    int has_bias, int has_scale, int has_res, int has_relu, int bias_m, int scale_m, int bias_outside) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   long long col = i % n;
@@ -220,8 +225,13 @@ extern "C" __global__ void autorust_epi_f16(__half* c, const __half* b, const __
   long long rel = bat * stride_c + row * n + col;
   long long ci = c_off + rel;
   float v = __half2float(c[ci]);
-  if (has_bias) v += __half2float(b[b_off + col]);
-  if (has_scale) v *= __half2float(s[s_off + col]);
+  if (bias_outside) {
+    if (has_scale) v *= __half2float(s[s_off + (scale_m ? row : col)]);
+    if (has_bias) v += __half2float(b[b_off + (bias_m ? row : col)]);
+  } else {
+    if (has_bias) v += __half2float(b[b_off + (bias_m ? row : col)]);
+    if (has_scale) v *= __half2float(s[s_off + (scale_m ? row : col)]);
+  }
   if (has_res) v += __half2float(r[r_off + rel]);
   if (has_relu && v < 0.0f) v = 0.0f;
   c[ci] = __float2half(v);
@@ -235,7 +245,7 @@ extern "C" __global__ void autorust_epi_f16(__half* c, const __half* b, const __
 extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat16* b, const __nv_bfloat16* s, const __nv_bfloat16* r,
     long long total, long long n, long long m, long long stride_c,
     long long c_off, long long b_off, long long s_off, long long r_off,
-    int has_bias, int has_scale, int has_res, int has_relu) {
+    int has_bias, int has_scale, int has_res, int has_relu, int bias_m, int scale_m, int bias_outside) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   long long col = i % n;
@@ -244,8 +254,13 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
   long long rel = bat * stride_c + row * n + col;
   long long ci = c_off + rel;
   float v = __bfloat162float(c[ci]);
-  if (has_bias) v += __bfloat162float(b[b_off + col]);
-  if (has_scale) v *= __bfloat162float(s[s_off + col]);
+  if (bias_outside) {
+    if (has_scale) v *= __bfloat162float(s[s_off + (scale_m ? row : col)]);
+    if (has_bias) v += __bfloat162float(b[b_off + (bias_m ? row : col)]);
+  } else {
+    if (has_bias) v += __bfloat162float(b[b_off + (bias_m ? row : col)]);
+    if (has_scale) v *= __bfloat162float(s[s_off + (scale_m ? row : col)]);
+  }
   if (has_res) v += __bfloat162float(r[r_off + rel]);
   if (has_relu && v < 0.0f) v = 0.0f;
   c[ci] = __float2bfloat16(v);
@@ -285,6 +300,9 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
         stride_c: i64,
         c_off: i64,
         relu: bool,
+        bias_m: bool,
+        scale_m: bool,
+        bias_outside: bool,
     ) {
         if bias.is_none() && scale.is_none() && residual.is_none() && !relu {
             return;
@@ -308,6 +326,9 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             residual.is_some() as i32,
         );
         let has_relu = relu as i32;
+        let has_bias_m = bias_m as i32;
+        let has_scale_m = scale_m as i32;
+        let has_bias_outside = bias_outside as i32;
         let cfg = LaunchConfig {
             grid_dim: (((total + 255) / 256) as u32, 1, 1),
             block_dim: (256, 1, 1),
@@ -329,7 +350,10 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             .arg(&has_bias)
             .arg(&has_scale)
             .arg(&has_res)
-            .arg(&has_relu);
+            .arg(&has_relu)
+            .arg(&has_bias_m)
+            .arg(&has_scale_m)
+            .arg(&has_bias_outside);
         unsafe { args.launch(cfg) }.unwrap_or_else(|e| panic!("TGERR: epilogue launch: {e}"));
     }
 
@@ -423,6 +447,8 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             && g.bias_slot >= 0
             && g.scale_slot < 0
             && g.res_slot < 0
+            && !g.bias_m
+            && !g.scale_m
             && g.dtype == crate::dtype::FLOAT32
             && crate::runtime::cublas::lt_available();
         let bias_ptr = if fuse_bias {
@@ -509,6 +535,9 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
                 if g.batch > 1 { g.c_b } else { 0 },
                 g.c_off,
                 g.relu,
+                g.bias_m,
+                g.scale_m,
+                g.bias_outside,
             );
         }
         if let Some(t) = trace {

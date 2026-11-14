@@ -5496,6 +5496,32 @@ is NVRTC, which needs the same owned-IR work as item 10.
 182 → 170 and costs +1.9 ms, so it is reverted; and the item-5 scalar fused
 backward is at parity rather than the projected -50 ms.
 
+### 9.74 Item 2 attempt: conv is blocked by unfolded BN, not the axis fold (2026-11-14)
+
+The remaining 12 conv stores were believed to need a multi-axis `m` fold. They
+do not: the store is already a transposed GEMM (`C[cout, ox]`, n = spatial,
+m = output channel) and the BN affine is indexed by m. Added to the surface:
+
+- `HostGemm::{bias_m, scale_m}`: the bias/scale may be indexed by the m axis
+  (output row) instead of n (column).
+- `HostGemm::bias_outside`: the store may be `C*scale + bias` (a BN) rather
+  than the transformer's `(C + bias)*scale`. The CUDA epilogue applies the two
+  in the recorded order (`int bias_outside`), which also fixes a latent
+  wrong-order case for any BN-style store that reached it.
+- Serialized in `to_data`/`from_arg`/`to_rust_literal`; numeric gates in
+  `tests/cublas.rs::cublas_matches_per_row_bias_and_scale` for both orders
+  (Always vs Never, library dispatch asserted).
+
+With that, the 12 rejects move from `epilogue-layout` to `epilogue-operand`:
+the conv's scale is the computed BN normalization
+`Reciprocal(Sqrt(Add(running_var, eps)))`, not a parameter buffer, and a host
+epilogue can only read buffers. The fix is to **fold BN into the conv**
+(item 7), after which the store is `Max(REDUCE + bias, 0)` — the bias+ReLU
+epilogue the host GEMM already supports. ResNet-18 is unchanged (319.5 ms);
+the primitives are ready for the fold. Note the native ResNet has unfolded BN;
+the exported ONNX ResNet does not (torch folded it), which is why item 7's
+investigation saw no `BatchNormalization` nodes.
+
 ### 9.73 Item 13: cuBLASLt bias(+ReLU) epilogue fused (2026-11-14)
 
 `runtime::cublas` now dlopens `libcublasLt` (separate from `libcublas`) and

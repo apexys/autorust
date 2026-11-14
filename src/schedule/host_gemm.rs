@@ -108,6 +108,15 @@ pub struct HostGemm {
     pub res_off: i64,
     /// `max(C, 0)` applied after the epilogue (a fused ReLU).
     pub relu: bool,
+    /// The bias is indexed by `m` (output row) rather than `n` (column). A
+    /// transposed conv store (`C[cout, ox]`) puts the per-channel BN term on
+    /// the m axis.
+    pub bias_m: bool,
+    /// The per-column multiplicative scale is indexed by `m` rather than `n`.
+    pub scale_m: bool,
+    /// The bias is applied *outside* the scale: `C*scale + bias` (a BN store)
+    /// rather than the transformer's `(C + bias)*scale`.
+    pub bias_outside: bool,
     /// Number of outer reduction slices accumulated into the same `C` (>= 1).
     /// A two-axis reduction that is not contiguous in both operands is a sum of
     /// per-slice GEMMs; slice `s` starts at `a_acc`/`b_acc` elements and is
@@ -131,7 +140,7 @@ impl HostGemm {
              a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
              a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
              c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
-             scale_off: {}, res_slot: {}, res_off: {}, relu: {}, acc: {}, a_acc: {}, b_acc: {} }}",
+             scale_off: {}, res_slot: {}, res_off: {}, relu: {}, bias_m: {}, scale_m: {}, bias_outside: {}, acc: {}, a_acc: {}, b_acc: {} }}",
             self.a_slot,
             self.b_slot,
             self.c_slot,
@@ -161,6 +170,9 @@ impl HostGemm {
             self.res_slot,
             self.res_off,
             self.relu,
+            self.bias_m,
+            self.scale_m,
+            self.bias_outside,
             self.acc,
             self.a_acc,
             self.b_acc
@@ -208,6 +220,9 @@ impl HostGemm {
                 ("res_slot".into(), int(self.res_slot)),
                 ("res_off".into(), int(self.res_off)),
                 ("relu".into(), Arg::Bool(self.relu)),
+                ("bias_m".into(), Arg::Bool(self.bias_m)),
+                ("scale_m".into(), Arg::Bool(self.scale_m)),
+                ("bias_outside".into(), Arg::Bool(self.bias_outside)),
                 ("acc".into(), int(self.acc)),
                 ("a_acc".into(), int(self.a_acc)),
                 ("b_acc".into(), int(self.b_acc)),
@@ -300,6 +315,9 @@ impl HostGemm {
             },
             res_off: i("res_off"),
             relu: matches!(d.get("relu"), Arg::Bool(true)),
+            bias_m: matches!(d.get("bias_m"), Arg::Bool(true)),
+            scale_m: matches!(d.get("scale_m"), Arg::Bool(true)),
+            bias_outside: matches!(d.get("bias_outside"), Arg::Bool(true)),
             acc: i("acc").max(1),
             a_acc: i("a_acc"),
             b_acc: i("b_acc"),
@@ -1446,7 +1464,13 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // bias (depends only on the output columns).
     let mut bias: (i64, i64) = (-1, 0);
     let mut bias_dt = c_dt;
+    let mut bias_m = false;
     let mut scale: (i64, i64) = (-1, 0);
+    let mut scale_m = false;
+    let mut bias_outside = false;
+    // Extras arrive outermost-first. If the bias Add is seen before any scale
+    // Mul, the store is `C*scale + bias` (BN), so the bias is applied last.
+    let mut saw_scale = false;
     let mut residual: (i64, i64) = (-1, 0);
     for e in &extras {
         let idx = or_reject(operand(ctx, e.expr.clone()), "epilogue-operand")?;
@@ -1464,21 +1488,27 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
             return reject("epilogue-dtype");
         }
         let off = off0 + base;
-        if map.len() == 1 && coeff(&map, n_key) == 1 {
-            // A MUL operand is the per-column scale; an ADD operand is additive.
-            // Two additive n-only terms (e.g. `bias_ih + bias_hh`) cannot be
-            // expressed by this epilogue, so leave the kernel generated.
+        if map.len() == 1 && (coeff(&map, n_key) == 1 || coeff(&map, m_key) == 1) {
+            // A MUL operand is the per-column (or per-row) scale; an ADD operand
+            // is additive. Two additive terms on the same axis (e.g.
+            // `bias_ih + bias_hh`) cannot be expressed, so leave the kernel
+            // generated.
+            let along_m = coeff(&map, m_key) == 1;
             if e.from_mul {
                 if scale.0 >= 0 {
                     return reject("epilogue-duplicate-scale");
                 }
                 scale = (slot, off);
+                scale_m = along_m;
+                saw_scale = true;
             } else {
                 if bias.0 >= 0 {
                     return reject("epilogue-duplicate-bias");
                 }
                 bias = (slot, off);
                 bias_dt = dt;
+                bias_m = along_m;
+                bias_outside = !saw_scale;
             }
             continue;
         }
@@ -1493,10 +1523,14 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let (bias_slot, bias_off) = bias;
     let (scale_slot, scale_off) = scale;
     let (res_slot, res_off) = residual;
-    // The fused clamp is implemented by the CUDA epilogue kernel; other
-    // backends keep the generated kernel rather than dropping the ReLU.
+    // The fused clamp and the per-row affine are implemented by the CUDA
+    // epilogue kernel; other backends keep the generated kernel rather than
+    // dropping the term.
     if relu && kind != GemmDevice::Cuda {
         return reject("relu-unsupported-backend");
+    }
+    if (bias_m || scale_m) && kind != GemmDevice::Cuda {
+        return reject("epi-m-unsupported-backend");
     }
     // The transposed view swaps the output axes: the epilogue adds along the
     // original n, which is the new m. Only a plain GEMM is transposed.
@@ -1647,7 +1681,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     if crate::helpers::env::get("AUTORUST_CUBLAS_DEBUG").is_some() {
         eprintln!(
             "CUBLAS m={m} n={n} k={k} batch={batch_count} \
-             a=[{a_m},{a_k}] b=[{b_k},{b_n}] c=[{c_m},{c_n}] alpha={alpha} bias={bias_slot} scale={scale_slot} res={res_slot} \
+             a=[{a_m},{a_k}] b=[{b_k},{b_n}] c=[{c_m},{c_n}] alpha={alpha} bias={bias_slot} scale={scale_slot} res={res_slot} bm={bias_m} sm={scale_m} \
              off=[{a_off},{b_off},{c_off}] slots=[{a_slot},{b_slot},{c_slot}]"
         );
     }
@@ -1687,6 +1721,9 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         res_slot,
         res_off,
         relu,
+        bias_m,
+        scale_m,
+        bias_outside,
         acc: acc.map(|(n, _, _)| n).unwrap_or(1),
         a_acc: acc.map(|(_, a, _)| a).unwrap_or(0),
         b_acc: acc.map(|(_, _, b)| b).unwrap_or(0),
@@ -1811,6 +1848,9 @@ mod tests {
             res_slot: -1,
             res_off: 0,
             relu: false,
+            bias_m: false,
+            scale_m: false,
+            bias_outside: false,
             acc: 1,
             a_acc: 0,
             b_acc: 0,

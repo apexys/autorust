@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Host-GEMM epilogue supports per-row (`m`) affine terms and both orders.**
+  A transposed conv store (`C[cout, ox]`) puts the per-channel BN terms on the
+  m axis, and a BN store is `C*scale + bias` rather than the transformer's
+  `(C + bias)*scale`. `HostGemm` now carries `bias_m`/`scale_m`/`bias_outside`
+  and the CUDA epilogue indexes the row and applies scale/bias in the recorded
+  order (this also fixes a latent wrong order for BN-style stores). Gates:
+  `tests/cublas.rs::cublas_matches_per_row_bias_and_scale` in both orders. The
+  ResNet convs still stop at `epilogue-operand` because the BN scale is a
+  computed `1/sqrt(var+eps)`, so folding BN (item 7) is the remaining step.
 - **cuBLASLt fused bias(+ReLU) epilogue for host GEMMs.** `runtime::cublas`
   loads `libcublasLt` and runs eligible f32 host GEMMs with the bias fused
   into the matmul (`CUBLASLT_EPILOGUE_BIAS` / `BIAS_RELU`), skipping the
