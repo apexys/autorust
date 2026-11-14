@@ -5257,3 +5257,16 @@ structural: the fused optimizer kernel (§9.59) is CUDA-only, so CL/VK still pay
 the tensor-graph update (~95 ms); porting `runtime::cuda_optim` to CL/VK is the
 obvious follow-up. ResNet-18 conv remains the largest CUDA gap (17x) even after
 the im2col gate (§9.64); CPU ResNet is 3.2x torch.
+
+### 9.66 PERFORMANCE_STEPS.md: the next round (2026-11-14)
+
+`PERFORMANCE_STEPS.md` collects the backlog after this session: the remaining
+`PERFORMANCE_REVIEW.md` items, the gaps from the refreshed cross-framework
+matrix (§9.65), and the measured dead ends, ranked by assumed impact. The top
+items are (1) serialized AOT lowered plans for GPU backends — the only large
+cold-start component with no cache today (warm cold 570 ms vs 38.5 ms replay);
+(2) implicit-GEMM/Winograd convolution (ResNet-18 17.2x torch); (3) automatic
+eager plans; (4) elementwise fusion (7,910 `E_*` launches, 40% of KPROF time);
+(5) a fused attention backward; (6) HostGemm staging/`beta = 1`; (7) ONNX graph
+preprocessing; (8) the fused optimizer ported to CL/VK; plus the cold-warm
+breakdown and a sequence. Numbers, gates and code pointers are in the document.
