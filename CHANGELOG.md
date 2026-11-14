@@ -102,6 +102,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (27 → 108 GB/s, level with torch's 26.3 ms); the graph path remains the
   reference and the fallback for non-CUDA, non-f32 and small tensors.
   `AUTORUST_OPTIM_KERNEL=0` forces it, `set_fused_optimizer(false)` from code.
+  The eligibility floor is 256 elements, so a ViT-B/16 training step (768-wide
+  parameters) uses it too: 217.2 → 212.1 ms and 2,287 → 1,487 launches/step.
   Also: every moment/parameter store is deferred into one schedule, so the graph
   fallback dropped from 66 `create_linear_with_vars` passes to two.
 - **ONNX replay plans.** `OnnxModel::run` captures the whole graph's LINEARS on

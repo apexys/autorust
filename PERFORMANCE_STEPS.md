@@ -191,11 +191,41 @@ or library GEMM between them), with a hard rule to **never fuse across a
 kernel where the scheduler currently emits one kernel per store. Validate with
 the kernel multiset before/after (fewer kernels, same rendered math).
 
-**Expected:** 30-50% fewer launches and 20-40 ms off ViT training; larger effect
-on LLM decode.
+**Measured composition (2026-11-14), ViT train bs 4, JIT replay, KPROF delta
+for one step, kernel identity resolved by hashing the PTX disk cache against the
+KPROF program key:**
 
-**Effort/risk:** medium-large; fusion correctness is the risk, so gate with the
-differential suite and the multiset check the review asks for.
+| program | count | what it actually is |
+|---|---:|---|
+| `E_4608_32_4` | 245 | fills/copies of 589,824 elements (`0.0`, `1.0`, `2.0`, `-1.0`; plus a pure copy variant) |
+| `E_2` | 199 | 2-thread **RNG counter increments** (`add 2359296/589824/605184/768/…`) |
+| `host_gemm` | 170 | library GEMMs (working as intended) |
+| `E_18432_32_4` | 120 | fills/copies at 2.36M elements |
+| `r_*` | ~330 | reductions (attention/FFN) |
+| total | 1,487 | (2,287 before the optimizer threshold change below) |
+
+So the launch count is **not** a chain of fusible elementwise stores: it is
+constant materialization, copies, and 2-element RNG-counter updates. A
+same-loop-domain multi-store merge has nothing to merge here — it would need
+constant-broadcast folding (a `full(c)` inlined into its consumer) or a
+launch-batching layer, not kernel fusion. That is why no fusion pass was
+landed: the measured opportunity is ~3 ms (fills) + ~1 ms (counter launches),
+not the 20-40 ms the item assumed.
+
+The one nearby measured win: `runtime::{cuda,cl}_optim::MIN_ELEMS` dropped from
+1024 to 256, so ViT's 768-wide parameters use the fused optimizer instead of
+the graph (the graph already fused the Adam chain into one kernel per parameter
+for these shapes, so the win is launch count, not bandwidth):
+ViT train bs 4 **217.2 → 212.1/212.4 ms (-2.3%)**, 1,487 vs 2,287 launches/step.
+
+**Better follow-ups measured here:** (a) find why scalar constants are
+materialized into full buffers each step (`2.0` fills at 768² and 2.36M) and
+inline/cache them; (b) fold the RNG counter increment into the random kernel
+(or batch the 199 increments into one launch with per-call offsets). Both are
+more contained and higher-value than a generic fusion pass.
+
+**Effort/risk:** medium-large for a real fusion pass; the measured opportunity
+does not justify it now.
 
 ## 5. Fused attention backward
 

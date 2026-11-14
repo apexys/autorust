@@ -5337,3 +5337,30 @@ Also: `flash_cuda_masks::causal_skips_half_the_work` was marked `#[ignore]`.
 Under the full suite it measured 0.92-1.20x (needs 1.25x) while standalone runs
 give 1.57x; causal *correctness* is covered by `causal_mask_gqa_all_kernels`, so
 the wall-clock ratio is a manual benchmark, not a CI gate.
+
+### 9.69 Item 4 attempt: the E_* launch count is not fusible compute (2026-11-14)
+
+Instrumented one ViT-B/16 training step (bs 4, JIT replay) with KPROF and
+resolved each program key by hashing the PTX disk cache, because kernel names
+collide across formulas. Result: 2,287 launches/step (1,487 after the optimizer
+change below), and the largest groups are **not** elementwise chains:
+
+- `E_4608_32_4` (245): fills and copies of 589,824 elements — writing `0.0`,
+  `1.0`, `2.0`, `-1.0`, or copying buffer-to-buffer.
+- `E_2` (199): two-thread device-RNG counter increments (`+2359296`, `+589824`,
+  `+605184`, `+768`, ...).
+- `E_18432_32_4` (120): fills/copies at 2.36M elements.
+- `host_gemm` 170 and `r_*` ~330 are the real work.
+
+A same-loop-domain multi-store fusion has nothing to merge in this set: the
+fill/copy kernels materialize constants or move data, and the counter kernels
+have a 2-element domain. The measured ceiling for the two contained ideas is
+~3 ms (constant fills) + ~1 ms (counter launches), so no generic fusion pass was
+landed; the document now records the measurement and points at constant-broadcast
+folding and counter-launch batching instead.
+
+Separately, `MIN_ELEMS` for the fused optimizer dropped 1024 → 256 so ViT-B/16's
+768-wide parameters qualify: ViT train bs 4 **217.2 → 212.1/212.4 ms (-2.3%)**
+and 2,287 → 1,487 launches/step. The graph optimizer was already one fused
+kernel per parameter for these shapes, so the gain is launch count, not
+bandwidth.
