@@ -8,7 +8,7 @@
 //! unlike this generic `run_host_kernel` seam.
 
 /// Smallest parameter worth a host kernel.
-pub const MIN_ELEMS: i64 = 1024;
+pub const MIN_ELEMS: i64 = 256;
 
 /// Kernel entry point.
 pub const NAME: &str = "autorust_adamw";

@@ -21,7 +21,7 @@
 /// Smallest parameter that is worth a host kernel (below this the launch and
 /// buffer resolution dominate; the graph path is also what the golden tests
 /// exercise).
-pub const MIN_ELEMS: i64 = 1024;
+pub const MIN_ELEMS: i64 = 256;
 
 /// Kernel entry point.
 pub const NAME: &str = "autorust_adamw";
