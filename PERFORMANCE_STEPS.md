@@ -15,6 +15,25 @@ Measurement protocol for every item: alternating builds, two processes, medians,
 same machine, `AUTORUST_PROF=1`/`AUTORUST_KPROF=1` for attribution, and the full
 test suite before committing. Do not land a "win" justified by one sample.
 
+**Ranking update (2026-11-14, after the first attempts).** Item 1's premise was
+measured and revised: the cacheable host work in a cold step is ~70-120 ms of
+the ~555 ms (the rest is GPU clock ramp and first-launch driver work — the
+median step falls 88 → 65 → 42 → 39 ms over the first five runs). Item 8 is
+done for CL (96.9 → 26.4 ms) with VK remaining, item 9 landed with no measurable
+step-time change, item 3's per-shape LRU landed, and TF32 (item 13) measured
+−5.8% on ViT training. The impact order is therefore now:
+
+1. **#2 conv** (~300 ms available, 17x gap)
+2. **#3 automatic eager plans** (~1.5 s per eager step)
+3. **#4 elementwise fusion** (~40% of generated kernels)
+4. **#5 attention backward** (training gap)
+5. **#1/#10 cold construction** (~100 ms one-off; the SINK-content schedule
+   cache is the cheaper variant of #1)
+6. **#6 HostGemm staging**, **#7 ONNX preprocessing**
+7. **#8 VK optimizer**, **#13 TF32/bf16 opt-ins**, **#11/#12/#14/#15**
+
+Item numbers below are kept stable so cross-references continue to work.
+
 ## Baseline (2026-11-14, `bench/results/`)
 
 Gap to PyTorch (f32, medians):
@@ -37,7 +56,7 @@ Backends on this machine:
 | ViT-B/16 infer bs 8 | 69.8 ms | 179 ms | 116 ms | 1103 ms |
 | GEMM sweep (8) | 27.4 ms | 52.8 ms | 56.6 ms | 506 ms |
 | memops sweep (8) | 5.03 ms | 7.97 ms | **4.79 ms** | 70.8 ms |
-| AdamW 100M | **25.7 ms** | 96.9 ms | 94.7 ms | 246 ms |
+| AdamW 100M | **25.4 ms** | **26.4 ms** | 95.0 ms | 246 ms |
 
 First process vs steady (`vit_infer` bs 4 unless noted):
 
@@ -76,11 +95,17 @@ plans; start with a debug-gated implementation and a strict validation of the
 rebuilt plan against the freshly scheduled one (kernel multiset + numerics).
 Extend the key with a binary fingerprint so a codegen change invalidates it.
 
-**Expected:** warm-cache cold start 570 ms → roughly `50-100 ms + first exec`.
-On a fresh cache the scheduling/lowering part is removed too; NVRTC is still
-needed unless the serialized plan also embeds the compiled PTX/cubin (the
-`freeze` seam embeds sources for this reason). The single largest broad win for
-deployment-style workloads.
+**Measured caveat (2026-11-14):** the cacheable host work in the warm-cache cold
+step is `realize.schedule` 58 ms + `callify` 12 ms + render misses (0-51 ms) ≈
+**70-120 ms of ~555 ms**. The rest is GPU clock ramp and first-launch driver
+work: successive step medians are 88 → 65 → 42 → 39 ms. So the realistic win
+here is ~100 ms per cold process, not 470 ms. The cheaper variant is the
+**SINK-content schedule cache** (reuse the kernel split + memory plan, skip
+`rangeify`/bufferize) before full plan serialization.
+
+**Expected:** warm-cache cold start 555 ms → ~440-480 ms; deployment value comes
+from removing the scheduling on *every* new shape/process, not from the first
+step's GPU ramp. Do the SINK-content cache first.
 
 **Effort/risk:** medium-large. The risk is buffer-slot and arena-id reuse; the
 existing content-keyed `CompiledProg` reuse path is the precedent, and the plan
@@ -129,6 +154,11 @@ aliasing contract.
 **Expected:** eager users see replay-like host cost (1.6 s → ~0.1-0.2 s on ViT
 train). This is also the prerequisite for making "no JIT" a reasonable default
 for inference.
+
+**Status (2026-11-14):** `StepPlan` now keeps one plan per input signature with
+an LRU (`StepPlan::set_capacity`, default 4) and a test for two shapes
+(`tests/jit.rs::step_plan_keeps_one_plan_per_shape`). Remaining: wiring it into
+the default eager path or documenting the opt-in API.
 
 **Effort/risk:** small-medium; the machinery is done, this is API + lifecycle.
 
@@ -219,6 +249,12 @@ CUDA one (f32, contiguous, `n >= 1024`). CPU backends can keep the graph path
 
 **Expected:** CL/VK optimizer 95 → ~30-40 ms; closes the 3.7x cross-backend gap.
 
+**Status (2026-11-14):** CL is done (`runtime::cl_optim`) and measures **26.4 ms**
+— CUDA parity. A numerical gate runs on CL too
+(`tests/nn_optim.rs::fused_kernel_matches_graph_update_cl`). Vulkan is not
+ported: its compute path needs explicit descriptor sets rather than the generic
+`run_host_kernel` source seam, which is a separate piece of work.
+
 **Effort/risk:** small-medium; the numerical formula is already validated
 against the graph path on CUDA.
 
@@ -236,6 +272,13 @@ that `alloc.backend` falls after the first step.
 
 **Expected:** ~5 ms/step on ViT training and more on models with many small
 buffers; also reduces driver pressure.
+
+**Status (2026-11-14):** landed (`BufferBase::drop` returns base allocations to
+the device free list, capped at 32 per size class; `try_device` makes the drop
+glue safe during shutdown). Measured: `alloc.backend` 1817 → 1611 over the
+profile window (−11%), `alloc.reuse` 206; **step time unchanged** (220.97/221.47
+→ 219.99/218.97 ms on ViT train bs 4; MNIST unchanged). Direction closed: the
+allocator is not a bottleneck, as the earlier measurement suggested.
 
 **Effort/risk:** medium; buffer lifetime/aliasing rules need care (the pinning
 bug in §9.59 is the cautionary tale).
@@ -307,6 +350,11 @@ inference (the bf16 ViT rows are already close to torch).
 
 **Expected:** 3-8% on ViT inference/training; a larger win if bf16 mixed
 precision is adopted.
+
+**Measured (2026-11-14):** `AUTORUST_CUBLAS_TF32=1` on ViT train bs 4 gives
+**217.2 → 204.6 ms (-5.8%)**; it changes numerics, so it stays an explicit
+opt-in. The cuBLASLt epilogue fusion (removing the separate epilogue kernel) is
+still open.
 
 **Effort/risk:** medium; numerics changes must stay opt-in.
 

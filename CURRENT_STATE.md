@@ -5270,3 +5270,37 @@ eager plans; (4) elementwise fusion (7,910 `E_*` launches, 40% of KPROF time);
 (5) a fused attention backward; (6) HostGemm staging/`beta = 1`; (7) ONNX graph
 preprocessing; (8) the fused optimizer ported to CL/VK; plus the cold-warm
 breakdown and a sequence. Numbers, gates and code pointers are in the document.
+
+### 9.67 PERFORMANCE_STEPS, first pass: CL optimizer, free list, StepPlan LRU, cold-start revision (2026-11-14)
+
+Worked through the ranked backlog; all numbers are on the RTX 3060.
+
+- **Item 8 (optimizer backends): CL done.** `runtime::cl_optim` is the OpenCL
+  port of the fused kernel, launched through the same `HostCall` seam. The
+  100M-parameter benchmark goes **96.9 → 26.4 ms**, level with CUDA (25.4).
+  `tests/nn_optim.rs::fused_kernel_matches_graph_update_cl` checks it against
+  the graph path. Vulkan remains on the graph path (95.0 ms): its compute path
+  needs explicit descriptor sets, not the generic source seam.
+  While wiring the CL test, `LAMB::new` was found to create the bias-correction
+  tensors and the m/v state on the *default* device; an optimizer over CL params
+  in a CUDA process failed with "buffers must be on the same device". Fixed by
+  deriving the device from each parameter.
+- **Item 9 (allocator): landed, no step-time win.** `BufferBase::drop` returns
+  base allocations to a size-capped free list (`try_device` keeps the drop glue
+  safe when the registry is gone). `alloc.backend` 1817 → 1611 over the profile
+  window (−11%), `alloc.reuse` 206; ViT train bs 4 220.97/221.47 → 219.99/218.97
+  ms and MNIST unchanged. The allocator is not a bottleneck; the change is kept
+  because it makes the documented free list real and bounds steady-state driver
+  traffic.
+- **Item 3 (eager plans): per-shape LRU.** `StepPlan` now holds up to 4 plans
+  keyed by input signature, evicting LRU; `step_plan_keeps_one_plan_per_shape`
+  proves two shapes each capture once and both replay.
+- **Item 1 (serialized plans): premise measured and revised.** A warm-cache cold
+  step is 555-588 ms, but `realize.schedule` is 58 ms, `callify` 12 ms and
+  render misses 0-51 ms — ~70-120 ms of cacheable host work. Successive step
+  medians are 88 → 65 → 42 → 39 ms, so the rest is GPU clock ramp and
+  first-launch driver work. The plan-serialization win is therefore ~100 ms per
+  cold process, not 470 ms; the SINK-content schedule cache is the cheaper
+  variant to try first. `PERFORMANCE_STEPS.md` records the revised ranking.
+- **Item 13 (TF32): measured opt-in.** `AUTORUST_CUBLAS_TF32=1` on ViT train
+  bs 4 is **217.2 → 204.6 ms (-5.8%)**; numerics change, so it stays opt-in.

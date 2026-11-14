@@ -837,10 +837,12 @@ traffic per parameter (grad, m, v, p reads; m, v, p writes).
 | CUDA | **26.0 ms (107.7 GB/s)** | 26.3 ms (106.3 GB/s) |
 | CPU | **232.0 ms (12.1 GB/s)** | 295.8 ms (9.5 GB/s) |
 
-On CUDA the update is a single fused kernel per parameter
-(`runtime::cuda_optim`, on by default): one 256-thread pass loads g/m/v, stores
-the new moments and updates p, so the 2.8 GB of traffic runs at the ideal
-28 bytes per parameter. The tensor graph (four or five elementwise passes per
+On CUDA and OpenCL the update is a single fused kernel per parameter
+(`runtime::cuda_optim` / `runtime::cl_optim`, on by default): one 256-thread
+pass loads g/m/v, stores the new moments and updates p, so the 2.8 GB of
+traffic runs at the ideal 28 bytes per parameter. CL measures 26.4 ms, the same
+as CUDA; Vulkan still uses the graph path (~95 ms) because its compute path
+needs explicit descriptor sets. The tensor graph (four or five elementwise passes per
 parameter, ~52 bytes and ~15% of peak because the scheduler can only give each
 launch 8-thread blocks for these extents) is the fallback and the numeric
 reference; it measured 102-104 ms. `AUTORUST_OPTIM_KERNEL=0` forces it.

@@ -144,11 +144,31 @@ impl BufferBase {
     }
     /// Drop the backing storage; the caller ensures there are no live users.
     pub fn deallocate(&self) {
-        assert!(
-            self.is_allocated(),
-            "TGERR: buffer must be allocated to deallocate"
-        );
-        *self.buf.borrow_mut() = None;
+        let o = self
+            .buf
+            .borrow_mut()
+            .take()
+            .expect("TGERR: buffer must be allocated to deallocate");
+        if let Some(dev) = crate::runtime::device::try_device(&self.device) {
+            dev.allocator.free(o, self.nbytes());
+        }
+    }
+}
+
+impl Drop for BufferBase {
+    /// Return the base allocation to the device's free list instead of
+    /// releasing it. Every step drops its intermediates, and `alloc.reuse` was
+    /// 0 with `alloc.backend` at ~500-600/step: each realize paid a driver
+    /// allocation (~0.010 ms) even for buffers of a size the process had just
+    /// freed. Views share the base, so only the base returns its storage.
+    fn drop(&mut self) {
+        let Some(o) = self.buf.get_mut().take() else {
+            return;
+        };
+        let Some(dev) = crate::runtime::device::try_device(&self.device) else {
+            return;
+        };
+        dev.allocator.free(o, self.nbytes());
     }
 }
 

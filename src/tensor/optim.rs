@@ -22,23 +22,32 @@ use crate::uop::ctx::UOpCtx;
 /// Whether the fused optimizer kernel is enabled (default: on, unless
 /// `AUTORUST_OPTIM_KERNEL=0`). The graph path remains the reference and is used
 /// for non-CUDA devices, non-f32 parameters, and tiny tensors.
-#[cfg(all(
-    feature = "backend_cuda",
-    any(target_os = "linux", target_os = "windows")
+#[cfg(any(
+    all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ),
+    feature = "backend_cl"
 ))]
 pub fn set_fused_optimizer(on: bool) {
     FUSED_OPTIM.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-#[cfg(all(
-    feature = "backend_cuda",
-    any(target_os = "linux", target_os = "windows")
+#[cfg(any(
+    all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ),
+    feature = "backend_cl"
 ))]
 static FUSED_OPTIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-#[cfg(all(
-    feature = "backend_cuda",
-    any(target_os = "linux", target_os = "windows")
+#[cfg(any(
+    all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ),
+    feature = "backend_cl"
 ))]
 fn fused_optimizer_enabled() -> bool {
     static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -52,9 +61,12 @@ fn fused_optimizer_enabled() -> bool {
 
 /// `Some(n)` when this parameter can use the fused kernel: contiguous f32 on
 /// CUDA with at least one block's worth of elements.
-#[cfg(all(
-    feature = "backend_cuda",
-    any(target_os = "linux", target_os = "windows")
+#[cfg(any(
+    all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ),
+    feature = "backend_cl"
 ))]
 fn fused_optim_elems(ctx: &mut UOpCtx, t: &Tensor) -> Option<i64> {
     let u = t.uop().clone();
@@ -66,7 +78,7 @@ fn fused_optim_elems(ctx: &mut UOpCtx, t: &Tensor) -> Option<i64> {
     else {
         return None;
     };
-    if !dev.starts_with("CUDA") {
+    if !(dev.starts_with("CUDA") || dev.starts_with("CL")) {
         return None;
     }
     let n: i64 = ctx
@@ -197,9 +209,22 @@ fn new_optim_param(ctx: &mut UOpCtx, params: &[Tensor]) -> Vec<Tensor> {
         .map(|p| {
             let shape = p.shape_ctx(ctx);
             let dt = p.dtype_ctx(ctx);
-            Tensor::zeros_param(&mut *ctx, shape, Some(dt), None)
+            // State must live on the parameter's device: `None` uses the
+            // process default, which is wrong for an optimizer over a
+            // non-default device (e.g. CL params in a CUDA process).
+            let dev = device_of_param(ctx, p);
+            Tensor::zeros_param(&mut *ctx, shape, Some(dt), dev.as_deref())
         })
         .collect()
+}
+
+/// The device string of `t`, if it is bound to one.
+fn device_of_param(ctx: &mut UOpCtx, t: &Tensor) -> Option<String> {
+    match crate::schedule::indexing::device_of(ctx, t.uop().clone()) {
+        Some(crate::uop::arg::DeviceSpec::Single(s)) => Some(s),
+        Some(crate::uop::arg::DeviceSpec::Multi(v)) => v.first().cloned(),
+        None => None,
+    }
 }
 
 /// Scalar const (0-d) of a requested dtype — tinygrad's `Tensor.ones((1,))`
@@ -388,6 +413,7 @@ impl LAMB {
             .map(|p| p.ctx().clone())
             .expect("TGERR: optimizer needs at least one parameter");
         let mut ctx = arena.borrow_mut();
+        let device = params.first().and_then(|p| device_of_param(&mut ctx, p));
         // b1_t/b2_t: `Tensor.ones((1,), dtype=dtypes.float32).is_param_(False)` —
         // **explicitly f32** (optim.py:157), not the default float. Keeping the
         // bias-correction accumulators in f32 is load-bearing: in bf16 `0.999`
@@ -397,14 +423,14 @@ impl LAMB {
             &mut ctx,
             &[crate::uop::sint::SVal::I(1)],
             Some(crate::dtype::FLOAT32),
-            None,
+            device.as_deref(),
         )
         .to_param_ctx(&mut ctx);
         let b2_t = crate::tensor::creation::ones(
             &mut ctx,
             &[crate::uop::sint::SVal::I(1)],
             Some(crate::dtype::FLOAT32),
-            None,
+            device.as_deref(),
         )
         .to_param_ctx(&mut ctx);
         let m = new_optim_param(&mut ctx, &params);
@@ -442,9 +468,12 @@ impl Optim for LAMB {
         // elementwise passes. Only taken when *every* parameter (and its
         // gradient) is a large contiguous f32 CUDA buffer, because
         // `schedule_step` zips `params` with the returned updates.
-        #[cfg(all(
-            feature = "backend_cuda",
-            any(target_os = "linux", target_os = "windows")
+        #[cfg(any(
+            all(
+                feature = "backend_cuda",
+                any(target_os = "linux", target_os = "windows")
+            ),
+            feature = "backend_cl"
         ))]
         if fused_optimizer_enabled() && !params.is_empty() {
             let mut ns: Vec<i64> = Vec::with_capacity(params.len());
@@ -504,9 +533,40 @@ impl Optim for LAMB {
                         b1buf.clone(),
                         b2buf.clone(),
                     ];
-                    let mut call = crate::runtime::cuda_optim::host_call(
-                        bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
-                    );
+                    let mut call = {
+                        #[cfg(all(
+                            feature = "backend_cuda",
+                            any(target_os = "linux", target_os = "windows")
+                        ))]
+                        let cuda = dev.starts_with("CUDA");
+                        #[cfg(all(
+                            feature = "backend_cuda",
+                            any(target_os = "linux", target_os = "windows")
+                        ))]
+                        if cuda {
+                            crate::runtime::cuda_optim::host_call(
+                                bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
+                            )
+                        } else {
+                            #[cfg(feature = "backend_cl")]
+                            {
+                                crate::runtime::cl_optim::host_call(
+                                    bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
+                                )
+                            }
+                            #[cfg(not(feature = "backend_cl"))]
+                            unreachable!("TGERR: fused optimizer device without a backend")
+                        }
+                        #[cfg(not(all(
+                            feature = "backend_cuda",
+                            any(target_os = "linux", target_os = "windows")
+                        )))]
+                        {
+                            crate::runtime::cl_optim::host_call(
+                                bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
+                            )
+                        }
+                    };
                     call.device = dev.clone();
                     sess.capture_host(call.clone());
                     call.exec();

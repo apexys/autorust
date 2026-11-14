@@ -251,20 +251,43 @@ fn collect_buffers(ctx: &mut UOpCtx, sess: &mut Session, steps: &[JitStep]) -> V
 /// }
 /// ```
 pub struct StepPlan {
-    jit: Jit,
-    inputs: Vec<Tensor>,
-    sig: Vec<(Vec<i64>, crate::dtype::DTypeId)>,
+    plans: Vec<PlanEntry>,
+    cap: usize,
     enabled: bool,
 }
 
+/// One captured plan for one input signature.
+struct PlanEntry {
+    jit: Jit,
+    inputs: Vec<Tensor>,
+    sig: Vec<(Vec<i64>, crate::dtype::DTypeId)>,
+}
+
 impl StepPlan {
-    /// An empty plan; the first [`StepPlan::run`] captures.
+    /// An empty plan cache; the first [`StepPlan::run`] for a signature captures.
     pub fn new() -> Self {
         StepPlan {
-            jit: Jit::new(),
-            inputs: Vec::new(),
-            sig: Vec::new(),
+            plans: Vec::new(),
+            cap: 4,
             enabled: true,
+        }
+    }
+
+    /// Number of captured plans currently resident (one per input signature).
+    pub fn len(&self) -> usize {
+        self.plans.len()
+    }
+
+    /// Whether no plan is captured.
+    pub fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+    }
+
+    /// Bound the number of resident plans (LRU order, oldest evicted first).
+    pub fn set_capacity(&mut self, cap: usize) {
+        self.cap = cap.max(1);
+        while self.plans.len() > self.cap {
+            self.plans.remove(0);
         }
     }
 
@@ -277,20 +300,22 @@ impl StepPlan {
         }
     }
 
-    /// Whether a plan is captured and can be replayed.
+    /// Whether at least one plan is captured and can be replayed.
     pub fn is_captured(&self) -> bool {
-        self.jit.is_captured()
+        !self.plans.is_empty()
     }
 
-    /// Drop the capture; the next run re-captures.
+    /// Drop every capture; the next run re-captures.
     pub fn reset(&mut self) {
-        self.jit.reset();
-        self.inputs.clear();
-        self.sig.clear();
+        self.plans.clear();
     }
 
     /// Run the step through the plan. `f` receives the plan's own input buffers
     /// (filled from `inputs`) and must return the step's outputs.
+    ///
+    /// Plans are kept per input signature up to [`StepPlan::set_capacity`]; a
+    /// new shape captures a new entry and the least-recently-used one is
+    /// evicted, so batch sweeps replay instead of re-scheduling.
     pub fn run<F>(&mut self, ctx: &Ctx, sess: &mut Session, inputs: &[Tensor], f: F) -> Vec<Tensor>
     where
         F: Fn(&Ctx, &mut Session, &[Tensor]) -> Vec<Tensor>,
@@ -299,16 +324,41 @@ impl StepPlan {
             return f(ctx, sess, inputs);
         }
         let sig = signature(ctx, inputs);
-        if self.jit.is_captured() && self.sig == sig {
-            for (dst, src) in self.inputs.iter().zip(inputs) {
-                dst.assign(sess, src);
+        if let Some(pos) = self.plans.iter().position(|p| p.sig == sig) {
+            let rets = {
+                let p = &mut self.plans[pos];
+                for (dst, src) in p.inputs.iter().zip(inputs) {
+                    dst.assign(sess, src);
+                }
+                let mut c = ctx.borrow_mut();
+                p.jit.replay(&mut c, sess)
+            };
+            if pos + 1 != self.plans.len() {
+                let e = self.plans.remove(pos);
+                self.plans.push(e);
             }
-            let mut c = ctx.borrow_mut();
-            return self.jit.replay(&mut c, sess);
+            return rets;
         }
 
-        // (Re)capture: bind the inputs to dedicated buffers, then run once.
-        self.reset();
+        let (entry, rets) = Self::capture(ctx, sess, inputs, sig, &f);
+        self.plans.push(entry);
+        while self.plans.len() > self.cap {
+            self.plans.remove(0);
+        }
+        rets
+    }
+
+    fn capture<F>(
+        ctx: &Ctx,
+        sess: &mut Session,
+        inputs: &[Tensor],
+        sig: Vec<(Vec<i64>, crate::dtype::DTypeId)>,
+        f: &F,
+    ) -> (PlanEntry, Vec<Tensor>)
+    where
+        F: Fn(&Ctx, &mut Session, &[Tensor]) -> Vec<Tensor>,
+    {
+        // Bind the inputs to dedicated buffers, then run once under capture.
         let mut metas = Vec::with_capacity(inputs.len());
         {
             let mut c = ctx.borrow_mut();
@@ -345,10 +395,16 @@ impl StepPlan {
         let mut c = ctx.borrow_mut();
         Tensor::realize_many(&mut c, sess, rets.iter());
         let planned = sess.end_capture();
-        self.jit.lower_capture(&mut c, sess, planned, rets.clone());
-        self.inputs = bound;
-        self.sig = sig;
-        rets
+        let mut jit = Jit::new();
+        jit.lower_capture(&mut c, sess, planned, rets.clone());
+        (
+            PlanEntry {
+                jit,
+                inputs: bound,
+                sig,
+            },
+            rets,
+        )
     }
 }
 

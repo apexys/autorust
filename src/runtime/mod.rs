@@ -48,6 +48,8 @@ pub mod cuda_flash_sage;
     any(target_os = "linux", target_os = "windows")
 ))]
 pub mod cuda_flash_tc;
+#[cfg(feature = "backend_cl")]
+pub mod cl_optim;
 pub mod device;
 pub mod interp;
 #[cfg(all(

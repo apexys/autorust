@@ -149,12 +149,18 @@ impl LruAllocator {
     }
 
     /// `LRUAllocator.free` — push to the cache (LRU on by default).
+    ///
+    /// Capped per size class so a long-lived process cannot keep an unbounded
+    /// number of foreign allocations alive; overflow goes back to the backend.
     pub fn free(&self, opaque: Rc<dyn OpaqueT>, size: usize) {
-        self.cache
-            .borrow_mut()
-            .entry((size, Default::default()))
-            .or_default()
-            .push(opaque);
+        const MAX_PER_SIZE: usize = 32;
+        let mut cache = self.cache.borrow_mut();
+        let list = cache.entry((size, Default::default())).or_default();
+        if list.len() < MAX_PER_SIZE {
+            list.push(opaque);
+        } else {
+            self.inner._free(opaque);
+        }
     }
 
     /// `LRUAllocator.free_cache` — drop every cached opaque.
@@ -570,6 +576,18 @@ pub fn registered_devices() -> Vec<String> {
     let mut names: Vec<String> = REGISTRY.with(|reg| reg.borrow().keys().cloned().collect());
     names.sort();
     names
+}
+
+/// Look up an already-open device without panicking or constructing one.
+///
+/// Used by `BufferBase`'s drop glue: returning storage to the free list must be
+/// a no-op (not a panic or a device open) when the registry is gone.
+pub fn try_device(name: &str) -> Option<Rc<Compiled>> {
+    let canon = canonicalize_device_name(name);
+    REGISTRY
+        .try_with(|reg| reg.borrow().get(&canon).and_then(|e| e.device.clone()))
+        .ok()
+        .flatten()
 }
 
 /// `Device[name]` — the registered device singletons (interp "CPU"/"INTERP";

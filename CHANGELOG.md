@@ -40,6 +40,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Device buffers return to the free list.** `BufferBase::drop` hands the base
+  allocation back to the device allocator's size-capped free list instead of
+  releasing it, so steady-state realizes stop paying a driver allocation per
+  intermediate: `alloc.backend` 1817 → 1611 (−11%) on `vit_train`. No step-time
+  change was measurable; the allocator was not a bottleneck.
 - **`remove_bufferize` substitution stops at `AFTER`.** The range-remapping DFS
   used to walk subtrees that belong to previously realized kernels and cannot
   contain the current schedule's ranges. `upat::substitute_local` prunes them:
@@ -48,6 +53,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fused Adam/AdamW/LAMB kernel for OpenCL.** `runtime::cl_optim` is the CL
+  port of the CUDA kernel: the 100M-parameter / 32-tensor benchmark goes
+  **96.9 → 26.4 ms (107 GB/s), level with CUDA's 25.4 ms**. Gated like CUDA
+  (f32, contiguous, `n >= 1024`, `AUTORUST_OPTIM_KERNEL=0` to disable), with a
+  graph-vs-kernel numerical test on CL. Vulkan still uses the graph path
+  (its compute path needs descriptor sets rather than the generic host-kernel
+  seam).
+- **`StepPlan` keeps one plan per input signature.** An LRU
+  (`set_capacity`, default 4) lets a batch sweep replay every shape instead of
+  recapturing; covered by `tests/jit.rs::step_plan_keeps_one_plan_per_shape`.
 - **`StepPlan`: a reusable eager plan.** `engine::jit::StepPlan` captures a step
   function once (binding its inputs to dedicated buffers) and replays it
   afterwards, recapturing when the input shapes/dtypes change — the same
@@ -172,6 +187,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Optimizer state is created on the parameter's device.** `LAMB::new` built
+  the bias-correction tensors, `m` and `v` with no device, so an optimizer over
+  non-default devices (e.g. `CL` params in a CUDA process) failed with "all
+  buffers must be on the same device".
 - **CUDA NVRTC fallback.** The device probe now tries every installed NVRTC
   newest-first and pins the first whose PTX the driver actually loads, instead
   of disabling CUDA when the newest toolkit is newer than the driver. An

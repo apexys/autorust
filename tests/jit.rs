@@ -245,3 +245,50 @@ fn step_plan_captures_once_and_rebinds_inputs() {
     // through a fresh eager computation instead (the contract is documented).
     let _ = a;
 }
+
+/// `StepPlan` keeps one plan per input signature: a second shape captures once,
+/// and both shapes then replay without calling the step again.
+#[test]
+fn step_plan_keeps_one_plan_per_shape() {
+    fn step(
+        plan: &mut StepPlan,
+        ctx: &Ctx,
+        sess: &mut Session,
+        x: &Tensor,
+        w: &Tensor,
+        calls: &std::cell::Cell<u32>,
+    ) -> Vec<Tensor> {
+        plan.run(ctx, sess, std::slice::from_ref(x), |_c, _s, ins| {
+            calls.set(calls.get() + 1);
+            vec![ins[0].dot(w)]
+        })
+    }
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let w =
+        Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], None, None).reshape([3, 2]);
+    let small =
+        Tensor::from_slice(&ctx, &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], None, None).reshape([2, 3]);
+    let big = Tensor::from_slice(
+        &ctx,
+        &[1.0f32, 0.0, 2.0, 0.0, 1.0, 3.0, 2.0, 1.0, 0.0],
+        None,
+        None,
+    )
+    .reshape([3, 3]);
+    let calls = std::cell::Cell::new(0u32);
+    let mut plan = StepPlan::new();
+    let _a = step(&mut plan, &ctx, &mut sess, &small, &w, &calls);
+    let b = step(&mut plan, &ctx, &mut sess, &big, &w, &calls);
+    assert_eq!(calls.get(), 2, "one capture per shape");
+    assert_eq!(plan.len(), 2);
+    let _ = step(&mut plan, &ctx, &mut sess, &small, &w, &calls);
+    let _ = step(&mut plan, &ctx, &mut sess, &big, &w, &calls);
+    assert_eq!(calls.get(), 2, "both shapes replay");
+    let want = big.dot(&w).to_list::<f32>(&mut sess);
+    let got = b[0].to_list::<f32>(&mut sess);
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).abs() < 1e-5, "plan[{i}]: {g} != {w}");
+    }
+}
