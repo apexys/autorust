@@ -346,7 +346,15 @@ train bs 4 the accepted descriptors go 170 → **182** and the step **212.4 →
 weight-gradient shape vs the generated kernel, `<1e-3`); the end-to-end loss
 with `AUTORUST_CUBLAS=0` vs default matches to ~5e-4 after two steps.
 Staging (a destination with no unit-stride axis / a merged `(h,d)` operand) is
-still open.
+still open. **Attempt (2026-11-14): materialize the transposed attention output
+so its merged `(h,d)` axis is contiguous.** That is the shape of the 48
+`b-index-not-affine` rejects (`idx = ... Floormod(r3,64) + Floordiv(r3,64)*12608
+...`). Inserting `contiguous()` after the attention transpose *reduces* accepted
+descriptors 182 → 170 (the copy changes the surrounding layout choices) and
+costs **+1.9 ms** (201.0 → 202.9 ms), so it was reverted. The rejects come from
+the backward/attention operand layout, not the forward transpose; staging needs
+the descriptor to accept a materialized operand rather than forcing it in the
+graph.
 
 
 **Evidence:** 170 descriptors are accepted at ViT train bs 4; the remaining
@@ -447,6 +455,14 @@ kernel order and cache keys must be preserved.
 **Expected:** cold rendering 83 ms → ~15-20 ms on a 24-thread CPU; combined with
 item 1 the cold path gets close to the replay cost.
 
+**Measured (2026-11-14, fresh `AUTORUST_CACHE_DIR`).** `vit_infer` bs 4:
+`codegen.render` **83.5 ms for 14 kernels** (5.97 ms/kernel; `codegen.sink`
+80.3 ms) out of a **595 ms** `ms_cold`; `compile.batch` 275 ms. The render is
+still serial because `codegen.sink` mutates the `Rc` arena; parallel workers
+need owned (or per-worker) kernel IR. Not attempted further because the change
+is the structural one the item names (owned `Send` IR across 30 rewrite stages),
+and the payoff is bounded to the cold path. **Effort/risk:** large.
+
 **Effort/risk:** large (cross-cutting `uop`/`codegen`); the review describes the
 same design.
 
@@ -466,6 +482,17 @@ is only worth it once a schedule-scoped lifetime exists.
 **Expected:** eager host time down substantially (substitution is ~30% of the
 eager step); no effect on JIT replay.
 
+**Measured (2026-11-14, eager ViT train bs 1, `AUTORUST_PROF=1`).**
+`rb.substitute` **0.464 s** (2452 calls, 0.19 ms each) in a ~1.6 s step;
+`subst.nodes` **12.1M** visited for `subst.changed` **16.7k** (725:1);
+`rb.walk` only 8.9 ms, so the walk itself is fine. The per-call DFS is already
+memoized (`substitute_local` → `substitute_dfs`); the remaining idea is a cache
+*across* calls, which is only sound for subtrees that do not contain the
+substituted var (the different `remove_bufferize` calls carry different dvars,
+and the graph mutates between calls). A scoped cache or a batched rewrite is
+possible but needs care; not landed. The measured ceiling is ~0.2-0.3 s/step on
+the eager path only.
+
 **Effort/risk:** large; gate on the kernel multiset.
 
 ## 12. Tiling/opt search with parallel candidate timing and a shipped cache
@@ -482,6 +509,17 @@ Then re-evaluate `BEAM=2` as an opt-in benchmark mode.
 
 **Expected:** ViT inference -14-16% for users who can pay a one-time search, and
 a path to using tuned opts without the cold cost.
+
+**Measured (2026-11-14).** The disk cache the item asks for **already exists**
+(`beam_search` scope, keyed by AST content, width and device) and works: the
+same `BEAM=1` run is **22.3 s cold → 0.58 s warm**; gains re-measured on
+`vit_infer` bs 4 are **38.30 → 32.93 ms (BEAM=1, -14.0%)** and **32.36 ms
+(BEAM=2, -15.5%)**. Instrumenting the search showed why "parallel candidate
+timing" is not the lever: per kernel, compilation is 0.01-1.1 s and the timed
+candidates are ~0 s, and `distinct_keys == compiled` (no redundant compiles).
+The cold cost is NVRTC compilation; parallelizing it needs the same owned-IR /
+worker-arena work as item 10. A shipped cache remains possible but must be
+keyed to the codegen fingerprint; not landed.
 
 **Effort/risk:** medium; mostly infrastructure, but the search must stay out of
 the default path.
@@ -564,6 +602,14 @@ vars at replay from `var_vals`; only then advertise one plan per model. This is
 the review's "larger project, not a cache tweak".
 
 **Expected:** no recapture on batch/shape changes; mostly serving-oriented.
+
+**Measured (2026-11-14).** Every shape still recaptures: `vit_infer`
+`ms_cold` (model build + capture + first step) is **507 ms at bs 1, 568 ms at
+bs 4, 863 ms at bs 8**, while the steady replay is ~33-38 ms. The plan is keyed
+by the input signature (`StepPlan` LRU), so a new batch is a full plan build.
+Symbolic `var_vals` resolution is the fix the item names; it touches launch
+dims, buffer sizes and every index expression, so it is not started. The
+measured ceiling is the recapture cost (~0.5 s per new shape) for serving.
 
 **Effort/risk:** large; correctness of symbolic bounds is the risk.
 

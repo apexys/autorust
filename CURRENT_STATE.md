@@ -5457,3 +5457,41 @@ bias-correction `b1_t`/`b2_t` update is host-side per-step state, not part of
 the pinned plan's stable buffers. The capture was reverted; the state-explicit
 design (keep the bias-correction multiply/assign in stable buffers, or exclude
 the optimizer from the graph) is recorded in item 14.
+
+### 9.72 Items 5, 10, 11, 12: measured attempts and one landed implementation (2026-11-14)
+
+**Item 5 (fused attention backward): implemented, gated, at parity.**
+`runtime::cuda_flash_train` now has the forward with saved LSE, `D = O.dO`, dQ
+and dK/dV kernels (causal, additive mask, GQA; no atomics), exposed as
+`models::flash_attention::{fused_attention_train, fused_attention_backward}`.
+`tests/flash_train_cuda.rs` matches the graph SDPA autograd at N=37 and 197,
+plain/causal/mask/GQA, to 4e-7. GPU time for 12 modules: 86.9 ms at N=197
+(graph 86.0), 276.6 at 512 (280.3), 1050.7 at 1024 (1111). The scalar backward
+is at parity because the graph's backward is batched cuBLAS; a tensor-core
+backward is what would realize the 57 ms target. Not wired into autograd, which
+also still needs the graph-op/host-call seam. Details in PERFORMANCE_STEPS
+item 5.
+
+**Item 10 (parallel rendering): measured, structural blocker confirmed.** With
+a fresh `AUTORUST_CACHE_DIR`, `vit_infer` bs4 renders 14 kernels in 83.5 ms
+(5.97 ms each; `codegen.sink` 80.3 ms) of a 595 ms cold start; NVRTC is 275 ms.
+The render is serial because `codegen.sink` mutates the `Rc` arena; parallel
+workers need owned/per-worker IR. Not started (the item itself).
+
+**Item 11 (substitution worklist): measured.** Eager ViT train bs1:
+`rb.substitute` 0.464 s (2452 calls) of ~1.6 s; `subst.nodes` 12.1M for
+`subst.changed` 16.7k. The per-call DFS is already memoized; a cache across
+calls is only sound when the substituted vars do not overlap and the graph has
+not changed, so it needs a scoped design. Not landed.
+
+**Item 12 (search): the disk cache already exists and works, and timing is not
+the cost.** `BEAM=1` is 22.3 s cold → 0.58 s warm; `vit_infer` bs4 goes 38.30 →
+32.93 ms (-14.0%) and 32.36 ms (BEAM=2, -15.5%). Instrumentation showed
+compilation 0.01-1.1 s and timed candidates ~0 s per kernel, with no duplicate
+keys, so parallel *timing* (the item's proposal) would not help; the cold cost
+is NVRTC, which needs the same owned-IR work as item 10.
+
+**Negative experiments recorded:** materializing the transposed attention output
+(to fix the 48 `b-index-not-affine` GEMM rejects) reduces accepted descriptors
+182 → 170 and costs +1.9 ms, so it is reverted; and the item-5 scalar fused
+backward is at parity rather than the projected -50 ms.

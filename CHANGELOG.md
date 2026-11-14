@@ -71,6 +71,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kernels are at parity with the graph's cuBLAS-based backward (7.24 vs
   7.17 ms/module at N=197; +5% at N=1024), so they are not wired into training;
   a tensor-core backward is the remaining step.
+- **Measured attempts for the remaining backlog.** Parallel rendering is 83.5
+  ms for 14 kernels on a fresh cache (serial `codegen.sink`); eager
+  substitution is 0.464 s/step (12.1M nodes); the beam-search disk cache makes
+  a 22.3 s search 0.58 s on a repeat run, and beam timing is ~0 (compilation is
+  the cost); every new input shape still recaptures (~0.5-0.9 s). These are
+  recorded in `PERFORMANCE_STEPS.md` items 10-12 and 15.
 - **Per-slice accumulation for strided two-axis reductions.** A contraction
   whose two reduction axes are not contiguous in both operands (the ViT
   weight-gradient shapes) is now a sum of per-slice GEMMs: `HostGemm` carries
