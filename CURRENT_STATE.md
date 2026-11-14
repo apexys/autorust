@@ -5210,3 +5210,15 @@ time, 60.6% of generated `E_*`+`r_*` time)**, against 415 `r_*` / 111.9 ms.
 The elementwise share is real but spread over thousands of sub-100 µs launches;
 fusing it is a scheduler/fusion project with the kernel-multiset gate the review
 asks for, not a local change.
+
+### 9.64 im2col gate: K floor (2026-11)
+
+Re-running the cross-framework matrix after §9.60 caught a regression the
+earlier ResNet-18-only A/B missed: ONNX ResNet-0.25 went from 11.5 ms to 29 ms.
+Its convs have `K = cin*kh*kw` as small as 144, where the patch copy and the
+cuBLAS setup dominate the tiny GEMM. Materializing now requires `K >= 576`
+(`AUTORUST_IM2COL_MIN_K`). At that floor ResNet-18 inference is 321 ms and
+training **289 ms** (was 449 ms before im2col), and ONNX ResNet-0.25 is 9.7 ms —
+better than its pre-im2col 11.5 ms, because the layers that do pass the floor
+still benefit. `K = 1152` regressed ResNet-18 inference to 341 ms, so 576 is the
+measured optimum on this machine.

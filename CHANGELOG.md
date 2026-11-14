@@ -58,6 +58,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bounded thread pool (`AUTORUST_COMPILE_WORKERS`, default `min(cpus, 8)`).
   RUST `vit_infer` fresh-cache cold start 2654 → 2161 ms (-18.6%). CUDA's NVRTC
   batch was already parallel.
+- **im2col only when the contraction can amortise the copy.** A re-run of the
+  cross-framework matrix showed the unguarded materialization regressed ONNX
+  ResNet-0.25 (11.5 → 29 ms) because its K = cin*kh*kw is small. Materializing
+  now requires `K >= 576` (`AUTORUST_IM2COL_MIN_K`): ONNX ResNet-0.25 9.7 ms and
+  ResNet-18 inference 321 ms / training 289 ms (from 449 ms pre-im2col).
 - **Materialized im2col for convolution.** The pooled patch view is now made
   contiguous (once per group, before the output-channel expansion) when the
   patch buffer is at most 64M elements, turning `(x*w).sum(cin,*kh,*kw)` into a

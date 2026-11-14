@@ -349,7 +349,16 @@ impl Tensor {
             )
             .saturating_mul(cin.clone().as_i128_or_panic())
             .saturating_mul(hw.iter().map(|&h| h as i128).product::<i128>());
-        let use_im2col = im2col_elems <= 64_000_000 && hw.iter().product::<i64>() > 1;
+        let red = cin.clone().as_i64().unwrap_or(0)
+            * hw.iter().product::<i64>();
+        // Materializing patches only pays when the contraction is long enough:
+        // at K = cin*kh*kw below ~576 the copy and the cuBLAS setup dominate
+        // the tiny GEMM (ONNX ResNet-0.25 went 11.5 -> 29 ms without this
+        // floor, while ResNet-18 is unchanged down to 256).
+        let min_k = crate::helpers::env::get("AUTORUST_IM2COL_MIN_K")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(576);
+        let use_im2col = im2col_elems <= 64_000_000 && hw.iter().product::<i64>() > 1 && red >= min_k;
         let x = if use_im2col { x.contiguous_ctx(ctx) } else { x };
 
         // Expanded in the *permuted* order: [bs, g, rcout, oyx.., cin, HW..].
