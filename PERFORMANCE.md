@@ -62,7 +62,8 @@ Measured, RTX 3060, default vs `AUTORUST_MATH=exact`:
 
 | workload | Exact | Fast | result |
 |---|---:|---:|---:|
-| ResNet-18 infer bs 32 | 277.2 ms | **201.2 ms** | -27% |
+| ResNet-18 infer bs 32 | 264.6 ms | **154.4 ms** | -42% |
+| ResNet-50 infer bs 32 | 88.6 ms | **35.3 ms** | -60% |
 | ViT-B/16 infer bs 8 | 82.8 ms | **65.6 ms** | -21% |
 
 The individual switches still override the mode

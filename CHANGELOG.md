@@ -13,9 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   source-breaking for struct-literal construction). `Fast` enables TF32
   cuBLAS, generated/custom tensor-core paths, `CC` `-ffast-math` and OpenCL
   `-cl-fast-relaxed-math`; `AUTORUST_MATH=exact` restores pedantic f32.
-  Measured RTX 3060: ResNet-18 infer 277.2 → 201.2 ms, ViT-B/16 infer bs 8
-  82.8 → 65.6 ms. Existing benchmark tables were collected in Exact mode and
-  are labelled as such in `PERFORMANCE.md`.
+  Measured RTX 3060: ResNet-18 infer 264.6 → 154.4 ms (-42%), ResNet-50
+  88.6 → 35.3 ms (-60%), ViT-B/16 infer bs 8 82.8 → 65.6 ms. Existing
+  benchmark tables were collected in Exact mode and are labelled as such in
+  `PERFORMANCE.md`.
 
 ### Added
 
