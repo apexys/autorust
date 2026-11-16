@@ -5775,3 +5775,40 @@ Two rejected alternatives, measured rather than guessed:
   inconclusive under load: CUDA `sum`/`amax` moved 10-30% in different
   directions across repeats, and forcing it on CPU ViT train cost 7%. Reverted;
   no split heuristic landed.
+
+### 9.82 Item 12 (fused softmax): measured rejection (2026-11-16)
+
+Implemented a hand-written CUDA row softmax: one block per row, 256 threads,
+the row staged in 16 KiB of shared memory, vectorized `float4` loads/stores,
+warp + block max/sum, then a normalized `float4` store. It is a forward-only
+host call (`runtime::cuda_softmax`) with a public session-aware entry point and
+a graph fallback for every unsupported shape.
+
+Correctness: fused vs graph over 8x64, 17x257 and 5x4096 f32 (max abs < 2e-6,
+rows sum to 1 within 2e-5), and the non-last-axis fallback matched exactly.
+
+Performance, RTX 3060, f32 `[4096, 4096]` (64 MB):
+
+- Host kernel alone (`tests` diagnostic, 20 launches): **0.427 ms**
+  (314 GB/s over 2N bytes); a standalone `nvcc -O3` build of the same kernel is
+  0.41-0.43 ms. The generated graph softmax is **0.89 ms** (three kernels:
+  max reduce, exp+sum reduce, normalize), so the kernel itself is **~2.1x**.
+- End-to-end `memops` step, 3 warmups + 20 iterations, alternating A/B:
+  graph **0.890 / 0.889 / 0.892 ms**; fused **0.824 / 0.816 / 0.908 ms**. The
+  median is ~**8%**, because the benchmark's one-element readback adds ~0.4 ms
+  to both paths and the fused output is a leaf buffer.
+- LLM prefill (6-layer decoder, 512 tokens) with the softmax wired into
+  attention and the block input pinned: graph 343.5-349.2 ms vs fused
+  344.1-348.3 ms, i.e. **neutral**; softmax is a small share of the matmul-bound
+  step. Without the per-block pin, fused was **937 ms vs 349 ms** because
+  realizing the score matrix re-captured the whole prefix per block - a warning
+  for any session-realizing fast path inside a captured step.
+- ViT: eval already uses the fused flash-attention kernels, and training needs
+  the SDPA autograd graph, so a forward-only softmax host call cannot replace
+  the softmax in the ViT step.
+
+Not landed. The kernel is genuinely 2x, but the measured end-to-end win is a
+single-digit memops improvement with a noisy repeat, no model-level win, and it
+would add a public forward-only API that the default `nn::softmax` cannot use
+without a session. The useful follow-up is a graph-level fused softmax with an
+autograd node (so training can use it), not an opt-in host call.

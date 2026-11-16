@@ -53,6 +53,12 @@ Try: one-pass row softmax (max+sum+exp in a single block/plane reduction), a vec
 and sum, and a layernorm kernel with the two reductions + normalize in one launch. Start with
 `memops` shapes, then reuse in the ViT/LLM paths.
 Measure: `bench/run.py --only '.*memops'` GB/s, kernel counts and wall time on vit_train.
+Status (2026-11-16): **measured rejection** for the forward-only host-kernel
+version. A shared-memory row kernel ran the 4096x4096 f32 case in 0.43 ms vs
+0.89 ms for the graph (2.1x), but the end-to-end `memops` step improved only
+~8% (readback dominates), LLM prefill was neutral, and ViT training needs an
+autograd node. See `CURRENT_STATE §9.82`. The graph-level fused op with autograd
+is still open.
 13. Fold broadcast-rhs batched matmul (LLM decode / per-head broadcast)
 Why: burn's `MatmulTransformPolicy` (burn-std/src/tensor/matmul.rs) rewrites
 `[.., b, m, k] @ [.., 1, k, n]` into one `[b*m, k] @ [k, n]` when the batch rows do not fill a

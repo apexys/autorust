@@ -914,7 +914,11 @@ One pass over 16M f32 elements (64 MB) per op; GB/s counts the minimum traffic
 - **Reductions are the gap on CUDA**: a full `sum`/`amax`/`softmax` runs at
   150-180 GB/s (amax at 64), because the two-pass reduce + broadcast re-reads
   the tensor; torch fuses the reduction. This matches the ViT training profile,
-  which is ~60% elementwise/reduction kernels.
+  which is ~60% elementwise/reduction kernels. A hand-written shared-memory row
+  softmax was tried: the kernel is 2.1x (0.43 vs 0.89 ms at 4096x4096), but the
+  end-to-end `memops` step only gains ~8% because the one-element readback
+  dominates, LLM prefill is neutral, and a forward-only host kernel cannot carry
+  ViT's attention autograd. It was not landed; see `CURRENT_STATE §9.82`.
 - On CPU, `amax` is the outlier in the other direction (torch is 5x faster):
   our max reduction is a scalar loop where torch uses a vectorized reduction.
 
