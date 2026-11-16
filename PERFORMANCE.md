@@ -1022,7 +1022,9 @@ Reading it:
   strict f32 stays the default; `tests/conv_tf32.rs` checks the opt-in forward
   against INTERP with a TF32 tolerance.
 - The UNet exposes `conv_transpose`, nearest upsample and skip `cat`, all far
-  behind cuDNN/oneDNN.
+  behind cuDNN/oneDNN. A 2x2/stride-2 conv_transpose pixel-shuffle
+  specialization was tried: CUDA was neutral (10.69 vs 10.61 ms) and CPU 2x
+  worse, so it was reverted (`CURRENT_STATE §9.92`).
 
 ## Autoregressive decoder
 

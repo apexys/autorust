@@ -6077,3 +6077,22 @@ Numerics: TF32 has a 10-bit mantissa, so this is opt-in only. Gate:
 INTERP (max abs < 2e-2), and verifies the default strict path is < 2e-5. The
 custom tensor-core implicit-GEMM kernel remains a future step; this lands the
 bounded cuBLAS-tensor-core path first.
+
+### 9.92 Item 11 (conv_transpose specialization): measured rejection (2026-11-16)
+
+Tried the other bounded form of item 11 before writing a custom tensor-core
+kernel: a graph-level 2x2/stride-2, no-padding conv_transpose as four 1x1
+projections (one per kernel tap) followed by a 2x2 pixel shuffle
+(`stack -> [ky,kx,b,cout,h,w] -> [b,cout,2h,2w]`). Gated by
+`AUTORUST_CONV_TRANSPOSE_SHUFFLE=1` for the A/B.
+
+| workload | general path | shuffle | result |
+|---|---:|---:|---|
+| UNet infer bs 4, CUDA | 10.69 ms | 10.61 ms | neutral |
+| UNet infer bs 4, CPU | 129.4 ms | 257.6 ms | 2x worse |
+
+The transpose is a small share of UNet on CUDA, and the stack/permute copy is
+expensive on the CPU. Reverted; no flag/tests remain. The remaining path is a
+true custom tensor-core implicit-GEMM 3x3 kernel. The current tensor-core option
+is the opt-in conv-only TF32 path (§9.91, ResNet-18 -7-11%), which is already
+landed and benchmarked.
