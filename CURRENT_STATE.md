@@ -5996,3 +5996,30 @@ tuner, and the keyed cache would add cold cost/complexity for noise. The
 existing shape heuristic stays. The full autotuner proposal should be revisited
 only with a different candidate space (e.g. an actual tensor-core tile), not
 the current register tiles.
+
+### 9.89 Item 15 (multi-stream scheduling): measured rejection (2026-11-16)
+
+Before wiring stream state into the captured-step executor, measured the actual
+overlap available in the one independent group both workloads expose: the q/k/v
+projections of one layer (three separate Linears sharing the same input, so no
+data dependency between them). A standalone CUDA/cuBLAS harness ran the group
+sequentially and on three streams with events:
+
+| group | sequential | 3 streams | saving |
+|---|---:|---:|---:|
+| LLM decode q/k/v (`768x1x768` x3) | 29.4 us | 27.8 us | 5.6% |
+| ViT bs 8 q/k/v (`1576x768x768` x3) | 872.6 us | 827.6 us | 5.4% |
+
+Those are the *whole* groups, not the steps. End to end:
+
+- `llm_decode` is **17.2 ms/token**; six layers of q/k/v groups are ~0.18 ms,
+  so a 5.6% overlap saves ~0.01 ms/token (<0.1%).
+- `vit_infer` bs 8 is **70.7 ms**; twelve q/k/v groups are ~10.5 ms, so a 5.4%
+  overlap saves ~0.57 ms (~0.8%). The rest of the step (attention, FFN,
+  layernorm, residual) is dependency-chained and stays serialized.
+
+The JIT capture stores ordered `CompiledLinear`s; exposing per-kernel read/write
+sets and a second stream would be a cross-cutting executor change for a
+sub-1% model result, and the q/k/v group is already one fused linear in the
+generated plan. Not landed. A future revisit needs a workload with genuinely
+independent large SINKs, not transformer layers.

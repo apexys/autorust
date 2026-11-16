@@ -815,8 +815,10 @@ the burn checkout, not this repository.
   and keeps a lazy stream per thread (`stream/multi.rs`) with explicit read
   plans and `Device::sync()` barriers. Our `Jit`/`StepPlan` captures one ordered
   stream, which is right for a training step but leaves independent decode
-  branches serialized. Item 15 in the backlog proposes reusing the captured
-  dependency graph to launch independent SINKs on secondary streams.
+  branches serialized. Item 15 proposed reusing the captured dependency graph
+  to launch independent SINKs on secondary streams; measured, the only such
+  group (a layer's q/k/v projections) overlaps for 5.4-5.6% of itself, i.e.
+  <1% end to end, so it was not wired in (`CURRENT_STATE §9.89`).
 - **Broadcast-rhs batched matmul folding.** `MatmulTransformPolicy`
   (`burn-std/src/tensor/matmul.rs`) rewrites `[.., b, m, k] @ [.., 1, k, n]`
   into one `[b*m, k] @ [k, n]` when the per-batch rows do not fill a tile. This
@@ -1025,6 +1027,10 @@ one token launches ~300 kernels (the KV `cat`, RoPE slices, per-head attention
 and the 32000-wide head), each ~50 µs of dispatch on CPU. torch runs the same
 algorithm (explicit matmul + softmax, not SDPA) at 53 ms/token. The prefill gap
 on CUDA is the attention matmuls at 513 keys plus the same launch count.
+A multi-stream experiment on the one independent group (a layer's three q/k/v
+GEMMs) saved 5.4-5.6% of that group, i.e. <0.1% of decode and ~0.8% of ViT
+bs 8; the rest is dependency-chained, so it was not wired into the executor
+(`CURRENT_STATE §9.89`).
 
 ## Mixed precision and the ONNX runner
 

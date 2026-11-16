@@ -110,3 +110,8 @@ Try: after `StepPlan` capture, annotate SINKs with no data dependency and launch
 secondary CUDA/CL stream with events joined before the next barrier; keep the single-stream path
 as the fallback. CUDA graphs (item 9) and this can share the same dependency annotation.
 Measure: llm_decode and vit_infer launch timeline / ms, and a kernel-order/numerics check.
+Status (2026-11-16): **measured rejection**. The only independent group is a
+layer's three q/k/v GEMMs; running them on three streams saved 5.4-5.6% of that
+group, or <0.1% of `llm_decode` (17.2 ms) and ~0.8% of `vit_infer` bs 8
+(70.7 ms). The rest of the step is dependency-chained. The executor change was
+not justified (`CURRENT_STATE §9.89`).
