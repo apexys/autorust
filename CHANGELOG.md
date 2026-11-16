@@ -34,6 +34,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **ONNX `TensorScatter`.** KV-cache-style updates along axis -2 with
   `linear`/`circular` modes and per-batch `write_indices`, as a graph
   one-hot/matmul (`tests/onnx.rs`).
+- **Per-dimension ONNX `Conv` strides/dilations.** 2-D convolutions with
+  differing stride/dilation per spatial axis expand the kernel and subsample
+  (`tests/onnx.rs`).
 - **Generalized ONNX `Einsum`.** `Tensor::einsum_many` (and the two-operand
   `einsum` wrapper) now supports N operands, ellipsis with right-aligned
   broadcasting, repeated labels (diagonal/trace) and implicit output. The ONNX

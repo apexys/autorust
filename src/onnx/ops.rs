@@ -1264,8 +1264,12 @@ impl OnnxModel {
         } else if dt == dtype::BOOL {
             let v: Vec<bool> = vals.iter().map(|x| *x != 0.0).collect();
             Tensor::from_slice(&self.ctx, &v, Some(dt), self.device.as_deref())
+        } else if dtype::is_float(dt) {
+            let v: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
+            Tensor::from_slice(&self.ctx, &v, Some(dtype::FLOAT32), self.device.as_deref())
+                .cast(dt)
         } else {
-            return Err(OnnxError::Unsupported(format!("Scatter on dtype {dt:?}")));
+            return Err(OnnxError::Unsupported(format!("host build on dtype {dt:?}")));
         };
         Ok(t.reshape(shape))
     }
@@ -2261,9 +2265,50 @@ impl OnnxModel {
         let s = strides[0];
         let d = dilations[0];
         if strides.iter().any(|&v| v != s) || dilations.iter().any(|&v| v != d) {
-            return Err(OnnxError::Unsupported(
-                "Conv with per-dimension strides/dilations".into(),
-            ));
+            // Per-dimension stride/dilation: expand the dilation into zeros in
+            // the kernel, run the stride-1 convolution, then subsample. This
+            // is exact for 2-D and keeps the group/dilation/pad semantics.
+            if n != 2 {
+                return Err(OnnxError::Unsupported(
+                    "Conv with per-dimension strides/dilations".into(),
+                ));
+            }
+            let (sh, sw) = (strides[0], strides[1]);
+            let (dh, dw) = (dilations[0], dilations[1]);
+            let (kh, kw) = (wshape[2], wshape[3]);
+            let (eh, ew) = ((kh - 1) * dh + 1, (kw - 1) * dw + 1);
+            let w2 = if eh == kh && ew == kw {
+                w.clone()
+            } else {
+                let vals = w.to_list::<f64>(&mut self.sess);
+                let mut exp = vec![0.0f64; (wshape[0] * wshape[1] * eh * ew) as usize];
+                for co in 0..wshape[0] {
+                    for ci in 0..wshape[1] {
+                        for ky in 0..kh {
+                            for kx in 0..kw {
+                                let src = (((co * wshape[1] + ci) * kh + ky) * kw + kx) as usize;
+                                let dst = (((co * wshape[1] + ci) * eh + ky * dh) * ew + kx * dw)
+                                    as usize;
+                                exp[dst] = vals[src];
+                            }
+                        }
+                    }
+                }
+                self.build_like(w, &exp, &[wshape[0], wshape[1], eh, ew])?
+            };
+            let out = x.conv2d(&w2, b, groups, 1, 1, &padding, None);
+            let mut ixs = vec![Ix::All; 4];
+            ixs[2] = Ix::Range {
+                start: Some(0),
+                stop: None,
+                step: sh,
+            };
+            ixs[3] = Ix::Range {
+                start: Some(0),
+                stop: None,
+                step: sw,
+            };
+            return Ok(out.getitem(&ixs));
         }
         // Use the tensor-core kxk kernel when the input is already realized
         // (notably the stem); `conv2d_with` falls back without a forced realize,

@@ -587,6 +587,35 @@ fn conv_pool_and_auto_pad() {
 }
 
 #[test]
+fn conv_per_dimension_strides_and_dilation() {
+    let w = b::f32_tensor("w", &[1, 1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let nodes = vec![b::node(
+        "Conv",
+        &["x", "w"],
+        &["out"],
+        &[
+            Attr::Ints("strides", vec![1, 2]),
+            Attr::Ints("dilations", vec![1, 2]),
+            Attr::Ints("pads", vec![0, 0, 0, 0]),
+        ],
+    )];
+    let inputs = vec![b::value_info(
+        "x",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(4), Dim::Val(6)],
+    )];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(3), Dim::Val(1)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[w], &inputs, &outputs, "conv"), 13);
+    let xv: Vec<f32> = (0..24).map(|i| i as f32).collect();
+    let got = f32_model(&bytes, &[("x", xv, vec![1, 1, 4, 6])], "out");
+    close(&got, &[140.0, 266.0, 392.0], 1e-4);
+}
+
+#[test]
 fn softmax_reduce_and_argmax() {
     let axes = b::i64_tensor("axes", &[1], &[1]);
     let nodes = vec![

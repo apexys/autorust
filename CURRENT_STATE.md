@@ -6490,3 +6490,18 @@ is in the plan-disabled set because the write indices are runtime.
 
 Gate: `tests/onnx.rs::tensor_scatter_kv_cache_linear_and_circular` (the spec's
 linear example plus a circular wrap).
+
+### 9.109 ONNX Conv per-dimension stride/dilation (2026-11-16)
+
+`Conv` with differing per-dimension `strides`/`dilations` no longer returns
+`Unsupported` for 2-D. The dilation is expanded into zeros in the kernel
+(`(k-1)*d+1`, original taps at multiples of `d`), the convolution runs at
+stride 1 with the same padding, and the output is subsampled with
+`Ix::Range { step }` on H/W. The stride-1 output is `(in+2p-k_eff)+1`, so the
+subsample has `floor((in+2p-k_eff)/s)+1` rows, matching ONNX. Groups and the
+per-dim padding keep working; the expanded weight is built once on the host
+(`build_like`, which now handles f16/bf16/f8). `ConvTranspose` still requires
+scalar attributes.
+
+Gate: `tests/onnx.rs::conv_per_dimension_strides_and_dilation` (a 2×3 kernel,
+strides [1,2], dilations [1,2] against a host reference).

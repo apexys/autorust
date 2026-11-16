@@ -92,9 +92,9 @@ outputs remain valid after it is dropped.
 - `GatherElements` uses a host-index loop (correct, not fast).
 - Zero-element tensors are rejected: the storage layer cannot allocate empty
   storage yet.
-- `Conv`/`ConvTranspose` require the same stride/dilation/output-padding on
-  every spatial dim (the `Tensor` API takes scalars); differing per-dim values
-  return `Unsupported`.
+- `Conv` supports per-dimension stride/dilation in 2-D (the kernel is dilated
+  with zeros, run at stride 1, then subsampled). `ConvTranspose` still requires
+  scalar stride/dilation/output-padding.
 - `Dropout` is inference-only; `BatchNormalization` rejects `training_mode`.
 - Quantized ops, ONNX training ops, windows, `If`, optional/sequence values and
   ONNX-ML are T2.
@@ -156,7 +156,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 
 | ONNX ops | Status | Notes |
 |---|---|---|
-| `Conv ConvTranspose Gemm MatMul` | ✅ | `conv2d`/`conv_transpose2d`/`linear`/`matmul`. |
+| `Conv ConvTranspose Gemm MatMul` | ✅ | `conv2d`/`conv_transpose2d`/`linear`/`matmul`; 2-D `Conv` accepts per-dimension stride/dilation. |
 | `MatMulInteger ConvInteger` | 🟡 | T2; integer matmul/conv on dequantized inputs. |
 | `MaxPool` | ✅ | `max_pool2d`. |
 | `AveragePool GlobalAveragePool GlobalMaxPool` | ✅ | N-D `avg_pool2d` + reductions. |
