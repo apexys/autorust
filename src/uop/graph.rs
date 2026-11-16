@@ -50,6 +50,29 @@ pub type Shape = Vec<SVal>;
 /// `_min_max` cache value.
 pub type MinMax = (SVal, SVal);
 
+/// Convolution parameters attached to the result of `Tensor::conv2d`.
+///
+/// This is export metadata, not part of UOp identity: the exporter uses it to
+/// emit one ONNX `Conv` instead of the expanded im2col graph. It lives on the
+/// result node so it is freed with that node.
+#[derive(Clone, Debug)]
+pub struct ConvMeta {
+    /// Input tensor.
+    pub x: UopId,
+    /// Weight, shaped `[cout, cin / groups, *kernel]`.
+    pub weight: UopId,
+    /// Optional bias, shaped `[cout]`.
+    pub bias: Option<UopId>,
+    /// Number of blocked connections.
+    pub groups: i64,
+    /// Stride per spatial dimension.
+    pub strides: Vec<i64>,
+    /// Dilation per spatial dimension.
+    pub dilations: Vec<i64>,
+    /// `(before, after)` padding per spatial dimension; both non-negative.
+    pub pads: Vec<(i64, i64)>,
+}
+
 /// An immutable UOp node. Fields mirror Python's `UOp.__slots__`; `srcs` holds
 /// **strong** handles to children, so a handle to a node keeps its whole subgraph
 /// alive. Property caches are interior-mutable so they can be filled through a
@@ -87,6 +110,9 @@ pub struct Node {
     /// growing a ctx-wide map; the value is a strong handle so the gradient
     /// subgraph stays alive while attached.
     pub grad: RefCell<Option<UopId>>,
+    /// High-level `conv2d` parameters when this node is a convolution result.
+    /// Export metadata only: not part of node identity and freed with the node.
+    pub conv: RefCell<Option<Box<ConvMeta>>>,
 }
 
 // Node identity is its process-unique id (two handles to the same node are the
@@ -240,6 +266,7 @@ impl Graph {
             addrspace_c: RefCell::new(None),
             initial_data: RefCell::new(None),
             grad: RefCell::new(None),
+            conv: RefCell::new(None),
         });
         self.interner.insert(k, Rc::downgrade(&node));
         UopId { node }

@@ -19,14 +19,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bench/onnx_export_check.py` (`onnx.checker` + onnxruntime). `Gemm`/`Conv`
   normalization remains E3b.
 
-- **ONNX export E3b: CNN export (2026-11-16).** The tracer now lowers
-  `Shrink` to ONNX `Slice` (evaluating the constant `Stack`/`Const` bounds) and
-  zero-fill `Pad` to ONNX `Pad`. Traced conv/pool graphs therefore export
-  instead of failing with `UnsupportedOp: Shrink`; a conv + relu + maxpool +
-  linear gate round-trips through the importer and
-  `bench/onnx_export_check.py` (`onnx.checker` + onnxruntime). Folding the
-  im2col pattern into a direct `Conv` (and `MatMul`+`Add` into `Gemm`) remains
-  an E3b optimization.
+- **ONNX export E3b: CNN export and direct Conv (2026-11-16).** The tracer now
+  lowers `Shrink` to ONNX `Slice` (evaluating the constant `Stack`/`Const`
+  bounds) and zero-fill `Pad` to ONNX `Pad`. `Tensor::conv2d` also records its
+  `(input, weight, bias, groups, strides, dilations, pads)` on the result node
+  (export metadata, not identity), so the exporter emits one `Conv` (bias
+  folded) instead of the im2col expansion. A conv + relu + maxpool + linear gate and a grouped/dilated/
+  strided no-bias conv gate round-trip through the importer and
+  `bench/onnx_export_check.py` (`onnx.checker` + onnxruntime). `Gemm` folding
+  remains an E3b optimization.
 
 - **Vulkan fused optimizer and full reductions (2026-11-16).**
   `runtime::vk_optim` dispatches a precompiled SPIR-V Adam/AdamW/LAMB kernel

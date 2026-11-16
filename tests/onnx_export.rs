@@ -2,10 +2,10 @@
 //! write assets for the Python onnxruntime check.
 
 use autorust::dtype;
-use autorust::onnx::export::{
-    export_fn, export_module, ExportOptions, GraphBuilder, InputSpec, OutputSpec,
-};
 use autorust::onnx::OnnxModel;
+use autorust::onnx::export::{
+    ExportOptions, GraphBuilder, InputSpec, OutputSpec, export_fn, export_module,
+};
 use autorust::tensor::nn::{Conv2d, Module};
 use autorust::tensor::{Ctx, Tensor};
 use std::path::PathBuf;
@@ -378,9 +378,7 @@ impl Module for Cnn {
 fn export_e3b_cnn_block() {
     let ctx = Ctx::new();
     let model = Cnn::new(&ctx);
-    let xv: Vec<f32> = (0..128)
-        .map(|i| ((i % 13) as f32 - 6.0) * 0.1)
-        .collect();
+    let xv: Vec<f32> = (0..128).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
     let x = Tensor::from_slice(&ctx, &xv, Some(dtype::FLOAT32), None).reshape([2, 1, 8, 8]);
     let mut sess = autorust::engine::session::Session::new();
     let want = model.forward(&x).to_list::<f32>(&mut sess);
@@ -396,9 +394,39 @@ fn export_e3b_cnn_block() {
     .expect("export cnn");
     let raw = std::fs::read(&path).expect("read cnn model");
     let proto = autorust::onnx::pb::parse_model(&raw).expect("parse cnn model");
-    let ops: Vec<&str> = proto.graph.nodes.iter().map(|n| n.op_type.as_str()).collect();
+    let ops: Vec<&str> = proto
+        .graph
+        .nodes
+        .iter()
+        .map(|n| n.op_type.as_str())
+        .collect();
     assert!(ops.contains(&"Pad"), "CNN export has no Pad: {ops:?}");
     assert!(ops.contains(&"Slice"), "CNN export has no Slice: {ops:?}");
+    let conv = proto
+        .graph
+        .nodes
+        .iter()
+        .find(|n| n.op_type == "Conv")
+        .unwrap_or_else(|| panic!("CNN export has no folded Conv: {ops:?}"));
+    assert_eq!(
+        conv.inputs.len(),
+        3,
+        "Conv bias must be folded: {:?}",
+        conv.inputs
+    );
+    assert_eq!(conv.attr_i64("group", 1), 1);
+    assert_eq!(
+        conv.attrs.get("strides").and_then(|a| a.as_i64s()),
+        Some(&[1, 1][..])
+    );
+    assert_eq!(
+        conv.attrs.get("dilations").and_then(|a| a.as_i64s()),
+        Some(&[1, 1][..])
+    );
+    assert_eq!(
+        conv.attrs.get("pads").and_then(|a| a.as_i64s()),
+        Some(&[1, 1, 1, 1][..])
+    );
     let mut m = OnnxModel::load_with_device(&path, None).expect("load cnn");
     let xx = Tensor::from_slice(m.ctx(), &xv, Some(dtype::FLOAT32), None).reshape([2, 1, 8, 8]);
     let mut out = m.run(&[("x", xx)]).expect("run cnn");
@@ -416,4 +444,74 @@ fn export_e3b_cnn_block() {
     }
     std::fs::write(out_dir().join("onnx_export_e3b_cnn_x.bin"), xb).unwrap();
     std::fs::write(out_dir().join("onnx_export_e3b_cnn_y.bin"), yb).unwrap();
+}
+
+#[test]
+fn export_e3b_conv_groups_stride() {
+    let weights: Vec<f32> = (0..32).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+    let xv: Vec<f32> = (0..(2 * 4 * 7 * 7))
+        .map(|i| ((i % 11) as f32 - 5.0) * 0.05)
+        .collect();
+    let path = out_dir().join("onnx_export_e3b_conv_groups.onnx");
+    export_fn(
+        &path,
+        &[InputSpec::new("x", dtype::FLOAT32, &[2, 4, 7, 7])],
+        &[OutputSpec::new("y")],
+        |args| {
+            let ctx = args[0].ctx();
+            let w =
+                Tensor::from_slice(ctx, &weights, Some(dtype::FLOAT32), None).reshape([4, 2, 2, 2]);
+            vec![args[0].conv2d(&w, None, 2, 2, 2, &[0, 0], None)]
+        },
+        &ExportOptions::default(),
+    )
+    .expect("export grouped conv");
+
+    let raw = std::fs::read(&path).expect("read grouped conv");
+    let proto = autorust::onnx::pb::parse_model(&raw).expect("parse grouped conv");
+    let conv = proto
+        .graph
+        .nodes
+        .iter()
+        .find(|n| n.op_type == "Conv")
+        .expect("folded grouped Conv");
+    assert_eq!(conv.inputs.len(), 2, "no-bias Conv must have two inputs");
+    assert_eq!(conv.attr_i64("group", 1), 2);
+    assert_eq!(
+        conv.attrs.get("strides").and_then(|a| a.as_i64s()),
+        Some(&[2, 2][..])
+    );
+    assert_eq!(
+        conv.attrs.get("dilations").and_then(|a| a.as_i64s()),
+        Some(&[2, 2][..])
+    );
+    assert_eq!(
+        conv.attrs.get("pads").and_then(|a| a.as_i64s()),
+        Some(&[0, 0, 0, 0][..])
+    );
+
+    let ctx = Ctx::new();
+    let x = Tensor::from_slice(&ctx, &xv, Some(dtype::FLOAT32), None).reshape([2, 4, 7, 7]);
+    let w = Tensor::from_slice(&ctx, &weights, Some(dtype::FLOAT32), None).reshape([4, 2, 2, 2]);
+    let mut sess = autorust::engine::session::Session::new();
+    let want = x
+        .conv2d(&w, None, 2, 2, 2, &[0, 0], None)
+        .to_list::<f32>(&mut sess);
+
+    let mut m = OnnxModel::load_with_device(&path, None).expect("load grouped conv");
+    let xx = Tensor::from_slice(m.ctx(), &xv, Some(dtype::FLOAT32), None).reshape([2, 4, 7, 7]);
+    let mut out = m.run(&[("x", xx)]).expect("run grouped conv");
+    let got = out.remove("y").unwrap().to_list::<f32>(m.session_mut());
+    close(&got, &want, 1e-4);
+
+    let mut xb = Vec::new();
+    for v in &xv {
+        xb.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut yb = Vec::new();
+    for v in &want {
+        yb.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(out_dir().join("onnx_export_e3b_conv_groups_x.bin"), xb).unwrap();
+    std::fs::write(out_dir().join("onnx_export_e3b_conv_groups_y.bin"), yb).unwrap();
 }

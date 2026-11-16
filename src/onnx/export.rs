@@ -15,7 +15,7 @@ use crate::dtype::{self, ConstVal, DTypeId};
 use crate::tensor::nn::Module;
 use crate::tensor::{Ctx, Tensor};
 use crate::uop::arg::Arg;
-use crate::uop::ctx::UOpCtx;
+use crate::uop::ctx::{ConvMeta, UOpCtx};
 use crate::uop::graph::UopId;
 use crate::uop::ops::Ops;
 use crate::uop::sint::SVal;
@@ -579,6 +579,11 @@ impl<'a> Tracer<'a> {
             self.names.insert(id.clone(), n.clone());
             return Ok(n);
         }
+        // `conv2d` records its high-level parameters; emit one `Conv` instead
+        // of walking the im2col expansion.
+        if let Some(meta) = self.ctx.conv_meta(id) {
+            return self.emit_conv(id, meta);
+        }
         let op = self.ctx.op_of(id);
         let dt = self.ctx.dt_of(id);
         let path = format!("uop#{}", id.id());
@@ -786,6 +791,34 @@ impl<'a> Tracer<'a> {
             }
             _ => self.trace_elementwise(id, op, dt, &srcs, &path),
         }
+    }
+
+    /// Emit one ONNX `Conv` from the parameters recorded by `Tensor::conv2d`.
+    fn emit_conv(&mut self, id: &UopId, meta: ConvMeta) -> Result<String> {
+        let x = self.trace(&meta.x)?;
+        let w = self.trace(&meta.weight)?;
+        let mut inputs = vec![x, w];
+        if let Some(b) = meta.bias {
+            inputs.push(self.trace(&b)?);
+        }
+        let mut pads = Vec::with_capacity(meta.pads.len() * 2);
+        for (before, _) in &meta.pads {
+            pads.push(*before);
+        }
+        for (_, after) in &meta.pads {
+            pads.push(*after);
+        }
+        Ok(self.emit(
+            id,
+            "Conv",
+            inputs,
+            vec![
+                ("group", Attribute::Int(meta.groups)),
+                ("strides", Attribute::Ints(meta.strides)),
+                ("dilations", Attribute::Ints(meta.dilations)),
+                ("pads", Attribute::Ints(pads)),
+            ],
+        ))
     }
 
     fn init_i64(&mut self, prefix: &str, vals: &[i64]) -> String {

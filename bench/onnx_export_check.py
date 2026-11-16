@@ -52,6 +52,12 @@ cnn_y = np.fromfile(f"{ROOT}/onnx_export_e3b_cnn_y.bin", dtype=np.float32).resha
 e3b = run(f"{ROOT}/onnx_export_e3b_cnn.onnx", {"x": cnn_x})
 assert np.allclose(e3b, cnn_y, atol=1e-4), (e3b, cnn_y)
 
+# E3b: grouped/dilated/strided convolution folded to one Conv.
+gx = np.fromfile(f"{ROOT}/onnx_export_e3b_conv_groups_x.bin", dtype=np.float32).reshape(2, 4, 7, 7)
+gy = np.fromfile(f"{ROOT}/onnx_export_e3b_conv_groups_y.bin", dtype=np.float32).reshape(2, 4, 3, 3)
+e3g = run(f"{ROOT}/onnx_export_e3b_conv_groups.onnx", {"x": gx})
+assert np.allclose(e3g, gy, atol=1e-4), (e3g, gy)
+
 print("onnx export E0/E1/E2/E3/E3b: checker + onnxruntime OK")
 print("E0", e0.tolist())
 print("E1", e1.tolist())
@@ -59,3 +65,4 @@ print("E2", e2.tolist())
 print("E3 dynamic", e3d.tolist())
 print("E3 external", e3ext.tolist())
 print("E3b cnn", e3b.tolist())
+print("E3b grouped conv", e3g.reshape(-1)[:4].tolist())

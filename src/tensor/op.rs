@@ -3,11 +3,11 @@
 //! share. Ported one-for-one from tinygrad v0.14.
 
 use crate::dtype::{self, ConstVal, DTypeId};
-use crate::uop::ctx::UOpCtx;
+use crate::uop::ctx::{ConvMeta, UOpCtx};
 use crate::uop::sint::SVal;
 
-use super::Tensor;
 use super::Ix;
+use super::Tensor;
 
 /// `flat_to_grouped(padding)` (helpers.py:55): `(l, r, t, b, ...)` →
 /// `((t, b), (l, r), ...)`.
@@ -373,10 +373,25 @@ impl Tensor {
                         ],
                     );
                     let y = y.permute_ctx(ctx, &[0, 3, 1, 2]);
-                    return match dtype {
+                    let y = match dtype {
                         Some(dt) => y.cast_ctx(ctx, dt),
                         None => y,
                     };
+                    if dtype.is_none() {
+                        ctx.set_conv_meta(
+                            y.uop().clone(),
+                            ConvMeta {
+                                x: self.uop().clone(),
+                                weight: weight.uop().clone(),
+                                bias: bias.map(|b| b.uop().clone()),
+                                groups: 1,
+                                strides: vec![1; 2],
+                                dilations: vec![1; 2],
+                                pads: vec![(0, 0); 2],
+                            },
+                        );
+                    }
+                    return y;
                 }
             }
         }
@@ -474,7 +489,7 @@ impl Tensor {
         osh.extend(oyx);
         let ret = ret.reshape_ctx(ctx, osh);
 
-        match bias {
+        let ret = match bias {
             Some(b) => {
                 let mut bsh: Vec<SVal> = vec![SVal::I(1), SVal::I(cout_i as i128)];
                 bsh.extend(std::iter::repeat_n(SVal::I(1), hw_len));
@@ -482,7 +497,25 @@ impl Tensor {
                 ret.add_ctx(ctx, &b_r)
             }
             None => ret,
+        };
+        // Record the high-level parameters for the exporter. Negative padding
+        // and a requested output dtype keep the expanded graph, which ONNX
+        // `Conv` cannot represent directly.
+        if dtype.is_none() && grouped.iter().all(|(a, b)| *a >= 0 && *b >= 0) {
+            ctx.set_conv_meta(
+                ret.uop().clone(),
+                ConvMeta {
+                    x: self.uop().clone(),
+                    weight: weight.uop().clone(),
+                    bias: bias.map(|b| b.uop().clone()),
+                    groups,
+                    strides: vec![stride; hw_len],
+                    dilations: vec![dilation; hw_len],
+                    pads: grouped.clone(),
+                },
+            );
         }
+        ret
     }
 
     /// `Tensor.conv_transpose2d(weight, bias, groups, stride, dilation, padding,

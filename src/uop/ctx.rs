@@ -15,6 +15,7 @@
 use super::alu::{cdiv, floordiv, py_mod};
 use super::arg::{Arg, DeviceSpec, ParamArg};
 use super::graph::{Graph, UopId};
+pub use super::graph::ConvMeta;
 use super::ops::{Ops, group};
 use super::sint::SVal;
 use crate::dtype::{
@@ -97,6 +98,16 @@ impl UOpCtx {
 
     /// No-op retained for the oracle/bridge API.
     pub fn grow_to(&mut self, _n: usize) {}
+
+    /// Record convolution parameters on the tensor produced by `conv2d`.
+    pub fn set_conv_meta(&mut self, out: UopId, meta: ConvMeta) {
+        *out.node.conv.borrow_mut() = Some(Box::new(meta));
+    }
+
+    /// Convolution parameters recorded for `out`, if it came from `conv2d`.
+    pub fn conv_meta(&self, out: &UopId) -> Option<ConvMeta> {
+        out.node.conv.borrow().as_deref().cloned()
+    }
 
     /// Attach (or overwrite) the autograd gradient for tensor uop `target`
     /// (stored on the node, so it is freed with the tensor's subgraph).
