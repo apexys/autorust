@@ -6641,3 +6641,42 @@ exporter code yet; the contract fixes the architecture before implementation:
   silent fallback; default opset 17/IR 8; normalization before lowering (e.g.
   embedding one-hot -> `Gather`); round-trip through our importer plus
   `onnx.checker` and onnxruntime as dev-only gates.
+
+### 9.117 Signal-processing Tensor ops (2026-11-16)
+
+Added `src/tensor/signal.rs` with graph-level signal primitives. No new kernels:
+all transforms emit ordinary `reshape`/movement/elementwise/`matmul` UOps and
+are compiled by the existing scheduler/codegen.
+
+- **Complex layout:** trailing size-2 axis (`[..., 2]` = real, imag), matching
+  ONNX.
+- **`Tensor::cfft(axis, inverse)`:** radix-2 Cooley–Tukey along a signal axis;
+  bit-reversal via reshape + reversed transpose, `log2(n)` butterfly stages
+  with precomputed twiddles; inverse includes `1/n`. Requires a static
+  power-of-two length and a complex input.
+- **`Tensor::fft(axis, inverse)`:** real input, zero imaginary part, output
+  complex. f64 computes in f64; f32/f16/bf16 compute in f32 and cast back.
+- **`Tensor::cdft`/`Tensor::dft`:** arbitrary static length via precomputed
+  `cos`/`sin` matrices and `MatMul` (`O(n²)` time and constants). Used as the
+  fallback for non-power-of-two `rfft`/`stft`.
+- **`Tensor::rfft(axis)`:** onesided `[..., n/2+1, 2]`.
+- **`Tensor::stft(frame_length, frame_step, window, onesided)`:** frames via
+  the existing sliding-window `pool` path, optional 1-D window, then
+  `rfft`/`fft`; output `[..., frames, bins, 2]`. No centering/padding.
+- **Windows:** `tensor::signal::{hann,hamming,blackman}_window` with periodic or
+  symmetric denominators, dtype selection, and ONNX
+  `HannWindow`/`HammingWindow`/`BlackmanWindow` handlers (`periodic`,
+  `output_datatype`, static `size`; dynamic size disables the plan).
+
+Gates: `tests/signal.rs` (10 tests: naive DFT comparison, batching, axis
+movement, complex inverse round-trip, arbitrary-length DFT, onesided rfft,
+STFT frames including the non-power-of-two DFT path, window formulas, f32 path,
+non-power-of-two `fft` rejection) and `tests/onnx.rs::window_ops_match_formulas`.
+
+Measured on RTX 3060, single f32 transform, warm best of 8: graph FFT
+N=256/1024/4096 = **19.3/26.8/37.1 ms** (build 0.7-1.2 ms; first realize
+69-126 ms); DFT matrix = 6.1 ms at N=256 and 81.1 ms at N=1024. The graph path
+is correct but launch/memory-bound; a first-class `Ops::Fft` marker with
+backend dispatch is recorded as low priority in
+`PERFORMANCE_OPTIMIZATIONS.md` §S1. Wavelets should stay graph-level
+(conv/downsample/lifting); no dedicated kernel planned.

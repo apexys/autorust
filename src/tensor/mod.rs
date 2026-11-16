@@ -44,6 +44,7 @@ pub mod rand;
 pub mod state;
 pub use state::State;
 pub mod reduce;
+pub mod signal;
 pub(crate) mod conv_fused;
 pub(crate) mod reduce_fused;
 

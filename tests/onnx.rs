@@ -1113,6 +1113,45 @@ fn rotary_embedding_identity() {
 }
 
 #[test]
+fn window_ops_match_formulas() {
+    let size = b::i64_tensor("size", &[], &[4]);
+    let nodes = vec![
+        b::node(
+            "HannWindow",
+            &["size"],
+            &["hann"],
+            &[Attr::Int("periodic", 1), Attr::Int("output_datatype", 1)],
+        ),
+        b::node(
+            "HammingWindow",
+            &["size"],
+            &["hamming"],
+            &[Attr::Int("periodic", 1), Attr::Int("output_datatype", 1)],
+        ),
+        b::node(
+            "BlackmanWindow",
+            &["size"],
+            &["blackman"],
+            &[Attr::Int("periodic", 1), Attr::Int("output_datatype", 1)],
+        ),
+    ];
+    let outputs = vec![
+        b::value_info("hann", b::FLOAT, &[Dim::Val(4)]),
+        b::value_info("hamming", b::FLOAT, &[Dim::Val(4)]),
+        b::value_info("blackman", b::FLOAT, &[Dim::Val(4)]),
+    ];
+    let bytes = b::model(&b::graph(&nodes, &[size], &[], &outputs, "win"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let mut out = m.run(&[]).expect("run");
+    let hann: Vec<f32> = out.remove("hann").unwrap().to_list(m.session_mut());
+    let hamming: Vec<f32> = out.remove("hamming").unwrap().to_list(m.session_mut());
+    let blackman: Vec<f32> = out.remove("blackman").unwrap().to_list(m.session_mut());
+    close(&hann, &[0.0, 0.5, 1.0, 0.5], 1e-6);
+    close(&hamming, &[0.08, 0.54, 1.0, 0.54], 1e-6);
+    close(&blackman, &[0.0, 0.34, 1.0, 0.34], 1e-6);
+}
+
+#[test]
 fn affine_grid_identity() {
     let size = b::i64_tensor("size", &[4], &[1, 1, 2, 2]);
     let nodes = vec![b::node(

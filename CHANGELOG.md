@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Signal-processing Tensor ops.** `Tensor::fft`/`cfft` (radix-2
+  Cooley–Tukey, power-of-two lengths), `Tensor::dft`/`cdft` (arbitrary-length
+  matrix fallback), `Tensor::rfft` (onesided), `Tensor::stft` (framing +
+  optional window + transform), and periodic/symmetric Hann/Hamming/Blackman
+  window functions (`tests/signal.rs`). ONNX `HannWindow`/`HammingWindow`/
+  `BlackmanWindow` are implemented; `DFT`/`STFT` wrappers remain T2-B.
+
 - **ONNX export contract.** `ONNX-Export.md` defines the exporter tiers (E0
   graph builder, E1 static trace, E2 module export, E3 dynamic axes/opset,
   E4 control flow/training/quantization), validation gates and MVP order. No

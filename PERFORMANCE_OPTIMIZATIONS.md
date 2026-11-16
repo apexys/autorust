@@ -135,6 +135,20 @@ How to read it:
   would let prime extents (ViT's 197) use wider blocks instead of the 2/8-thread
   blocks the divisibility heuristic forces. Lower priority.
 
+### Signal processing
+
+- **S1. First-class `Ops::FFT` / backend FFT (low priority).** The graph-level
+  `Tensor::fft`/`rfft`/`stft` (radix-2 Cooley–Tukey over ordinary UOps) is
+  correct and exportable as standard ONNX ops, but it is launch- and
+  memory-traffic-bound: RTX 3060, single f32 transform, warm best of 8:
+  N=256/1024/4096 = **19.3/26.8/37.1 ms**; the `dft` matrix fallback is
+  6.1 ms at N=256 and 81.1 ms at N=1024. If audio-rate FFT/STFT becomes a
+  target, add an `Ops::Fft` marker whose default lowering expands to the
+  current graph, whose ONNX export maps to `DFT`, and whose backend dispatch
+  can use cuFFT/FFTW/a custom kernel with a host fallback. Keep the current
+  graph path as the portable reference. Wavelet DWT should stay a graph
+  (conv/downsample/lifting); no dedicated kernel is planned.
+
 ### Measurement and tooling
 
 - **T1. CUDA-event KPROF.** The current profiler synchronizes per launch and

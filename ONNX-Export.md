@@ -266,6 +266,7 @@ E1 should cover the inference subset already exercised by the importer:
 | Indexing | `Gather`; `GatherND`/`GatherElements` where the traced form is unambiguous; simple `Scatter*` only if semantics are exact |
 | NN | `Conv`, `ConvTranspose`, `MatMul`, `Gemm`, pooling, `BatchNormalization`, `LayerNormalization`, `GroupNormalization`, `Softmax`, `LogSoftmax`, activation compositions |
 | Resize | linear/nearest/cubic forms that map to `Resize`; unsupported attributes error |
+| Signal | window functions (standard compositions); `DFT`/`STFT` once the ONNX wrappers and opset mapping land |
 | Recurrent/control flow | none initially (E4) |
 | Random | none initially; seeded random is E4/depends on the ONNX random-op policy |
 

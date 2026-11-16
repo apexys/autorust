@@ -595,6 +595,7 @@ fn shape_inputs(op: &str) -> &'static [usize] {
         "OneHot" => &[1, 2],
         "Reshape" | "Expand" | "Tile" | "TopK" | "Squeeze" | "Unsqueeze" | "Split" | "Trilu"
         | "AffineGrid" | "CumSum" => &[1],
+        "HannWindow" | "HammingWindow" | "BlackmanWindow" => &[0],
         "ReduceSum" | "ReduceMean" | "ReduceMax" | "ReduceMin" | "ReduceProd" | "ReduceL1"
         | "ReduceL2" | "ReduceSumSquare" | "ReduceLogSum" | "ReduceLogSumExp" => &[1],
         _ => &[],

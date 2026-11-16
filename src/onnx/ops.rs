@@ -1078,6 +1078,24 @@ impl OnnxModel {
                 }
                 one(out)
             }
+            "HannWindow" | "HammingWindow" | "BlackmanWindow" => {
+                let size_t = inp(ins, 0)?;
+                let size = self.i64s(size_t)?.first().copied().unwrap_or(0);
+                let periodic = node.attr_i64("periodic", 1) != 0;
+                let dt = super::pb::onnx_dtype(node.attr_i64("output_datatype", 1) as i32)?;
+                let w = match op {
+                    "HannWindow" => {
+                        crate::tensor::signal::hann_window(&self.ctx, size, periodic, Some(dt))
+                    }
+                    "HammingWindow" => {
+                        crate::tensor::signal::hamming_window(&self.ctx, size, periodic, Some(dt))
+                    }
+                    _ => {
+                        crate::tensor::signal::blackman_window(&self.ctx, size, periodic, Some(dt))
+                    }
+                };
+                one(w)
+            }
             "Einsum" => {
                 let eq = node.attr_str("equation", "");
                 let operands: Result<Vec<&Tensor>> =
