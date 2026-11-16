@@ -64,6 +64,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Einsum` op no longer rejects >2 operands (`tests/einsum.rs`,
   `tests/onnx.rs::einsum_multi_operand_chain`).
 
+### Changed
+
+- **ONNX T2 is split into batches.** T2-A (windows, `If`, optional/sequence
+  values, `Binarizer`/`ArrayFeatureExtractor`), T2-B (`GridSample`,
+  `RoiAlign`/`MaxRoiPool`, `BitShift`, `Unique`, lower-priority `Col2Im`/
+  `DeformConv`), and T2-C (deferred: quantization, training ops, `Loop`/`Scan`,
+  wider ONNX-ML, `ImageDecoder`, random ops). See `ONNX-Compat.md`.
+
 ## [0.3.0] - 2026-11-16
 
 ### Changed

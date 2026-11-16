@@ -6595,3 +6595,24 @@ Replay is bit-identical to the first run. The gate is
 `tests/clip.rs::clip_text_and_vision_match_onnxruntime` (`#[ignore]`, assets
 under `CLIP_ASSET_DIR`, default `/tmp/opencode/clip`). This closes the T1
 acceptance gate.
+
+### 9.115 ONNX T2 split into batches (2026-11-16)
+
+T2 is no longer one milestone. The remaining work is split by cost/value and
+recorded in `ONNX-Compat.md`:
+
+- **T2-A (next):** `HannWindow`/`HammingWindow`/`BlackmanWindow`, `If` subgraphs,
+  `OptionalGetElement`/`OptionalHasElement`, and the two small ONNX-ML ops
+  (`Binarizer`, `ArrayFeatureExtractor`). `If` needs a nested graph runner and
+  a recursion cap; runtime conditions disable the replay plan.
+- **T2-B (after T2-A):** `GridSample`, `RoiAlign`/`MaxRoiPool`, `BitShift`,
+  `Unique`; lower priority `Col2Im`/`DeformConv`. These were missing from the
+  original matrix but are higher value than most of T2-C (spatial transformers,
+  detection post-processing, integer models).
+- **T2-C (deferred):** quantized ops (waiting for the INT8 W8A8 design),
+  training ops, `Loop`/`Scan`, the wider ONNX-ML/string domain,
+  `ImageDecoder`, and random ops.
+
+Do not do "all of T2 except quantization" as one batch: training/ONNX-ML/
+`Loop` have low deployment value or need architectural changes, while the
+T2-A/T2-B ops are small and self-contained.

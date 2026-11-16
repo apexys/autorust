@@ -14,8 +14,11 @@ except `tf_crop_and_resize`, aspect-ratio policy), the fused transformer ops
 validated end-to-end against onnxruntime (`tests/clip.rs`). Remaining T1
 limitations are rare: shape inputs fed at runtime (not derived from
 `Shape`/`Size`; evaluated eagerly) and `Resize`'s `tf_crop_and_resize` (needs
-`roi`). T2 (quantization, training ops, ONNX-ML, control flow) is not
-implemented.
+`roi`). T2 is split into batches by cost/value: **T2-A** (windows, `If`,
+optional/sequence values, the two small ONNX-ML ops), **T2-B** (additional
+high-value vision/general ops), and **T2-C** (deferred: quantization, training
+ops, `Loop`/`Scan`, the wider ONNX-ML/string domain, `ImageDecoder`, random
+ops). See [T2 batches](#t2-batches).
 
 Legend:
 
@@ -23,8 +26,8 @@ Legend:
 - 🟡 **partial** — the importer supports the common form but not every
   attribute/mode, or a required primitive is still missing.
 - ⬜ **missing** — no importer support / primitive yet.
-- ❌ **not planned** — intentionally out of scope (training ops, image codecs,
-  ONNX-ML feature transformers, …).
+- ❌ **not planned / deferred** — intentionally out of scope for now
+  (training graphs, `Loop`/`Scan`, wider ONNX-ML, image codecs, random ops).
 
 ## Scope
 
@@ -32,7 +35,24 @@ Legend:
 |---|---|---|
 | T0 | protobuf parser, runner, runtime `Shape` folding, external data, Depth-Anything-style models | ✅ done |
 | T1 | transformer/CLIP op set (`Einsum`, `GatherND`, `Pad` modes, `TopK`, `Scatter*`, …) | ✅ done |
-| T2 | quantized ops, training ops (`Adam`/`Momentum`/`Gradient`), windows, `If` subgraphs, ONNX-ML | ⬜ not started |
+| T2-A | near-term: `HannWindow`/`HammingWindow`/`BlackmanWindow`, `If`, optional/sequence values, `Binarizer`/`ArrayFeatureExtractor` | ⬜ next |
+| T2-B | additional high-value op coverage: `GridSample`, `RoiAlign`, `MaxRoiPool`, `BitShift`, `Unique`; lower priority `Col2Im`, `DeformConv` | ⬜ after T2-A |
+| T2-C | deferred / not planned: quantized ops, training ops, `Loop`/`Scan`, wider ONNX-ML, `ImageDecoder`, random ops | ❌ deferred |
+
+## T2 batches
+
+T2 is deliberately not one milestone. The remaining work is split by cost,
+value and architectural risk:
+
+| Batch | Contents | Rationale |
+|---|---|---|
+| **T2-A** | `HannWindow`/`HammingWindow`/`BlackmanWindow`; `If` subgraphs; `OptionalGetElement`/`OptionalHasElement`; `Binarizer`/`ArrayFeatureExtractor` | Small, mostly compositional, and the only T2 features with realistic deployment value. `If` needs a nested graph runner and a recursion cap; runtime conditions disable the replay plan. |
+| **T2-B** | `GridSample`; `RoiAlign`/`MaxRoiPool`; `BitShift`; `Unique`; lower priority `Col2Im`/`DeformConv` | Not in the original T2 list, but higher value than most of T2-C: spatial transformers, detection post-processing and integer models. `GridSample`/`BitShift` are graph compositions; ROI pooling and `Unique` are host-assisted and data-dependent. |
+| **T2-C** | Quantized ops; training ops (`Adam`/`Adagrad`/`Momentum`/`Gradient`); `Loop`/`Scan`; the wider ONNX-ML/string domain; `ImageDecoder`; random ops (`Bernoulli`/`Multinomial`/`Random*`) | Deferred or not planned. Quantization waits for the INT8 W8A8 design; training graphs are rare in deployment and stateful; `Loop`/`Scan` need dynamic carried state; ONNX-ML is a long preprocessing tail; image codecs are out of scope; random ops need a seeding/reproducibility policy. |
+
+Execution order: **T2-A → T2-B**, with T2-C explicitly out of scope until a
+concrete model requires a piece of it. The short T2-A items (windows, the two
+ONNX-ML ops) can land before `If`.
 
 ## Parser and runner features
 
@@ -44,11 +64,11 @@ Legend:
 | Initializers / `Constant` | ✅ | decoded per tensor and uploaded as buffer leaves; raw bytes dropped after upload. |
 | Static shapes | ✅ | `Shape`/`Size` produce host-visible `int64` tensors at run time. |
 | Dynamic/symbolic dims | ✅ (runtime-bound) | declared `dim_param`s are bound from the fed tensor; data-dependent shapes remain unsupported. |
-| Subgraphs (`If`, `Loop`) | T2 | graph attributes are parsed; no control-flow runner yet. `Loop` is not in tinygrad's table. |
-| Optional / sequence values | T2 | not implemented. |
+| Subgraphs (`If`, `Loop`) | T2-A / T2-C | graph attributes are parsed; `If` is T2-A, `Loop`/`Scan` are T2-C. |
+| Optional / sequence values | T2-A | not implemented. |
 | Constant folding of `Shape`/`Slice`/`Concat` | 🟡 | host values are cached by interned UOp per run; there is no pre-pass that rewrites the graph. |
 | >2 GB models / external data | 🟡 | external tensors stream one at a time; an embedded model is read into memory (2 GB practical limit). |
-| Security limits | ✅ | per-tensor byte caps, length checks, overflow-checked dims; no recursion-depth limit yet (subgraphs are T2). |
+| Security limits | ✅ | per-tensor byte caps, length checks, overflow-checked dims; no recursion-depth limit yet (the `If` runner is T2-A). |
 
 ## Runner API
 
@@ -106,9 +126,13 @@ outputs remain valid after it is dropped.
   for per-dimension stride/dilation/output-padding (dilate the kernel,
   zero-insert the input, run at stride 1, append the output padding).
 - `Dropout` is inference-only; `BatchNormalization` rejects `training_mode`.
-- Quantized ops, ONNX training ops, windows, `If`, optional/sequence values and
-  ONNX-ML are T2.
-- `MatMulInteger`/`ConvInteger` and the `QLinear*` family are T2.
+- Windows, `If`, optional/sequence values and the two small ONNX-ML ops
+  (`Binarizer`, `ArrayFeatureExtractor`) are T2-A.
+- `GridSample`, `RoiAlign`, `MaxRoiPool`, `BitShift`, `Unique`, `Col2Im` and
+  `DeformConv` are T2-B.
+- Quantized ops (`MatMulInteger`/`ConvInteger`, `QuantizeLinear`/`DequantizeLinear`,
+  the `QLinear*` family), training ops, `Loop`/`Scan`, the wider ONNX-ML/string
+  domain, `ImageDecoder` and random ops are T2-C (deferred / not planned).
 
 ## Operator matrix
 
@@ -123,6 +147,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Abs Add Ceil Div Exp Floor Log Max Mean Min Mod Mul Neg Pow Reciprocal Relu Sqrt Sub Sum Where` | ✅ | direct `Tensor` ops. |
 | `Equal Greater GreaterOrEqual Less LessOrEqual Not And Or Xor` | ✅ | comparisons/logical ops. |
 | `BitwiseAnd BitwiseOr BitwiseXor` | ✅ | wrapper uses the integer `And`/`Or`/`Xor` ALU ops. |
+| `BitShift` | ⬜ T2-B | logical/arithmetic shift composition. |
 | `BitwiseNot` | ✅ | composed as `-x - 1`. |
 | `Cast CastLike Clip Round Sign` | ✅ | importer + `Tensor` compositions. |
 | `Erf` | ✅ | tinygrad's Abramowitz–Stegun polynomial. |
@@ -144,6 +169,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `TopK` | ✅ | bitonic `sort`/`topk`; indices cast to int64. |
 | `NonZero` | ✅ | host-side; output `[rank, nnz]` int64, including `nnz = 0`. |
 | `Hardmax` | ✅ | `argmax` + one-hot. |
+| `Unique` | ⬜ T2-B | host-side, data-dependent (plan-disabled), like `NonZero`. |
 
 ### Movement / shape / indexing
 
@@ -162,12 +188,20 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `CenterCropPad Compress` | ✅ | host-side; centre crop/pad and axis/flatten selection, including an empty selection. |
 | `Shrink` | ✅ | `where` composition. |
 
+### Control flow and values
+
+| ONNX ops | Status | Notes |
+|---|---|---|
+| `If` | ⬜ T2-A | branch subgraph runner; runtime conditions make the replay plan run eagerly. |
+| `OptionalGetElement OptionalHasElement` | ⬜ T2-A | optional/sequence value plumbing. |
+| `Loop Scan` | ❌ T2-C | dynamic iteration/carried state; `Loop` is not in tinygrad's table. |
+
 ### Neural-network ops
 
 | ONNX ops | Status | Notes |
 |---|---|---|
 | `Conv ConvTranspose Gemm MatMul` | ✅ | `conv2d`/`conv_transpose2d`/`linear`/`matmul`; both `Conv` and `ConvTranspose` accept per-dimension strides/dilations (and `ConvTranspose` per-dim `output_padding`). |
-| `MatMulInteger ConvInteger` | 🟡 | T2; integer matmul/conv on dequantized inputs. |
+| `MatMulInteger ConvInteger` | 🟡 | T2-C; integer matmul/conv on dequantized inputs, after the INT8 W8A8 plan. |
 | `MaxPool` | ✅ | `max_pool2d`. |
 | `AveragePool GlobalAveragePool GlobalMaxPool` | ✅ | N-D `avg_pool2d` + reductions. |
 | `MaxUnpool` | ✅ | host-side placement from the MaxPool indices; inferred or explicit `output_shape`. |
@@ -182,19 +216,21 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `SkipLayerNormalization` | ✅ | residual (+bias) + layernorm + affine; optional mean/inv_std/input outputs. |
 | `EmbedLayerNormalization` | ✅ | word/position/(segment) embedding + layernorm; the optional `mask_index` output is unsupported. |
 | `AffineGrid` | ✅ | 2-D/3-D base grid from `theta`, `align_corners`. |
-| `If` | T2 | subgraph runner; `Loop` is not in tinygrad's table. |
-| `OptionalGetElement OptionalHasElement` | T2 | optional/sequence value plumbing. |
+| `GridSample` | ⬜ T2-B | bilinear/nearest/linear sampling; graph composition, `padding_mode` and `align_corners`. |
+| `RoiAlign MaxRoiPool` | ⬜ T2-B | host-assisted ROI pooling; detection models. |
+| `Col2Im DeformConv` | ⬜ T2-B | lower priority; `DeformConv` needs sampled kernel offsets. |
 
 ### Quantization, training, and misc
 
 | ONNX ops | Status | Notes |
 |---|---|---|
-| `QuantizeLinear DequantizeLinear DynamicQuantizeLinear` | 🟡 | T2; round/clamp/cast composition with per-axis reshape. |
-| `QLinearAdd QLinearMul QLinearMatMul QLinearConv QLinearGlobalAveragePool` | 🟡 | T2; integer dequantize → op → requantize. |
-| `Adam Adagrad Momentum Gradient` | 🟡 | T2; port of tinygrad's ONNX training adapters over `nn/optim`. |
-| `HannWindow HammingWindow BlackmanWindow` | 🟡 | T2; `arange`+`cos` composition. |
-| `Binarizer ArrayFeatureExtractor` | T2 | ONNX-ML domain. |
-| `ImageDecoder` | ❌ | image codecs are out of scope; feed tensors. |
+| `QuantizeLinear DequantizeLinear DynamicQuantizeLinear` | 🟡 | T2-C; round/clamp/cast composition with per-axis reshape, after INT8 W8A8. |
+| `QLinearAdd QLinearMul QLinearMatMul QLinearConv QLinearGlobalAveragePool` | 🟡 | T2-C; integer dequantize → op → requantize, after INT8 W8A8. |
+| `Adam Adagrad Momentum Gradient` | 🟡 | T2-C; stateful/training-only graphs, low deployment value. |
+| `HannWindow HammingWindow BlackmanWindow` | ⬜ T2-A | `arange`+`cos` composition. |
+| `Binarizer ArrayFeatureExtractor` | ⬜ T2-A | the only planned ONNX-ML ops. |
+| `ImageDecoder` | ❌ T2-C | image codecs are out of scope; feed tensors. |
+| `Bernoulli Multinomial RandomNormal RandomUniform` | ❌ T2-C | random ops; a seeding/reproducibility policy is needed first. |
 | `Einsum` | ✅ | N operands, ellipsis (right-aligned broadcast), repeated labels (diagonal) and implicit output. |
 
 ## Validation plan (remaining)
@@ -206,6 +242,9 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
    correctness; compare against `onnxruntime` in the dev environment only.
 3. **Golden fixtures**: `tests/onnx.rs` builds models in-memory; add committed
    fixtures (when size allows) for the T1 op families.
+4. **T2**: land T2-A first (windows, then `If`), then T2-B (`GridSample`,
+   `RoiAlign`/`MaxRoiPool`, `BitShift`, `Unique`). T2-C stays documented as
+   deferred unless a target model forces a specific item.
 
 ## Security
 
