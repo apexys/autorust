@@ -300,6 +300,63 @@ impl Tensor {
             "TGERR: input/weight ndims differ"
         );
 
+        // 1x1 conv is a plain matmul: `[B*H*W, Cin] @ [Cin, Cout]`. The old
+        // lowering still paid the pad/pool/expand/3-axis-reduce path because
+        // `hw_product > 1` gated im2col. Restrict the fast path to groups=1,
+        // stride=1, dilation=1 and zero padding; everything else keeps the
+        // general convolution.
+        if crate::helpers::env::get("AUTORUST_CONV1X1").is_some_and(|v| v != "0")
+            && matches!(
+                crate::schedule::indexing::device_of(ctx, self.uop()),
+                Some(crate::uop::arg::DeviceSpec::Single(ref d)) if d.starts_with("CUDA")
+            )
+            && groups == 1
+            && stride == 1
+            && dilation == 1
+            && hw_len == 2
+            && w_shape[2..].iter().all(|s| s.clone().as_i64() == Some(1))
+            && padding_.iter().all(|&p| p == 0)
+        {
+            let dims: Option<Vec<i64>> = x_shape.iter().map(|s| s.clone().as_i64()).collect();
+            if let Some(d) = dims
+                && d.len() == 4
+                && d[0] > 0
+                && d[2] > 0
+                && d[3] > 0
+                && cin_i > 0
+                && cout_i > 0
+            {
+                let m = d[0].saturating_mul(d[2]).saturating_mul(d[3]);
+                // Below this many rows the NCHW permuted store costs more than
+                // the 3-axis generated convolution (UNet's bottleneck 1x1s).
+                let min_m = crate::helpers::env::get("AUTORUST_CONV1X1_MIN_M")
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(2048);
+                if m >= min_m {
+                    let x2 =
+                        self.reshape_ctx(ctx, vec![SVal::I(m as i128), SVal::I(cin_i as i128)]);
+                    let w2 = weight
+                        .reshape_ctx(ctx, vec![SVal::I(cout_i as i128), SVal::I(cin_i as i128)])
+                        .transpose_ctx(ctx, 0, 1);
+                    let y = x2.linear_ctx(ctx, &w2, bias);
+                    let y = y.reshape_ctx(
+                        ctx,
+                        vec![
+                            SVal::I(d[0] as i128),
+                            SVal::I(d[2] as i128),
+                            SVal::I(d[3] as i128),
+                            SVal::I(cout_i as i128),
+                        ],
+                    );
+                    let y = y.permute_ctx(ctx, &[0, 3, 1, 2]);
+                    return match dtype {
+                        Some(dt) => y.cast_ctx(ctx, dt),
+                        None => y,
+                    };
+                }
+            }
+        }
+
         // conv2d is a pooling op (with padding, possibly negative — _pad_constant handles the shrink)
         let grouped = flat_to_grouped(&padding_);
         let mut p_x: Vec<(Option<i64>, Option<i64>)> =

@@ -43,6 +43,11 @@ tensor-core tile on sm_80+, keep the direct/im2col paths as fallbacks, and add a
 depthwise kernel for `groups == channels`. Gate with the same numerics check as the FA2 TC path.
 Measure: ResNet-18 infer/train, ResNet-50 infer, MobileNetV2, UNet at bs 32/4; kernel table and
 GFLOP/s before/after.
+Status (2026-11-16): started with the 1x1 case. CUDA 1x1 convs (groups=1,
+stride=1, dilation=1, no padding, >=2048 rows) now lower as a plain matmul:
+MobileNetV2 -7%, ResNet-50 -2%, UNet -4%, CPU/ResNet-18 neutral
+(`CURRENT_STATE §9.86`, `tests/conv1x1.rs`). Tensor-core implicit GEMM for
+3x3/depthwise/conv_transpose remains open.
 12. Fused reductions: softmax/layernorm/sum/amax (burn reduce tuner)
 Why: our CUDA reductions are the remaining memory-bound gap (softmax 155 vs torch 288 GB/s,
 layernorm 156 vs 209, sum 176 vs 287, amax 64 vs 292). Burn decomposes softmax and lets fusion

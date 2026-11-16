@@ -5900,3 +5900,32 @@ step cannot use it. This is the same disposition as the fused softmax: the
 useful follow-up is a graph-level layernorm with an autograd node, not an
 inference-only host call. The code, test and `AUTORUST_LAYERNORM_KERNEL` flag
 were removed.
+
+### 9.86 Item 11 start: 1x1 convolution fast path (2026-11-16)
+
+The general conv lowering gates im2col on `hw_product > 1`, so a 1x1 conv kept
+the pad/pool/expand/3-axis-reduce path. A 1x1 conv with `groups=1`, stride 1,
+dilation 1 and zero padding is exactly
+`[B*H*W, Cin] @ [Cin, Cout]`; `conv2d_ctx` now builds that matmul (then reshapes
+`[B,H,W,Cout]` and permutes to NCHW) on CUDA. The permuted store is left to the
+scheduler/generated matmul; no host-GEMM change was needed. The fast path is
+gated by `AUTORUST_CONV1X1` (default on) and `AUTORUST_CONV1X1_MIN_M`
+(default 2048 rows). It is CUDA-only because CPU 1x1 convs regressed badly in
+the first A/B (MobileNet 237 -> 400 ms); the CPU/CL/VK paths keep the old
+lowering.
+
+Interleaved A/B, RTX 3060, same process protocol:
+
+| workload | old | 1x1 path | result |
+|---|---:|---:|---|
+| MobileNetV2 infer bs 32 | 56.9-57.1 ms | 52.9-55.7 ms | 2-7% |
+| ResNet-50 infer bs 32 | 88.2-89.7 ms | 82.8-87.9 ms | 2-6% |
+| UNet infer bs 4 | 12.3 ms | 11.8 ms | ~4% (one pair) |
+| ResNet-18 infer bs 32 | 282.1 ms | 276.1 ms | neutral (no 1x1) |
+| MobileNetV2 infer bs 32, CPU | 247.7 ms | 246.2 ms | neutral (guard) |
+
+Gates: `tests/conv1x1.rs` checks the fast path against a direct host sum
+(forward, stride-1 and stride-2 fallback) and the CUDA gradients (dx/dw/db)
+against the analytic 1x1 sums; `tests/nn_conv.rs` still passes. The remaining
+tensor-core implicit-GEMM work is for 3x3, depthwise and conv_transpose, not
+1x1.

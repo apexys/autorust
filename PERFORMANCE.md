@@ -979,6 +979,18 @@ Reading it:
 - MobileNetV2 is the exception: depthwise convolutions have no GEMM lowering,
   and our elementwise path beats torch on CPU by 3.4x (torch's CPU depthwise
   kernel is slow at this size). CUDA is 2.4x behind.
+- **1x1 convolutions now lower as a plain matmul on CUDA.** A 1x1 conv with
+  `groups=1`, stride 1, dilation 1 and zero padding becomes
+  `[B*H*W, Cin] @ [Cin, Cout]` (then a permuted NCHW store), instead of the
+  pad/pool/expand/3-axis-reduce path that `hw_product > 1` had gated off. The
+  fast path is CUDA-only and requires at least 2048 rows; smaller maps (UNet's
+  bottlenecks) stay on the generated conv. Interleaved A/B, RTX 3060:
+  MobileNetV2 56.9-57.1 -> 52.9-55.7 ms (2-7% across repeated pairs),
+  ResNet-50 88.2-89.7 -> 82.8-87.9 ms (2-6%), UNet 12.3 -> 11.8 ms (~4% in one
+  pair), ResNet-18 and the CPU rows unchanged. Gates:
+  `tests/conv1x1.rs` (direct-sum reference and CUDA gradients).
+  The 3x3/depthwise/conv_transpose gap still needs the tensor-core
+  implicit-GEMM work.
 - The UNet exposes `conv_transpose`, nearest upsample and skip `cat`, all far
   behind cuDNN/oneDNN.
 

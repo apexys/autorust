@@ -136,6 +136,8 @@ These mirror the `Settings` fields above; the per-backend variables win over
 | `SDPA_TILE` | integer | `0` (off) | Attention padding multiple. |
 | `AUTORUST_MM_M/N/K/LM/LN` | five integers | generated | Matmul tile override (ignored unless all five parse). |
 | `AUTORUST_CPU_GEMM_MC/NC/KC` | three integers | 48/96/256 | CPU host-GEMM tile (ignored unless all three parse). |
+| `AUTORUST_CONV1X1` | `0` to disable | on (CUDA) | Lower a 1x1 conv with groups=1, stride=1, dilation=1 and zero padding as `[B*H*W, Cin] @ [Cin, Cout]` instead of the 3-axis conv path. CUDA-only; CPU/CL/VK keep the existing path. |
+| `AUTORUST_CONV1X1_MIN_M` | integer rows | `2048` | Minimum `B*H*W` for the 1x1 fast path; smaller spatial maps (UNet bottlenecks) stay on the generated conv. |
 
 ### Dtypes and the RAYON evaluator
 

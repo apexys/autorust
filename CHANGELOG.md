@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **1x1 convolution fast path on CUDA.** A 1x1 conv with `groups=1`, stride 1,
+  dilation 1 and zero padding now lowers as `[B*H*W, Cin] @ [Cin, Cout]`
+  instead of the 3-axis convolution path, with a CUDA-only row gate
+  (`AUTORUST_CONV1X1`, `AUTORUST_CONV1X1_MIN_M`, default 2048). Measured
+  MobileNetV2 -7%, ResNet-50 -2%, UNet -4%; ResNet-18 and CPU unchanged.
+  `tests/conv1x1.rs` covers the direct-sum reference, the stride fallback and
+  the CUDA gradients.
 - **Fused CUDA full reductions.** `Tensor::sum_with` and `Tensor::max_with`
   (and the memops driver by default) run an already-realized contiguous f32
   scalar reduction as one streaming pass plus a tiny finish kernel instead of
