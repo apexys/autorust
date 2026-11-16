@@ -6,7 +6,7 @@ use autorust::onnx::export::{
     export_fn, export_module, ExportOptions, GraphBuilder, InputSpec, OutputSpec,
 };
 use autorust::onnx::OnnxModel;
-use autorust::tensor::nn::Module;
+use autorust::tensor::nn::{Conv2d, Module};
 use autorust::tensor::{Ctx, Tensor};
 use std::path::PathBuf;
 
@@ -323,4 +323,97 @@ fn export_e3_transformer_style_block() {
     let mut out = m.run(&[("x", xx)]).expect("run block");
     let got = out.remove("y").unwrap().to_list::<f32>(m.session_mut());
     close(&got, &want, 1e-5);
+}
+
+struct Cnn {
+    conv: Conv2d,
+    lin: Tensor,
+    bias: Tensor,
+}
+
+impl Cnn {
+    fn new(ctx: &Ctx) -> Self {
+        let conv = Conv2d::new(ctx, 1, 2, &[2, 2], 1, &[(1, 1), (1, 1)], 1, 1, true);
+        // 2 pools of 2x2 with one pixel of padding over the 9x9 conv output
+        // -> 5x5 each; the padded max uses a bool Pad + Where with dtype_min.
+        let lin = Tensor::from_slice(
+            ctx,
+            &(0..(2 * 5 * 5 * 3))
+                .map(|i| ((i % 11) as f32 - 5.0) * 0.03)
+                .collect::<Vec<_>>(),
+            Some(dtype::FLOAT32),
+            None,
+        )
+        .reshape([50, 3]);
+        let bias = Tensor::from_slice(ctx, &[0.1f32, -0.2, 0.05], Some(dtype::FLOAT32), None);
+        Cnn { conv, lin, bias }
+    }
+
+    fn forward(&self, x: &Tensor) -> Tensor {
+        let h = self.conv.forward(x).relu();
+        let (p, _) = h.max_pool2d(&[2, 2], Some(&[2, 2]), &[1, 1], &[1, 1], false, false);
+        p.reshape([2, 50]).matmul(&self.lin).add(&self.bias)
+    }
+}
+
+impl Module for Cnn {
+    fn named_params(&self) -> Box<dyn Iterator<Item = (String, Tensor)> + '_> {
+        let mut v = vec![
+            ("conv_weight".to_string(), self.conv.weight.clone()),
+            ("lin".to_string(), self.lin.clone()),
+            ("bias".to_string(), self.bias.clone()),
+        ];
+        if let Some(b) = &self.conv.bias {
+            v.push(("conv_bias".to_string(), b.clone()));
+        }
+        Box::new(v.into_iter())
+    }
+
+    fn into_params(self) -> Self {
+        self
+    }
+}
+
+#[test]
+fn export_e3b_cnn_block() {
+    let ctx = Ctx::new();
+    let model = Cnn::new(&ctx);
+    let xv: Vec<f32> = (0..128)
+        .map(|i| ((i % 13) as f32 - 6.0) * 0.1)
+        .collect();
+    let x = Tensor::from_slice(&ctx, &xv, Some(dtype::FLOAT32), None).reshape([2, 1, 8, 8]);
+    let mut sess = autorust::engine::session::Session::new();
+    let want = model.forward(&x).to_list::<f32>(&mut sess);
+    let path = out_dir().join("onnx_export_e3b_cnn.onnx");
+    export_module(
+        &path,
+        &model,
+        &[InputSpec::new("x", dtype::FLOAT32, &[2, 1, 8, 8])],
+        &[OutputSpec::new("y")],
+        |m, args| vec![m.forward(&args[0])],
+        &ExportOptions::default(),
+    )
+    .expect("export cnn");
+    let raw = std::fs::read(&path).expect("read cnn model");
+    let proto = autorust::onnx::pb::parse_model(&raw).expect("parse cnn model");
+    let ops: Vec<&str> = proto.graph.nodes.iter().map(|n| n.op_type.as_str()).collect();
+    assert!(ops.contains(&"Pad"), "CNN export has no Pad: {ops:?}");
+    assert!(ops.contains(&"Slice"), "CNN export has no Slice: {ops:?}");
+    let mut m = OnnxModel::load_with_device(&path, None).expect("load cnn");
+    let xx = Tensor::from_slice(m.ctx(), &xv, Some(dtype::FLOAT32), None).reshape([2, 1, 8, 8]);
+    let mut out = m.run(&[("x", xx)]).expect("run cnn");
+    let got = out.remove("y").unwrap().to_list::<f32>(m.session_mut());
+    close(&got, &want, 1e-4);
+
+    // Assets for the dev-only Python onnxruntime check.
+    let mut xb = Vec::new();
+    for v in &xv {
+        xb.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut yb = Vec::new();
+    for v in &want {
+        yb.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(out_dir().join("onnx_export_e3b_cnn_x.bin"), xb).unwrap();
+    std::fs::write(out_dir().join("onnx_export_e3b_cnn_y.bin"), yb).unwrap();
 }

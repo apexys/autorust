@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the exporter's E0/E1/E2 artifacts with onnxruntime.
+"""Check the exporter's E0-E3b artifacts with onnxruntime.
 
 Run after `cargo test --release --test onnx_export` has written the models and
 assets to /tmp/opencode. Use the bench virtualenv (onnx + onnxruntime).
@@ -46,9 +46,16 @@ e3x = np.fromfile(f"{ROOT}/onnx_export_e2_x.bin", dtype=np.float32).reshape(2, 3
 e3ext = run(f"{ROOT}/onnx_export_e3_external.onnx", {"x": e3x})
 assert np.allclose(e3ext, y2), (e3ext, y2)
 
-print("onnx export E0/E1/E2/E3: checker + onnxruntime OK")
+# E3b: CNN (conv + relu + maxpool + linear) through the traced lowering.
+cnn_x = np.fromfile(f"{ROOT}/onnx_export_e3b_cnn_x.bin", dtype=np.float32).reshape(2, 1, 8, 8)
+cnn_y = np.fromfile(f"{ROOT}/onnx_export_e3b_cnn_y.bin", dtype=np.float32).reshape(2, 3)
+e3b = run(f"{ROOT}/onnx_export_e3b_cnn.onnx", {"x": cnn_x})
+assert np.allclose(e3b, cnn_y, atol=1e-4), (e3b, cnn_y)
+
+print("onnx export E0/E1/E2/E3/E3b: checker + onnxruntime OK")
 print("E0", e0.tolist())
 print("E1", e1.tolist())
 print("E2", e2.tolist())
 print("E3 dynamic", e3d.tolist())
 print("E3 external", e3ext.tolist())
+print("E3b cnn", e3b.tolist())

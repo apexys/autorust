@@ -4,12 +4,13 @@ This file is the contract for the ONNX **exporter**. The importer and its
 operator matrix live in `ONNX-Compat.md`; this document covers producing ONNX
 models from `autorust` graphs and models.
 
-**Status (2026-11-16):** **E0-E3 are implemented** in `src/onnx/export.rs` and
-`src/onnx/write.rs`: dynamic `dim_param` axes, external-data sidecars, direct
-`MatMul` recognition, and a transformer-style LayerNorm/residual gate.
-`tests/onnx_export.rs` and the dev-only `bench/onnx_export_check.py`
-onnxruntime gate cover E0-E3. `Gemm`/`Conv` normalization (expanded arithmetic
-today), opset decomposition and shape-inference polish are tracked as **E3b**;
+**Status (2026-11-16):** **E0-E3 are implemented**, plus E3b CNN export, in
+`src/onnx/export.rs` and `src/onnx/write.rs`: dynamic `dim_param` axes,
+external-data sidecars, direct `MatMul` recognition, a transformer-style
+LayerNorm/residual gate, and `Shrink`/`Pad` lowering so traced conv/pool
+graphs export. `tests/onnx_export.rs` and the dev-only
+`bench/onnx_export_check.py` onnxruntime gate cover E0-E3b. Direct `Gemm`/`Conv`
+folding, opset decomposition and shape-inference polish remain E3b follow-ups;
 E4 is deferred.
 
 ## Goals
@@ -73,7 +74,7 @@ complexity**. A higher tier includes the lower tiers.
 | **E1** | `export_fn` closure | fixed | Trace a lazy `Tensor`/UOp graph; params/constants as initializers; dedup; core standard ops | ✅ done |
 | **E2** | `export_module` + `Module` | fixed | `named_params`/`named_buffers`, shared parameters, multiple inputs/outputs, eval mode, metadata | ✅ done |
 | **E3** | E1/E2 | symbolic/dynamic | `Dim::Param` on declared axes, external-data sidecars, direct `MatMul` lowering, transformer-style graph gate | ✅ done |
-| **E3b** | E3 | symbolic/dynamic | `Gemm`/`Conv` normalization, opset decomposition, shape-inference polish | 🟡 follow-up |
+| **E3b** | E3 | symbolic/dynamic | CNN export (`Shrink`→`Slice`, `Pad`→`Pad`), conv/pool gates; direct `Gemm`/`Conv` folding, opset decomposition, shape-inference polish | 🟡 CNN export done; folding follow-up |
 | **E4** | E1/E2 | data-dependent | `If` (later `Loop`/`Scan`), training, QDQ/quantized, sequences/optionals, custom domains | deferred |
 
 ### E0 — proto and graph builder (implemented)
@@ -153,20 +154,23 @@ where
   leaves, initializer dedup by UOp identity, explicit `UnsupportedOp` errors.
 - Lowering: elementwise arithmetic/logical/comparison, `Where`, `Cast`,
   `Sqrt`/`Sin`/`Neg`/`Trunc`/`Reciprocal`, `Exp2`/`Log2`, `Reshape`,
-  `Expand`, `Permute`, `Reduce` (`Add`/`Mul`/`Max`), and `Identity` output
-  aliases. The expanded `dot` pattern (broadcast multiply + permute + sum) is
-  recognized and emitted as one `MatMul`; a graph that does not match the
-  validated shape pattern keeps the expanded arithmetic form. This covers
-  MLP-style graphs (Linear/dot + bias + ReLU) and transformer blocks.
+  `Expand`, `Permute`, `Reduce` (`Add`/`Mul`/`Max`), `Shrink`→`Slice`,
+  `Pad`→`Pad`, and `Identity` output aliases. The expanded `dot` pattern
+  (broadcast multiply + permute + sum) is recognized and emitted as one
+  `MatMul`; a graph that does not match the validated shape pattern keeps the
+  expanded arithmetic form. This covers MLP-style graphs (Linear/dot + bias +
+  ReLU), transformer blocks, and traced CNN blocks (conv + relu + maxpool +
+  linear).
 - E3 dynamic axes and external data are implemented. A simple elementwise
   graph exports with `dim_param` batch axes and runs in ORT at several batch
   sizes; float initializers can move to `<model>.onnx.data` while integer shape
   tensors stay inline for ONNX shape inference.
-- Direct `MatMul` normalization is in. `Gemm` (the traced `MatMul` + `Add`
-  pair is already valid) and `Conv` (im2col arithmetic, including `Shrink`/
-  `Pad` index graphs) remain E3b, as do `Resize` and a full attention block.
-  The transformer-style LayerNorm+residual gate is covered; unmapped UOps fail
-  explicitly.
+- Direct `MatMul` normalization is in. Traced convolutions export through
+  their im2col arithmetic now that `Shrink` and `Pad` are lowered; folding that
+  pattern into a single `Conv` (and folding `MatMul` + `Add` into `Gemm`)
+  remains an E3b optimization, as do `Resize` and a full attention block. The
+  transformer-style LayerNorm+residual gate and the CNN gate are covered;
+  unmapped UOps fail explicitly.
 
 ### E3 — dynamic axes and deployment polish
 
@@ -276,6 +280,10 @@ Further normalization (E3b) will include:
   -> primitive ONNX subgraphs unless a newer opset op is explicitly requested.
 - `Reshape` with static targets -> shapes; dynamic targets -> the traced
   `Shape`/`Gather`/`Concat` subgraph.
+- `Shrink` -> `Slice` and zero-fill `Pad` -> `Pad`; non-zero `pad_constant`
+  fills are already traced as `Pad` + `Where`, so they stay correct.
+- im2col conv -> one `Conv` (optimization; the expanded graph is the current
+  portable form).
 
 The lowering table is exhaustive over the UOps that can reach export. There is
 no silent fallback: an unmapped UOp is an `UnsupportedOp` error with the node

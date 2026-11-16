@@ -715,6 +715,70 @@ impl<'a> Tracer<'a> {
                     ))
                 }
             }
+            Ops::Shrink => {
+                // `shrink` stores `(start, size)` per dim. ONNX `Slice` wants
+                // `[start, start + size)` with unit steps.
+                let x = self.trace(&srcs[0])?;
+                let rank = shape_of(self.ctx, &srcs[0])?.len();
+                let (Some(starts), Some(sizes)) =
+                    (self.const_ints(&srcs[1]), self.const_ints(&srcs[2]))
+                else {
+                    return Err(ExportError::UnsupportedOp {
+                        op: "SHRINK with non-constant bounds".into(),
+                        path,
+                    });
+                };
+                let (Some(starts), Some(sizes)) = (fit_rank(starts, rank), fit_rank(sizes, rank))
+                else {
+                    return Err(ExportError::UnsupportedOp {
+                        op: "SHRINK bounds do not match the rank".into(),
+                        path,
+                    });
+                };
+                let ends: Vec<i64> = starts.iter().zip(&sizes).map(|(s, n)| s + n).collect();
+                let axes: Vec<i64> = (0..rank as i64).collect();
+                let steps = vec![1i64; rank];
+                let st = self.init_i64("starts", &starts);
+                let en = self.init_i64("ends", &ends);
+                let ax = self.init_i64("axes", &axes);
+                let sp = self.init_i64("steps", &steps);
+                Ok(self.emit(id, "Slice", vec![x, st, en, ax, sp], vec![]))
+            }
+            Ops::Pad => {
+                // `pad` stores `(start, stop)` where `stop` is the new
+                // dimension size (`start + input + after`). ONNX wants
+                // `[before dims..., after dims...]`.
+                let x = self.trace(&srcs[0])?;
+                let in_shape = shape_of(self.ctx, &srcs[0])?;
+                let rank = in_shape.len();
+                let (Some(lo), Some(stop)) = (self.const_ints(&srcs[1]), self.const_ints(&srcs[2]))
+                else {
+                    return Err(ExportError::UnsupportedOp {
+                        op: "PAD with non-constant bounds".into(),
+                        path,
+                    });
+                };
+                let (Some(lo), Some(stop)) = (fit_rank(lo, rank), fit_rank(stop, rank)) else {
+                    return Err(ExportError::UnsupportedOp {
+                        op: "PAD bounds do not match the rank".into(),
+                        path,
+                    });
+                };
+                let mut pads = Vec::with_capacity(rank * 2);
+                pads.extend_from_slice(&lo);
+                for ((s, l), d) in stop.iter().zip(&lo).zip(&in_shape) {
+                    let after = s - d - l;
+                    if after < 0 || *l < 0 {
+                        return Err(ExportError::UnsupportedOp {
+                            op: "PAD with negative padding".into(),
+                            path,
+                        });
+                    }
+                    pads.push(after);
+                }
+                let p = self.init_i64("pads", &pads);
+                Ok(self.emit(id, "Pad", vec![x, p], vec![]))
+            }
             Ops::Cast => {
                 let x = self.trace(&srcs[0])?;
                 let to = dtype_code_for(dt)?;
@@ -733,6 +797,46 @@ impl<'a> Tracer<'a> {
         self.initializers
             .push(tensor_proto(&name, vec![vals.len() as i64], 7, bytes));
         name
+    }
+
+    /// Evaluate a small integer subgraph used as a movement bound. `shrink`
+    /// and `pad` build their bounds from `Stack`/`Const` nodes; anything more
+    /// complex is rejected rather than guessed.
+    fn const_ints(&mut self, id: &UopId) -> Option<Vec<i64>> {
+        match self.ctx.op_of(id) {
+            Ops::Const => match self.ctx.arg_of(id) {
+                Arg::Const(crate::dtype::ConstVal::Int(v)) => {
+                    i64::try_from(*v).ok().map(|v| vec![v])
+                }
+                _ => None,
+            },
+            Ops::Stack => {
+                let srcs = self.ctx.srcs(id).to_vec();
+                let mut out = Vec::new();
+                for s in &srcs {
+                    out.extend(self.const_ints(s)?);
+                }
+                Some(out)
+            }
+            Ops::Reshape | Ops::Cast => {
+                let src = self.ctx.srcs(id)[0].clone();
+                self.const_ints(&src)
+            }
+            Ops::Expand => {
+                let src = self.ctx.srcs(id)[0].clone();
+                let vals = self.const_ints(&src)?;
+                let shape = shape_of(self.ctx, id).ok()?;
+                let n: usize = shape.iter().map(|&d| d as usize).product();
+                if vals.len() == n {
+                    Some(vals)
+                } else if vals.len() == 1 {
+                    Some(vec![vals[0]; n])
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Match the expanded `dot` graph (`permute(mul(reshape(x), permute(reshape(w))))
@@ -932,6 +1036,18 @@ impl<'a> Tracer<'a> {
                 path: path.to_string(),
             }),
         }
+    }
+}
+
+/// Broadcast a one-element bound list to `rank`, as tinygrad's shape args do
+/// for scalars.
+fn fit_rank(v: Vec<i64>, rank: usize) -> Option<Vec<i64>> {
+    if v.len() == rank {
+        Some(v)
+    } else if v.len() == 1 {
+        Some(vec![v[0]; rank])
+    } else {
+        None
     }
 }
 

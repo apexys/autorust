@@ -6851,3 +6851,30 @@ E3 dynamic/external, E3 transformer block). `bench/onnx_export_check.py`
 and the external-data MLP. `cargo nextest run --release` is 417/417,
 `cargo clippy --all-targets`, `cargo rustdoc --lib -- -W missing_docs` and
 `cargo check --no-default-features` are clean.
+
+### 9.124 ONNX export E3b: CNN export (2026-11-16)
+
+Traced convolutions previously failed export at `UnsupportedOp { op: "Shrink" }`
+even though every other op in the im2col graph was mapped. E3b closes that:
+
+- `Shrink` lowers to ONNX `Slice`. The UOp stores `(start, size)` per dim, so
+  the exported `ends` are `start + size`; `axes` are `0..rank` and `steps` 1.
+- `Pad` lowers to ONNX `Pad`. The UOp stores `(start, stop)` where `stop` is the
+  new dimension size, so the `after` padding is `stop - input - start`. Only
+  zero-fill pads reach this node; `pad_constant` with a non-zero value is
+  already a `Pad` + `Where` graph, which exports correctly.
+- The bounds are constant `Stack`/`Const` subgraphs; a small evaluator handles
+  `Const`, `Stack`, `Reshape`, `Expand` and `Cast` and rejects anything else
+  explicitly rather than guessing.
+- A CNN gate (`Conv2d` with padding + ReLU + `max_pool2d` with padding +
+  linear) exports, contains real `Pad`/`Slice` nodes, round-trips through
+  `OnnxModel`, and matches the eager graph. The pool padding exercises the
+  bool `Pad` + `Where(dtype_min)` path, not just zero-fill pads. The Python gate
+  checks `onnx.checker` + onnxruntime and compares to the Rust reference.
+
+Direct `Conv` folding (the exported conv is currently its im2col arithmetic)
+and `Gemm` folding remain E3b optimizations; the expanded form is valid and is
+the portable fallback.
+
+Gates: `tests/onnx_export.rs::export_e3b_cnn_block` (6 tests total),
+`bench/onnx_export_check.py` E0-E3b, `cargo clippy --all-targets` clean.
