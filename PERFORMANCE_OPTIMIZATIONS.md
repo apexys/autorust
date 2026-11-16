@@ -261,6 +261,9 @@ How to read it:
 ### Backend
 
 - **CL fused optimizer.** 96.9 → 26.4 ms, CUDA parity; `tests/nn_optim.rs`.
+- **VK fused optimizer and reductions.** The same kernel as precompiled SPIR-V:
+  AdamW 100M **95.0 → 24.5-27.0 ms**; `amax`/`sum` 16M **0.32-0.38 ms**;
+  `tests/nn_optim.rs`, `tests/vk_reduce.rs`.
 - **Math-mode compiler flags.** `CC` `-ffast-math`: amax 2.38 → 2.11 ms, add
   10.64 → 10.20 ms, but gelu 9.38 → 10.63 ms (mixed); OpenCL
   `-cl-fast-relaxed-math`: softmax 1.065 → 0.982 ms, other memops neutral.
