@@ -6790,3 +6790,36 @@ three models through `OnnxModel` and compares outputs. `bench/onnx_export_check.
 runs `onnx.checker` + onnxruntime on the same artifacts; all three match
 autorust exactly for the test inputs. `cargo test --release --test onnx_export`
 passes 3 tests.
+
+### 9.122 Vulkan fused optimizer and full reductions (2026-11-16)
+
+Closed B1 and the VK reduction follow-up. The Vulkan compute path needs explicit
+descriptor sets, so both kernels ship as precompiled SPIR-V captured in the
+normal `VkModule` payload rather than compiled from source at run time.
+
+- `src/runtime/vk_optim.rs` (`vk_optim.spv`) fuses Adam/AdamW/LAMB into one
+  256-invocation pass over `p/g/m/v`; the five hyperparameters and `n` are
+  one-element storage buffers. `tensor::optim` selects it for VK parameters
+  `>= MIN_ELEMS` and keeps the graph as the reference. `AUTORUST_OPTIM_KERNEL=0`
+  still disables the fused path.
+- `src/runtime/vk_reduce.rs` (`vk_reduce_{sum,amax}{,_finish}.spv`) does a
+  256-block streaming pass plus a finish pass behind
+  `Tensor::sum_with`/`max_with`; non-full/axis reductions fall back to the
+  graph.
+- `tests/nn_optim.rs::fused_kernel_matches_graph_update_vk` and
+  `tests/vk_reduce.rs` fail if the kernels disagree with the graph.
+
+Measured on the RTX 3060 (`bench/autorust`, warmup 3, iters 10):
+
+| case | before | after |
+|---|---|---|
+| AdamW 100M params, 32 tensors | 95.0 ms | **24.5-27.0 ms** |
+| `amax` 16M | 0.47 ms | **0.32-0.34 ms** (CL 0.35) |
+| `sum` 16M | 0.48 ms | **0.32-0.38 ms** (CL 0.43) |
+
+Micro-experiment rejections (recorded, no code change): the VK/CL conv host-GEMM
+`k < 576` gate at 256/128 moved MobileNetV2 by <0.5% (65.1 → 64.7/64.8 ms);
+f32 TN GEMM at 2048³ is 4.0-4.5 ms on VK versus 2.3-2.9 ms on CL, so the
+transposed-staging work is deferred; the isolated transpose is within 1.09x of
+CL (0.48 vs 0.45 ms), below the full-run variance.
+

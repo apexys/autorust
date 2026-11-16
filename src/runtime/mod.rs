@@ -65,6 +65,10 @@ pub mod cuda_reduce;
 pub mod cuda_conv_tc;
 #[cfg(feature = "backend_cl")]
 pub mod cl_optim;
+#[cfg(feature = "backend_vk")]
+pub mod vk_optim;
+#[cfg(feature = "backend_vk")]
+pub mod vk_reduce;
 pub mod device;
 pub mod interp;
 #[cfg(all(

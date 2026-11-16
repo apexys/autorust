@@ -191,3 +191,42 @@ fn fused_kernel_matches_graph_update_cl() {
         );
     }
 }
+
+/// The fused Vulkan kernel must match the graph path too.
+#[cfg(feature = "backend_vk")]
+#[test]
+fn fused_kernel_matches_graph_update_vk() {
+    if !autorust::runtime::ops_vk::available() {
+        return;
+    }
+    use autorust::dtype;
+    let n = 4096usize;
+    let init: Vec<f32> = (0..n).map(|i| ((i % 29) as f32) * 0.01 - 0.1).collect();
+    let grad: Vec<f32> = (0..n).map(|i| ((i % 17) as f32) * 0.02 - 0.15).collect();
+    let run = |fused: bool| {
+        autorust::tensor::optim::set_fused_optimizer(fused);
+        let ctx = Ctx::new();
+        let mut sess = Session::new();
+        let p = Tensor::from_slice(&ctx, &init, Some(dtype::FLOAT32), Some("VK")).to_param();
+        let g = Tensor::from_slice(&ctx, &grad, Some(dtype::FLOAT32), Some("VK"));
+        let opt = AdamW::new(vec![p.clone()], 1e-3);
+        ctx.raw().set_grad(&p.uop(), g.uop().clone());
+        for _ in 0..3 {
+            opt.step(&mut sess);
+        }
+        let out = p.to_list::<f32>(&mut sess);
+        autorust::tensor::optim::set_fused_optimizer(true);
+        out
+    };
+    let graph = run(false);
+    let fused = run(true);
+    assert_eq!(graph.len(), fused.len());
+    for (i, (a, b)) in graph.iter().zip(&fused).enumerate() {
+        let tol = 1e-5 * a.abs().max(1.0);
+        assert!(
+            (a - b).abs() <= tol,
+            "VK fused[{i}]: graph {a}, fused {b} (diff {})",
+            (a - b).abs()
+        );
+    }
+}

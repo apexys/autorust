@@ -68,10 +68,6 @@ How to read it:
 
 ### Backend portability
 
-- **B1. Port the fused optimizer to Vulkan.** Evidence: AdamW/100M is 25.7 ms
-  on CUDA, **26.4 ms on CL**, and 95.0 ms on VK (graph path). CL is landed
-  (`runtime::cl_optim`); Vulkan needs explicit descriptor sets rather than the
-  generic `run_host_kernel` source seam. Target 30-40 ms. Effort: medium.
 - **B2. Which CUDA-only paths are portable.** TF32 cuBLAS, the cuBLASLt
   epilogues, the kxk `wmma` conv and conv-only TF32 are CUDA-only. OpenCL gets
   `-cl-fast-relaxed-math` and the im2col host GEMM; Vulkan gets cooperative
@@ -240,9 +236,21 @@ How to read it:
 - **Fused full reductions.** `sum_with`/`max_with` one streaming pass + finish:
   `sum` 0.370 → 0.254 ms, `amax` 0.397 → 0.248 ms (265/270 GB/s), deterministic
   partial order.
-- **Fused optimizer.** CUDA 104 → 26 ms (torch parity), CL 96.9 → 26.4 ms
-  (numeric gate on CL); `MIN_ELEMS` 1024 → 256 took ViT train -2.3% and cut
-  launches 2287 → 1487.
+- **Fused optimizer.** CUDA 104 → 26 ms (torch parity), CL 96.9 → 26.4 ms,
+  **VK 95.0 → 24.5-27.0 ms** (numeric gate on all three); `MIN_ELEMS` 1024 →
+  256 took ViT train -2.3% and cut launches 2287 → 1487. The VK path uses a
+  precompiled SPIR-V module (`runtime/vk_optim.spv`) and one-element scalar
+  buffers; measured with `bench` `optim` on the 100M-parameter workload.
+- **VK fused full reductions.** `sum_with`/`max_with` use a 256-thread partial
+  pass + finish on Vulkan. `amax` 16M **0.47 → 0.32-0.34 ms** (ahead of CL's
+  0.35) and `sum` 0.48 → 0.32-0.38 ms (CL 0.43); numeric gates in
+  `tests/vk_reduce.rs`.
+- **Measured, not landed:** lowering the VK/CL conv host-GEMM `k < 576` gate
+  to 256/128 changed MobileNetV2 by <0.5% (65.1 → 64.7/64.8 ms), so the
+  threshold stays; f32 TN GEMM remains 1.4-1.8x behind CL (VK 4.0-4.5 vs
+  2.3-2.9 ms at 2048³) and needs transposed-operand staging/16-bit MMA; the
+  isolated transpose is within 1.09x of CL (0.48 vs 0.45 ms), not the larger
+  full-run variance.
 - **Measured, not landed:** a generic elementwise fusion pass (the composition
   is fills/copies/counter updates; measured opportunity ~3 ms + ~1 ms, not the
   assumed 20-40 ms); forward-only softmax (2.1x kernel, ~8% memops, neutral

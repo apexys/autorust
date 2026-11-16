@@ -510,7 +510,7 @@ several gaps):
 | LLM decode, 1 tok | **19.8** | 21.4 | 0.93x |
 | ONNX MNIST, bs 32 | **11.0** | 11.6 | 0.95x |
 | ONNX ResNet-18 (w=0.25), bs 8 | 72.4 | **68.6** | 1.06x |
-| AdamW, 100M params | **94.5** | 96.3 | 0.98x |
+| AdamW, 100M params (fused) | **24.5-27.0** | 26.4 | ~1x |
 
 **VK is at or ahead on 6 of 14 rows and within 1.06x on 10 of 14.** Attributing the
 CL side per kernel (the OpenCL timing output now carries the kernel name, matching
@@ -581,7 +581,7 @@ swing ±30%, so a single run can read 1.5-2x high):
 | softmax 16M | **0.89** | 1.39 | 0.64x |
 | layernorm 16M | **0.90** | 1.43 | 0.63x |
 | sum 16M | **0.44** | 0.71 | 0.63x |
-| amax 16M | **0.45** | 0.63 | 0.71x |
+| amax 16M | **0.32-0.34** | 0.35 | ~0.95x |
 | transpose 16M | **0.45** | 0.91 | 0.49x |
 
 Reading it:

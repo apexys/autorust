@@ -27,7 +27,8 @@ use crate::uop::ctx::UOpCtx;
         feature = "backend_cuda",
         any(target_os = "linux", target_os = "windows")
     ),
-    feature = "backend_cl"
+    feature = "backend_cl",
+    feature = "backend_vk"
 ))]
 pub fn set_fused_optimizer(on: bool) {
     FUSED_OPTIM.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -38,7 +39,8 @@ pub fn set_fused_optimizer(on: bool) {
         feature = "backend_cuda",
         any(target_os = "linux", target_os = "windows")
     ),
-    feature = "backend_cl"
+    feature = "backend_cl",
+    feature = "backend_vk"
 ))]
 static FUSED_OPTIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
@@ -47,7 +49,8 @@ static FUSED_OPTIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
         feature = "backend_cuda",
         any(target_os = "linux", target_os = "windows")
     ),
-    feature = "backend_cl"
+    feature = "backend_cl",
+    feature = "backend_vk"
 ))]
 fn fused_optimizer_enabled() -> bool {
     static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -66,7 +69,8 @@ fn fused_optimizer_enabled() -> bool {
         feature = "backend_cuda",
         any(target_os = "linux", target_os = "windows")
     ),
-    feature = "backend_cl"
+    feature = "backend_cl",
+    feature = "backend_vk"
 ))]
 fn fused_optim_elems(ctx: &mut UOpCtx, t: &Tensor) -> Option<i64> {
     let u = t.uop().clone();
@@ -78,7 +82,7 @@ fn fused_optim_elems(ctx: &mut UOpCtx, t: &Tensor) -> Option<i64> {
     else {
         return None;
     };
-    if !(dev.starts_with("CUDA") || dev.starts_with("CL")) {
+    if !(dev.starts_with("CUDA") || dev.starts_with("CL") || dev.starts_with("VK")) {
         return None;
     }
     let n: i64 = ctx
@@ -88,7 +92,52 @@ fn fused_optim_elems(ctx: &mut UOpCtx, t: &Tensor) -> Option<i64> {
         .iter()
         .map(|d| d.clone().as_i64().unwrap_or(0))
         .product();
-    (n >= crate::runtime::cuda_optim::MIN_ELEMS).then_some(n)
+    // The CUDA/CL/VK fused kernels all use a 256-element minimum.
+    (n >= 256).then_some(n)
+}
+
+/// Build the fused update launch for `dev`; each compiled backend is tried in
+/// turn and an unknown device is a wiring error (eligibility already filtered).
+#[cfg(any(
+    all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ),
+    feature = "backend_cl",
+    feature = "backend_vk"
+))]
+#[allow(clippy::too_many_arguments)]
+fn fused_host_call(
+    dev: &str,
+    bufs: Vec<crate::runtime::buffer::Buffer>,
+    n: i64,
+    lr: f32,
+    b1: f32,
+    b2: f32,
+    eps: f32,
+    wd: f32,
+) -> crate::engine::session::HostCall {
+    #[cfg(all(
+        feature = "backend_cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    if dev.starts_with("CUDA") {
+        return crate::runtime::cuda_optim::host_call(bufs, n, lr, b1, b2, eps, wd);
+    }
+    #[cfg(feature = "backend_vk")]
+    if dev.starts_with("VK") {
+        return crate::runtime::vk_optim::host_call(bufs, n, lr, b1, b2, eps, wd);
+    }
+    #[cfg(feature = "backend_cl")]
+    {
+        let _ = dev;
+        crate::runtime::cl_optim::host_call(bufs, n, lr, b1, b2, eps, wd)
+    }
+    #[cfg(not(feature = "backend_cl"))]
+    {
+        let _ = (dev, bufs, n, lr, b1, b2, eps, wd);
+        unreachable!("TGERR: fused optimizer device without a backend")
+    }
 }
 
 /// Common surface for an optimizer step.
@@ -473,7 +522,8 @@ impl Optim for LAMB {
                 feature = "backend_cuda",
                 any(target_os = "linux", target_os = "windows")
             ),
-            feature = "backend_cl"
+            feature = "backend_cl",
+            feature = "backend_vk"
         ))]
         if fused_optimizer_enabled() && !params.is_empty() {
             let mut ns: Vec<i64> = Vec::with_capacity(params.len());
@@ -533,40 +583,9 @@ impl Optim for LAMB {
                         b1buf.clone(),
                         b2buf.clone(),
                     ];
-                    let mut call = {
-                        #[cfg(all(
-                            feature = "backend_cuda",
-                            any(target_os = "linux", target_os = "windows")
-                        ))]
-                        let cuda = dev.starts_with("CUDA");
-                        #[cfg(all(
-                            feature = "backend_cuda",
-                            any(target_os = "linux", target_os = "windows")
-                        ))]
-                        if cuda {
-                            crate::runtime::cuda_optim::host_call(
-                                bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
-                            )
-                        } else {
-                            #[cfg(feature = "backend_cl")]
-                            {
-                                crate::runtime::cl_optim::host_call(
-                                    bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
-                                )
-                            }
-                            #[cfg(not(feature = "backend_cl"))]
-                            unreachable!("TGERR: fused optimizer device without a backend")
-                        }
-                        #[cfg(not(all(
-                            feature = "backend_cuda",
-                            any(target_os = "linux", target_os = "windows")
-                        )))]
-                        {
-                            crate::runtime::cl_optim::host_call(
-                                bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
-                            )
-                        }
-                    };
+                    let mut call = fused_host_call(
+                        &dev, bufs, *n, self.lr, self.b1, self.b2, self.eps, self.wd,
+                    );
                     call.device = dev.clone();
                     sess.capture_host(call.clone());
                     call.exec();

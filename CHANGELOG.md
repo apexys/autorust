@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Vulkan fused optimizer and full reductions (2026-11-16).**
+  `runtime::vk_optim` dispatches a precompiled SPIR-V Adam/AdamW/LAMB kernel
+  (one 256-invocation pass, one-element scalar buffers) and is wired into
+  `tensor::optim`; the 100M-parameter benchmark goes **95.0 → 24.5-27.0 ms**
+  (numeric gate: `tests/nn_optim.rs::fused_kernel_matches_graph_update_vk`).
+  `runtime::vk_reduce` adds two-pass `sum`/`amax` kernels behind
+  `Tensor::sum_with`/`max_with`: `amax` 16M **0.47 → 0.32-0.34 ms** (CL 0.35)
+  and `sum` 0.48 → 0.32-0.38 ms; `tests/vk_reduce.rs` covers numerics and the
+  axis fallback.
+
+- **VK micro-experiment rejections (2026-11-16).** Lowering the VK/CL conv
+  host-GEMM `k < 576` gate to 256/128 changed MobileNetV2 by <0.5%
+  (65.1 → 64.7/64.8 ms), so the threshold is unchanged; f32 TN GEMM stays
+  1.4-1.8x behind CL (4.0-4.5 vs 2.3-2.9 ms at 2048³) and is deferred; the
+  isolated transpose is within 1.09x of CL (0.48 vs 0.45 ms).
+
 - **ONNX export E0-E2.** `src/onnx/export.rs` and `src/onnx/write.rs` add a
   std-only ONNX model writer, manual `GraphBuilder`, static `export_fn` trace
   and `export_module` with `named_state` initializers. Supported lowering
