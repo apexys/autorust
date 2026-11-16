@@ -107,6 +107,7 @@ not duplicate those documents here; point at them.
     with the number and `CURRENT_STATE` section when it lands.
   - `ONNX-Compat.md` — ONNX importer operator/feature coverage (the canonical matrix).
   - `ONNX-Export.md` — ONNX exporter contract, tiers and validation gates.
+  - `CLASSIC-ML.md` — classical-ML scope, algorithm tiers, GPU fit and roadmap.
   - `FREEZE.md` — frozen-plan capture/emit/runner behaviour.
   - `INDEXING.md` — the `getitem` index DSL.
 - **Keep this `AGENTS.md` in sync** when layout, build commands, policies or the
@@ -159,6 +160,7 @@ FREEZE.md          AOT frozen CPU plans (build.rs/include! flow)
 INDEXING.md        the getitem index-DSL reference
 ONNX-Compat.md     ONNX importer operator/feature matrix
 ONNX-Export.md     ONNX exporter contract, tiers and validation gates
+CLASSIC-ML.md      classical-ML scope, algorithms and roadmap
 ../tinygrad/       reference oracle (do not modify; dev/test only)
 ```
 

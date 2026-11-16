@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Classic-ML design contract.** `CLASSIC-ML.md` records the `src/classic/`
+  scope, tiers (linear/logistic/PCA/k-means/KNN/linear SVM; CPU-first trees;
+  kernel SVM and sparse/pipeline work), GPU-fit notes, persistence rules and
+  the C0-C3 roadmap. No classic-ML code yet.
+
 - **Signal-processing Tensor ops.** `Tensor::fft`/`cfft` (radix-2
   Cooley–Tukey, power-of-two lengths), `Tensor::dft`/`cdft` (arbitrary-length
   matrix fallback), `Tensor::rfft` (onesided), `Tensor::stft` (framing +

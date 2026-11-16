@@ -165,6 +165,8 @@ and [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.
   selection.
 - [`FREEZE.md`](https://github.com/apexys/autorust/blob/main/FREEZE.md) — embedding a "precompiled" model in an application.
 - [`ONNX-Compat.md`](https://github.com/apexys/autorust/blob/main/ONNX-Compat.md) — ONNX operator coverage and runner API.
+- [`ONNX-Export.md`](https://github.com/apexys/autorust/blob/main/ONNX-Export.md) — ONNX export contract and roadmap.
+- [`CLASSIC-ML.md`](https://github.com/apexys/autorust/blob/main/CLASSIC-ML.md) — classical-ML scope, algorithms and roadmap.
 - [`INDEXING.md`](https://github.com/apexys/autorust/blob/main/INDEXING.md) — tensor indexing, especially with Rust types.
 - [`CURRENT_STATE.md`](https://github.com/apexys/autorust/blob/main/CURRENT_STATE.md) — canonical status and known gaps.
 - [`CHANGELOG.md`](https://github.com/apexys/autorust/blob/main/CHANGELOG.md) — release notes.

@@ -6682,3 +6682,26 @@ is correct but launch/memory-bound; a first-class `Ops::Fft` marker with
 backend dispatch is recorded as low priority in
 `PERFORMANCE_OPTIMIZATIONS.md` §S1. Wavelets should stay graph-level
 (conv/downsample/lifting); no dedicated kernel planned.
+
+### 9.118 Classical-ML design contract (2026-11-16)
+
+Added `CLASSIC-ML.md` for a future `src/classic/` module. No code yet; the
+document fixes scope before implementation:
+
+- **Placement:** core crate, `src/classic/{linalg,linear,decomposition,cluster,
+  neighbors,svm,tree,preprocess,metrics,state}.rs`; dense `Tensor` inputs;
+  `classic` is not part of `nn` and does not require new dependencies.
+- **Tiers:** C0 host f64 solve/QR/SVD/eigh + metrics/scaler/state; C1
+  GEMM-friendly estimators (linear/ridge, logistic, PCA, KMeans, exact KNN,
+  linear SVM); C2 CPU-first trees/forests/GBT (rayon when available); C3 kernel
+  SVM, randomized SVD, approximate NN, sparse/categorical data, pipelines/CV.
+- **GPU policy:** use GEMM/reductions/distances where they win; do not force
+  GPU for small tabular data, f64 solves or tree split search. Trees are
+  host/CPU first. Seed k-means/forests/GBT locally rather than through the
+  global Tensor RNG.
+- **Persistence:** tensor parameters use the existing `state`/safetensors path;
+  trees store node arrays as safetensors tensors plus metadata. `freeze` is a
+  CPU inference-plan capture, **not** model serialization and not applicable to
+  tree/kNN host loops.
+- **Missing primitive:** the core has no `solve`/`QR`/`SVD`/`eigh`; C0 adds
+  small dense f64 host implementations before closed-form linear/PCA work.
