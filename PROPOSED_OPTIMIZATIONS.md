@@ -53,7 +53,10 @@ a graph-level 4-D depthwise tiling tweak was neutral (`CURRENT_STATE §9.87`).
 The 3x3 layout specialization also landed: the im2col floor is 256 on CUDA
 (576 elsewhere), which moves UNet's K=288 layers onto im2col + cuBLAS
 (11.3-12.4 -> 10.2-10.3 ms, `CURRENT_STATE §9.90`, `tests/conv_im2col.rs`).
-Tensor-core implicit GEMM for 3x3/conv_transpose remains open.
+Tensor-core implicit GEMM for 3x3/conv_transpose remains open as a custom
+kernel, but the bounded cuBLAS-tensor-core path landed: opt-in conv-only TF32
+(`AUTORUST_CONV_TF32=1`) gives ResNet-18 -7-9% and UNet -12%
+(`CURRENT_STATE §9.91`, `tests/conv_tf32.rs`).
 12. Fused reductions: softmax/layernorm/sum/amax (burn reduce tuner)
 Why: our CUDA reductions are the remaining memory-bound gap (softmax 155 vs torch 288 GB/s,
 layernorm 156 vs 209, sum 176 vs 287, amax 64 vs 292). Burn decomposes softmax and lets fusion

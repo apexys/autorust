@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Opt-in conv-only TF32 tensor-core path.** `AUTORUST_CONV_TF32=1` switches
+  batched f32 im2col host GEMMs with `n >= 28` to TF32 tensor-core math while
+  keeping attention/linear f32 strict. Measured ResNet-18 -7-11%, UNet ~4% median
+  (mixed), MobileNet/ONNX neutral/slight; convolution numerics change, so it is off by
+  default. Gate: `tests/conv_tf32.rs`.
 - **Low-K 3x3 convolution im2col on CUDA.** The im2col floor is now
   `cin*kh*kw >= 256` on CUDA (`576` on CPU/CL/VK, where host-GEMM setup costs
   more). UNet's 32-channel 3x3 layers moved to im2col + cuBLAS and improved

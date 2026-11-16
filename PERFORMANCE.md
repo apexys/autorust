@@ -1012,6 +1012,15 @@ Reading it:
   were neutral, and CPU UNet is unchanged at the 576 floor. Gate:
   `tests/conv_im2col.rs` compares CUDA forward and dx/dw/db against INTERP for
   the K=288 shape.
+- **Conv-only TF32 is available as an opt-in tensor-core path.**
+  `AUTORUST_CONV_TF32=1` switches batched f32 im2col host GEMMs with `n >= 28`
+  to TF32 tensor-core math (the global `AUTORUST_CUBLAS_TF32` still applies to
+  every f32 GEMM). Measured: ResNet-18 **274.9 → 250.5 ms** (and 273.6 → 254.8
+  in a repeat, -7-11%), UNet ~4% median (mixed: 11.1/10.7/10.0 →
+  10.1/10.3/10.8), MobileNet 56.8 → 56.4 and
+  ONNX ResNet 10.9 → 10.6 (neutral/slight). It changes convolution numerics, so
+  strict f32 stays the default; `tests/conv_tf32.rs` checks the opt-in forward
+  against INTERP with a TF32 tolerance.
 - The UNet exposes `conv_transpose`, nearest upsample and skip `cat`, all far
   behind cuDNN/oneDNN.
 

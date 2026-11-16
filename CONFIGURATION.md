@@ -127,7 +127,8 @@ These mirror the `Settings` fields above; the per-backend variables win over
 | `AUTORUST_CLBLAST` | same | auto | OpenCL override. |
 | `AUTORUST_MPS` / `AUTORUST_METAL_GEMM` | same | auto (MPS needs `all`) | Metal MPS override. |
 | `AUTORUST_CPU_GEMM` | same | auto | CPU host-GEMM override. |
-| `AUTORUST_CUBLAS_TF32` / `ALLOW_TF32` | `1`/`true` | off | TF32 cuBLAS (f32 only). |
+| `AUTORUST_CUBLAS_TF32` / `ALLOW_TF32` | `1`/`true` | off | TF32 cuBLAS (f32 only), every f32 GEMM. |
+| `AUTORUST_CONV_TF32` | `1`/`true` | off | Opt-in conv-only TF32: batched f32 im2col host GEMMs with `n >= 28` use TF32 tensor cores (ResNet-18 -7-9%, UNet -12%, MobileNet/ONNX neutral/slight). Changes convolution numerics; strict f32 remains the default. |
 | `AUTORUST_TENSOR_CORES` / `AUTORUST_TC` | `0`/`false` to disable | on | `mma` kernels. |
 | `AUTORUST_ASYNC` | `0`/`false` to disable | on | `cp.async` pipeline. |
 | `METAL_FAST_MATH` | any non-`0` | off (safe math) | Metal shader math mode; fast math folds `x + -inf` to `x` and drops attention masks. |

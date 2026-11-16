@@ -6049,3 +6049,31 @@ contiguous `oy` batch axis into `n` (`n=28, batch=896` -> `n=784, batch=32`)
 regressed ResNet-18 from 282.8 to 327.0 ms, so it was reverted. The remaining
 3x3/conv_transpose gap needs a real tensor-core implicit-GEMM kernel, not a
 descriptor rewrite.
+
+### 9.91 Item 11 (tensor-core conv): opt-in conv-only TF32 landed (2026-11-16)
+
+The bounded tensor-core conv path uses the existing im2col + cuBLAS GEMM and
+switches **only conv-like host GEMMs** to TF32 tensor-core math. Gate:
+`AUTORUST_CONV_TF32=1`, f32, `batch > 1`, `n >= 28`; the global
+`AUTORUST_CUBLAS_TF32` still affects every f32 GEMM. Handle math mode is set per
+host call (26/step in ResNet-18), and strict pedantic f32 remains the default.
+
+Interleaved A/B, RTX 3060:
+
+| workload | strict f32 | conv TF32 | result |
+|---|---:|---:|---|
+| ResNet-18 infer bs 32 | 274.9 ms | **250.5 ms** | -9% |
+| ResNet-18 infer bs 32 (repeat) | 273.6 ms | **254.8 ms** | -7% |
+| UNet infer bs 4 (3 pairs) | 11.10 / 10.65 / 9.99 ms | 10.12 / 10.26 / 10.76 ms | ~4% median, mixed |
+| MobileNetV2 infer bs 32 | 56.8 ms | 56.4 ms | neutral |
+| ONNX ResNet-18 w=0.25 bs 8 | 10.94 ms | 10.59 ms | neutral/slight |
+
+The `n >= 28` gate matters: a global `AUTORUST_CUBLAS_TF32=1` also changes
+attention/linear math and regressed ONNX ResNet-18 (9.65 -> 11.03 ms) while
+helping ResNet-18; the conv-only policy keeps those shapes on strict f32.
+
+Numerics: TF32 has a 10-bit mantissa, so this is opt-in only. Gate:
+`tests/conv_tf32.rs` runs a 32x32, K=288 conv on CUDA with the flag and against
+INTERP (max abs < 2e-2), and verifies the default strict path is < 2e-5. The
+custom tensor-core implicit-GEMM kernel remains a future step; this lands the
+bounded cuBLAS-tensor-core path first.

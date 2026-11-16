@@ -439,6 +439,14 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
         let handle = handle
             .as_ref()
             .unwrap_or_else(|| panic!("TGERR: cuBLAS handle creation failed"));
+        // Opt-in conv-only TF32: batched f32 im2col contractions with a
+        // spatial n wide enough for the tensor-core path. The global
+        // `AUTORUST_CUBLAS_TF32` still applies to every f32 GEMM.
+        let conv_tf32 = crate::helpers::env::get("AUTORUST_CONV_TF32").is_some_and(|v| v != "0")
+            && g.dtype == crate::dtype::FLOAT32
+            && g.batch > 1
+            && g.n >= 28;
+        handle.set_math_mode(crate::settings::global().allow_tf32 || conv_tf32);
         CUBLAS_GEMMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // A two-axis `(batch, head)` layout has no single cuBLAS batch stride.
         // cuBLAS can still run it as `outer` strided-batched calls over the inner

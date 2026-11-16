@@ -600,6 +600,20 @@ impl Handle {
     }
 }
 
+impl Handle {
+    /// Switch the handle between pedantic f32 and TF32 tensor-core math.
+    ///
+    /// Used by the opt-in conv-only TF32 policy; the normal handle setup still
+    /// follows [`tf32_enabled`].
+    pub fn set_math_mode(&self, tf32: bool) {
+        let Some(set_math) = self.lib.set_math_mode else {
+            return;
+        };
+        let mode = if tf32 { 3 } else { 2 };
+        let _ = unsafe { set_math(self.raw, mode) };
+    }
+}
+
 impl Drop for Handle {
     fn drop(&mut self) {
         if let (Some(lt), Some(raw)) = (&self.lib.lt, self.lt_raw) {
