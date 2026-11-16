@@ -170,6 +170,13 @@ Run from this directory (`autorust/`):
   data, need an external ONNX checkpoint, or are slow end-to-end gates; run them
   explicitly with `-- --ignored` when relevant. On macOS, Apple's OpenCL runtime
   can fail `flash_cl`; `AUTORUST_CL_LIB=/nonexistent` skips CL for a clean run.
+- **Fast test loop:** `cargo nextest run --cargo-profile test-fast`. `nextest`
+  runs each test binary in parallel (plain `cargo test` runs the binaries
+  sequentially) and `test-fast` is incremental with `opt-level = 2`, so it
+  rebuilds and runs the whole suite much faster for iteration. The release gate
+  is still `cargo nextest run --release` (or `cargo test --release` when
+  `nextest` is unavailable); use `cargo test --release --test <name>` for one
+  integration file.
 - `cargo clippy --all-targets` — 0 errors, 0 warnings. `mutable_key_type` is
   allowed at the crate root (`UopId` hashes by immutable id); oracle-derived
   functions with many arguments carry targeted allows, not crate-wide ones.

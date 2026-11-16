@@ -1,0 +1,7 @@
+# `cargo nextest` runs each test binary in parallel, unlike `cargo test`, which
+# runs the binaries sequentially. This is the default for
+# `cargo nextest run --cargo-profile test-fast` and the release gate
+# (`cargo nextest run --release`).
+[profile.default]
+test-threads = "num-cpus"
+fail-fast = false

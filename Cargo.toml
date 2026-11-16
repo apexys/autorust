@@ -26,6 +26,7 @@ exclude = [
     "py/",
     "bench/",
     ".github/",
+    ".config/",
     # Internal review/backlog notes, not part of the user-facing documentation.
     "PERFORMANCE_OPTIMIZATIONS.md",
 ]
@@ -186,3 +187,12 @@ objc2-metal = { version = "0.3", optional = true, default-features = false, feat
 
 [profile.dev]
 opt-level = 1
+
+# Fast iteration for the (large) test suite: incremental like `dev`, but
+# optimized enough that GPU/numeric tests are not host-bound. Use
+# `cargo nextest run --cargo-profile test-fast`; the `release` gate is unchanged.
+[profile.test-fast]
+inherits = "dev"
+opt-level = 2
+debug = 0
+incremental = true
