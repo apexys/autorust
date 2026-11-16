@@ -74,7 +74,8 @@ Here's a benchmark ([`bench`](https://github.com/apexys/autorust/tree/main/bench
 
 The table is **Exact-mode** (`AUTORUST_MATH=exact`) to keep the arithmetic
 comparable; the default is now Fast (`AUTORUST_MATH=fast`), which uses TF32
-tensor cores and measured 27% faster ResNet-18 inference and 21% faster ViT
+tensor cores and measured 42% faster ResNet-18 inference, 60% faster ResNet-50
+and 21% faster ViT
 inference. See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#math-mode) for methodology and tuning.
 
 | workload | device | autorust | burn | candle | torch | tinygrad |

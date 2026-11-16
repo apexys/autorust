@@ -19,11 +19,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Custom tensor-core 3x3 implicit-GEMM convolution.** A bounded TF32 `wmma`
+- **Custom tensor-core kxk implicit-GEMM convolution.** A bounded TF32 `wmma`
   kernel generates patches directly into the A tile (no im2col copy), 64 rows x
   64 output channels per block; `Tensor::conv2d_with`/`Conv2d::forward_with`
-  use it for groups=1/stride=1/padding=1 f32 inference. Gate:
-  `tests/cuda_conv3x3_tc.rs`.
+  use it for groups=1/stride 1-2/symmetric-padding f32 inference. It is picked
+  for the measured 3x3 stride-1 case and for low-K convs below the im2col
+  floor, notably ResNet's 7x7 stem (K=147). Measured RTX 3060, bs 32:
+  ResNet-18 infer 214-216 → 155 ms, ResNet-50 83 → 35-37 ms, MobileNet
+  neutral. Gate: `tests/cuda_conv_tc.rs`.
 - **Opt-in conv-only TF32 tensor-core path.** `AUTORUST_CONV_TF32=1` switches
   batched f32 im2col host GEMMs with `n >= 28` to TF32 tensor-core math while
   keeping attention/linear f32 strict. Measured ResNet-18 -7-11%, UNet ~4% median

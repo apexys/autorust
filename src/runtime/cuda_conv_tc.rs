@@ -1,13 +1,18 @@
-//! Bounded tensor-core 3x3 implicit-GEMM convolution for CUDA.
+//! Bounded tensor-core implicit-GEMM convolution for CUDA.
 //!
 //! One block computes a 64-row (batch*oy*ox) by 64-output-channel tile with
 //! four warps, each running a 16x16 TF32 `wmma` tile. The patches are generated
 //! directly into the A staging buffer, so there is no im2col copy in global
-//! memory. The K loop is `cin*9`; the B tile is the corresponding weight taps.
+//! memory. The K loop is `cin*kh*kw`; the B tile is the corresponding weight
+//! taps.
 //!
-//! Only 3x3, stride 1, padding 1, dilation 1, groups 1, f32 in/out are covered;
-//! everything else keeps the graph convolution. This is a forward-only host
-//! kernel, so training keeps the autograd path.
+//! Covered: square `k x k`, `groups=1`, `stride` 1 or 2, `dilation=1`,
+//! `padding=(k-1)/2`, f32 in/out. Everything else keeps the graph convolution.
+//! This is a forward-only host kernel, so training keeps the autograd path.
+//!
+//! The dispatch only picks it when the graph would otherwise use the slow
+//! direct convolution (`cin*k*k` below the im2col floor, e.g. ResNet's 7x7
+//! stem at K=147) or for the measured 3x3 stride-1 case.
 
 /// Threads per block: four warps, one 16x16 output tile each.
 pub const THREADS: i64 = 128;
@@ -18,21 +23,24 @@ pub const N_TILE: i64 = 64;
 /// Smallest output worth a host launch.
 pub const MIN_OUT: i64 = 1 << 14;
 /// Kernel entry point.
-pub const NAME: &str = "ar_conv3x3_tc";
+pub const NAME: &str = "ar_conv_tc";
 
 /// CUDA source.
 pub const SRC: &str = r#"
 #include <mma.h>
 using namespace nvcuda;
 
-extern "C" __global__ void ar_conv3x3_tc(
+extern "C" __global__ void ar_conv_tc(
     const float* __restrict__ X, const float* __restrict__ WT,
     const float* __restrict__ Bias, float* __restrict__ Y,
-    int B, int C, int H, int Wd, int O, int has_bias) {
+    int B, int C, int H, int Wd, int O, int has_bias,
+    int KH, int KW, int pad, int stride) {
   const int warp = threadIdx.x >> 5;
   const int m0 = blockIdx.x * 64 + warp * 16;
   const int n0 = blockIdx.y * 64;
-  const int OH = H, OW = Wd, K = C * 9;
+  const int OH = (H + 2*pad - KH) / stride + 1;
+  const int OW = (Wd + 2*pad - KW) / stride + 1;
+  const int KS = KH * KW, K = C * KS;
   __shared__ float As[64][8];
   __shared__ float Bs[8][64];
   __shared__ float Cs[64][64];
@@ -50,9 +58,9 @@ extern "C" __global__ void ar_conv3x3_tc(
         int bi = m / (OH*OW);
         int rem = m % (OH*OW);
         int oy = rem / OW, ox = rem % OW;
-        int ci = k / 9, tap = k % 9;
-        int ky = tap / 3, kx = tap % 3;
-        int iy = oy + ky - 1, ix = ox + kx - 1;
+        int ci = k / KS, tap = k % KS;
+        int ky = tap / KW, kx = tap % KW;
+        int iy = oy * stride + ky - pad, ix = ox * stride + kx - pad;
         if (iy >= 0 && iy < H && ix >= 0 && ix < Wd)
           v = X[((bi*C + ci)*H + iy)*Wd + ix];
       }
@@ -63,8 +71,8 @@ extern "C" __global__ void ar_conv3x3_tc(
       int k = kb + kk;
       float v = 0.0f;
       if (k < K && n0 + n < O) {
-        int ci = k / 9, tap = k % 9;
-        v = WT[((n0+n)*C + ci)*9 + tap];
+        int ci = k / KS, tap = k % KS;
+        v = WT[((n0+n)*C + ci)*KS + tap];
       }
       Bs[kk][n] = v;
     }
@@ -93,7 +101,7 @@ extern "C" __global__ void ar_conv3x3_tc(
 }
 "#;
 
-/// `(slot, dtype)`: four pointers, then six int scalars.
+/// `(slot, dtype)`: four pointers, then eight int scalars.
 pub fn signature() -> Vec<(i64, crate::dtype::DTypeId)> {
     use crate::dtype::{FLOAT32, INT32};
     vec![
@@ -107,10 +115,15 @@ pub fn signature() -> Vec<(i64, crate::dtype::DTypeId)> {
         (7, INT32),
         (8, INT32),
         (9, INT32),
+        (10, INT32),
+        (11, INT32),
+        (12, INT32),
+        (13, INT32),
     ]
 }
 
-/// Captured launch for one 3x3 tensor-core convolution.
+/// Captured launch for one tensor-core convolution.
+#[allow(clippy::too_many_arguments)]
 pub fn host_call(
     bufs: Vec<crate::runtime::buffer::Buffer>,
     b: i64,
@@ -119,8 +132,14 @@ pub fn host_call(
     w: i64,
     o: i64,
     has_bias: bool,
+    kh: i64,
+    kw: i64,
+    pad: i64,
+    stride: i64,
 ) -> crate::engine::session::HostCall {
-    let rows = b * h * w;
+    let oh = (h + 2 * pad - kh) / stride + 1;
+    let ow = (w + 2 * pad - kw) / stride + 1;
+    let rows = b * oh * ow;
     crate::engine::session::HostCall {
         device: "CUDA".into(),
         src: SRC.to_string(),
@@ -129,6 +148,6 @@ pub fn host_call(
         bufs,
         global: [(rows + M_TILE - 1) / M_TILE, (o + N_TILE - 1) / N_TILE, 1],
         local: Some([THREADS, 1, 1]),
-        vals: vec![b, c, h, w, o, has_bias as i64],
+        vals: vec![b, c, h, w, o, has_bias as i64, kh, kw, pad, stride],
     }
 }

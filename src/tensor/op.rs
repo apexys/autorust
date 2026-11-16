@@ -280,7 +280,7 @@ impl Tensor {
         dtype: Option<DTypeId>,
         sess: &mut crate::engine::session::Session,
     ) -> Tensor {
-        if let Some(t) = crate::tensor::conv_fused::conv3x3_with(
+        if let Some(t) = crate::tensor::conv_fused::conv_with(
             self, weight, bias, groups, stride, dilation, padding, dtype, sess,
         ) {
             return t;
@@ -429,8 +429,7 @@ impl Tensor {
             )
             .saturating_mul(cin.clone().as_i128_or_panic())
             .saturating_mul(hw.iter().map(|&h| h as i128).product::<i128>());
-        let red = cin.clone().as_i64().unwrap_or(0)
-            * hw.iter().product::<i64>();
+        let red = cin.clone().as_i64().unwrap_or(0) * hw.iter().product::<i64>();
         // Materializing patches only pays when the contraction is long enough:
         // at K = cin*kh*kw below ~576 the copy and the cuBLAS setup dominate
         // the tiny GEMM (ONNX ResNet-0.25 went 11.5 -> 29 ms without this
@@ -447,7 +446,8 @@ impl Tensor {
                 );
                 if cuda { 256 } else { 576 }
             });
-        let use_im2col = im2col_elems <= 64_000_000 && hw.iter().product::<i64>() > 1 && red >= min_k;
+        let use_im2col =
+            im2col_elems <= 64_000_000 && hw.iter().product::<i64>() > 1 && red >= min_k;
         let x = if use_im2col { x.contiguous_ctx(ctx) } else { x };
 
         // Expanded in the *permuted* order: [bs, g, rcout, oyx.., cin, HW..].

@@ -62,7 +62,7 @@ pub mod cuda_reduce;
     feature = "backend_cuda",
     any(target_os = "linux", target_os = "windows")
 ))]
-pub mod cuda_conv3x3;
+pub mod cuda_conv_tc;
 #[cfg(feature = "backend_cl")]
 pub mod cl_optim;
 pub mod device;

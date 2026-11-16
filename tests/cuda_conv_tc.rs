@@ -122,3 +122,39 @@ fn conv3x3_graph_gradient_matches_interp() {
     assert!(max(&cpu.1, &cuda.1) < 2e-5, "dw {:e}", max(&cpu.1, &cuda.1));
     assert!(max(&cpu.2, &cuda.2) < 2e-5, "db {:e}", max(&cpu.2, &cuda.2));
 }
+
+#[test]
+fn conv7x7_stem_tc_matches_interp() {
+    let _guard = LOCK.lock().unwrap();
+    if !autorust::runtime::ops_cuda::available() {
+        return;
+    }
+    // The ResNet stem shape: 3 -> 16, 7x7, stride 2, pad 3. rows = 4*64*64.
+    let (b, cin, h, w, cout) = (4i64, 3i64, 128i64, 128i64, 16i64);
+    let xv = values(14, (b * cin * h * w) as usize);
+    let wv = values(15, (cout * cin * 7 * 7) as usize);
+    let bv = values(16, cout as usize);
+
+    let build = |dev: &str, fused: bool| -> Vec<f32> {
+        let ctx = Ctx::new();
+        let x = Tensor::from_slice(&ctx, &xv, None, Some(dev)).reshape([b, cin, h, w]);
+        let weight = Tensor::from_slice(&ctx, &wv, None, Some(dev)).reshape([cout, cin, 7, 7]);
+        let bias = Tensor::from_slice(&ctx, &bv, None, Some(dev));
+        let mut sess = Session::new();
+        if fused {
+            x.realize(&mut sess);
+            x.conv2d_with(&weight, Some(&bias), 1, 2, 1, &[3, 3], None, &mut sess)
+                .to_list::<f32>(&mut sess)
+        } else {
+            x.conv2d(&weight, Some(&bias), 1, 2, 1, &[3, 3], None)
+                .to_list::<f32>(&mut sess)
+        }
+    };
+
+    let reference = build("INTERP", false);
+    unsafe { std::env::set_var("AUTORUST_CONV3X3_TC", "1") };
+    let fused = build("CUDA", true);
+    unsafe { std::env::remove_var("AUTORUST_CONV3X3_TC") };
+    let err = max(&reference, &fused);
+    assert!(err < 3e-2, "TC 7x7 differs from INTERP: max abs {err:e}");
+}

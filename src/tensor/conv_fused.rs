@@ -1,8 +1,11 @@
-//! Session-aware fused 3x3 convolution (CUDA tensor cores, forward-only).
+//! Session-aware fused kxk convolution (CUDA tensor cores, forward-only).
 //!
-//! `Tensor::conv2d_with` uses `runtime::cuda_conv3x3` for groups=1, stride=1,
-//! dilation=1, padding=1, 3x3, f32 convolutions with a realized input. The
-//! graph conv remains the fallback and the reference; training stays on it.
+//! `Tensor::conv2d_with` uses `runtime::cuda_conv_tc` for groups=1, dilation=1,
+//! square `k x k`, symmetric `(k-1)/2` padding, stride 1 or 2, f32 convolutions
+//! with a realized input. The graph conv remains the fallback and the reference;
+//! training stays on it. The host path is only taken where it measured faster
+//! than the graph: the measured 3x3 stride-1 case, and low-K convs such as
+//! ResNet's 7x7 stem (K = 3*49 = 147) that fall below the im2col floor.
 
 use crate::engine::session::Session;
 use crate::runtime::buffer::{Buffer, buffer_of};
@@ -10,7 +13,9 @@ use crate::tensor::Tensor;
 use crate::uop::sint::SVal;
 
 fn enabled(x: &Tensor) -> bool {
-    match crate::helpers::env::get("AUTORUST_CONV3X3_TC") {
+    match crate::helpers::env::get("AUTORUST_CONV_TC")
+        .or_else(|| crate::helpers::env::get("AUTORUST_CONV3X3_TC"))
+    {
         Some(v) => v != "0" && !v.is_empty(),
         None => x.ctx().borrow().settings.math_mode == crate::settings::MathMode::Fast,
     }
@@ -50,7 +55,7 @@ fn realized_weight(t: &Tensor, sess: &mut Session) -> Option<Buffer> {
     any(target_os = "linux", target_os = "windows")
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn conv3x3_with(
+pub fn conv_with(
     x: &Tensor,
     weight: &Tensor,
     bias: Option<&Tensor>,
@@ -64,14 +69,11 @@ pub fn conv3x3_with(
     if !enabled(x)
         || dtype.is_some()
         || groups != 1
-        || stride != 1
+        || !(stride == 1 || stride == 2)
         || dilation != 1
         || x.dtype() != crate::dtype::FLOAT32
         || weight.dtype() != crate::dtype::FLOAT32
     {
-        return None;
-    }
-    if padding.len() != 4 || padding.iter().any(|&p| p != 1) {
         return None;
     }
     let xs = x.shape();
@@ -84,11 +86,27 @@ pub fn conv3x3_with(
     let (xd, wd) = (xd?, wd?);
     let (b, c, h, w) = (xd[0], xd[1], xd[2], xd[3]);
     let (o, cin, kh, kw) = (wd[0], wd[1], wd[2], wd[3]);
-    if cin != c || kh != 3 || kw != 3 || o < 16 || b <= 0 || h <= 0 || w <= 0 {
+    if cin != c || kh != kw || kh < 3 || o < 16 || b <= 0 || h <= 0 || w <= 0 {
         return None;
     }
-    let rows = b.saturating_mul(h).saturating_mul(w);
-    if rows < crate::runtime::cuda_conv3x3::MIN_OUT {
+    let pad = (kh - 1) / 2;
+    if padding.len() != 4 || padding.iter().any(|&p| p != pad) {
+        return None;
+    }
+    // 3x3 stride 1 is the measured ResNet-18 win. Larger kernels are only
+    // worth the host launch when the graph would use the direct convolution,
+    // i.e. when the im2col contraction is below its floor (the 7x7 stem).
+    let red = cin.saturating_mul(kh).saturating_mul(kw);
+    let im2col_floor = crate::helpers::env::get("AUTORUST_IM2COL_MIN_K")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(256);
+    if !((kh == 3 && stride == 1) || red < im2col_floor) {
+        return None;
+    }
+    let oh = (h + 2 * pad - kh) / stride + 1;
+    let ow = (w + 2 * pad - kw) / stride + 1;
+    let rows = b.saturating_mul(oh).saturating_mul(ow);
+    if rows < crate::runtime::cuda_conv_tc::MIN_OUT {
         return None;
     }
     let in_buf = x.realized_buffer()?;
@@ -113,11 +131,11 @@ pub fn conv3x3_with(
         &[
             SVal::I(b as i128),
             SVal::I(o as i128),
-            SVal::I(h as i128),
-            SVal::I(w as i128),
+            SVal::I(oh as i128),
+            SVal::I(ow as i128),
         ],
     );
-    let mut call = crate::runtime::cuda_conv3x3::host_call(
+    let mut call = crate::runtime::cuda_conv_tc::host_call(
         vec![in_buf, w_buf, b_buf, out_buf],
         b,
         c,
@@ -125,6 +143,10 @@ pub fn conv3x3_with(
         w,
         o,
         has_bias,
+        kh,
+        kw,
+        pad,
+        stride,
     );
     call.device = crate::runtime::device::canonicalize_device_name(&dev);
     sess.capture_host(call.clone());
@@ -137,7 +159,7 @@ pub fn conv3x3_with(
     any(target_os = "linux", target_os = "windows")
 )))]
 #[allow(clippy::too_many_arguments)]
-pub fn conv3x3_with(
+pub fn conv_with(
     _x: &Tensor,
     _weight: &Tensor,
     _bias: Option<&Tensor>,

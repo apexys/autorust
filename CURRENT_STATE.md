@@ -6172,3 +6172,37 @@ blocks, off for a bottleneck's `c2`. With that gate ResNet-50 returns to
 opt-in and is correct at every shape (the tests cover stride 1, the odd-shape
 fallback and the graph gradient); callers should only wire it where the input is
 already realized, and a mid-graph realize must be treated as a schedule split.
+
+### 9.95 Generalized kxk tensor-core conv: the ResNet stem (2026-11-16)
+
+Profiling ResNet-50 (`AUTORUST_KPROF=1`, bs 32) put **61% of the step in one
+kernel**, `r_32_2_57_57_32_2_2_3_7_7` (332 ms of 543 ms across 5 steps): the
+7x7/stride-2 stem. Its contraction is `K = cin*49 = 3*49 = 147`, below the CUDA
+im2col floor (256), so it ran the generated *direct* convolution. The im2col
+alternative is no better (69.6 vs 70.4 ms measured on the isolated conv), and
+lowering the floor regressed the models (ResNet-50 83.2 -> 85.3 ms), so the
+stem had no fast path.
+
+The §9.93 kernel only handled 3x3. Generalized it to square `k x k`:
+`KH/KW/pad/stride` are kernel arguments, `OH=(H+2p-k)/s+1`, and the patch
+index is `ci=k/(kh*kw), ky=(k%(kh*kw))/kw, kx=k%kw`. The dispatch
+(`tensor::conv_fused`, module renamed `runtime::cuda_conv_tc`) uses it for
+`groups=1`, `dilation=1`, square `k>=3`, symmetric `(k-1)/2` padding, stride 1
+or 2, only when the graph would be slow: the measured 3x3 stride-1 case, or
+`cin*k*k` below the im2col floor. The stem's input is a parameter, so there is
+no mid-graph realize and none of the §9.94 bottleneck cost.
+
+Measured, RTX 3060, bs 32, 5 warmups + 20 iterations, alternating on/off
+(`AUTORUST_CONV3X3_TC`; alias `AUTORUST_CONV_TC`):
+
+| workload | off | on | result |
+|---|---:|---:|---:|
+| ResNet-18 infer | 213.9-215.7 ms | **154.6-156.0 ms** | -28% |
+| ResNet-50 infer | 82.9-83.1 ms | **35.2-36.6 ms** | -56% |
+| MobileNetV2 infer | 55.3 ms | 56.1 ms | neutral (depthwise 3x3, only the stem is covered) |
+
+After the change the top KPROF row is `E_2` at 11%; the stem no longer
+dominates. `tests/cuda_conv_tc.rs` adds a 7x7/stride-2 test against INTERP
+(max abs < 3e-2, TF32) on the stem shape, alongside the existing 3x3,
+odd-shape fallback and graph-gradient tests. The kernel stays Fast-only and
+forward-only; training keeps the graph.

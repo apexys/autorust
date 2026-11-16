@@ -56,18 +56,19 @@ impl Cb {
     }
 
     fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {
+        let k = &self.conv.kernel_size;
+        let pad = (k[0] - 1) / 2;
         let tc3x3 = !training
             && self.fused
             && self.conv.groups == 1
-            && self.conv.kernel_size == [3, 3]
-            && self.conv.stride == 1
+            && k[0] == k[1]
+            && k[0] >= 3
+            && (self.conv.stride == 1 || self.conv.stride == 2)
             && self.conv.dilation == 1
-            && self.conv.padding == [1, 1, 1, 1]
+            && self.conv.padding == [pad, pad, pad, pad]
             && match std::env::var("AUTORUST_CONV3X3_TC") {
                 Ok(v) => v != "0" && !v.is_empty(),
-                Err(_) => {
-                    x.ctx().borrow().settings.math_mode == autorust::settings::MathMode::Fast
-                }
+                Err(_) => x.ctx().borrow().settings.math_mode == autorust::settings::MathMode::Fast,
             };
         let y = if tc3x3 {
             {
