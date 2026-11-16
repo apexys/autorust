@@ -5120,7 +5120,7 @@ as the review describes. That is a cross-cutting refactor of `uop::ctx` and
 `codegen`, out of proportion to the cold-start share (~0.5 s of a 1.2 s first
 call, and zero on replay/ONNX after the plan capture in §9.58).
 
-### 9.62 PROPOSED_OPTIMIZATIONS.md: what was measured and landed (2026-11)
+### 9.62 Proposed optimizations: what was measured and landed (2026-11)
 
 Ten proposals were evaluated; four produced code, two produced decisions backed
 by numbers, and four were judged out of scope.
@@ -5258,9 +5258,9 @@ the tensor-graph update (~95 ms); porting `runtime::cuda_optim` to CL/VK is the
 obvious follow-up. ResNet-18 conv remains the largest CUDA gap (17x) even after
 the im2col gate (§9.64); CPU ResNet is 3.2x torch.
 
-### 9.66 PERFORMANCE_STEPS.md: the next round (2026-11-14)
+### 9.66 Performance backlog: the next round (2026-11-14)
 
-`PERFORMANCE_STEPS.md` collects the backlog after this session: the remaining
+The performance backlog (now `PERFORMANCE_OPTIMIZATIONS.md`) collects the remaining work after this session: the remaining
 `PERFORMANCE_REVIEW.md` items, the gaps from the refreshed cross-framework
 matrix (§9.65), and the measured dead ends, ranked by assumed impact. The top
 items are (1) serialized AOT lowered plans for GPU backends — the only large
@@ -5271,7 +5271,7 @@ eager plans; (4) elementwise fusion (7,910 `E_*` launches, 40% of KPROF time);
 preprocessing; (8) the fused optimizer ported to CL/VK; plus the cold-warm
 breakdown and a sequence. Numbers, gates and code pointers are in the document.
 
-### 9.67 PERFORMANCE_STEPS, first pass: CL optimizer, free list, StepPlan LRU, cold-start revision (2026-11-14)
+### 9.67 Performance backlog, first pass: CL optimizer, free list, StepPlan LRU, cold-start revision (2026-11-14)
 
 Worked through the ranked backlog; all numbers are on the RTX 3060.
 
@@ -5301,7 +5301,7 @@ Worked through the ranked backlog; all numbers are on the RTX 3060.
   medians are 88 → 65 → 42 → 39 ms, so the rest is GPU clock ramp and
   first-launch driver work. The plan-serialization win is therefore ~100 ms per
   cold process, not 470 ms; the SINK-content schedule cache is the cheaper
-  variant to try first. `PERFORMANCE_STEPS.md` records the revised ranking.
+  variant to try first. `PERFORMANCE_OPTIMIZATIONS.md` records the revised ranking.
 - **Item 13 (TF32): measured opt-in.** `AUTORUST_CUBLAS_TF32=1` on ViT train
   bs 4 is **217.2 → 204.6 ms (-5.8%)**; numerics change, so it stays opt-in.
 
@@ -5445,7 +5445,7 @@ projection-weight-gradient kernel costs almost as much as the removed attention.
 only called from Rust, never by the scheduler. A correct implementation needs an
 LSE-saving forward, dQ/dK/dV kernels, a graph op with a `grad_of_op` rule, a
 scheduler->HostCall lowering, and freeze serialization - cross-cutting. The
-measured payoff, decomposition and gates are recorded in `PERFORMANCE_STEPS.md`
+measured payoff, decomposition and gates are recorded in `PERFORMANCE_OPTIMIZATIONS.md`
 item 5.
 
 **Item 14 was attempted as part of this.** Opt-in CUDA-graph capture was
@@ -5469,7 +5469,7 @@ plain/causal/mask/GQA, to 4e-7. GPU time for 12 modules: 86.9 ms at N=197
 (graph 86.0), 276.6 at 512 (280.3), 1050.7 at 1024 (1111). The scalar backward
 is at parity because the graph's backward is batched cuBLAS; a tensor-core
 backward is what would realize the 57 ms target. Not wired into autograd, which
-also still needs the graph-op/host-call seam. Details in PERFORMANCE_STEPS
+also still needs the graph-op/host-call seam. Details in PERFORMANCE_OPTIMIZATIONS
 item 5.
 
 **Item 10 (parallel rendering): measured, structural blocker confirmed.** With
@@ -5712,7 +5712,7 @@ the autorust/candle/torch rows are strict f32; the burn CPU rows are strict f32.
 That caveat is carried in `bench/README.md`, `PERFORMANCE.md` and `README.md`.
 
 What the burn source suggests for us (recorded as items 11-15 in
-`PROPOSED_OPTIMIZATIONS.md`):
+`PERFORMANCE_OPTIMIZATIONS.md`):
 
 1. **Implicit-GEMM conv with tensor-core tiles and per-shape autotune**
    (`burn-cubecl/src/kernel/conv/forward/`): direct/1x1/depthwise/implicit-GEMM

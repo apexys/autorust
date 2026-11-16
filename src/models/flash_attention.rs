@@ -777,7 +777,7 @@ fn train_shape(q: &Tensor, k: &Tensor, v: &Tensor) -> Option<(i64, i64, i64, i64
 /// `LSE` is the `[b*h, n]` log-sum-exp of each query row, which the backward
 /// needs to recompute `p = exp(s - lse)` without materializing the score
 /// matrix. This is the forward half of the fused training path; it is not
-/// wired into autograd (see `PERFORMANCE_STEPS.md` item 5), so callers that
+/// wired into autograd (see `PERFORMANCE_OPTIMIZATIONS.md` item A1), so callers that
 /// want gradients use [`fused_attention_backward`] explicitly.
 ///
 /// Returns `None` (caller keeps the graph path) unless the device is CUDA, the

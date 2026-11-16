@@ -840,8 +840,8 @@ the burn checkout, not this repository.
   (`kernel/attention/base.rs`: flash blackbox-accelerated, flash unit, fallback,
   autotune), reduce (`kernel/reduce/tune.rs`: unit/plane/cube routines plus
   output vectorization) and interpolate. This is the same idea as
-  `PROPOSED_OPTIMIZATIONS.md` item 1, but applied to the compute kernels and
-  keyed per shape. Our matmul spread (8.0 TF/s at 4096³ vs 5.1 at 1024³) and the
+  the per-kernel opt-search item (S5 in `PERFORMANCE_OPTIMIZATIONS.md`), but applied
+  to the compute kernels and keyed per shape. Our matmul spread (8.0 TF/s at 4096³ vs 5.1 at 1024³) and the
   bf16 gap are exactly the cases where a measured per-shape candidate would pay.
 - **Implicit-GEMM convolution with tensor-core tiles.** Burn's conv forward does
   not just im2col + a generic GEMM: it has a dedicated depthwise kernel, a 1×1
@@ -886,8 +886,7 @@ the burn checkout, not this repository.
 The priority order from this comparison is: (1) tensor-core implicit-GEMM conv
 plus depthwise, (2) fused single-pass reductions/softmax, (3) a keyed per-shape
 autotuner for the remaining tiled matmul/conv candidates, (4) broadcast-rhs
-folding and multi-stream decode. They are recorded as items 11-15 in
-`PROPOSED_OPTIMIZATIONS.md`; none is landed here, because the measurements above
+folding and multi-stream decode. They are tracked in `PERFORMANCE_OPTIMIZATIONS.md`; none is landed here, because the measurements above
 are the baseline they would have to beat.
 
 

@@ -27,8 +27,7 @@ exclude = [
     "bench/",
     ".github/",
     # Internal review/backlog notes, not part of the user-facing documentation.
-    "PERFORMANCE_REVIEW.md",
-    "PROPOSED_OPTIMIZATIONS.md",
+    "PERFORMANCE_OPTIMIZATIONS.md",
 ]
 
 [package.metadata.docs.rs]

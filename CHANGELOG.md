@@ -75,8 +75,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   CUDA and Flex CPU), and `bench/run.py` / `bench/report.py` include it. The
   comparison adds burn columns to `README.md` and `PERFORMANCE.md`, plus a
   review of burn's autotuning, implicit-GEMM conv, fused reductions,
-  broadcast-rhs matmul folding and multi-stream execution as backlog items
-  11-15 in `PROPOSED_OPTIMIZATIONS.md`. Burn's f32 CUDA rows use TF32 tensor
+  broadcast-rhs matmul folding and multi-stream execution as backlog items in
+  `PERFORMANCE_OPTIMIZATIONS.md`. Burn's f32 CUDA rows use TF32 tensor
   cores and are labelled as such; no autorust kernel changed in this pass.
 
 ## [0.2.0] - 2026-11-16
@@ -108,7 +108,7 @@ below.
   replay. The kernel caches already exist, but `create_linear_with_vars` is
   re-run per capture (`realize.schedule` 61 ms + `callify` 11.5 ms); a
   SINK-content cache needs the CALL/buffer-map re-interning of the serialized
-  plan. Both are recorded in `PERFORMANCE_STEPS.md`.
+  plan. Both are recorded in `PERFORMANCE_OPTIMIZATIONS.md`.
 - **Measured the ONNX preprocessing and bf16-epilogue items (both skips).** The
   ONNX assets are already clean (0 `Constant` nodes; `Identity` aliases emit no
   kernels; the ResNet has no BN; MNIST's BN is fused into the conv stores) and
@@ -116,14 +116,14 @@ below.
   On bf16, `vit_infer_bf16` accepts 0 host GEMMs and `vit_train_bf16`'s accepted
   descriptors are bias-free attention contractions; the biased linears are f32
   compute with a bf16 store, so a bf16 cuBLASLt epilogue has no target. Both are
-  recorded in `PERFORMANCE_STEPS.md` items 7 and 13.
+  recorded in `PERFORMANCE_OPTIMIZATIONS.md`.
 - **Measured the ONNX preprocessing item (skip).** The exported assets have no
   `Constant` nodes, `Identity` nodes emit no kernels, host-GEMM weights are
   already consumed through strides (no pack/transpose kernels in the replay),
   and the ResNet has no BN nodes (MNIST's are fused into the conv stores). The
   steady replays are 29 (ResNet) and 12 (MNIST) kernels; the remaining gap is
   conv lowering (item 2), not graph preprocessing. Recorded in
-  `PERFORMANCE_STEPS.md` item 7.
+  `PERFORMANCE_OPTIMIZATIONS.md`.
 - **Host-GEMM epilogue C indexing and outer batch stride.** The epilogue used
   `row*n + col` with one batch stride, which assumes `c_m == n` and contiguous
   batch slices; the folded-conv layout (`C[b][cout][oy][ox]`, two batch axes)
@@ -232,7 +232,7 @@ below.
   substitution is 0.464 s/step (12.1M nodes); the beam-search disk cache makes
   a 22.3 s search 0.58 s on a repeat run, and beam timing is ~0 (compilation is
   the cost); every new input shape still recaptures (~0.5-0.9 s). These are
-  recorded in `PERFORMANCE_STEPS.md` items 10-12 and 15.
+  recorded in `PERFORMANCE_OPTIMIZATIONS.md`.
 - **Per-slice accumulation for strided two-axis reductions.** A contraction
   whose two reduction axes are not contiguous in both operands (the ViT
   weight-gradient shapes) is now a sum of per-slice GEMMs: `HostGemm` carries

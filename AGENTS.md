@@ -100,6 +100,11 @@ not duplicate those documents here; point at them.
   - `CONFIGURATION.md` — new features, `Settings` fields, env vars, defaults.
   - `PERFORMANCE.md` — benchmark methodology, kernel internals, device selection,
     any claim that a user might rely on.
+  - `PERFORMANCE_OPTIMIZATIONS.md` — the single performance backlog: open work
+    (TODO) and landed/rejected work with its measured result (DONE), grouped by
+    area (scheduler, backend, conv/GEMM, attention, elementwise, memory, ONNX,
+    tooling). Add an item there when you measure a new lever; move it to DONE
+    with the number and `CURRENT_STATE` section when it lands.
   - `ONNX-Compat.md` — ONNX operator/feature coverage (the canonical matrix).
   - `FREEZE.md` — frozen-plan capture/emit/runner behaviour.
   - `INDEXING.md` — the `getitem` index DSL.
@@ -147,6 +152,7 @@ CURRENT_STATE.md   canonical status, decisions, measurements, known gaps
 CHANGELOG.md       user-visible release notes
 README.md          user-facing overview and quick start
 PERFORMANCE.md     benchmarks, GEMM/attention internals, device selection
+PERFORMANCE_OPTIMIZATIONS.md  performance backlog (TODO/DONE, grouped by area)
 CONFIGURATION.md   feature flags, Settings, full env-var reference
 FREEZE.md          AOT frozen CPU plans (build.rs/include! flow)
 INDEXING.md        the getitem index-DSL reference
