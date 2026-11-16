@@ -2,11 +2,18 @@
 
 This file is the contract for the ONNX importer in `src/onnx/`.
 
-**Status (2026-10):** the T0 importer is implemented and validated end-to-end on
-Depth-Anything V2. T1 is largely covered (the transformer/CNN op set, `Pad`
-modes, `TopK`, `GatherND`/`GatherElements`, two-operand `Einsum`); the remaining
-T1/T2 gaps are listed below. T2 (quantization, training ops, ONNX-ML, control
-flow) is not implemented.
+**Status (2026-11-16):** T0 is validated end-to-end on Depth-Anything V2. The
+T1 transformer/CLIP/CNN op set is implemented: `Einsum` (N operands, ellipsis,
+repeated labels), `GatherND` (all `batch_dims`)/`GatherElements`, `Pad` modes,
+`TopK`, `NonZero`/`Compress`/`CenterCropPad`/`Scatter*`/`TensorScatter`,
+`MaxUnpool`, `Resize` (linear/nearest/cubic, antialias, every coordinate mode
+except `tf_crop_and_resize`, aspect-ratio policy), the fused transformer ops
+(`SkipLayerNormalization`, `EmbedLayerNormalization`, `RotaryEmbedding`,
+`AffineGrid`) and the loss wrappers. Remaining T1 limitations are storage or
+rare attributes: zero-element tensors, runtime `Pad` pads (host constants),
+`GatherND` `k=0`, `ConvTranspose` per-dimension attributes, and
+`GatherElements`' host-index loop (correct, not fast). T2 (quantization,
+training ops, ONNX-ML, control flow) is not implemented.
 
 Legend:
 
@@ -142,7 +149,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Reshape Flatten Squeeze Unsqueeze Transpose Concat Split Expand Tile Identity` | ✅ | direct movement ops. |
 | `Slice` | ✅ | `Ix::Range`; constant starts/ends/axes/steps. |
 | `Gather` | ✅ | `Tensor::gather`. |
-| `GatherElements GatherND` | 🟡 | `GatherND` supports all `batch_dims`; `GatherElements` uses a host-index loop (also plan-disabled). |
+| `GatherElements GatherND` | ✅ | `GatherND` all `batch_dims` (`k=0` caveat); `GatherElements` host-index loop (correct, not fast; plan-disabled). |
 | `Scatter ScatterElements ScatterND TensorScatter` | ✅ | `Scatter*` host-side with negative indices and reduction `none`/`add`/`mul`/`max`/`min`; `TensorScatter` is a graph one-hot/matmul for axis -2, `linear`/`circular`, per-batch `write_indices`. |
 | `Pad` | ✅ | constant/edge/reflect/wrap with static (host-resolved) pads. |
 | `Resize Upsample` | ✅ | linear/nearest/cubic, antialias, all coordinate modes except `tf_crop_and_resize`, all `nearest_mode`s, `keep_aspect_ratio_policy`. |
