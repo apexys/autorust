@@ -1026,7 +1026,12 @@ Reading it:
 
 - **Dense conv is the weak path.** The direct-conv kernels run at ~9-30 GFLOP/s
   (a 7×7 stem conv: 3.0 GFLOP in 0.32 s) where the GEMM microbench reaches
-  8 TFLOP/s. torch uses oneDNN on CPU and cuDNN on CUDA, both far ahead.
+  8 TFLOP/s. torch uses oneDNN on CPU and cuDNN on CUDA, both far ahead. The
+  **CUDA table rows predate the tensor-core kxk conv** (`CURRENT_STATE
+  §9.93-9.95`): in the default Fast mode the 7×7 stem now runs in the `wmma`
+  kernel, taking ResNet-18 infer from 214-216 to ~155 ms and ResNet-50 from 83
+  to ~35 ms. The strict-f32 numbers above are kept for the cross-framework
+  comparison.
 - ResNet-18 *inference* is now close to its own training step on CPU (1.20 s vs
   1.18 s) although training does more work: `fold_bn_eval` folds the BatchNorm
   into the conv weight and bias, so the store is a plain bias(+ReLU) GEMM. The
@@ -1119,7 +1124,11 @@ bs 8; the rest is dependency-chained, so it was not wired into the executor
   and later calls copy the inputs into the plan's buffers and replay it, so
   per-call scheduling is paid only on capture. That took CUDA ONNX MNIST from
   11.7 to **1.8 ms** and ResNet-0.25 from 73.8 to **9.7 ms**; the remaining gap
-  to torch is kernel time and conv lowering, not host scheduling. A changed
+  to torch is kernel time and conv lowering, not host scheduling. With the
+  default Fast math mode the `Conv` op also takes the tensor-core kxk path when
+  its input is already realized (the stem), which takes the ONNX ResNet row to
+  **6.5-7.0 ms** (`CURRENT_STATE §9.98`); the table above stays on the strict
+  f32 path. A changed
   input shape recaptures; `OnnxModel::set_plan_cache(false)` forces the eager
   path for debugging. Static shapes are the T0/T1 contract — the plan is not
   valid for data-dependent graph structure (no control-flow ops are supported
