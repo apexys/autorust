@@ -142,7 +142,10 @@ How to read it:
   correct and exportable as standard ONNX ops, but it is launch- and
   memory-traffic-bound: RTX 3060, single f32 transform, warm best of 8:
   N=256/1024/4096 = **19.3/26.8/37.1 ms**; the `dft` matrix fallback is
-  6.1 ms at N=256 and 81.1 ms at N=1024. If audio-rate FFT/STFT becomes a
+  6.1 ms at N=256 and 81.1 ms at N=1024 (build + first realize). N=4096 was not
+  in the warm table: building the two 4096² matrices takes 1.33 s and the first
+  realize another 0.43 s, so the O(n²) constant construction dominates (and the
+  matrices are regenerated on every graph build). If audio-rate FFT/STFT becomes a
   target, add an `Ops::Fft` marker whose default lowering expands to the
   current graph, whose ONNX export maps to `DFT`, and whose backend dispatch
   can use cuFFT/FFTW/a custom kernel with a host fallback. Keep the current

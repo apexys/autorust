@@ -6675,7 +6675,9 @@ non-power-of-two `fft` rejection) and `tests/onnx.rs::window_ops_match_formulas`
 
 Measured on RTX 3060, single f32 transform, warm best of 8: graph FFT
 N=256/1024/4096 = **19.3/26.8/37.1 ms** (build 0.7-1.2 ms; first realize
-69-126 ms); DFT matrix = 6.1 ms at N=256 and 81.1 ms at N=1024. The graph path
+69-126 ms); DFT matrix = 6.1 ms at N=256 and 81.1 ms at N=1024. DFT N=4096 was
+not in the warm table because constructing the two 4096² matrices dominates:
+build 1.33 s + first realize 0.43 s (they are regenerated per graph build). The graph path
 is correct but launch/memory-bound; a first-class `Ops::Fft` marker with
 backend dispatch is recorded as low priority in
 `PERFORMANCE_OPTIMIZATIONS.md` §S1. Wavelets should stay graph-level
