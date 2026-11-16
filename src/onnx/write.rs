@@ -118,7 +118,15 @@ fn tensor_msg(t: &TensorProto) -> Vec<u8> {
     packed_i64(1, &t.dims, &mut b);
     field_i64(2, t.data_type as i64, &mut b);
     field_str(8, &t.name, &mut b);
-    if let Some(raw) = &t.data.raw {
+    if !t.external.is_empty() {
+        for (k, v) in &t.external {
+            let mut m = Vec::new();
+            field_str(1, k, &mut m);
+            field_str(2, v, &mut m);
+            field_msg(13, &m, &mut b);
+        }
+        field_i64(14, t.data_location, &mut b);
+    } else if let Some(raw) = &t.data.raw {
         field_bytes(9, raw, &mut b);
     } else if t.data.has_floats || !t.data.floats.is_empty() {
         packed_f32(4, &t.data.floats, &mut b);

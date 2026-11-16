@@ -36,7 +36,19 @@ y2 = np.fromfile(f"{ROOT}/onnx_export_e2_y.bin", dtype=np.float32).reshape(2, 2)
 e2 = run(f"{ROOT}/onnx_export_e2.onnx", {"x": x2})
 assert np.allclose(e2, y2), (e2, y2)
 
-print("onnx export E0/E1/E2: checker + onnxruntime OK")
+# E3: dynamic batch and external data.
+e3d = run(
+    f"{ROOT}/onnx_export_e3_dynamic.onnx",
+    {"x": np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32)},
+)
+assert np.allclose(e3d, np.array([[3.0, 5.0], [7.0, 9.0], [11.0, 13.0]])), e3d
+e3x = np.fromfile(f"{ROOT}/onnx_export_e2_x.bin", dtype=np.float32).reshape(2, 3)
+e3ext = run(f"{ROOT}/onnx_export_e3_external.onnx", {"x": e3x})
+assert np.allclose(e3ext, y2), (e3ext, y2)
+
+print("onnx export E0/E1/E2/E3: checker + onnxruntime OK")
 print("E0", e0.tolist())
 print("E1", e1.tolist())
 print("E2", e2.tolist())
+print("E3 dynamic", e3d.tolist())
+print("E3 external", e3ext.tolist())

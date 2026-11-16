@@ -4,9 +4,13 @@ This file is the contract for the ONNX **exporter**. The importer and its
 operator matrix live in `ONNX-Compat.md`; this document covers producing ONNX
 models from `autorust` graphs and models.
 
-**Status (2026-11-16):** **E0, E1 and E2 are implemented** in `src/onnx/export.rs`
-and `src/onnx/write.rs`, with `tests/onnx_export.rs` and the dev-only
-`bench/onnx_export_check.py` onnxruntime gate. E3 and E4 remain planned.
+**Status (2026-11-16):** **E0-E3 are implemented** in `src/onnx/export.rs` and
+`src/onnx/write.rs`: dynamic `dim_param` axes, external-data sidecars, direct
+`MatMul` recognition, and a transformer-style LayerNorm/residual gate.
+`tests/onnx_export.rs` and the dev-only `bench/onnx_export_check.py`
+onnxruntime gate cover E0-E3. `Gemm`/`Conv` normalization (expanded arithmetic
+today), opset decomposition and shape-inference polish are tracked as **E3b**;
+E4 is deferred.
 
 ## Goals
 
@@ -68,7 +72,8 @@ complexity**. A higher tier includes the lower tiers.
 | **E0** | Manual `GraphBuilder` | any | Protobuf/model writer: nodes, attributes, tensors, initializers, value info, opset/IR metadata (external data is E3) | ✅ done |
 | **E1** | `export_fn` closure | fixed | Trace a lazy `Tensor`/UOp graph; params/constants as initializers; dedup; core standard ops | ✅ done |
 | **E2** | `export_module` + `Module` | fixed | `named_params`/`named_buffers`, shared parameters, multiple inputs/outputs, eval mode, metadata | ✅ done |
-| **E3** | E1/E2 | symbolic/dynamic | `Dim::Param`, shape inference, opset targeting/decomposition, constant folding, external data | planned |
+| **E3** | E1/E2 | symbolic/dynamic | `Dim::Param` on declared axes, external-data sidecars, direct `MatMul` lowering, transformer-style graph gate | ✅ done |
+| **E3b** | E3 | symbolic/dynamic | `Gemm`/`Conv` normalization, opset decomposition, shape-inference polish | 🟡 follow-up |
 | **E4** | E1/E2 | data-dependent | `If` (later `Loop`/`Scan`), training, QDQ/quantized, sequences/optionals, custom domains | deferred |
 
 ### E0 — proto and graph builder (implemented)
@@ -140,22 +145,28 @@ where
 - `ModuleForward` can get a convenience adapter later; the explicit closure
   keeps the API usable for modules whose `forward` has a non-trivial input type.
 
-### Current implementation coverage (E0-E2)
+### Current implementation coverage (E0-E3)
 
 - Writer: model/graph/node/attribute/tensor/value-info protobufs, opset import,
-  IR version, raw initializers, fixed shapes. External data is E3.
+  IR version, raw initializers, fixed shapes and external-data sidecars.
 - Tracer: lazy UOp graph, graph inputs, materialized module parameters/const
   leaves, initializer dedup by UOp identity, explicit `UnsupportedOp` errors.
 - Lowering: elementwise arithmetic/logical/comparison, `Where`, `Cast`,
   `Sqrt`/`Sin`/`Neg`/`Trunc`/`Reciprocal`, `Exp2`/`Log2`, `Reshape`,
   `Expand`, `Permute`, `Reduce` (`Add`/`Mul`/`Max`), and `Identity` output
-  aliases. This covers MLP-style graphs (Linear/dot + bias + ReLU) and their
-  constants.
-- Not yet: direct `Gemm`/`MatMul`/`Conv` normalization (these may export as
-  expanded arithmetic graphs), `Resize`, attention/transformer patterns,
-  dynamic axes, external data, and control flow. These are E3/E4 work and
-  return `UnsupportedOp` rather than silently degrading when an unmapped UOp
-  appears.
+  aliases. The expanded `dot` pattern (broadcast multiply + permute + sum) is
+  recognized and emitted as one `MatMul`; a graph that does not match the
+  validated shape pattern keeps the expanded arithmetic form. This covers
+  MLP-style graphs (Linear/dot + bias + ReLU) and transformer blocks.
+- E3 dynamic axes and external data are implemented. A simple elementwise
+  graph exports with `dim_param` batch axes and runs in ORT at several batch
+  sizes; float initializers can move to `<model>.onnx.data` while integer shape
+  tensors stay inline for ONNX shape inference.
+- Direct `MatMul` normalization is in. `Gemm` (the traced `MatMul` + `Add`
+  pair is already valid) and `Conv` (im2col arithmetic, including `Shrink`/
+  `Pad` index graphs) remain E3b, as do `Resize` and a full attention block.
+  The transformer-style LayerNorm+residual gate is covered; unmapped UOps fail
+  explicitly.
 
 ### E3 — dynamic axes and deployment polish
 
@@ -188,17 +199,20 @@ Deferred until the importer has the corresponding features:
 pub struct InputSpec {
     pub name: String,
     pub dtype: DTypeId,
-    pub shape: Vec<i64>, // fixed shape in E1/E2
+    pub shape: Vec<i64>,              // placeholder shape; dynamic axes trace as 1
+    pub dynamic_dims: Vec<(usize, String)>, // ONNX dim_param axes
 }
 
 pub struct OutputSpec {
-    pub name: String, // dtype/shape inferred from the traced tensor
+    pub name: String,
+    pub dynamic_dims: Vec<(usize, String)>,
 }
 
 pub struct ExportOptions {
-    pub opset: i64,       // default 17
-    pub ir_version: i64,  // default 8
-    pub producer: String, // default "autorust"
+    pub opset: i64,                  // default 17
+    pub ir_version: i64,             // default 8
+    pub producer: String,            // default "autorust"
+    pub external_data: Option<u64>,  // total-raw threshold; None embeds
 }
 
 // E0 manual builder:
@@ -250,8 +264,9 @@ is already a storage leaf (or a fused plan); re-run the forward in a fresh
 
 ## Lowering and normalization
 
-A direct UOp trace is correct but can be a poor ONNX graph. E1/E2 currently
-emit the traced UOps directly; future normalization will include:
+A direct UOp trace is correct but can be a poor ONNX graph. E3 recognizes the
+`dot` expansion and emits `MatMul`; the rest is still emitted directly.
+Further normalization (E3b) will include:
 
 - `nn::Embedding` / one-hot + sum -> `Gather` (otherwise a vocabulary-sized
   one-hot is exported).

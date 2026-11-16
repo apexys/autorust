@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ONNX export E3 (2026-11-16).** `InputSpec`/`OutputSpec` accept
+  `with_dynamic_dim(axis, name)` and emit ONNX `dim_param` axes;
+  `ExportOptions::external_data` moves float initializers into a
+  `<model>.onnx.data` sidecar (integer shape tensors stay inline for shape
+  inference). The tracer recognizes the expanded `dot` pattern and emits one
+  `MatMul` node, with the expanded arithmetic graph as the fallback. Gates
+  cover dynamic batches, external data, a batched MLP and a transformer-style
+  LayerNorm/residual block through both the importer and
+  `bench/onnx_export_check.py` (`onnx.checker` + onnxruntime). `Gemm`/`Conv`
+  normalization remains E3b.
+
 - **Vulkan fused optimizer and full reductions (2026-11-16).**
   `runtime::vk_optim` dispatches a precompiled SPIR-V Adam/AdamW/LAMB kernel
   (one 256-invocation pass, one-element scalar buffers) and is wired into

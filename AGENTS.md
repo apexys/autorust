@@ -125,7 +125,7 @@ src/settings.rs Settings (attention kind, library GEMM, tile sizes, TC, cache),
 src/tensor/     Tensor front-end + Ctx, movement/elementwise/reduce, indexing,
                 grad, rand, nn layers, optimizers, state/safetensors, marshalling
 src/models/     reference models: transformer, ViT, FlashAttention dispatch
-src/onnx/       std-only protobuf parser, T0/T1 runner, E0-E2 exporter
+src/onnx/       std-only protobuf parser, T0/T1 runner, E0-E3 exporter
 src/classic/    classical ML: host f64 linalg, linear/logistic, PCA, k-means,
                 exact kNN, linear SVM/SVR, decision trees/random forests (C0-C2a)
 src/schedule/   rangeify/indexing/memory, library-GEMM seam (Seam B)

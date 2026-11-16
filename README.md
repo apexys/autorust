@@ -13,7 +13,7 @@ It includes:
 - AOT CPU compilation (embed ML models as Rust code with a build script)
 - Accelerated GEMM and fused FlashAttention kernels (including TF32/bf16
   tensor-core variants)
-- Safetensors checkpoint loading, ONNX model import and ONNX export (E0-E2)
+- Safetensors checkpoint loading, ONNX model import and ONNX export (E0-E3)
 - Classical ML (C0/C1/C2a): linear/ridge and logistic regression, PCA, k-means,
   exact kNN, linear SVM/SVR, decision trees, random forests, standard scaling
   and metrics

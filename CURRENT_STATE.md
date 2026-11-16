@@ -6823,3 +6823,31 @@ f32 TN GEMM at 2048³ is 4.0-4.5 ms on VK versus 2.3-2.9 ms on CL, so the
 transposed-staging work is deferred; the isolated transpose is within 1.09x of
 CL (0.48 vs 0.45 ms), below the full-run variance.
 
+### 9.123 ONNX export E3 (2026-11-16)
+
+E3 adds the dynamic-shape and deployment pieces on top of E0-E2:
+
+- `InputSpec::with_dynamic_dim(axis, name)` and the matching
+  `OutputSpec::with_dynamic_dim` emit ONNX `dim_param`s. The tracing
+  placeholder for a dynamic axis is `1`; the graph body must not bake that
+  axis elsewhere (the gate uses a pointwise graph).
+- `ExportOptions::external_data: Option<u64>` moves float initializers whose
+  total raw bytes exceed the threshold into `<model>.onnx.data`. Integer
+  initializers (shape/axes) stay inline: onnxruntime's shape inference rejects
+  external tensors for `Reshape`, so externalizing everything is not portable.
+- The tracer validates the expanded `dot` graph (broadcast multiply + permute +
+  reduce) against operand shapes and emits one `MatMul`; non-matching
+  reductions keep the expanded arithmetic form. The transformer-style gate
+  (`LayerNorm` + residual + linear) contains a real `MatMul` node.
+- **E3b** remains: direct `Gemm` folding, `Conv` (the traced im2col graph uses
+  `Pad`/`Shrink` index arithmetic), opset decomposition and shape-inference
+  polish. These are documented as follow-ups rather than silently approximated.
+- A full attention block is still target coverage; the covered gate is a
+  transformer-style LayerNorm/residual/MLP block.
+
+Gates: `tests/onnx_export.rs` has 5 tests (E0 Add graph, E1 closure, E2 module,
+E3 dynamic/external, E3 transformer block). `bench/onnx_export_check.py`
+(`onnx.checker` + onnxruntime) passes E0-E3, including a 3-row dynamic batch
+and the external-data MLP. `cargo nextest run --release` is 417/417,
+`cargo clippy --all-targets`, `cargo rustdoc --lib -- -W missing_docs` and
+`cargo check --no-default-features` are clean.

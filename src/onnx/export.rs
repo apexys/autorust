@@ -66,8 +66,11 @@ pub struct InputSpec {
     pub name: String,
     /// Input element dtype.
     pub dtype: DTypeId,
-    /// Concrete dimensions (E2; symbolic axes are E3).
+    /// Concrete placeholder dimensions. A dynamic axis uses `1` as the
+    /// tracing placeholder and [`InputSpec::dynamic_dims`] to name it.
     pub shape: Vec<i64>,
+    /// `(axis, name)` pairs declared as symbolic ONNX `dim_param`s.
+    pub dynamic_dims: Vec<(usize, String)>,
 }
 
 impl InputSpec {
@@ -77,7 +80,14 @@ impl InputSpec {
             name: name.into(),
             dtype,
             shape: shape.to_vec(),
+            dynamic_dims: Vec::new(),
         }
+    }
+
+    /// Mark `axis` as a symbolic dimension (the tracing placeholder is 1).
+    pub fn with_dynamic_dim(mut self, axis: usize, name: impl Into<String>) -> Self {
+        self.dynamic_dims.push((axis, name.into()));
+        self
     }
 }
 
@@ -86,12 +96,23 @@ impl InputSpec {
 pub struct OutputSpec {
     /// Output name.
     pub name: String,
+    /// `(axis, name)` pairs declared as symbolic output dimensions.
+    pub dynamic_dims: Vec<(usize, String)>,
 }
 
 impl OutputSpec {
     /// Construct an output with `name`.
     pub fn new(name: impl Into<String>) -> Self {
-        OutputSpec { name: name.into() }
+        OutputSpec {
+            name: name.into(),
+            dynamic_dims: Vec::new(),
+        }
+    }
+
+    /// Mark `axis` as a symbolic output dimension.
+    pub fn with_dynamic_dim(mut self, axis: usize, name: impl Into<String>) -> Self {
+        self.dynamic_dims.push((axis, name.into()));
+        self
     }
 }
 
@@ -104,6 +125,8 @@ pub struct ExportOptions {
     pub ir_version: i64,
     /// Producer name.
     pub producer: String,
+    /// External-data threshold in bytes; `None` embeds raw initializers.
+    pub external_data: Option<u64>,
 }
 
 impl Default for ExportOptions {
@@ -112,6 +135,7 @@ impl Default for ExportOptions {
             opset: 17,
             ir_version: 8,
             producer: "autorust".to_string(),
+            external_data: None,
         }
     }
 }
@@ -242,7 +266,19 @@ where
                 spec.name
             )));
         }
-        let shape: Vec<SVal> = spec.shape.iter().map(|&d| SVal::I(d as i128)).collect();
+        let shape: Vec<SVal> = spec
+            .shape
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| {
+                let d = if spec.dynamic_dims.iter().any(|(a, _)| *a == i) {
+                    1
+                } else {
+                    d
+                };
+                SVal::I(d as i128)
+            })
+            .collect();
         let fill = if dtype::is_int(spec.dtype) {
             ConstVal::Int(0)
         } else if dtype::is_float(spec.dtype) {
@@ -296,7 +332,19 @@ where
     let mut input_map = HashMap::new();
     let mut tensors = Vec::with_capacity(inputs.len());
     for spec in inputs {
-        let shape: Vec<SVal> = spec.shape.iter().map(|&d| SVal::I(d as i128)).collect();
+        let shape: Vec<SVal> = spec
+            .shape
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| {
+                let d = if spec.dynamic_dims.iter().any(|(a, _)| *a == i) {
+                    1
+                } else {
+                    d
+                };
+                SVal::I(d as i128)
+            })
+            .collect();
         let fill = if dtype::is_int(spec.dtype) {
             ConstVal::Int(0)
         } else if dtype::is_float(spec.dtype) {
@@ -392,7 +440,7 @@ fn const_bytes(c: &ConstVal, dt: DTypeId) -> Result<Vec<u8>> {
                 _ => {
                     return Err(ExportError::UnsupportedTensor(format!(
                         "constant int for dtype {dt:?}"
-                    )))
+                    )));
                 }
             }
         }
@@ -630,6 +678,14 @@ impl<'a> Tracer<'a> {
                 ))
             }
             Ops::Reduce => {
+                // `Tensor::dot` lowers to a broadcast multiply plus a
+                // permutation and reduction. Recognize that exact shape when
+                // the graph is a plain matmul and emit one ONNX `MatMul`;
+                // anything that does not match keeps the expanded arithmetic
+                // form below (both are valid, the fallback is the reference).
+                if let Some(matmul) = self.try_matmul(id, &path)? {
+                    return Ok(matmul);
+                }
                 let x = self.trace(&srcs[0])?;
                 let (rop, count) = reduce_arg(self.ctx.arg_of(id), &path)?;
                 let axes: Vec<i64> = (0..count as i64).collect();
@@ -677,6 +733,102 @@ impl<'a> Tracer<'a> {
         self.initializers
             .push(tensor_proto(&name, vec![vals.len() as i64], 7, bytes));
         name
+    }
+
+    /// Match the expanded `dot` graph (`permute(mul(reshape(x), permute(reshape(w))))
+    /// -> reduce(add)`) and emit a single `MatMul`.
+    ///
+    /// The pattern is validated against the operand shapes, so a partial or
+    /// unrelated reduction falls back to the expanded form. `dot` always
+    /// inserts one broadcast dimension (`x` becomes `[.., N, 1, K]`, `w`
+    /// becomes `[.., 1, K, M]`), which is what lets this distinguish an actual
+    /// contraction from an elementwise multiply followed by an unrelated sum.
+    fn try_matmul(&mut self, id: &UopId, path: &str) -> Result<Option<String>> {
+        let (rop, count) = match reduce_arg(self.ctx.arg_of(id), path) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        if rop != Ops::Add || count != 1 {
+            return Ok(None);
+        }
+        let srcs = self.ctx.srcs(id).to_vec();
+        let Some(perm_node) = srcs.first() else {
+            return Ok(None);
+        };
+        if self.ctx.op_of(perm_node) != Ops::Permute {
+            return Ok(None);
+        }
+        let Ok(pd) = shape_of(self.ctx, perm_node).map(|s| s.len()) else {
+            return Ok(None);
+        };
+        let Some(outer_perm) = perm_ints(self.ctx.arg_of(perm_node)) else {
+            return Ok(None);
+        };
+        if preduce_permute(&outer_perm, pd).is_none() {
+            return Ok(None);
+        }
+        let mul = self.ctx.srcs(perm_node)[0].clone();
+        if self.ctx.op_of(&mul) != Ops::Mul {
+            return Ok(None);
+        }
+        let mul_srcs = self.ctx.srcs(&mul).to_vec();
+        if mul_srcs.len() != 2 {
+            return Ok(None);
+        }
+        let (xr, wt) = (&mul_srcs[0], &mul_srcs[1]);
+        if self.ctx.op_of(xr) != Ops::Reshape || self.ctx.op_of(wt) != Ops::Permute {
+            return Ok(None);
+        }
+        let wr = self.ctx.srcs(wt)[0].clone();
+        if self.ctx.op_of(&wr) != Ops::Reshape {
+            return Ok(None);
+        }
+        let Some(wperm) = perm_ints(self.ctx.arg_of(wt)) else {
+            return Ok(None);
+        };
+        let Ok(xs) = shape_of(self.ctx, xr) else {
+            return Ok(None);
+        };
+        let Ok(ws) = shape_of(self.ctx, &wr) else {
+            return Ok(None);
+        };
+        let nd = xs.len();
+        if nd < 3 || ws.len() != nd {
+            return Ok(None);
+        }
+        if preduce_swap_last(&wperm, nd).is_none() {
+            return Ok(None);
+        }
+        // `dot` inserts the broadcast axis at `-2` in x and `-3` in w.
+        if xs[nd - 2] != 1 || ws[nd - 3] != 1 {
+            return Ok(None);
+        }
+        let k = xs[nd - 1];
+        if ws[nd - 2] != k {
+            return Ok(None);
+        }
+        let m = ws[nd - 1];
+        let x = self.ctx.srcs(xr)[0].clone();
+        let w = self.ctx.srcs(&wr)[0].clone();
+        let mut want_x = xs[..nd - 2].to_vec();
+        want_x.push(k);
+        if shape_of(self.ctx, &x).ok().as_deref() != Some(want_x.as_slice()) {
+            return Ok(None);
+        }
+        let mut want_w = ws[..nd - 3].to_vec();
+        want_w.push(k);
+        want_w.push(m);
+        if shape_of(self.ctx, &w).ok().as_deref() != Some(want_w.as_slice()) {
+            return Ok(None);
+        }
+        let mut want_out = xs[..nd - 2].to_vec();
+        want_out.push(m);
+        if shape_of(self.ctx, id).ok().as_deref() != Some(want_out.as_slice()) {
+            return Ok(None);
+        }
+        let a = self.trace(&x)?;
+        let b = self.trace(&w)?;
+        Ok(Some(self.emit(id, "MatMul", vec![a, b], vec![])))
     }
 
     fn trace_elementwise(
@@ -783,6 +935,41 @@ impl<'a> Tracer<'a> {
     }
 }
 
+/// Integer list inside a `PERMUTE`-style arg.
+fn perm_ints(arg: &Arg) -> Option<Vec<usize>> {
+    let Arg::Seq { items, .. } = arg else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|a| match a {
+            Arg::Int(v) if *v >= 0 => usize::try_from(*v).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `[nd-1, 0, 1, .., nd-2]`: move the reduced contraction axis to the front.
+fn preduce_permute(perm: &[usize], nd: usize) -> Option<()> {
+    if perm.len() != nd || nd < 2 || perm[0] != nd - 1 {
+        return None;
+    }
+    if perm[1..] != (0..nd - 1).collect::<Vec<_>>()[..] {
+        return None;
+    }
+    Some(())
+}
+
+/// `[0, .., nd-3, nd-1, nd-2]`: `transpose(-1, -2)`.
+fn preduce_swap_last(perm: &[usize], nd: usize) -> Option<()> {
+    if perm.len() != nd || nd < 2 {
+        return None;
+    }
+    let mut want: Vec<usize> = (0..nd).collect();
+    want.swap(nd - 1, nd - 2);
+    (perm == want.as_slice()).then_some(())
+}
+
 fn reduce_arg(arg: &Arg, path: &str) -> Result<(Ops, usize)> {
     let Arg::Seq { items, .. } = arg else {
         return Err(ExportError::UnsupportedOp {
@@ -818,6 +1005,19 @@ fn reduce_arg(arg: &Arg, path: &str) -> Result<(Ops, usize)> {
         }
     };
     Ok((op, count))
+}
+
+fn out_dims(dims: &[i64], dynamic: &[(usize, String)]) -> Vec<Dim> {
+    dims.iter()
+        .enumerate()
+        .map(|(i, &d)| {
+            dynamic
+                .iter()
+                .find(|(a, _)| *a == i)
+                .map(|(_, n)| Dim::Param(n.clone()))
+                .unwrap_or(Dim::Value(d))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -863,7 +1063,7 @@ fn write_model(
             out_infos.push(ValueInfo {
                 name: out_name,
                 dtype: Some(*out_dtype),
-                dims: dims.iter().copied().map(Dim::Value).collect(),
+                dims: out_dims(dims, &o.dynamic_dims),
                 is_optional: false,
                 is_sequence: false,
             });
@@ -871,7 +1071,7 @@ fn write_model(
             out_infos.push(ValueInfo {
                 name,
                 dtype: Some(*out_dtype),
-                dims: dims.iter().copied().map(Dim::Value).collect(),
+                dims: out_dims(dims, &o.dynamic_dims),
                 is_optional: false,
                 is_sequence: false,
             });
@@ -887,7 +1087,18 @@ fn write_model(
         .map(|spec| ValueInfo {
             name: spec.name.clone(),
             dtype: Some(spec.dtype),
-            dims: spec.shape.iter().copied().map(Dim::Value).collect(),
+            dims: spec
+                .shape
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| {
+                    spec.dynamic_dims
+                        .iter()
+                        .find(|(a, _)| *a == i)
+                        .map(|(_, n)| Dim::Param(n.clone()))
+                        .unwrap_or(Dim::Value(d))
+                })
+                .collect(),
             is_optional: false,
             is_sequence: false,
         })
@@ -899,6 +1110,10 @@ fn write_model(
         inputs: graph_inputs,
         outputs: out_infos,
     };
+    let mut graph = graph;
+    if let Some(limit) = opts.external_data {
+        externalize(&mut graph, path.as_ref(), limit)?;
+    }
     let model = ModelProto {
         graph,
         opsets: HashMap::from([(String::new(), opts.opset)]),
@@ -906,5 +1121,45 @@ fn write_model(
     };
     let bytes = encode_model_with_ir(&model, opts.ir_version);
     std::fs::write(path, bytes).map_err(|e| ExportError::Io(e.to_string()))?;
+    Ok(())
+}
+
+fn externalize(graph: &mut GraphProto, model_path: &Path, limit: u64) -> Result<()> {
+    let total: u64 = graph
+        .initializers
+        .iter()
+        .filter_map(|t| t.data.raw.as_ref().map(|r| r.len() as u64))
+        .sum();
+    if total <= limit {
+        return Ok(());
+    }
+    let sidecar = format!("{}.data", model_path.to_string_lossy());
+    let location = Path::new(&sidecar)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model.onnx.data")
+        .to_string();
+    let mut bytes = Vec::with_capacity(total as usize);
+    let mut offset = 0u64;
+    for t in &mut graph.initializers {
+        // Keep integer shape/axis initializers inline: ONNX shape inference
+        // (onnxruntime and onnx.checker) needs their values while loading.
+        let float_tensor = matches!(t.data_type, 1 | 10 | 11 | 16);
+        if !float_tensor {
+            continue;
+        }
+        if let Some(raw) = t.data.raw.take() {
+            let len = raw.len() as u64;
+            t.external = vec![
+                ("location".to_string(), location.clone()),
+                ("offset".to_string(), offset.to_string()),
+                ("length".to_string(), len.to_string()),
+            ];
+            t.data_location = 1;
+            offset += len;
+            bytes.extend_from_slice(&raw);
+        }
+    }
+    std::fs::write(&sidecar, bytes).map_err(|e| ExportError::Io(e.to_string()))?;
     Ok(())
 }
