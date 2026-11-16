@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ONNX indexing family.** `NonZero`, `Compress`, `CenterCropPad`,
+  `Scatter`/`ScatterElements`/`ScatterND` (with `none`/`add`/`mul`/`max`/`min`
+  reductions) are implemented; they are host-realized and disable the replay
+  plan for models that use them (`tests/onnx.rs`).
 - **Generalized ONNX `Einsum`.** `Tensor::einsum_many` (and the two-operand
   `einsum` wrapper) now supports N operands, ellipsis with right-aligned
   broadcasting, repeated labels (diagonal/trace) and implicit output. The ONNX

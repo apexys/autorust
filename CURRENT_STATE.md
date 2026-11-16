@@ -6312,3 +6312,30 @@ ellipsis broadcast, diagonal/trace, `iij->j`, implicit output) and
 `ONNX-Compat.md` moves `Einsum` to ✅. The remaining T1 gap is the
 `Scatter*`/`NonZero`/`Compress`/`CenterCropPad` family (needs
 `masked_select`/scatter primitives), then the CLIP end-to-end gate.
+
+### 9.101 ONNX indexing family: NonZero/Compress/CenterCropPad/Scatter (2026-11-16)
+
+Implemented the remaining T1 indexing family as host-realized ONNX ops (the
+outputs are data-dependent or the indices are runtime values):
+
+- **`NonZero`** returns `[rank, nnz]` int64 coordinates (row-major scan).
+- **`Compress`** selects along `axis` (or flattened when `axis` is absent) with
+  a host-computed index vector and a graph `getitem`.
+- **`CenterCropPad`** composes a centred crop (`Ix::Range`) and a symmetric
+  constant pad (`pad_op`) from the target shape.
+- **`Scatter` / `ScatterElements` / `ScatterND`** apply the update on the host
+  with `none`/`add`/`mul`/`max`/`min` reductions (negative indices normalised).
+- `GatherElements` (pre-existing) also builds host index constants.
+
+Because these ops bake runtime indices/values into the graph, the model's
+replay plan is **disabled** when it contains any of them (`plan_enabled` is set
+at load from the node set, including `GatherElements`, `TensorScatter` and
+`CenterCropPad`); the eager path re-evaluates them each run. Zero-element
+results (`NonZero`/`Compress` with an empty selection) still return
+`Unsupported` because empty storage is not implemented.
+
+Gates: `tests/onnx.rs` (`nonzero_lists_coordinates`,
+`compress_selects_by_a_condition`, `scatter_elements_writes_at_indices`,
+`scatter_nd_writes_rows`, `center_crop_pad_crops_and_pads`), plus the full
+ONNX suite. `ONNX-Compat.md` moves the family to done; `MaxUnpool`,
+`TensorScatter`, `GatherND batch_dims>0` and empty tensors remain.

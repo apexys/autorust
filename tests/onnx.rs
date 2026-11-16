@@ -141,6 +141,181 @@ fn einsum_multi_operand_chain() {
 }
 
 #[test]
+fn nonzero_lists_coordinates() {
+    let nodes = vec![b::node("NonZero", &["x"], &["out"], &[])];
+    let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(2), Dim::Val(3)])];
+    let outputs = vec![b::value_info("out", b::INT64, &[Dim::Val(2), Dim::Val(3)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "nz"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[0.0f32, 1.0, 0.0, 2.0, 0.0, 3.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 3]);
+    let mut out = m.run(&[("x", x)]).expect("run");
+    let got: Vec<i64> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(got, vec![0, 1, 1, 1, 0, 2]);
+}
+
+#[test]
+fn compress_selects_by_a_condition() {
+    let nodes = vec![b::node(
+        "Compress",
+        &["data", "cond"],
+        &["out"],
+        &[Attr::Int("axis", 0)],
+    )];
+    let inputs = vec![
+        b::value_info("data", b::FLOAT, &[Dim::Val(3), Dim::Val(2)]),
+        b::value_info("cond", b::BOOL, &[Dim::Val(3)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2), Dim::Val(2)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "compress"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let data = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([3i64, 2]);
+    let cond = Tensor::from_slice(
+        m.ctx(),
+        &[true, false, true],
+        Some(dtype::BOOL),
+        None,
+    )
+    .reshape([3i64]);
+    let mut out = m
+        .run(&[("data", data), ("cond", cond)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(got, vec![1.0, 2.0, 5.0, 6.0]);
+}
+
+#[test]
+fn scatter_elements_writes_at_indices() {
+    let nodes = vec![b::node(
+        "ScatterElements",
+        &["data", "indices", "updates"],
+        &["out"],
+        &[Attr::Int("axis", 1)],
+    )];
+    let inputs = vec![
+        b::value_info("data", b::FLOAT, &[Dim::Val(2), Dim::Val(3)]),
+        b::value_info("indices", b::INT64, &[Dim::Val(2), Dim::Val(2)]),
+        b::value_info("updates", b::FLOAT, &[Dim::Val(2), Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2), Dim::Val(3)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "scatter"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let data = Tensor::from_slice(
+        m.ctx(),
+        &[0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 3]);
+    let indices = Tensor::from_slice(
+        m.ctx(),
+        &[0i64, 2, 1, 0],
+        Some(dtype::INT64),
+        None,
+    )
+    .reshape([2i64, 2]);
+    let updates = Tensor::from_slice(
+        m.ctx(),
+        &[10.0f32, 20.0, 30.0, 40.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 2]);
+    let mut out = m
+        .run(&[("data", data), ("indices", indices), ("updates", updates)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(got, vec![10.0, 1.0, 20.0, 40.0, 30.0, 5.0]);
+}
+
+#[test]
+fn scatter_nd_writes_rows() {
+    let nodes = vec![b::node(
+        "ScatterND",
+        &["data", "indices", "updates"],
+        &["out"],
+        &[],
+    )];
+    let inputs = vec![
+        b::value_info("data", b::FLOAT, &[Dim::Val(3), Dim::Val(3)]),
+        b::value_info("indices", b::INT64, &[Dim::Val(2), Dim::Val(1)]),
+        b::value_info("updates", b::FLOAT, &[Dim::Val(2), Dim::Val(3)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(3), Dim::Val(3)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "scatternd"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let data = Tensor::from_slice(
+        m.ctx(),
+        &[0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([3i64, 3]);
+    let indices = Tensor::from_slice(m.ctx(), &[0i64, 2], Some(dtype::INT64), None)
+        .reshape([2i64, 1]);
+    let updates = Tensor::from_slice(
+        m.ctx(),
+        &[10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 3]);
+    let mut out = m
+        .run(&[("data", data), ("indices", indices), ("updates", updates)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(got, vec![10.0, 11.0, 12.0, 3.0, 4.0, 5.0, 20.0, 21.0, 22.0]);
+}
+
+#[test]
+fn center_crop_pad_crops_and_pads() {
+    // Crop 4x4 -> 2x2.
+    let shape = b::i64_tensor("shape", &[2], &[2, 2]);
+    let nodes = vec![b::node("CenterCropPad", &["x", "shape"], &["out"], &[])];
+    let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(4), Dim::Val(4)])];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2), Dim::Val(2)])];
+    let bytes = b::model(&b::graph(&nodes, &[shape], &inputs, &outputs, "ccp"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let xv: Vec<f32> = (0..16).map(|i| i as f32).collect();
+    let x = Tensor::from_slice(m.ctx(), &xv, Some(dtype::FLOAT32), None).reshape([4i64, 4]);
+    let mut out = m.run(&[("x", x)]).expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(got, vec![5.0, 6.0, 9.0, 10.0]);
+
+    // Pad 2x2 -> 4x4, centred.
+    let shape = b::i64_tensor("shape", &[2], &[4, 4]);
+    let nodes = vec![b::node("CenterCropPad", &["x", "shape"], &["out"], &[])];
+    let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(2), Dim::Val(2)])];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(4), Dim::Val(4)])];
+    let bytes = b::model(&b::graph(&nodes, &[shape], &inputs, &outputs, "ccp2"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 2.0, 3.0, 4.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 2]);
+    let mut out = m.run(&[("x", x)]).expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(
+        got,
+        vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    );
+}
+
+#[test]
 fn movement_slice_gather_concat_and_expand() {
     let shape = b::i64_tensor("shape", &[2], &[2, 12]);
     let gather_idx = b::i64_tensor("gidx", &[2], &[0, 11]);
@@ -496,14 +671,14 @@ fn negative_gather_indices_are_normalized() {
 
 #[test]
 fn unsupported_op_reports_the_name() {
-    let nodes = vec![b::node("NonZero", &["x"], &["out"], &[])];
+    let nodes = vec![b::node("MaxUnpool", &["x"], &["out"], &[])];
     let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(3)])];
     let outputs = vec![b::value_info("out", b::INT64, &[Dim::Val(1)])];
     let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "nz"), 17);
     let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
     let x = Tensor::from_slice(m.ctx(), &[1.0f32, 0.0, 2.0], Some(dtype::FLOAT32), None);
     match m.run(&[("x", x)]) {
-        Err(OnnxError::Unsupported(s)) => assert!(s.contains("NonZero"), "{s}"),
+        Err(OnnxError::Unsupported(s)) => assert!(s.contains("MaxUnpool"), "{s}"),
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }

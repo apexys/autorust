@@ -124,6 +124,22 @@ impl OnnxModel {
         if !saw_onnx {
             opsets.insert("ai.onnx".to_string(), 1);
         }
+        // Data-dependent ops (indices/selections/crops) are evaluated on the
+        // host and bake their values into the graph, so they cannot be part of
+        // a replayed plan. Such models run eagerly each call.
+        let data_dependent = graph.nodes.iter().any(|n| {
+            matches!(
+                n.op_type.as_str(),
+                "NonZero"
+                    | "Compress"
+                    | "GatherElements"
+                    | "Scatter"
+                    | "ScatterElements"
+                    | "ScatterND"
+                    | "TensorScatter"
+                    | "CenterCropPad"
+            )
+        });
         Ok(OnnxModel {
             ctx,
             sess: Session::new(),
@@ -137,7 +153,7 @@ impl OnnxModel {
             host_i64: HashMap::new(),
             host_f64: HashMap::new(),
             plan: None,
-            plan_enabled: true,
+            plan_enabled: !data_dependent,
         })
     }
 

@@ -704,9 +704,179 @@ impl OnnxModel {
                 let (v, i) = x.topk(k, axis, largest);
                 Ok(vec![v, i.cast(dtype::INT64)])
             }
-            "NonZero" => Err(OnnxError::Unsupported(
-                "NonZero (needs masked_select)".into(),
-            )),
+            "NonZero" => {
+                let x = inp(ins, 0)?;
+                let shape: Vec<i64> = x
+                    .shape()
+                    .as_slice()
+                    .iter()
+                    .map(|s| s.clone().as_i64().unwrap_or(0))
+                    .collect();
+                let rank = shape.len();
+                if rank == 0 {
+                    return Err(OnnxError::Unsupported("NonZero on a scalar".into()));
+                }
+                let vals = x.to_list::<f64>(&mut self.sess);
+                let mut coords: Vec<i64> = Vec::new();
+                let mut nnz = 0i64;
+                let mut idx = vec![0i64; rank];
+                for &v in &vals {
+                    if v != 0.0 {
+                        coords.extend_from_slice(&idx);
+                        nnz += 1;
+                    }
+                    for d in (0..rank).rev() {
+                        idx[d] += 1;
+                        if idx[d] < shape[d] {
+                            break;
+                        }
+                        idx[d] = 0;
+                    }
+                }
+                if nnz == 0 {
+                    return Err(OnnxError::Unsupported(
+                        "NonZero with no nonzero elements (zero-element tensor)".into(),
+                    ));
+                }
+                // `coords` is [nnz][rank]; the ONNX output is [rank][nnz].
+                let mut out = vec![0i64; rank * nnz as usize];
+                for i in 0..nnz as usize {
+                    for d in 0..rank {
+                        out[d * nnz as usize + i] = coords[i * rank + d];
+                    }
+                }
+                let t = Tensor::from_slice(
+                    &self.ctx,
+                    &out,
+                    Some(dtype::INT64),
+                    self.device.as_deref(),
+                )
+                .reshape([rank as i64, nnz]);
+                one(t)
+            }
+            "Compress" => {
+                let data = inp(ins, 0)?;
+                let cond = inp(ins, 1)?;
+                let cond_vals = cond.to_list::<i64>(&mut self.sess);
+                let axis_attr = node.attr_i64("axis", i64::MIN);
+                let ndim = data.shape().as_slice().len();
+                let (flat, axis, dim) = if axis_attr == i64::MIN {
+                    let n = data
+                        .shape()
+                        .as_slice()
+                        .iter()
+                        .map(|s| s.clone().as_i64().unwrap_or(0))
+                        .product::<i64>();
+                    (true, 0usize, n)
+                } else {
+                    let axis = resolve_axis(data, axis_attr);
+                    let n = data.shape().as_slice()[axis].clone().as_i64().unwrap_or(0);
+                    (false, axis, n)
+                };
+                let keep: Vec<i64> = cond_vals
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, v)| **v != 0 && (*i as i64) < dim)
+                    .map(|(i, _)| i as i64)
+                    .collect();
+                if keep.is_empty() {
+                    return Err(OnnxError::Unsupported(
+                        "Compress selected no elements (zero-element tensor)".into(),
+                    ));
+                }
+                let idx = Tensor::from_slice(
+                    &self.ctx,
+                    &keep,
+                    Some(dtype::INT64),
+                    self.device.as_deref(),
+                );
+                if flat {
+                    let flat_data = data.reshape([-1]);
+                    one(flat_data.getitem(&[Ix::Tensor(idx)]))
+                } else {
+                    let mut ixs: Vec<Ix> = vec![Ix::All; ndim];
+                    ixs[axis] = Ix::Tensor(idx);
+                    one(data.getitem(&ixs))
+                }
+            }
+            "CenterCropPad" => {
+                let data = inp(ins, 0)?;
+                let shape_t = inp(ins, 1)?;
+                let target = shape_t.to_list::<i64>(&mut self.sess);
+                let rank = data.shape().as_slice().len();
+                let cur: Vec<i64> = data
+                    .shape()
+                    .as_slice()
+                    .iter()
+                    .map(|s| s.clone().as_i64().unwrap_or(0))
+                    .collect();
+                let mut tgt = cur.clone();
+                match node.attr_i64s("axes") {
+                    Some(axes) if !axes.is_empty() => {
+                        if target.len() != axes.len() {
+                            return Err(OnnxError::Shape(
+                                "CenterCropPad shape/axes length".into(),
+                            ));
+                        }
+                        for (i, &ax) in axes.iter().enumerate() {
+                            let ax = resolve_axis(data, ax);
+                            tgt[ax] = target[i];
+                        }
+                    }
+                    _ => {
+                        if target.len() != rank {
+                            return Err(OnnxError::Shape(
+                                "CenterCropPad shape length".into(),
+                            ));
+                        }
+                        tgt = target.clone();
+                    }
+                }
+                let mut out = data.clone();
+                if (0..rank).any(|d| tgt[d] < cur[d]) {
+                    let mut ixs: Vec<Ix> = Vec::with_capacity(rank);
+                    for d in 0..rank {
+                        if tgt[d] < cur[d] {
+                            let start = (cur[d] - tgt[d]) / 2;
+                            ixs.push(Ix::Range {
+                                start: Some(start),
+                                stop: Some(start + tgt[d]),
+                                step: 1,
+                            });
+                        } else {
+                            ixs.push(Ix::All);
+                        }
+                    }
+                    out = out.getitem(&ixs);
+                }
+                let mut pads = vec![0i64; 2 * rank];
+                for d in 0..rank {
+                    if tgt[d] > cur[d] {
+                        let diff = tgt[d] - cur[d];
+                        pads[d] = diff / 2;
+                        pads[rank + d] = diff - diff / 2;
+                    }
+                }
+                if pads.iter().any(|&v| v != 0) {
+                    out = self.pad_op(&out, &pads, "constant", 0.0)?;
+                }
+                one(out)
+            }
+            "Scatter" | "ScatterElements" => {
+                let data = inp(ins, 0)?;
+                let indices = inp(ins, 1)?;
+                let updates = inp(ins, 2)?;
+                let axis = resolve_axis(data, node.attr_i64("axis", 0));
+                let reduction = node.attr_str("reduction", "none");
+                one(self.scatter_elements(data, indices, updates, axis, reduction)?)
+            }
+            "ScatterND" => {
+                let data = inp(ins, 0)?;
+                let indices = inp(ins, 1)?;
+                let updates = inp(ins, 2)?;
+                let reduction = node.attr_str("reduction", "none");
+                one(self.scatter_nd(data, indices, updates, reduction)?)
+            }
 
             // ---------------- creation ----------------
             "Range" => {
@@ -1053,6 +1223,169 @@ impl OnnxModel {
         let mut ixs: Vec<Ix> = vec![Ix::All; x.shape().as_slice().len()];
         ixs[ax] = Ix::Tensor(idx);
         Ok(x.getitem(&ixs))
+    }
+
+    /// Rebuild a host-computed result with `template`'s dtype and `shape`.
+    fn build_like(&mut self, template: &Tensor, vals: &[f64], shape: &[i64]) -> Result<Tensor> {
+        let dt = template.dtype();
+        let t = if dt == dtype::FLOAT32 {
+            let v: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
+            Tensor::from_slice(&self.ctx, &v, Some(dt), self.device.as_deref())
+        } else if dt == dtype::FLOAT64 {
+            Tensor::from_slice(&self.ctx, vals, Some(dt), self.device.as_deref())
+        } else if dt == dtype::INT64 {
+            let v: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
+            Tensor::from_slice(&self.ctx, &v, Some(dt), self.device.as_deref())
+        } else if dt == dtype::INT32 {
+            let v: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
+            Tensor::from_slice(&self.ctx, &v, Some(dt), self.device.as_deref())
+        } else if dt == dtype::BOOL {
+            let v: Vec<bool> = vals.iter().map(|x| *x != 0.0).collect();
+            Tensor::from_slice(&self.ctx, &v, Some(dt), self.device.as_deref())
+        } else {
+            return Err(OnnxError::Unsupported(format!("Scatter on dtype {dt:?}")));
+        };
+        Ok(t.reshape(shape))
+    }
+
+    fn scatter_elements(
+        &mut self,
+        data: &Tensor,
+        indices: &Tensor,
+        updates: &Tensor,
+        axis: usize,
+        reduction: &str,
+    ) -> Result<Tensor> {
+        let shape: Vec<i64> = data
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let rank = shape.len();
+        let ishape: Vec<i64> = indices
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        if ishape.len() != rank {
+            return Err(OnnxError::Shape(
+                "ScatterElements indices/rank mismatch".into(),
+            ));
+        }
+        let dv = data.to_list::<f64>(&mut self.sess);
+        let iv = indices.to_list::<i64>(&mut self.sess);
+        let uv = updates.to_list::<f64>(&mut self.sess);
+        let mut strides = vec![1i64; rank];
+        for d in (0..rank.saturating_sub(1)).rev() {
+            strides[d] = strides[d + 1] * shape[d + 1];
+        }
+        let total: i64 = ishape.iter().product();
+        let mut out = dv.clone();
+        let mut coords = vec![0i64; rank];
+        for p in 0..total {
+            let mut rem = p;
+            for d in (0..rank).rev() {
+                coords[d] = rem % ishape[d];
+                rem /= ishape[d];
+            }
+            let mut idx = iv[p as usize];
+            if idx < 0 {
+                idx += shape[axis];
+            }
+            if idx < 0 || idx >= shape[axis] {
+                return Err(OnnxError::Runtime(
+                    "ScatterElements index out of range".into(),
+                ));
+            }
+            coords[axis] = idx;
+            let di: i64 = coords.iter().zip(&strides).map(|(c, s)| c * s).sum();
+            let u = uv[p as usize];
+            match reduction {
+                "" | "none" => out[di as usize] = u,
+                "add" => out[di as usize] += u,
+                "mul" => out[di as usize] *= u,
+                "max" => out[di as usize] = out[di as usize].max(u),
+                "min" => out[di as usize] = out[di as usize].min(u),
+                other => {
+                    return Err(OnnxError::Unsupported(format!(
+                        "Scatter reduction `{other}`"
+                    )));
+                }
+            }
+        }
+        self.build_like(data, &out, &shape)
+    }
+
+    fn scatter_nd(
+        &mut self,
+        data: &Tensor,
+        indices: &Tensor,
+        updates: &Tensor,
+        reduction: &str,
+    ) -> Result<Tensor> {
+        let shape: Vec<i64> = data
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let rank = shape.len();
+        let ishape: Vec<i64> = indices
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let Some(&k64) = ishape.last() else {
+            return Err(OnnxError::Shape("ScatterND scalar indices".into()));
+        };
+        let k = k64 as usize;
+        if k > rank {
+            return Err(OnnxError::Shape("ScatterND index depth".into()));
+        }
+        let num: i64 = ishape[..ishape.len() - 1].iter().product();
+        let per: i64 = shape[k..].iter().product();
+        let dv = data.to_list::<f64>(&mut self.sess);
+        let iv = indices.to_list::<i64>(&mut self.sess);
+        let uv = updates.to_list::<f64>(&mut self.sess);
+        let mut strides = vec![1i64; rank];
+        for d in (0..rank.saturating_sub(1)).rev() {
+            strides[d] = strides[d + 1] * shape[d + 1];
+        }
+        let mut out = dv.clone();
+        let mut idx = vec![0i64; k];
+        for n in 0..num {
+            for d in 0..k {
+                let mut v = iv[n as usize * k + d];
+                if v < 0 {
+                    v += shape[d];
+                }
+                if v < 0 || v >= shape[d] {
+                    return Err(OnnxError::Runtime("ScatterND index out of range".into()));
+                }
+                idx[d] = v;
+            }
+            let base: i64 = idx.iter().zip(&strides[..k]).map(|(c, s)| c * s).sum();
+            for t in 0..per {
+                let di = (base + t) as usize;
+                let u = uv[(n * per + t) as usize];
+                match reduction {
+                    "" | "none" => out[di] = u,
+                    "add" => out[di] += u,
+                    "mul" => out[di] *= u,
+                    "max" => out[di] = out[di].max(u),
+                    "min" => out[di] = out[di].min(u),
+                    other => {
+                        return Err(OnnxError::Unsupported(format!(
+                            "ScatterND reduction `{other}`"
+                        )));
+                    }
+                }
+            }
+        }
+        self.build_like(data, &out, &shape)
     }
 
     fn pad_op(&mut self, x: &Tensor, pads: &[i64], mode: &str, value: f64) -> Result<Tensor> {
