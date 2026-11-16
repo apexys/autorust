@@ -236,6 +236,22 @@ fn build_pm_mops() -> PatternMatcher {
 
 // ---------- earliest rewrites (rangeify.py:127-187) ----------
 
+/// Whether `x` contains a `WHERE` whose condition is an equality comparison.
+///
+/// That is the advanced-indexing / one-hot mask shape
+/// (`(idx == arange).where(table, 0).sum(axis)`). The codegen gated-load lift
+/// can turn it into a direct gather, but the lift is only valid before the
+/// reduce is split into per-block partials, so keep this reduce whole.
+fn has_compare_where(ctx: &mut UOpCtx, x: &UopId) -> bool {
+    ctx.toposort(x).iter().any(|n| {
+        if ctx.op_of(n) != Ops::Where {
+            return false;
+        }
+        let cond = ctx.srcs(n)[0].clone();
+        matches!(ctx.op_of(&cond), Ops::Cmpeq | Ops::Cmpne)
+    })
+}
+
 /// `split_reduceop` (rangeify.py:71) — split big reduces into two kernels.
 fn split_reduceop(ctx: &mut UOpCtx, reduce: UopId, x: UopId) -> Option<UopId> {
     let red_shape = ctx.shape(&reduce).ok().flatten()?;
@@ -256,6 +272,9 @@ fn split_reduceop(ctx: &mut UOpCtx, reduce: UopId, x: UopId) -> Option<UopId> {
         .product();
     const THRESHOLD: i128 = 32768;
     if numel_in.checked_div(numel_out).unwrap_or(0) < THRESHOLD {
+        return None;
+    }
+    if has_compare_where(ctx, &x) {
         return None;
     }
     // get expanded-by-rangeifying view of x

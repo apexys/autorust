@@ -774,6 +774,9 @@ fn build_pm_reduce_load_collapse() -> PatternMatcher {
             .reduce(vec![var("r")], Some(red_add_arg()), false),
         r(|ctx, st, _| {
             let (rr, idx, expr) = (sget(st, "r"), sget(st, "idx"), sget(st, "expr"));
+            // `split_reduceop` skips reductions holding a compare-gated
+            // `WHERE`, so this reduce is whole here: the lift's range
+            // substitution covers the entire gathered axis.
             let rdt = ctx.dt_of(&rr);
             let icast = ctx.cast(idx, rdt);
             let zero = ctx.const_like(icast.clone(), cv_num(0));

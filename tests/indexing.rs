@@ -162,3 +162,32 @@ fn single_tensor_on_1d() {
     let i = idx(&ctx, &[0, 3, 3]);
     check(&at(&t, &[Ix::Tensor(i)]), &[0., 3., 3.]);
 }
+
+/// Regression: a table large enough for `split_reduceop` (>= 32768 elements
+/// along the gathered axis) used to replicate the gathered row once per
+/// reduction block. The gated-load gather lift must keep the masked sum for
+/// those split reductions.
+#[test]
+fn tensor_index_large_table_keeps_one_row() {
+    if !autorust::runtime::ops_cuda::available() {
+        return;
+    }
+    let ctx = Ctx::new();
+    for dim in [32768i64, 49408] {
+        let vals: Vec<f32> = (0..dim * 4).map(|i| (i % 97) as f32 * 0.01).collect();
+        let table = Tensor::from_slice(&ctx, &vals, None, Some("CUDA")).reshape([dim, 4]);
+        let i = Tensor::from_slice(&ctx, &[3i64, dim - 2], None, Some("CUDA")).reshape([1, 2]);
+        let got = at(&table, &[Ix::Tensor(i)]);
+        let want = [
+            vals[12],
+            vals[13],
+            vals[14],
+            vals[15],
+            vals[((dim - 2) * 4) as usize],
+            vals[((dim - 2) * 4 + 1) as usize],
+            vals[((dim - 2) * 4 + 2) as usize],
+            vals[((dim - 2) * 4 + 3) as usize],
+        ];
+        check(&got, &want);
+    }
+}
