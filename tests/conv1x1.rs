@@ -27,7 +27,7 @@ fn reference(
                     let mut acc = bias[co];
                     for ci in 0..cin {
                         let xv = x[((bi * cin + ci) * h + oy * stride) * wd + ox * stride];
-                        let wv = w[(co * cin + ci) * 1 * 1];
+                        let wv = w[co * cin + ci];
                         acc += xv * wv;
                     }
                     out[((bi * cout + co) * oh + oy) * ow + ox] = acc;

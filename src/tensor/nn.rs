@@ -209,7 +209,7 @@ pub fn fold_bn_eval(conv: &mut Conv2d, bn: &BatchNorm, sess: &mut Session) -> bo
         crate::dtype::ConstVal::Float(bn.eps),
         None,
     );
-    let scale = gamma.mul(&var.add(&eps).sqrt().reciprocal());
+    let scale = gamma.mul(var.add(eps).sqrt().reciprocal());
     let mut shp = vec![crate::uop::sint::SVal::I(1); wshape.len()];
     shp[0] = crate::uop::sint::SVal::I(cout as i128);
     let scale_b = scale.reshape_ctx(&mut ctx.borrow_mut(), shp);

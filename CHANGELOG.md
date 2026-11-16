@@ -56,6 +56,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fallback for views, non-scalar axes and non-f32 inputs. Tests:
   `tests/cuda_reduce.rs`.
 
+- **Burn cross-framework benchmark.** `bench/burn` runs the same
+  `beautiful_mnist`, ViT-B/16 and GEMM workloads through burn 0.22.1 (CubeCL
+  CUDA and Flex CPU), and `bench/run.py` / `bench/report.py` include it. The
+  comparison adds burn columns to `README.md` and `PERFORMANCE.md`, plus a
+  review of burn's autotuning, implicit-GEMM conv, fused reductions,
+  broadcast-rhs matmul folding and multi-stream execution as backlog items in
+  `PERFORMANCE_OPTIMIZATIONS.md`. Burn's f32 CUDA rows use TF32 tensor
+  cores and are labelled as such; no autorust kernel changed in this pass.
+
 ### Fixed
 
 - **Small batched contractions no longer go through one cuBLAS call per
@@ -67,17 +76,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bs 8 goes 12.0 → 10.2 ms. ResNet-18's 2.06M/batch host families stay on
   cuBLAS. Unit test: `schedule::host_gemm::tests::
   tiny_batches_stay_on_the_generated_kernel`.
-
-### Added
-
-- **Burn cross-framework benchmark.** `bench/burn` runs the same
-  `beautiful_mnist`, ViT-B/16 and GEMM workloads through burn 0.22.1 (CubeCL
-  CUDA and Flex CPU), and `bench/run.py` / `bench/report.py` include it. The
-  comparison adds burn columns to `README.md` and `PERFORMANCE.md`, plus a
-  review of burn's autotuning, implicit-GEMM conv, fused reductions,
-  broadcast-rhs matmul folding and multi-stream execution as backlog items in
-  `PERFORMANCE_OPTIMIZATIONS.md`. Burn's f32 CUDA rows use TF32 tensor
-  cores and are labelled as such; no autorust kernel changed in this pass.
 
 ## [0.2.0] - 2026-11-16
 

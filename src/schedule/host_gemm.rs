@@ -1605,20 +1605,13 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     // VK's cooperative-matrix loop and CUDA's outer-loop of strided-batched
     // cuBLAS calls. CLBlast and the CPU kernel read `a_b`/`b_b` alone, so for
     // them a non-contiguous pair must keep the generated kernel.
+    let split_pair = batch.len() == 2
+        && batch[0].1 > 1
+        && (kind == GemmDevice::Cuda
+            || (kind == GemmDevice::Vk
+                && batch[1].4 == batch[0].4.saturating_mul(batch[0].1)));
     let (batch_count, a_b, b_b, c_b, batch_inner, a_bi, b_bi) =
-        if kind == GemmDevice::Cuda && batch.len() == 2 && batch[0].1 > 1 {
-            let (_, e0, a0, b0, c0) = batch[0];
-            let (_, e1, a1, b1, _c1) = batch[1];
-            // Two independent batch axes: the host splits the counter into
-            // `i = p % e0` and `o = p / e0`, using the inner stride (c0/a0/b0)
-            // and the outer one (c1/a1/b1). C's outer stride need not be
-            // `e0*c0`: the conv's `[b][cout][oy][ox]` puts m between the axes.
-            (e0.saturating_mul(e1), a1, b1, c0, e0, a0, b0)
-        } else if kind == GemmDevice::Vk
-            && batch.len() == 2
-            && batch[1].4 == batch[0].4.saturating_mul(batch[0].1)
-            && batch[0].1 > 1
-        {
+        if split_pair {
             let (_, e0, a0, b0, c0) = batch[0];
             let (_, e1, a1, b1, _c1) = batch[1];
             // Two independent batch axes: the host splits the counter into

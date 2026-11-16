@@ -32,13 +32,13 @@ fn conv_tf32_matches_interp_with_tf32_tolerance() {
     let wv = values(2, (cout * cin * 3 * 3) as usize);
     let bv = values(3, cout as usize);
 
-    let run = |dev: &str, mut sess: &mut Session| {
+    let run = |dev: &str, sess: &mut Session| {
         let ctx = Ctx::new();
         let x = Tensor::from_slice(&ctx, &xv, None, Some(dev)).reshape([b, cin, h, w]);
         let weight = Tensor::from_slice(&ctx, &wv, None, Some(dev)).reshape([cout, cin, 3, 3]);
         let bias = Tensor::from_slice(&ctx, &bv, None, Some(dev));
         x.conv2d(&weight, Some(&bias), 1, 1, 1, &[1, 1], None)
-            .to_list::<f32>(&mut sess)
+            .to_list::<f32>(sess)
     };
 
     let mut s1 = Session::new();
