@@ -6,21 +6,41 @@
 //! which remains the numeric reference.
 
 use crate::engine::session::Session;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 use crate::runtime::buffer::{Buffer, buffer_of};
 use crate::tensor::Tensor;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 use crate::uop::sint::SVal;
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn static_numel(x: &Tensor) -> Option<i64> {
     let shape = x.shape();
     let dims: Option<Vec<i64>> = shape.iter().map(|s| s.clone().as_i64()).collect();
     dims?.iter().try_fold(1i64, |a, &b| a.checked_mul(b))
 }
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn enabled() -> bool {
     !crate::helpers::env::get("AUTORUST_REDUCE_KERNEL").is_some_and(|v| v == "0" || v.is_empty())
 }
 
 /// Allocate a dense device buffer and the Tensor that owns it.
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn alloc_out(
     ctx: &crate::tensor::Ctx,
     sess: &mut Session,
@@ -41,6 +61,10 @@ fn alloc_out(
     (t, b)
 }
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn temp_partials(dev: &str) -> Buffer {
     let b = Buffer::new_base(
         dev,
@@ -51,6 +75,10 @@ fn temp_partials(dev: &str) -> Buffer {
     b
 }
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn input_buffer(x: &Tensor, _sess: &mut Session) -> Option<Buffer> {
     // Require an already-realized input: realizing a view inside a captured
     // step would replay its producer, and a realized view's buffer layout is
@@ -59,6 +87,10 @@ fn input_buffer(x: &Tensor, _sess: &mut Session) -> Option<Buffer> {
     x.realized_buffer()
 }
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn eligible(x: &Tensor, axis: Option<&[usize]>, keepdim: bool) -> Option<(String, i64)> {
     if !enabled() || axis.is_some() || keepdim || x.dtype() != crate::dtype::FLOAT32 {
         return None;

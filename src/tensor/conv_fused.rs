@@ -8,10 +8,22 @@
 //! ResNet's 7x7 stem (K = 3*49 = 147) that fall below the im2col floor.
 
 use crate::engine::session::Session;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 use crate::runtime::buffer::{Buffer, buffer_of};
 use crate::tensor::Tensor;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 use crate::uop::sint::SVal;
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn enabled(x: &Tensor) -> bool {
     match crate::helpers::env::get("AUTORUST_CONV_TC")
         .or_else(|| crate::helpers::env::get("AUTORUST_CONV3X3_TC"))
@@ -21,6 +33,10 @@ fn enabled(x: &Tensor) -> bool {
     }
 }
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn alloc_out(
     ctx: &crate::tensor::Ctx,
     sess: &mut Session,
@@ -41,6 +57,10 @@ fn alloc_out(
     (t, b)
 }
 
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn realized_weight(t: &Tensor, sess: &mut Session) -> Option<Buffer> {
     if let Some(b) = t.realized_buffer() {
         return Some(b);
