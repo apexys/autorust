@@ -53,6 +53,11 @@ pub mod cuda_flash_sage;
     any(target_os = "linux", target_os = "windows")
 ))]
 pub mod cuda_flash_tc;
+#[cfg(all(
+    feature = "backend_cuda",
+    any(target_os = "linux", target_os = "windows")
+))]
+pub mod cuda_reduce;
 #[cfg(feature = "backend_cl")]
 pub mod cl_optim;
 pub mod device;

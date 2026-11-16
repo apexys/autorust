@@ -44,6 +44,7 @@ pub mod rand;
 pub mod state;
 pub use state::State;
 pub mod reduce;
+pub(crate) mod reduce_fused;
 
 use crate::dtype::ConstVal;
 
@@ -1428,6 +1429,22 @@ impl Tensor {
             Tensor::from_uop(ctx, __u)
         }
     }
+    /// [`Tensor::sum`] with a session, using the fused CUDA full-reduction
+    /// kernel when it applies.
+    ///
+    /// Forward-only: it covers an already-realized, contiguous f32 CUDA tensor
+    /// reduced to a scalar (`axis = None`, `keepdim = false`) with at least 1M
+    /// elements. Everything else falls back to the graph reduction.
+    /// `AUTORUST_REDUCE_KERNEL=0` forces the graph path.
+    pub fn sum_with(
+        &self,
+        axis: Option<&[usize]>,
+        keepdim: bool,
+        dtype: Option<DTypeId>,
+        sess: &mut crate::engine::session::Session,
+    ) -> Tensor {
+        reduce_fused::sum_with(self, axis, keepdim, dtype, sess)
+    }
     /// `Tensor.prod(axis, keepdim)` — product along `axis`.
     pub fn prod(&self, axis: Option<&[usize]>, keepdim: bool, dtype: Option<DTypeId>) -> Tensor {
         self.prod_ctx(&mut self.ctx.borrow_mut(), axis, keepdim, dtype)
@@ -1455,6 +1472,21 @@ impl Tensor {
             let __u = reduce::max(ctx, self.uop().clone(), axis, keepdim);
             Tensor::from_uop(ctx, __u)
         }
+    }
+    /// [`Tensor::max`] with a session, using the fused CUDA full-reduction
+    /// kernel when it applies.
+    ///
+    /// Same contract as [`Tensor::sum_with`]: realized contiguous f32 CUDA,
+    /// scalar output, at least 1M elements; otherwise the graph path. The fast
+    /// kernel uses `fmaxf` (a NaN operand is ignored); use [`Tensor::max`] when
+    /// NaN propagation matters.
+    pub fn max_with(
+        &self,
+        axis: Option<&[usize]>,
+        keepdim: bool,
+        sess: &mut crate::engine::session::Session,
+    ) -> Tensor {
+        reduce_fused::max_with(self, axis, keepdim, sess)
     }
     /// `Tensor.mean(axis, keepdim)` — arithmetic mean along `axis`.
     pub fn mean(&self, axis: Option<&[usize]>, keepdim: bool) -> Tensor {

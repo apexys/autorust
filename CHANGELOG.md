@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Fused CUDA full reductions.** `Tensor::sum_with` and `Tensor::max_with`
+  (and the memops driver by default) run an already-realized contiguous f32
+  scalar reduction as one streaming pass plus a tiny finish kernel instead of
+  the graph reduce. On the 16M-element memops case, CUDA `sum` improved
+  0.37 → 0.25 ms (270 GB/s) and `amax` 0.40 → 0.25 ms (270 GB/s), within 6% of
+  torch. `AUTORUST_REDUCE_KERNEL=0` forces the graph path; the graph remains the
+  fallback for views, non-scalar axes and non-f32 inputs. Tests:
+  `tests/cuda_reduce.rs`.
+
 ### Fixed
 
 - **Small batched contractions no longer go through one cuBLAS call per

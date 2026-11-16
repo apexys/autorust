@@ -5812,3 +5812,36 @@ single-digit memops improvement with a noisy repeat, no model-level win, and it
 would add a public forward-only API that the default `nn::softmax` cannot use
 without a session. The useful follow-up is a graph-level fused softmax with an
 autograd node (so training can use it), not an opt-in host call.
+
+### 9.83 Fused CUDA full reductions (sum/amax) landed (2026-11-16)
+
+Item 12 follow-up after the softmax rejection (§9.82). `Tensor::sum_with` and
+`Tensor::max_with` now run an already-realized, contiguous f32 CUDA scalar
+reduction as **one grid-stride streaming pass + one tiny finish kernel**
+(`runtime/cuda_reduce.rs`): 256 blocks x 256 threads write 256 partials, the
+finish kernel reduces them. Amax uses an ordered u32 key (monotonic float bit
+transform), so the partials reduce with an integer max and decode once. The
+graph reduction remains the reference and the fallback for other shapes,
+dtypes, axes and unrealized inputs; `AUTORUST_REDUCE_KERNEL=0` forces it.
+
+Measured, RTX 3060, 16M f32 (64 MB), 3 warmups + 20 iterations, alternating A/B:
+
+| case | graph | fused | GB/s graph -> fused |
+|---|---:|---:|---:|
+| `sum` | 0.370 ms | **0.254 ms** | 181 -> 265 |
+| `amax` | 0.397 ms | **0.248 ms** | 169 -> 270 |
+
+The graph-vs-fused step also improved because
+`bench/autorust/src/memops.rs::read_one` now uses `to_list` directly for a
+rank-0 result instead of `getitem(&[])`, which on a realized leaf scheduled a
+separate 0.4 ms read path. The memops JSONs for RUST/CUDA/VK/CL were refreshed;
+only CUDA changes path.
+
+Correctness: `tests/cuda_reduce.rs` compares fused vs graph on 1M and 1M+12345
+elements (sum relative error < 2e-4, max abs < 1e-3) and checks the
+non-scalar-axis fallback. The partial order is fixed, so fused sum is
+deterministic for a given shape.
+
+This does not cover layernorm (two row reductions plus normalize) or softmax;
+those remain graph paths. A fused layernorm would need a row kernel in the same
+style and would still be forward-only, so it is only useful for inference.

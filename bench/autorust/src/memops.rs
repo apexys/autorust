@@ -39,11 +39,15 @@ fn median(mut xs: Vec<f64>) -> f64 {
 
 fn read_one(sess: &mut Session, y: &Tensor) {
     let rank = y.shape().as_slice().len();
+    // A rank-0 tensor is already the one-element result; `getitem(&[])` on a
+    // realized leaf schedules a separate read path, while `to_list` copies the
+    // scalar directly.
+    if rank == 0 {
+        let _ = y.to_list::<f32>(sess);
+        return;
+    }
     let ixs = vec![Ix::slice(None, Some(1), 1); rank];
-    let _ = y
-        .getitem(&ixs)
-        .cast(dtype::FLOAT32)
-        .to_list::<f32>(sess);
+    let _ = y.getitem(&ixs).cast(dtype::FLOAT32).to_list::<f32>(sess);
 }
 
 /// Run every op once (JIT-captured) and return the medians.
@@ -56,23 +60,30 @@ pub fn run(
 ) -> Vec<Case> {
     let a = Tensor::rand(ctx, &[N], None, None).to_param();
     let b = Tensor::rand(ctx, &[N], None, None).to_param();
+    // Materialize the input once so a fused reduction does not capture the
+    // RNG/copy producer inside the JIT step.
+    a.realize(sess);
     let m2 = a.reshape([SIDE, SIDE]);
     let ln = LayerNorm::new(ctx, vec![SIDE], 1e-5, true);
     let nbytes = (N * 4) as f64;
+    // `BENCH_FUSED_REDUCE=0` keeps the graph path for the sum/amax A/B.
+    let fused_reduce = std::env::var("BENCH_FUSED_REDUCE")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(true);
     // (name, bytes moved, output)
     let ops: Vec<(&str, f64, Tensor)> = vec![
         ("add", 3.0 * nbytes, a.add(&b)),
         ("copy", 2.0 * nbytes, a.mul(1.0)),
         ("gelu", 2.0 * nbytes, autorust::tensor::nn::gelu(&a)),
-        ("softmax", 2.0 * nbytes, autorust::tensor::nn::softmax(&m2, Some(1))),
+        (
+            "softmax",
+            2.0 * nbytes,
+            autorust::tensor::nn::softmax(&m2, Some(1)),
+        ),
         ("layernorm", 2.0 * nbytes, ln.forward(&m2)),
         ("sum", nbytes, a.sum(None, false, None)),
         ("amax", nbytes, a.max(None, false)),
-        (
-            "transpose",
-            2.0 * nbytes,
-            m2.transpose(0, 1).contiguous(),
-        ),
+        ("transpose", 2.0 * nbytes, m2.transpose(0, 1).contiguous()),
     ];
     let mut out = Vec::new();
     for (name, bytes, y) in ops {
@@ -83,7 +94,15 @@ pub fn run(
         }
         let mut jit = Jit::new();
         let step = |jit: &mut Jit, sess: &mut Session| {
-            let y = jit.call(ctx, sess, |_c, _s| y.clone());
+            let y = jit.call(ctx, sess, |_c, s| {
+                if fused_reduce && name == "sum" {
+                    a.sum_with(None, false, None, s)
+                } else if fused_reduce && name == "amax" {
+                    a.max_with(None, false, s)
+                } else {
+                    y.clone()
+                }
+            });
             read_one(sess, &y);
         };
         step(&mut jit, sess);

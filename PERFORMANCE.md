@@ -895,30 +895,34 @@ One pass over 16M f32 elements (64 MB) per op; GB/s counts the minimum traffic
 | gelu | CUDA | **318** | 314 |
 | softmax (4096²) | CUDA | 155 | **288** |
 | layernorm (4096²) | CUDA | 156 | **209** |
-| sum | CUDA | 176 | **287** |
-| amax | CUDA | 64 | **292** |
+| sum | CUDA | 270 | **287** |
+| amax | CUDA | 270 | **292** |
 | transpose | CUDA | **312** | 137 |
 | add | CPU | **20.3** | 10.4 |
 | copy | CPU | **18.4** | 8.2 |
 | gelu | CPU | **17.3** | 8.2 |
 | softmax | CPU | **8.8** | 7.2 |
 | layernorm | CPU | **10.6** | 8.3 |
-| sum | CPU | **28.7** | 20.8 |
-| amax | CPU | 23.8 | **115.2** |
+| sum | CPU | **27.4** | 20.8 |
+| amax | CPU | 27.5 | **115.2** |
 | transpose | CPU | **8.8** | 2.6 |
 
 (GB/s.)
 
 - Pure elementwise kernels match or beat torch on both devices (the `RUST`
   backend's vectorized kernels are 2x torch's CPU elementwise throughput).
-- **Reductions are the gap on CUDA**: a full `sum`/`amax`/`softmax` runs at
-  150-180 GB/s (amax at 64), because the two-pass reduce + broadcast re-reads
-  the tensor; torch fuses the reduction. This matches the ViT training profile,
-  which is ~60% elementwise/reduction kernels. A hand-written shared-memory row
-  softmax was tried: the kernel is 2.1x (0.43 vs 0.89 ms at 4096x4096), but the
-  end-to-end `memops` step only gains ~8% because the one-element readback
-  dominates, LLM prefill is neutral, and a forward-only host kernel cannot carry
-  ViT's attention autograd. It was not landed; see `CURRENT_STATE §9.82`.
+- **Full `sum`/`amax` now reach 270 GB/s on CUDA** through the fused
+  `sum_with`/`max_with` host path: one streaming pass plus a tiny finish kernel,
+  0.25 ms vs 0.37/0.40 ms for the graph reduction, within 6% of torch (287/292)
+  instead of 1.2-4.6x behind. The memops driver uses them by default
+  (`AUTORUST_REDUCE_KERNEL=0` forces the graph) and the same two-kernel path is
+  available through the public session-aware methods. **Softmax and layernorm
+  remain the gap** (150/120 vs 288/209), because they are still the graph
+  max + sum + normalize path. A hand-written shared-memory row softmax was
+  tried: the kernel is 2.1x (0.43 vs 0.89 ms at 4096x4096), but the end-to-end
+  `memops` step only gains ~8% because the one-element readback dominates, LLM
+  prefill is neutral, and a forward-only host kernel cannot carry ViT's
+  attention autograd. It was not landed; see `CURRENT_STATE §9.82`.
 - On CPU, `amax` is the outlier in the other direction (torch is 5x faster):
   our max reduction is a scalar loop where torch uses a vectorized reduction.
 

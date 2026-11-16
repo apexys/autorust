@@ -83,7 +83,10 @@ transpose or stride shows up as a divergent loss.
   interpreter) is run with fewer steps because it is 1-2 orders of magnitude
   slower.
 - `gemm`, `memops` and `optim` are microbenches: one JSON per framework with a
-  `cases` array, rendered as per-case tables by `report.py`. The GEMM bf16 rows
+  `cases` array, rendered as per-case tables by `report.py`. The autorust
+  `memops` `sum`/`amax` cases use `Tensor::sum_with`/`max_with` on CUDA (one
+  streaming pass + finish kernel); `BENCH_FUSED_REDUCE=0` forces the graph path
+  for an A/B. Rank-0 outputs are read with `to_list` rather than `getitem(&[])`. The GEMM bf16 rows
   are CUDA-only (torch's CPU bf16 GEMM is unusably slow here, candle's CPU
   matmul is f32-only, tinygrad 0.14 rejects bf16 on this CUDA path).
 - `llm_decode` reuses the same 512-token cache for every timed step (the cache
