@@ -316,6 +316,101 @@ fn center_crop_pad_crops_and_pads() {
 }
 
 #[test]
+fn gather_nd_honours_batch_dims() {
+    let nodes = vec![b::node(
+        "GatherND",
+        &["data", "indices"],
+        &["out"],
+        &[Attr::Int("batch_dims", 1)],
+    )];
+    let inputs = vec![
+        b::value_info("data", b::FLOAT, &[Dim::Val(2), Dim::Val(3), Dim::Val(2)]),
+        b::value_info(
+            "indices",
+            b::INT64,
+            &[Dim::Val(2), Dim::Val(2), Dim::Val(1)],
+        ),
+    ];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(2), Dim::Val(2), Dim::Val(2)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "gnd"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let data = Tensor::from_slice(
+        m.ctx(),
+        &[0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 3, 2]);
+    let indices = Tensor::from_slice(
+        m.ctx(),
+        &[0i64, 2, 1, 0],
+        Some(dtype::INT64),
+        None,
+    )
+    .reshape([2i64, 2, 1]);
+    let mut out = m
+        .run(&[("data", data), ("indices", indices)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(got, vec![0.0, 1.0, 4.0, 5.0, 12.0, 13.0, 10.0, 11.0]);
+}
+
+#[test]
+fn max_unpool_places_values_at_indices() {
+    let shape = b::i64_tensor("shape", &[4], &[1, 1, 4, 4]);
+    let nodes = vec![b::node(
+        "MaxUnpool",
+        &["x", "indices", "shape"],
+        &["out"],
+        &[
+            Attr::Ints("kernel_shape", vec![2, 2]),
+            Attr::Ints("strides", vec![2, 2]),
+        ],
+    )];
+    let inputs = vec![
+        b::value_info("x", b::FLOAT, &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(2)]),
+        b::value_info(
+            "indices",
+            b::INT64,
+            &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(2)],
+        ),
+    ];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(4), Dim::Val(4)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[shape], &inputs, &outputs, "unpool"), 17);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 2.0, 3.0, 4.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([1i64, 1, 2, 2]);
+    let indices = Tensor::from_slice(
+        m.ctx(),
+        &[0i64, 3, 12, 15],
+        Some(dtype::INT64),
+        None,
+    )
+    .reshape([1i64, 1, 2, 2]);
+    let mut out = m
+        .run(&[("x", x), ("indices", indices)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    assert_eq!(
+        got,
+        vec![1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 4.0]
+    );
+}
+
+#[test]
 fn movement_slice_gather_concat_and_expand() {
     let shape = b::i64_tensor("shape", &[2], &[2, 12]);
     let gather_idx = b::i64_tensor("gidx", &[2], &[0, 11]);
@@ -671,14 +766,14 @@ fn negative_gather_indices_are_normalized() {
 
 #[test]
 fn unsupported_op_reports_the_name() {
-    let nodes = vec![b::node("MaxUnpool", &["x"], &["out"], &[])];
+    let nodes = vec![b::node("TensorScatter", &["x"], &["out"], &[])];
     let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(3)])];
     let outputs = vec![b::value_info("out", b::INT64, &[Dim::Val(1)])];
     let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "nz"), 17);
     let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
     let x = Tensor::from_slice(m.ctx(), &[1.0f32, 0.0, 2.0], Some(dtype::FLOAT32), None);
     match m.run(&[("x", x)]) {
-        Err(OnnxError::Unsupported(s)) => assert!(s.contains("MaxUnpool"), "{s}"),
+        Err(OnnxError::Unsupported(s)) => assert!(s.contains("TensorScatter"), "{s}"),
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }

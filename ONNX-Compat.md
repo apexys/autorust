@@ -78,20 +78,18 @@ outputs remain valid after it is dropped.
 
 ## Known T1/T2 gaps
 
-- `MaxUnpool` still needs `max_unpool2d` (or an indices composition).
 - `NonZero`/`Compress` with an empty selection return `Unsupported`: the
   storage layer cannot allocate zero-element tensors yet.
-- `Scatter*`, `NonZero`, `Compress`, `CenterCropPad` and `GatherElements` are
-  host-side (they realize their index/selection inputs), so a model that uses
-  them runs eagerly; the replay plan is disabled for it.
+- `Scatter*`, `NonZero`, `Compress`, `CenterCropPad`, `MaxUnpool` and
+  `GatherElements` are host-side (they realize their index/selection inputs),
+  so a model that uses them runs eagerly; the replay plan is disabled for it.
 - `Pad` supports constant/edge/reflect/wrap, not arbitrary dynamic pads
   (pads must resolve to host constants).
 - `Resize` supports linear (align-corners/half-pixel/pytorch-half-pixel for
   outputs > 1) and all four `nearest_mode` choices; cubic, antialias,
   `asymmetric`/`half_pixel_symmetric` linear, and non-`stretch` aspect-ratio
   policies are missing.
-- `GatherND` only supports `batch_dims=0`; `GatherElements` uses a host-index
-  loop (correct, not fast).
+- `GatherElements` uses a host-index loop (correct, not fast).
 - Zero-element tensors are rejected: the storage layer cannot allocate empty
   storage yet.
 - `Conv`/`ConvTranspose` require the same stride/dilation/output-padding on
@@ -144,7 +142,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Reshape Flatten Squeeze Unsqueeze Transpose Concat Split Expand Tile Identity` | ✅ | direct movement ops. |
 | `Slice` | ✅ | `Ix::Range`; constant starts/ends/axes/steps. |
 | `Gather` | ✅ | `Tensor::gather`. |
-| `GatherElements GatherND` | 🟡 | `GatherND` supports `batch_dims=0`; `GatherElements` uses a host-index loop (also plan-disabled). |
+| `GatherElements GatherND` | 🟡 | `GatherND` supports all `batch_dims`; `GatherElements` uses a host-index loop (also plan-disabled). |
 | `Scatter ScatterElements ScatterND` | ✅ | host-side; `axis`/negative indices and reduction `none`/`add`/`mul`/`max`/`min`. `TensorScatter` remains missing. |
 | `Pad` | ✅ | constant/edge/reflect/wrap with static (host-resolved) pads. |
 | `Resize Upsample` | 🟡 | linear (align-corners/half-pixel) and nearest with all `nearest_mode`s; no cubic/antialias. |
@@ -162,7 +160,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `MatMulInteger ConvInteger` | 🟡 | T2; integer matmul/conv on dequantized inputs. |
 | `MaxPool` | ✅ | `max_pool2d`. |
 | `AveragePool GlobalAveragePool GlobalMaxPool` | ✅ | N-D `avg_pool2d` + reductions. |
-| `MaxUnpool` | ⬜ | add `max_unpool2d` (or compose from indices). |
+| `MaxUnpool` | ✅ | host-side placement from the MaxPool indices; inferred or explicit `output_shape`. |
 | `BatchNormalization` | ✅ | `Tensor::batchnorm`. |
 | `LayerNormalization RMSNormalization GroupNormalization InstanceNormalization` | ✅ | `nn` layers + `Tensor::layernorm`. |
 | `LpNormalization MeanVarianceNormalization` | ✅ | `normalize` + mean/var composition. |
@@ -190,9 +188,8 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 
 ## Validation plan (remaining)
 
-1. **CLIP text/vision ONNX** for the T1 set (`GatherND` `batch_dims>0`,
-   `TopK`, `Pad` modes, `MaxUnpool`; `Einsum` and the scatter family are now
-   general).
+1. **CLIP text/vision ONNX** for the T1 set (`TopK`, `Pad` modes; `Einsum`,
+   `GatherND`, `MaxUnpool` and the scatter family are now general).
 2. **ONNX backend node tests** from `../tinygrad/test/external/` for op-level
    correctness; compare against `onnxruntime` in the dev environment only.
 3. **Golden fixtures**: `tests/onnx.rs` builds models in-memory; add committed

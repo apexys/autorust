@@ -12,6 +12,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Scatter`/`ScatterElements`/`ScatterND` (with `none`/`add`/`mul`/`max`/`min`
   reductions) are implemented; they are host-realized and disable the replay
   plan for models that use them (`tests/onnx.rs`).
+- **ONNX `GatherND batch_dims>0` and `MaxUnpool`.** `GatherND` now gathers
+  per batch axis; `MaxUnpool` places pooled values at the MaxPool indices with
+  an explicit or inferred output shape (`tests/onnx.rs`).
 - **Generalized ONNX `Einsum`.** `Tensor::einsum_many` (and the two-operand
   `einsum` wrapper) now supports N operands, ellipsis with right-aligned
   broadcasting, repeated labels (diagonal/trace) and implicit output. The ONNX

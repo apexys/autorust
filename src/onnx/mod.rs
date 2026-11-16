@@ -132,6 +132,7 @@ impl OnnxModel {
                 n.op_type.as_str(),
                 "NonZero"
                     | "Compress"
+                    | "MaxUnpool"
                     | "GatherElements"
                     | "Scatter"
                     | "ScatterElements"

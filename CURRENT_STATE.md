@@ -6339,3 +6339,21 @@ Gates: `tests/onnx.rs` (`nonzero_lists_coordinates`,
 `scatter_nd_writes_rows`, `center_crop_pad_crops_and_pads`), plus the full
 ONNX suite. `ONNX-Compat.md` moves the family to done; `MaxUnpool`,
 `TensorScatter`, `GatherND batch_dims>0` and empty tensors remain.
+
+### 9.102 ONNX GatherND batch_dims and MaxUnpool (2026-11-16)
+
+- **`GatherND` with `batch_dims > 0`.** The batch axes are validated against
+  `data`, flattened into one axis, gathered per batch with the `batch_dims=0`
+  path, stacked and reshaped to `indices.shape[..-1] + data.shape[b+k..]`. The
+  `batch_dims=0` behaviour is unchanged (extracted into `gather_nd_0`). Empty
+  index depth with `batch_dims > 0` remains unsupported.
+- **`MaxUnpool`.** Host-side placement of the pooled values at the MaxPool
+  indices (per `(N, C)` plane); the output shape comes from the optional
+  `output_shape` input or is inferred as
+  `(in-1)*stride - pad_begin - pad_end + kernel`. It is in the host-side
+  plan-disabled set with the other index ops.
+
+Gates: `tests/onnx.rs::gather_nd_honours_batch_dims` (2x3x2 data, 2x2x1
+indices, `batch_dims=1`) and `::max_unpool_places_values_at_indices`
+(`output_shape` [1,1,4,4]); full ONNX suite. `ONNX-Compat.md` updates both rows;
+`TensorScatter`, empty tensors and `GatherElements`'s host loop remain.

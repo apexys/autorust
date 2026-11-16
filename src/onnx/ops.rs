@@ -18,6 +18,37 @@ fn opt(ins: &[Option<Tensor>], i: usize) -> Option<&Tensor> {
     ins.get(i).and_then(|x| x.as_ref())
 }
 
+
+fn gather_nd_0(x: &Tensor, idx: &Tensor) -> Result<Tensor> {
+    let rank = idx.shape().as_slice().len();
+    if rank == 0 {
+        return Err(OnnxError::Unsupported("GatherND with scalar indices".into()));
+    }
+    let k = idx.shape().as_slice()[rank - 1]
+        .clone()
+        .as_i64()
+        .unwrap_or(0);
+    if k == 0 {
+        return Ok(x.clone());
+    }
+    let (idx, squeeze_out) = if rank == 1 {
+        (idx.unsqueeze(0), true)
+    } else {
+        (idx.clone(), false)
+    };
+    let parts = idx.split(&vec![1i64; k as usize], -1);
+    let mut ixs: Vec<Ix> = Vec::with_capacity(k as usize);
+    for p in parts {
+        ixs.push(Ix::Tensor(p.squeeze(Some(-1))));
+    }
+    let out = x.getitem(&ixs);
+    Ok(if squeeze_out {
+        out.squeeze(Some(0))
+    } else {
+        out
+    })
+}
+
 impl OnnxModel {
     pub(crate) fn eval(&mut self, node: &Node, ins: &[Option<Tensor>]) -> Result<Vec<Tensor>> {
         let op = node.op_type.as_str();
@@ -595,36 +626,7 @@ impl OnnxModel {
                 let x = inp(ins, 0)?;
                 let idx = inp(ins, 1)?;
                 let batch = node.attr_i64("batch_dims", 0);
-                if batch != 0 {
-                    return Err(OnnxError::Unsupported("GatherND batch_dims != 0".into()));
-                }
-                let idx_shape = idx.shape().into_vec();
-                let rank = idx_shape.len();
-                if rank == 0 {
-                    return Err(OnnxError::Unsupported(
-                        "GatherND with scalar indices".into(),
-                    ));
-                }
-                let k = idx_shape[rank - 1].clone().as_i64().unwrap_or(0);
-                if k == 0 {
-                    return one(x.clone());
-                }
-                let (idx, squeeze_out) = if rank == 1 {
-                    (idx.unsqueeze(0), true)
-                } else {
-                    (idx.clone(), false)
-                };
-                let parts = idx.split(&vec![1; k as usize], -1);
-                let mut ixs: Vec<Ix> = Vec::with_capacity(k as usize);
-                for p in parts {
-                    ixs.push(Ix::Tensor(p.squeeze(Some(-1))));
-                }
-                let out = x.getitem(&ixs);
-                one(if squeeze_out {
-                    out.squeeze(Some(0))
-                } else {
-                    out
-                })
+                one(self.gather_nd(x, idx, batch)?)
             }
             "GatherElements" => {
                 let x = inp(ins, 0)?;
@@ -958,6 +960,12 @@ impl OnnxModel {
                 let operands: Result<Vec<&Tensor>> =
                     (0..ins.len()).map(|i| inp(ins, i)).collect();
                 one(Tensor::einsum_many(&operands?, eq))
+            }
+            "MaxUnpool" => {
+                let x = inp(ins, 0)?;
+                let indices = inp(ins, 1)?;
+                let out_shape = opt(ins, 2);
+                one(self.max_unpool(x, indices, out_shape, node)?)
             }
             "MaxPool" => Ok(self.max_pool_op(node, ins)?),
             "AveragePool" => one(self.avg_pool_op(node, ins)?),
@@ -1454,6 +1462,137 @@ impl OnnxModel {
             out = out.getitem(&ixs);
         }
         Ok(out)
+    }
+
+    fn gather_nd(&mut self, x: &Tensor, idx: &Tensor, batch_dims: i64) -> Result<Tensor> {
+        let xshape: Vec<i64> = x
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let ishape: Vec<i64> = idx
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let r = xshape.len();
+        let q = ishape.len();
+        if q == 0 {
+            return Err(OnnxError::Unsupported("GatherND with scalar indices".into()));
+        }
+        let b = batch_dims.max(0) as usize;
+        if b > q - 1 || b > r {
+            return Err(OnnxError::Shape("GatherND batch_dims".into()));
+        }
+        for d in 0..b {
+            if xshape[d] != ishape[d] {
+                return Err(OnnxError::Shape(
+                    "GatherND batch dimensions do not match".into(),
+                ));
+            }
+        }
+        let k = ishape[q - 1].max(0) as usize;
+        if k == 0 {
+            return if b == 0 {
+                Ok(x.clone())
+            } else {
+                Err(OnnxError::Unsupported(
+                    "GatherND batch_dims>0 with empty index depth".into(),
+                ))
+            };
+        }
+        if b + k > r {
+            return Err(OnnxError::Shape("GatherND index depth".into()));
+        }
+        if b == 0 {
+            return gather_nd_0(x, idx);
+        }
+        // Flatten the batch axes, gather each slice, then stack and reshape.
+        let batch_vol: i64 = xshape[..b].iter().product();
+        let mut xf = xshape[b..].to_vec();
+        xf.insert(0, batch_vol);
+        let mut inf = ishape[b..].to_vec();
+        inf.insert(0, batch_vol);
+        let x_flat = x.reshape(xf);
+        let idx_flat = idx.reshape(inf);
+        let mut parts: Vec<Tensor> = Vec::with_capacity(batch_vol as usize);
+        for bi in 0..batch_vol {
+            let xb = x_flat.getitem(&[Ix::Index(bi)]);
+            let ib = idx_flat.getitem(&[Ix::Index(bi)]);
+            parts.push(gather_nd_0(&xb, &ib)?);
+        }
+        let first = parts.remove(0).unsqueeze(0);
+        let rest: Vec<Tensor> = parts.into_iter().map(|t| t.unsqueeze(0)).collect();
+        let stacked = if rest.is_empty() {
+            first
+        } else {
+            first.cat(&rest, 0)
+        };
+        let mut out_shape: Vec<i64> = ishape[..q - 1].to_vec();
+        out_shape.extend_from_slice(&xshape[b + k..]);
+        Ok(stacked.reshape(out_shape))
+    }
+
+    fn max_unpool(
+        &mut self,
+        x: &Tensor,
+        indices: &Tensor,
+        out_shape: Option<&Tensor>,
+        node: &Node,
+    ) -> Result<Tensor> {
+        let xshape: Vec<i64> = x
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let rank = xshape.len();
+        if rank < 2 {
+            return Err(OnnxError::Shape("MaxUnpool needs N,C,spatial".into()));
+        }
+        let spatial = rank - 2;
+        let out_shape: Vec<i64> = if let Some(t) = out_shape {
+            self.i64s(t)?
+        } else {
+            let kernel = node
+                .attr_i64s("kernel_shape")
+                .ok_or_else(|| OnnxError::Shape("MaxUnpool kernel_shape".into()))?;
+            let strides = node
+                .attr_i64s("strides")
+                .unwrap_or_else(|| vec![1; spatial]);
+            let pads = node
+                .attr_i64s("pads")
+                .unwrap_or_else(|| vec![0; 2 * spatial]);
+            if kernel.len() != spatial || strides.len() != spatial || pads.len() != 2 * spatial {
+                return Err(OnnxError::Shape("MaxUnpool attributes".into()));
+            }
+            let mut s = vec![xshape[0], xshape[1]];
+            for i in 0..spatial {
+                s.push((xshape[2 + i] - 1) * strides[i] - pads[i] - pads[spatial + i] + kernel[i]);
+            }
+            s
+        };
+        if out_shape.len() != rank {
+            return Err(OnnxError::Shape("MaxUnpool output shape rank".into()));
+        }
+        let planes: i64 = xshape[0].saturating_mul(xshape[1]);
+        let in_vol: i64 = xshape[2..].iter().product();
+        let out_vol: i64 = out_shape[2..].iter().product();
+        let xv = x.to_list::<f64>(&mut self.sess);
+        let iv = indices.to_list::<i64>(&mut self.sess);
+        let mut out = vec![0.0f64; (planes * out_vol) as usize];
+        for plane in 0..planes {
+            for p in 0..in_vol {
+                let o = iv[(plane * in_vol + p) as usize];
+                if o < 0 || o >= out_vol {
+                    return Err(OnnxError::Runtime("MaxUnpool index out of range".into()));
+                }
+                out[(plane * out_vol + o) as usize] = xv[(plane * in_vol + p) as usize];
+            }
+        }
+        self.build_like(x, &out, &out_shape)
     }
 
     fn gather_elements(&mut self, x: &Tensor, idx: &Tensor, axis: usize) -> Result<Tensor> {
