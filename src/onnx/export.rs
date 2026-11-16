@@ -6,7 +6,7 @@
 //! primitives. Unsupported UOps fail with the node id and op rather than
 //! producing a silently wrong model.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::pb::{Attribute, Dim, GraphProto, ModelProto, Node, TensorProto, ValueInfo};
@@ -475,6 +475,14 @@ struct Tracer<'a> {
     initializers: Vec<TensorProto>,
     next_init: usize,
     next_node: usize,
+    /// Distinct consumers of each UOp, used to fold `MatMul` + `Add` into one
+    /// `Gemm` only when the matmul result is not shared.
+    users: HashMap<UopId, Vec<UopId>>,
+    /// Graph outputs: a matmul that is itself an output must stay a `MatMul`.
+    outputs: HashSet<UopId>,
+    /// Nodes already written, so an inner fold (`MatMul`+`Add` -> `Gemm`) is
+    /// not duplicated when the outer op finishes tracing its sources.
+    emitted: HashSet<UopId>,
 }
 
 impl<'a> Tracer<'a> {
@@ -482,6 +490,8 @@ impl<'a> Tracer<'a> {
         ctx: &'a mut UOpCtx,
         input_names: HashMap<UopId, String>,
         param_inits: HashMap<UopId, (String, TensorProto)>,
+        users: HashMap<UopId, Vec<UopId>>,
+        outputs: HashSet<UopId>,
     ) -> Self {
         let mut initializers = Vec::with_capacity(param_inits.len());
         for (_, proto) in param_inits.values() {
@@ -496,6 +506,9 @@ impl<'a> Tracer<'a> {
             initializers,
             next_init: 0,
             next_node: 0,
+            users,
+            outputs,
+            emitted: HashSet::new(),
         }
     }
 
@@ -549,12 +562,16 @@ impl<'a> Tracer<'a> {
         inputs: Vec<String>,
         attrs: Vec<(&str, Attribute)>,
     ) -> String {
+        if self.emitted.contains(id) {
+            return self.value(id);
+        }
         let out = self.value(id);
         let mut map = HashMap::new();
         for (k, v) in attrs {
             map.insert(k.to_string(), v);
         }
         let node_name = self.node_name();
+        self.emitted.insert(id.clone());
         self.nodes.push(Node {
             op_type: op_type.to_string(),
             domain: String::new(),
@@ -912,10 +929,17 @@ impl<'a> Tracer<'a> {
         if mul_srcs.len() != 2 {
             return Ok(None);
         }
-        let (xr, wt) = (&mul_srcs[0], &mul_srcs[1]);
-        if self.ctx.op_of(xr) != Ops::Reshape || self.ctx.op_of(wt) != Ops::Permute {
+        let (xr, wt) = if self.ctx.op_of(&mul_srcs[0]) == Ops::Reshape
+            && self.ctx.op_of(&mul_srcs[1]) == Ops::Permute
+        {
+            (&mul_srcs[0], &mul_srcs[1])
+        } else if self.ctx.op_of(&mul_srcs[1]) == Ops::Reshape
+            && self.ctx.op_of(&mul_srcs[0]) == Ops::Permute
+        {
+            (&mul_srcs[1], &mul_srcs[0])
+        } else {
             return Ok(None);
-        }
+        };
         let wr = self.ctx.srcs(wt)[0].clone();
         if self.ctx.op_of(&wr) != Ops::Reshape {
             return Ok(None);
@@ -929,43 +953,116 @@ impl<'a> Tracer<'a> {
         let Ok(ws) = shape_of(self.ctx, &wr) else {
             return Ok(None);
         };
-        let nd = xs.len();
-        if nd < 3 || ws.len() != nd {
+        let nx = xs.len();
+        let nw = ws.len();
+        if nx < 3 || nw < 3 || pd != nx.max(nw) {
             return Ok(None);
         }
-        if preduce_swap_last(&wperm, nd).is_none() {
+        if preduce_swap_last(&wperm, nw).is_none() {
             return Ok(None);
         }
-        // `dot` inserts the broadcast axis at `-2` in x and `-3` in w.
-        if xs[nd - 2] != 1 || ws[nd - 3] != 1 {
+        // `dot` inserts the broadcast axis at `-2` in x and `-3` in w; x and
+        // w may have different ranks (e.g. `[B, N, K] @ [K, M]`), so index
+        // each operand by its own rank.
+        if xs[nx - 2] != 1 || ws[nw - 3] != 1 {
             return Ok(None);
         }
-        let k = xs[nd - 1];
-        if ws[nd - 2] != k {
+        let k = xs[nx - 1];
+        if ws[nw - 2] != k {
             return Ok(None);
         }
-        let m = ws[nd - 1];
+        let m = ws[nw - 1];
         let x = self.ctx.srcs(xr)[0].clone();
         let w = self.ctx.srcs(&wr)[0].clone();
-        let mut want_x = xs[..nd - 2].to_vec();
+        let mut want_x = xs[..nx - 2].to_vec();
         want_x.push(k);
         if shape_of(self.ctx, &x).ok().as_deref() != Some(want_x.as_slice()) {
             return Ok(None);
         }
-        let mut want_w = ws[..nd - 3].to_vec();
+        let mut want_w = ws[..nw - 3].to_vec();
         want_w.push(k);
         want_w.push(m);
         if shape_of(self.ctx, &w).ok().as_deref() != Some(want_w.as_slice()) {
             return Ok(None);
         }
-        let mut want_out = xs[..nd - 2].to_vec();
+        let Some(mut want_out) = broadcast_shapes(&xs[..nx - 2], &ws[..nw - 3]) else {
+            return Ok(None);
+        };
         want_out.push(m);
         if shape_of(self.ctx, id).ok().as_deref() != Some(want_out.as_slice()) {
             return Ok(None);
         }
+        if let Some(gemm) = self.try_gemm(id, &x, &w, &want_out)? {
+            return Ok(Some(gemm));
+        }
         let a = self.trace(&x)?;
         let b = self.trace(&w)?;
         Ok(Some(self.emit(id, "MatMul", vec![a, b], vec![])))
+    }
+
+    /// Fold `MatMul` + `Add` into one ONNX `Gemm` when the matmul is 2-D and
+    /// its only consumer is a broadcast bias add. The add's output replaces
+    /// both names so a later trace of the add returns the `Gemm`.
+    fn try_gemm(
+        &mut self,
+        id: &UopId,
+        x: &UopId,
+        w: &UopId,
+        out_shape: &[i64],
+    ) -> Result<Option<String>> {
+        // `Gemm` requires 2-D A and B even when the broadcast output is 2-D.
+        if shape_of(self.ctx, x).map(|s| s.len()).ok() != Some(2)
+            || shape_of(self.ctx, w).map(|s| s.len()).ok() != Some(2)
+        {
+            return Ok(None);
+        }
+        let Some((add, bias)) = self.gemm_bias(id, out_shape) else {
+            return Ok(None);
+        };
+        let a = self.trace(x)?;
+        let b = self.trace(w)?;
+        let c = self.trace(&bias)?;
+        let name = self.emit(&add, "Gemm", vec![a, b, c], vec![]);
+        self.names.insert(id.clone(), name.clone());
+        Ok(Some(name))
+    }
+
+    /// `(add, bias)` when `id` is a 2-D matmul whose only consumer is an
+    /// `Add` with a Gemm-compatible bias.
+    fn gemm_bias(&mut self, id: &UopId, out_shape: &[i64]) -> Option<(UopId, UopId)> {
+        if out_shape.len() != 2 || self.outputs.contains(id) {
+            return None;
+        }
+        let add = {
+            let users = self.users.get(id)?;
+            if users.len() != 1 {
+                return None;
+            }
+            users[0].clone()
+        };
+        if self.ctx.op_of(&add) != Ops::Add {
+            return None;
+        }
+        let srcs = self.ctx.srcs(&add).to_vec();
+        if srcs.len() != 2 {
+            return None;
+        }
+        let bias = if srcs[0] == *id {
+            srcs[1].clone()
+        } else if srcs[1] == *id {
+            srcs[0].clone()
+        } else {
+            return None;
+        };
+        if bias == *id {
+            return None;
+        }
+        let add_shape = shape_of(self.ctx, &add).ok()?;
+        if add_shape.as_slice() != out_shape {
+            return None;
+        }
+        let bias_shape = shape_of(self.ctx, &bias).ok()?;
+        gemm_bias_ok(&bias_shape, out_shape).then_some((add, bias))
     }
 
     fn trace_elementwise(
@@ -1070,6 +1167,45 @@ impl<'a> Tracer<'a> {
             }),
         }
     }
+}
+
+/// Right-aligned broadcast of two shapes, or `None` when they conflict.
+fn broadcast_shapes(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
+    let n = a.len().max(b.len());
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let av = if i + a.len() < n {
+            1
+        } else {
+            a[i + a.len() - n]
+        };
+        let bv = if i + b.len() < n {
+            1
+        } else {
+            b[i + b.len() - n]
+        };
+        out.push(if av == bv {
+            av
+        } else if av == 1 {
+            bv
+        } else if bv == 1 {
+            av
+        } else {
+            return None;
+        });
+    }
+    Some(out)
+}
+
+/// ONNX `Gemm` C must broadcast unidirectionally to `(M, N)`; a scalar or a
+/// higher-rank bias is left as a separate `Add`.
+fn gemm_bias_ok(bias: &[i64], out: &[i64]) -> bool {
+    if out.len() != 2 || bias.len() > 2 {
+        return false;
+    }
+    let mut padded = vec![1; 2 - bias.len()];
+    padded.extend_from_slice(bias);
+    padded.iter().zip(out).all(|(b, o)| *b == 1 || b == o)
 }
 
 /// Broadcast a one-element bound list to `rank`, as tinygrad's shape args do
@@ -1193,7 +1329,36 @@ fn write_model(
         .map(|t| Ok((tensor_dims(t)?, t.dtype())))
         .collect::<Result<Vec<_>>>()?;
     let mut ctx_ref = ctx.borrow_mut();
-    let mut tracer = Tracer::new(&mut ctx_ref, input_names, params);
+    let mut users: HashMap<UopId, Vec<UopId>> = HashMap::new();
+    let mut output_ids: HashSet<UopId> = HashSet::new();
+    for t in outs {
+        let root = t.uop();
+        // Protect the output and any pass-through wrapper of it: a matmul
+        // reached through `Contiguous`/`Copy` is still an output.
+        let mut stack = vec![root.clone()];
+        while let Some(u) = stack.pop() {
+            if !output_ids.insert(u.clone()) {
+                continue;
+            }
+            if matches!(
+                ctx_ref.op_of(&u),
+                Ops::After | Ops::Group | Ops::Noop | Ops::Contiguous | Ops::Copy | Ops::Detach
+            ) && let Some(src) = ctx_ref.srcs(&u).first()
+            {
+                stack.push(src.clone());
+            }
+        }
+        for u in ctx_ref.toposort(&root) {
+            let srcs = ctx_ref.srcs(&u).to_vec();
+            for src in srcs {
+                let entry = users.entry(src).or_default();
+                if !entry.iter().any(|seen| seen == &u) {
+                    entry.push(u.clone());
+                }
+            }
+        }
+    }
+    let mut tracer = Tracer::new(&mut ctx_ref, input_names, params, users, output_ids);
     let mut out_infos = Vec::with_capacity(outs.len());
     for (idx, (t, o)) in outs.iter().zip(outputs).enumerate() {
         let name = tracer.trace(&t.uop())?;

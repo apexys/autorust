@@ -6891,3 +6891,31 @@ Gates: `tests/onnx_export.rs` (7 tests, including both E3b conv gates),
 `bench/onnx_export_check.py` E0-E3b, `cargo nextest run --release` 419/419,
 `cargo clippy --all-targets` and `cargo rustdoc --lib -- -W missing_docs`
 clean.
+
+### 9.125 ONNX export E3b: Gemm folding and rank-generic MatMul (2026-11-16)
+
+Closed the `MatMul` + `Add` -> `Gemm` gap and made the matcher handle linear
+layers whose input rank exceeds the weight rank.
+
+- The tracer builds a distinct-consumer map from `toposort` over every graph
+  output and passes it (plus the output-id set) to `Tracer`.
+- `try_matmul` now folds a 2-D matmul into `Gemm` only when: the output is rank
+  2, the matmul is not itself a graph output, it has exactly one distinct
+  consumer, that consumer is an `Add`, and the other operand broadcasts
+  unidirectionally to `(M, N)` (rank 1 or 2). Everything else keeps the valid
+  `MatMul` + `Add` pair.
+- `emit` is idempotent by node id. The fold emits the `Gemm` while the outer
+  `Add` is still tracing its sources; when the `Add` finishes, it returns the
+  already-emitted name instead of writing a duplicate output.
+- The dot matcher previously required `xr` and `wr` to have the same rank, so
+  `[B, N, K] @ [K, M]` fell back to expanded arithmetic. It now indexes each
+  operand by its own rank (broadcast axis `-2` in x, `-3` in w) and
+  right-aligns the result shape, so 3-D linear layers emit `MatMul`.
+- Fallback gates in `tests/onnx_export.rs::export_e3b_gemm_fallback_cases`:
+  a 3-D matmul + bias, a shared 2-D matmul used twice, and a matmul that is a
+  graph output all keep `MatMul` and do not emit `Gemm`.
+- `tests/onnx_export.rs::export_e3_transformer_style_block` now asserts the
+  folded `Gemm` (3 inputs, no leftover `MatMul`).
+
+Gates: `tests/onnx_export.rs` (8 tests), `bench/onnx_export_check.py` E0-E3b,
+`cargo nextest run --release`, clippy and rustdoc.

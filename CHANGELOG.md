@@ -19,15 +19,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bench/onnx_export_check.py` (`onnx.checker` + onnxruntime). `Gemm`/`Conv`
   normalization remains E3b.
 
-- **ONNX export E3b: CNN export and direct Conv (2026-11-16).** The tracer now
+- **ONNX export E3b: CNN export, Conv and Gemm (2026-11-16).** The tracer now
   lowers `Shrink` to ONNX `Slice` (evaluating the constant `Stack`/`Const`
   bounds) and zero-fill `Pad` to ONNX `Pad`. `Tensor::conv2d` also records its
   `(input, weight, bias, groups, strides, dilations, pads)` on the result node
   (export metadata, not identity), so the exporter emits one `Conv` (bias
-  folded) instead of the im2col expansion. A conv + relu + maxpool + linear gate and a grouped/dilated/
-  strided no-bias conv gate round-trip through the importer and
-  `bench/onnx_export_check.py` (`onnx.checker` + onnxruntime). `Gemm` folding
-  remains an E3b optimization.
+  folded) instead of the im2col expansion. A 2-D `MatMul` + broadcast `Add`
+  with a single consumer and no graph-output use folds to one `Gemm`; shared,
+  output or batched matmuls keep the valid `MatMul` + `Add` pair. The `dot`
+  matcher also handles rank-mismatched operands (`[B, N, K] @ [K, M]`), so 3-D
+  linear layers export as `MatMul` rather than expanded arithmetic. A conv +
+  relu + maxpool + linear gate, a grouped/dilated/strided no-bias conv gate and
+  the Gemm fallback cases round-trip through the importer and
+  `bench/onnx_export_check.py` (`onnx.checker` + onnxruntime).
 
 - **Vulkan fused optimizer and full reductions (2026-11-16).**
   `runtime::vk_optim` dispatches a precompiled SPIR-V Adam/AdamW/LAMB kernel

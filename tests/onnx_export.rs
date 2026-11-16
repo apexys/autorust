@@ -304,19 +304,31 @@ fn export_e3_transformer_style_block() {
         &ExportOptions::default(),
     )
     .expect("export block");
-    // The `dot` lowering must be recognized as one `MatMul`, not exported as
-    // the expanded broadcast-multiply/reduce graph.
+    // The 2-D `dot` + bias lowering must be recognized as one `Gemm`, not
+    // exported as the expanded broadcast-multiply/reduce/add graph.
     let raw = std::fs::read(&path).expect("read block model");
     let proto = autorust::onnx::pb::parse_model(&raw).expect("parse block model");
+    let ops: Vec<&str> = proto
+        .graph
+        .nodes
+        .iter()
+        .map(|n| n.op_type.as_str())
+        .collect();
+    let gemm = proto
+        .graph
+        .nodes
+        .iter()
+        .find(|n| n.op_type == "Gemm")
+        .unwrap_or_else(|| panic!("block export has no folded Gemm: {ops:?}"));
+    assert_eq!(
+        gemm.inputs.len(),
+        3,
+        "Gemm must fold the bias: {:?}",
+        gemm.inputs
+    );
     assert!(
-        proto.graph.nodes.iter().any(|n| n.op_type == "MatMul"),
-        "block export has no MatMul node: {:?}",
-        proto
-            .graph
-            .nodes
-            .iter()
-            .map(|n| n.op_type.as_str())
-            .collect::<Vec<_>>()
+        !ops.contains(&"MatMul"),
+        "un-folded MatMul left in block: {ops:?}"
     );
     let mut m = OnnxModel::load_with_device(&path, None).expect("load block");
     let xx = Tensor::from_slice(m.ctx(), &xv, Some(dtype::FLOAT32), None).reshape([2, 4]);
@@ -514,4 +526,104 @@ fn export_e3b_conv_groups_stride() {
     }
     std::fs::write(out_dir().join("onnx_export_e3b_conv_groups_x.bin"), xb).unwrap();
     std::fs::write(out_dir().join("onnx_export_e3b_conv_groups_y.bin"), yb).unwrap();
+}
+
+fn model_ops(path: &std::path::Path) -> Vec<String> {
+    let raw = std::fs::read(path).expect("read model");
+    let proto = autorust::onnx::pb::parse_model(&raw).expect("parse model");
+    proto
+        .graph
+        .nodes
+        .iter()
+        .map(|n| n.op_type.clone())
+        .collect()
+}
+
+#[test]
+fn export_e3b_gemm_fallback_cases() {
+    // ONNX Gemm is 2-D only: a batched matmul keeps the expanded form.
+    let path3 = out_dir().join("onnx_export_e3b_gemm_3d.onnx");
+    export_fn(
+        &path3,
+        &[InputSpec::new("x", dtype::FLOAT32, &[2, 3, 4])],
+        &[OutputSpec::new("y")],
+        |args| {
+            let ctx = args[0].ctx();
+            let w = Tensor::from_slice(
+                ctx,
+                &(0..20).map(|i| i as f32 * 0.01).collect::<Vec<_>>(),
+                Some(dtype::FLOAT32),
+                None,
+            )
+            .reshape([4, 5]);
+            let b = Tensor::from_slice(ctx, &[0.1f32; 5], Some(dtype::FLOAT32), None);
+            vec![args[0].matmul(&w).add(&b)]
+        },
+        &ExportOptions::default(),
+    )
+    .expect("export 3d matmul");
+    let ops = model_ops(&path3);
+    assert!(ops.contains(&"MatMul".to_string()), "3-D: {ops:?}");
+    assert!(
+        !ops.contains(&"Gemm".to_string()),
+        "3-D folded to Gemm: {ops:?}"
+    );
+
+    // A shared matmul cannot be consumed by the fold.
+    let path_shared = out_dir().join("onnx_export_e3b_gemm_shared.onnx");
+    export_fn(
+        &path_shared,
+        &[InputSpec::new("x", dtype::FLOAT32, &[2, 3])],
+        &[OutputSpec::new("y")],
+        |args| {
+            let ctx = args[0].ctx();
+            let w = Tensor::from_slice(
+                ctx,
+                &[0.2f32, -0.3, 0.4, 0.1, -0.5, 0.6],
+                Some(dtype::FLOAT32),
+                None,
+            )
+            .reshape([3, 2]);
+            let b = Tensor::from_slice(ctx, &[0.05f32, -0.05], Some(dtype::FLOAT32), None);
+            let y = args[0].matmul(&w);
+            vec![y.add(&b).add(&y)]
+        },
+        &ExportOptions::default(),
+    )
+    .expect("export shared matmul");
+    let ops = model_ops(&path_shared);
+    assert!(ops.contains(&"MatMul".to_string()), "shared: {ops:?}");
+    assert!(
+        !ops.contains(&"Gemm".to_string()),
+        "shared matmul folded: {ops:?}"
+    );
+
+    // A matmul that is itself an output must stay a MatMul.
+    let path_out = out_dir().join("onnx_export_e3b_gemm_output.onnx");
+    export_fn(
+        &path_out,
+        &[InputSpec::new("x", dtype::FLOAT32, &[2, 3])],
+        &[OutputSpec::new("y"), OutputSpec::new("z")],
+        |args| {
+            let ctx = args[0].ctx();
+            let w = Tensor::from_slice(
+                ctx,
+                &[0.2f32, -0.3, 0.4, 0.1, -0.5, 0.6],
+                Some(dtype::FLOAT32),
+                None,
+            )
+            .reshape([3, 2]);
+            let b = Tensor::from_slice(ctx, &[0.05f32, -0.05], Some(dtype::FLOAT32), None);
+            let y = args[0].matmul(&w);
+            vec![y.contiguous(), y.add(&b)]
+        },
+        &ExportOptions::default(),
+    )
+    .expect("export matmul output");
+    let ops = model_ops(&path_out);
+    assert!(ops.contains(&"MatMul".to_string()), "output: {ops:?}");
+    assert!(
+        !ops.contains(&"Gemm".to_string()),
+        "output matmul folded: {ops:?}"
+    );
 }

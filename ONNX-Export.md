@@ -6,12 +6,14 @@ models from `autorust` graphs and models.
 
 **Status (2026-11-16):** **E0-E3 are implemented**, plus E3b CNN export, in
 `src/onnx/export.rs` and `src/onnx/write.rs`: dynamic `dim_param` axes,
-external-data sidecars, direct `MatMul` recognition, a transformer-style
-LayerNorm/residual gate, `Shrink`/`Pad` lowering, and direct `Conv` folding for
-traced `conv2d` (including bias, groups, stride and dilation). `tests/onnx_export.rs`
+external-data sidecars, direct `MatMul` recognition (including rank-mismatched
+operands such as `[B, N, K] @ [K, M]`), a transformer-style LayerNorm/residual
+gate, `Shrink`/`Pad` lowering, direct `Conv` folding for traced `conv2d`
+(including bias, groups, stride and dilation), and `MatMul` + broadcast `Add`
+folding to `Gemm` when the matmul is 2-D and unshared. `tests/onnx_export.rs`
 and the dev-only `bench/onnx_export_check.py` onnxruntime gate cover E0-E3b.
-`Gemm` folding, opset decomposition and shape-inference polish remain E3b
-follow-ups; E4 is deferred.
+Opset decomposition, shape-inference polish, `Resize` and full attention
+remain E3b/E4 follow-ups.
 
 ## Goals
 
@@ -74,7 +76,7 @@ complexity**. A higher tier includes the lower tiers.
 | **E1** | `export_fn` closure | fixed | Trace a lazy `Tensor`/UOp graph; params/constants as initializers; dedup; core standard ops | ✅ done |
 | **E2** | `export_module` + `Module` | fixed | `named_params`/`named_buffers`, shared parameters, multiple inputs/outputs, eval mode, metadata | ✅ done |
 | **E3** | E1/E2 | symbolic/dynamic | `Dim::Param` on declared axes, external-data sidecars, direct `MatMul` lowering, transformer-style graph gate | ✅ done |
-| **E3b** | E3 | symbolic/dynamic | CNN export (`Shrink`→`Slice`, `Pad`→`Pad`, direct `Conv` with bias/groups/stride/dilation); `Gemm` folding, opset decomposition, shape-inference polish | 🟡 Conv done; Gemm/decomposition follow-up |
+| **E3b** | E3 | symbolic/dynamic | CNN export (`Shrink`→`Slice`, `Pad`→`Pad`, direct `Conv` with bias/groups/stride/dilation), `Gemm` folding for 2-D matmul + broadcast bias; opset decomposition, shape-inference polish, `Resize`, attention | 🟡 Conv/Gemm done; decomposition follow-up |
 | **E4** | E1/E2 | data-dependent | `If` (later `Loop`/`Scan`), training, QDQ/quantized, sequences/optionals, custom domains | deferred |
 
 ### E0 — proto and graph builder (implemented)
@@ -155,26 +157,33 @@ where
 - Lowering: elementwise arithmetic/logical/comparison, `Where`, `Cast`,
   `Sqrt`/`Sin`/`Neg`/`Trunc`/`Reciprocal`, `Exp2`/`Log2`, `Reshape`,
   `Expand`, `Permute`, `Reduce` (`Add`/`Mul`/`Max`), `Shrink`→`Slice`,
-  `Pad`→`Pad`, `Conv`, and `Identity` output aliases. The expanded `dot`
-  pattern (broadcast multiply + permute + sum) is recognized and emitted as one
-  `MatMul`; a graph that does not match the validated shape pattern keeps the
-  expanded arithmetic form. `conv2d` records its high-level parameters on the
-  result node (export metadata, not identity) and exports as one `Conv` (bias
-  folded), so the im2col expansion is not emitted. This covers MLP-style graphs (Linear/dot + bias +
-  ReLU), transformer blocks, and traced CNN blocks (conv + relu + maxpool +
-  linear).
+  `Pad`→`Pad`, `Conv`, `Gemm`, and `Identity` output aliases. The expanded
+  `dot` pattern (broadcast multiply + permute + sum) is recognized and emitted
+  as one `MatMul`; the matcher handles x/w of different ranks by right-aligning
+  the broadcast, so `[B, N, K] @ [K, M]` exports as `MatMul` too. A 2-D matmul
+  whose only consumer is a broadcast `Add` folds to `Gemm` (bias folded); a
+  shared matmul, a matmul that is itself an output, a batched matmul, or a
+  non-broadcast bias keeps `MatMul` + `Add`. Anything that does not match the
+  validated shape pattern keeps the expanded arithmetic form. `conv2d` records
+  its high-level parameters on the result node (export metadata, not identity)
+  and exports as one `Conv` (bias folded), so the im2col expansion is not
+  emitted. This covers MLP-style graphs (Linear/dot + bias + ReLU), transformer
+  blocks, and traced CNN blocks (conv + relu + maxpool + linear).
 - E3 dynamic axes and external data are implemented. A simple elementwise
   graph exports with `dim_param` batch axes and runs in ORT at several batch
   sizes; float initializers can move to `<model>.onnx.data` while integer shape
   tensors stay inline for ONNX shape inference.
-- Direct `MatMul` and `Conv` normalization is in. `Tensor::conv2d` stores its
-  `(input, weight, bias, groups, strides, dilations, pads)` on the result node
-  (export metadata, not part of UOp identity); the exporter emits one `Conv`
-  and traces only those operands. Negative padding or a requested output dtype keep the
-  expanded graph, which `Shrink`/`Pad` lowering also supports. Folding
-  `MatMul` + `Add` into `Gemm` remains an E3b optimization, as do `Resize` and
-  a full attention block. The transformer-style LayerNorm+residual gate and the
-  CNN gate are covered; unmapped UOps fail explicitly.
+- Direct `MatMul`, `Conv` and `Gemm` normalization is in. `Tensor::conv2d`
+  stores its `(input, weight, bias, groups, strides, dilations, pads)` on the
+  result node (export metadata, not part of UOp identity); the exporter emits
+  one `Conv` and traces only those operands. Negative padding or a requested
+  output dtype keep the expanded graph, which `Shrink`/`Pad` lowering also
+  supports. A 2-D `dot` + broadcast `Add` folds to `Gemm` only when the matmul
+  has a single consumer and is not a graph output; otherwise the valid
+  `MatMul` + `Add` pair is written. `Resize`, a full attention block, opset
+  decomposition and shape-inference polish remain follow-ups. The
+  transformer-style LayerNorm+residual gate and the CNN gate are covered;
+  unmapped UOps fail explicitly.
 
 ### E3 — dynamic axes and deployment polish
 
@@ -272,13 +281,14 @@ is already a storage leaf (or a fused plan); re-run the forward in a fresh
 
 ## Lowering and normalization
 
-A direct UOp trace is correct but can be a poor ONNX graph. E3 recognizes the
-`dot` expansion and emits `MatMul`; the rest is still emitted directly.
-Further normalization (E3b) will include:
+A direct UOp trace is correct but can be a poor ONNX graph. E3/E3b recognize
+the `dot` expansion (`MatMul`/`Gemm`) and `conv2d` (`Conv`); the rest is still
+emitted directly. Further normalization will include:
 
 - `nn::Embedding` / one-hot + sum -> `Gather` (otherwise a vocabulary-sized
   one-hot is exported).
-- `MatMul` + bias + activation patterns -> `Gemm` where it is exact and helps.
+- `MatMul` + bias -> `Gemm` (implemented for 2-D, unshared matmuls); adding an
+  activation after the bias is left as a separate node.
 - `Contiguous`/`Copy`/trivial reshapes -> identity or removal.
 - Fused/primitive ops with standard decompositions (e.g. layer norm, attention)
   -> primitive ONNX subgraphs unless a newer opset op is explicitly requested.
