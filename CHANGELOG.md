@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ONNX export contract.** `ONNX-Export.md` defines the exporter tiers (E0
+  graph builder, E1 static trace, E2 module export, E3 dynamic axes/opset,
+  E4 control flow/training/quantization), validation gates and MVP order. No
+  exporter code yet.
+
 - **ONNX indexing family.** `NonZero`, `Compress`, `CenterCropPad`,
   `Scatter`/`ScatterElements`/`ScatterND` (with `none`/`add`/`mul`/`max`/`min`
   reductions) are implemented; they are host-realized and disable the replay

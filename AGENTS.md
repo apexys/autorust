@@ -105,7 +105,8 @@ not duplicate those documents here; point at them.
     area (scheduler, backend, conv/GEMM, attention, elementwise, memory, ONNX,
     tooling). Add an item there when you measure a new lever; move it to DONE
     with the number and `CURRENT_STATE` section when it lands.
-  - `ONNX-Compat.md` — ONNX operator/feature coverage (the canonical matrix).
+  - `ONNX-Compat.md` — ONNX importer operator/feature coverage (the canonical matrix).
+  - `ONNX-Export.md` — ONNX exporter contract, tiers and validation gates.
   - `FREEZE.md` — frozen-plan capture/emit/runner behaviour.
   - `INDEXING.md` — the `getitem` index DSL.
 - **Keep this `AGENTS.md` in sync** when layout, build commands, policies or the
@@ -156,7 +157,8 @@ PERFORMANCE_OPTIMIZATIONS.md  performance backlog (TODO/DONE, grouped by area)
 CONFIGURATION.md   feature flags, Settings, full env-var reference
 FREEZE.md          AOT frozen CPU plans (build.rs/include! flow)
 INDEXING.md        the getitem index-DSL reference
-ONNX-Compat.md     ONNX operator/feature matrix
+ONNX-Compat.md     ONNX importer operator/feature matrix
+ONNX-Export.md     ONNX exporter contract, tiers and validation gates
 ../tinygrad/       reference oracle (do not modify; dev/test only)
 ```
 

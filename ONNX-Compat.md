@@ -14,7 +14,8 @@ except `tf_crop_and_resize`, aspect-ratio policy), the fused transformer ops
 validated end-to-end against onnxruntime (`tests/clip.rs`). Remaining T1
 limitations are rare: shape inputs fed at runtime (not derived from
 `Shape`/`Size`; evaluated eagerly) and `Resize`'s `tf_crop_and_resize` (needs
-`roi`). T2 is split into batches by cost/value: **T2-A** (windows, `If`,
+`roi`). Export is a separate contract: see `ONNX-Export.md`. T2 is split into
+batches by cost/value: **T2-A** (windows, `If`,
 optional/sequence values, the two small ONNX-ML ops), **T2-B** (additional
 high-value vision/general ops, plus random ops), and **T2-C**
 (deferred: quantization, training ops, `Loop`/`Scan`, the wider ONNX-ML/string

@@ -6620,3 +6620,24 @@ recorded in `ONNX-Compat.md`:
 Do not do "all of T2 except quantization" as one batch: training/ONNX-ML/
 `Loop` have low deployment value or need architectural changes, while the
 T2-A/T2-B ops are small and self-contained.
+
+### 9.116 ONNX exporter contract (2026-11-16)
+
+Added `ONNX-Export.md` as the exporter counterpart to `ONNX-Compat.md`. No
+exporter code yet; the contract fixes the architecture before implementation:
+
+- **Placement:** core crate under `src/onnx/export/` (plus a std-only
+  `src/onnx/write.rs`), not a separate crate. It needs `Ctx`/`Tensor`/`UOp` and
+  `nn::Module`, uses no new dependencies, and works in the
+  `--no-default-features` build.
+- **Tiers:** E0 protobuf/`GraphBuilder`; E1 static `export_fn` trace of the lazy
+  UOp graph with fixed shapes; E2 `export_module`/`named_params`; E3 dynamic
+  axes, opset targeting/decomposition, constant folding, external data; E4
+  control flow/training/quantized (deferred).
+- **Capture rule:** export the lazy `Tensor`/UOp graph before `realize`, never a
+  compiled/fused `Session` plan. Reject side effects, mutation, data-dependent
+  control flow and unseeded random ops.
+- **Correctness policy:** exhaustive lowering with `UnsupportedOp` paths, no
+  silent fallback; default opset 17/IR 8; normalization before lowering (e.g.
+  embedding one-hot -> `Gather`); round-trip through our importer plus
+  `onnx.checker` and onnxruntime as dev-only gates.
