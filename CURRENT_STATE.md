@@ -6206,3 +6206,23 @@ dominates. `tests/cuda_conv_tc.rs` adds a 7x7/stride-2 test against INTERP
 (max abs < 3e-2, TF32) on the stem shape, alongside the existing 3x3,
 odd-shape fallback and graph-gradient tests. The kernel stays Fast-only and
 forward-only; training keeps the graph.
+
+### 9.96 1x1 conv: permute and tensor-core alternatives (2026-11-16)
+
+The 1x1 fast path (§9.86) builds `[B*H*W, Cin] @ [Cin, Cout]`, reshapes to
+`[B,H,W,Cout]` and permutes to NCHW. Timing the isolated conv against the bare
+matmul showed the permute is a large share: **0.645 of 1.42 ms**
+(32x256x14x14->64), **0.644 of 1.53** (32x96x28x28->24) and **1.814 of 3.53**
+(32x320x7x7->1280). Two ways to remove it were measured and rejected:
+
+- **General `hw=1` im2col.** Letting the general conv lowering use im2col for
+  `hw=1` (the 1x1 fast path disabled) did not fold the NCHW store: 1.88 vs
+  1.42 ms, 1.90 vs 1.53, 4.01 vs 3.53. The gate stays `hw_product > 1`.
+- **`k=1` tensor-core kernel.** The kxk kernel writes NCHW directly, so it was
+  allowed for 1x1 (pad 0). It is neutral against the cuBLAS fast path:
+  1.56 vs 1.48 ms, 1.51 vs 1.50, 3.08 vs 3.20, 65.9 vs 66.8. Reverted.
+
+Eliminating the permute needs an NCHW-store host-GEMM descriptor for the 1x1
+case (the descriptor already has `c_m/c_n/c_b` and a batch split, as the conv
+im2col path uses), not a different kernel. That is left as a separate
+scheduler/host-GEMM change.

@@ -69,7 +69,10 @@ Its stride-2 extension for the 3x3 case was measured and rejected (ResNet-50
 85.7 -> 1132 ms; the isolated kernel is not faster than the graph). The kernel
 also needs an already-realized input, so a bottleneck's 1x1 -> 3x3 boundary
 forces a schedule split (ResNet-50 13x slower); the harness only wires it where
-3x3 convs are contiguous.
+3x3 convs are contiguous. The 1x1 fast path's NCHW permute is ~45% of that conv
+(0.645 of 1.42 ms at 32x256x14x14->64); enabling general `hw=1` im2col or a
+`k=1` tensor-core kernel were both neutral, so removing it needs an
+NCHW-store host-GEMM descriptor (`CURRENT_STATE §9.96`).
 12. Fused reductions: softmax/layernorm/sum/amax (burn reduce tuner)
 Why: our CUDA reductions are the remaining memory-bound gap (softmax 155 vs torch 288 GB/s,
 layernorm 156 vs 209, sum 176 vs 287, amax 64 vs 292). Burn decomposes softmax and lets fusion
