@@ -6228,3 +6228,24 @@ Eliminating the permute needs an NCHW-store host-GEMM descriptor for the 1x1
 case (the descriptor already has `c_m/c_n/c_b` and a batch split, as the conv
 im2col path uses), not a different kernel. That is left as a separate
 scheduler/host-GEMM change.
+
+### 9.97 Remaining proposal re-checks after the kxk conv (2026-11-16)
+
+Three items were re-examined because the conv changes altered their premise:
+
+- **Item 3 (library GEMM before `split_reduceop`) is now satisfied by other
+  means.** Its goal was to get conv stores to the host GEMM. The 1x1 path lowers
+  to a matmul, 3x3-and-up use im2col + host GEMM at `K >= 256`, and the kxk
+  kernel handles the low-K stem, so the reduce-split guard it blamed is no
+  longer the conv blocker. Disabling the split is still neutral; no change.
+- **Item 6 (epilogue fusion).** Re-profiled `vit_train` bs 4: `host_gemm`
+  23.7%, attention dropout `E_591_197_16` 15.0%, attention matmuls/reshapes
+  ~25%, `E_2` 5.7%. `E_2` is a one-time capture counter (3025 launches at both
+  iters=1 and 5). The FFN GELU is not a top kernel (an isolated pass over 2.4M
+  f32 is ~0.06 ms), so a GELU epilogue is <1%. The 15% dropout needs the
+  unwired `cuda_flash_train` path; `grad.rs` has no custom-VJP hook, so that is
+  an autograd project.
+- **1x1 row floor (`AUTORUST_CONV1X1_MIN_M`).** Lowering it from 2048 to 512
+  was not reproducible: MobileNet was slightly worse in all three alternating
+  rounds (54.23/54.38/54.75 vs 54.03/54.30/54.45 ms) and UNet was mixed
+  (9.69/9.83/9.61 vs 9.71/9.97/9.73). The default stays 2048.

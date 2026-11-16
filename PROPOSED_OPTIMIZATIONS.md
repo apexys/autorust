@@ -22,6 +22,17 @@ Try: time cuModuleLoadData across a cold/warm process; if it is a meaningful sha
 6. SDPA/FFN epilogue fusion after HostGemm decisions
 Why: elementwise kernels are ~60% of generated CUDA training time and many are sub-50 µs launches; the review asks to fuse only where it does not hide a library GEMM.
 Try: fuse the GELU/dropout/epilogue chains that the host-GEMM split leaves on either side of a matmul; verify the kernel multiset and that the HostGemm still fires. Measure: generated E_* time and launch count on vit_train.
+Status (2026-11-16): re-measured after the Fast-math and conv changes.
+`vit_train` bs 4 KPROF is now `host_gemm` 23.7%, **`E_591_197_16` (attention
+dropout, [bs,12,197,197]) 15.0%**, the attention matmuls/reshapes 25%, and
+`E_2` 5.7%. `E_2` is a one-time JIT-capture counter (3025 launches at both
+iters=1 and iters=5), not a steady-state cost. The FFN GELU is not a top kernel
+(an isolated pass over 2.4M f32 is ~0.06 ms), so a GELU epilogue is <1%. The
+15% dropout can only be fused by wiring `runtime::cuda_flash_train` into
+autograd, but `grad.rs` has no custom-VJP hook (`fused_attention_train` is
+explicitly not wired), so this remains a scheduler/autograd project, not a
+bounded epilogue change.
+
 7. Allocator behavior at larger batches
 Why: the review did not measure it and claims nothing; it is a cheap question that could invalidate a hidden assumption.
 Try: ViT bs 8 and UNet at bs 8, track memory_info, reallocation counts (AUTORUST_PROF counters) and prune/alloc traffic. Either close the question or find a new lever.
