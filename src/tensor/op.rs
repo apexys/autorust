@@ -7,6 +7,7 @@ use crate::uop::ctx::UOpCtx;
 use crate::uop::sint::SVal;
 
 use super::Tensor;
+use super::Ix;
 
 /// `flat_to_grouped(padding)` (helpers.py:55): `(l, r, t, b, ...)` →
 /// `((t, b), (l, r), ...)`.
@@ -756,6 +757,135 @@ impl Tensor {
             "none" => unreduced.neg_ctx(ctx),
             other => panic!("TGERR: unsupported reduction {other:?}"),
         }
+    }
+
+    /// Negative log-likelihood from log-probabilities, class axis 1 (ONNX /
+    /// PyTorch convention). `weight` is an optional per-class weight; targets
+    /// equal to `ignore_index` are zeroed and excluded from the `mean`
+    /// denominator; `reduction` is `"none"`, `"mean"` or `"sum"`.
+    pub fn nll_loss(
+        &self,
+        target: &Tensor,
+        weight: Option<&Tensor>,
+        ignore_index: Option<i64>,
+        reduction: &str,
+    ) -> Tensor {
+        self.nll_loss_axis(target, weight, ignore_index, reduction, 1)
+    }
+
+    /// [`Tensor::nll_loss`] with an explicit class axis.
+    pub fn nll_loss_axis(
+        &self,
+        target: &Tensor,
+        weight: Option<&Tensor>,
+        ignore_index: Option<i64>,
+        reduction: &str,
+        axis: i64,
+    ) -> Tensor {
+        self.nll_loss_axis_ctx(
+            &mut self.ctx.borrow_mut(),
+            target,
+            weight,
+            ignore_index,
+            reduction,
+            axis,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn nll_loss_axis_ctx(
+        &self,
+        ctx: &mut UOpCtx,
+        target: &Tensor,
+        weight: Option<&Tensor>,
+        ignore_index: Option<i64>,
+        reduction: &str,
+        axis: i64,
+    ) -> Tensor {
+        let ndim = self.shape_ctx(ctx).len();
+        let class_axis = super::movement::resolve_dim(ndim, axis, false);
+        let (safe, keep) = match ignore_index {
+            Some(ignore) => {
+                let keep = target.ne_ctx(ctx, ignore);
+                let zero = target.mul_ctx(ctx, 0);
+                (keep.where__ctx(ctx, target.clone(), zero), Some(keep))
+            }
+            None => (target.clone(), None),
+        };
+        let idx = safe.unsqueeze_ctx(ctx, class_axis as i64);
+        let picked = self
+            .gather_ctx(ctx, class_axis as i64, &idx)
+            .squeeze_ctx(ctx, Some(class_axis as i64));
+        let mut loss = picked.neg_ctx(ctx);
+        let per_target_w = weight.map(|w| w.getitem_ctx(ctx, &[Ix::Tensor(safe.clone())]));
+        if let Some(w) = &per_target_w {
+            loss = loss.mul_ctx(ctx, w);
+        }
+        if let Some(k) = &keep {
+            let zero = loss.mul_ctx(ctx, 0.0);
+            loss = k.where__ctx(ctx, loss.clone(), zero);
+        }
+        let target_numel: i64 = loss
+            .shape_ctx(ctx)
+            .into_vec()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .product();
+        match reduction {
+            "none" => loss,
+            "sum" => loss.sum_ctx(ctx, None, false, None),
+            "mean" => {
+                let denom = if let Some(w) = &per_target_w {
+                    let w = match &keep {
+                        Some(k) => {
+                            let zero = w.mul_ctx(ctx, 0.0);
+                            k.where__ctx(ctx, w.clone(), zero)
+                        }
+                        None => w.clone(),
+                    };
+                    w.sum_ctx(ctx, None, false, None)
+                } else {
+                    match &keep {
+                        Some(k) => k
+                            .cast_ctx(ctx, crate::dtype::FLOAT32)
+                            .sum_ctx(ctx, None, false, None),
+                        None => loss
+                            .sum_ctx(ctx, None, false, None)
+                            .mul_ctx(ctx, 0.0)
+                            .add_ctx(ctx, target_numel as f64),
+                    }
+                };
+                loss.sum_ctx(ctx, None, false, None).div_ctx(ctx, &denom)
+            }
+            other => panic!("TGERR: unsupported loss reduction {other:?}"),
+        }
+    }
+
+    /// Softmax cross-entropy from logits (class axis 1): the log-softmax
+    /// counterpart of [`Tensor::nll_loss`].
+    pub fn softmax_cross_entropy(
+        &self,
+        target: &Tensor,
+        weight: Option<&Tensor>,
+        ignore_index: Option<i64>,
+        reduction: &str,
+    ) -> Tensor {
+        self.softmax_cross_entropy_axis(target, weight, ignore_index, reduction, 1)
+    }
+
+    /// [`Tensor::softmax_cross_entropy`] with an explicit class axis.
+    pub fn softmax_cross_entropy_axis(
+        &self,
+        target: &Tensor,
+        weight: Option<&Tensor>,
+        ignore_index: Option<i64>,
+        reduction: &str,
+        axis: i64,
+    ) -> Tensor {
+        let ndim = self.shape().as_slice().len();
+        let ax = super::movement::resolve_dim(ndim, axis, false);
+        let logp = super::nn::log_softmax(self, Some(ax));
+        logp.nll_loss_axis(target, weight, ignore_index, reduction, axis)
     }
 }
 

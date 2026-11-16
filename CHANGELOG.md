@@ -18,6 +18,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Cubic resize.** `Tensor::interpolate_cubic` (Keys/Catmull-Rom, host-side
   tap weights, `cubic_coeff_a`, `exclude_outside`) and ONNX `Resize`
   `mode="cubic"` (`tests/interpolate_cubic.rs`, `tests/onnx.rs`).
+- **NLL / softmax cross-entropy.** `Tensor::nll_loss` and
+  `Tensor::softmax_cross_entropy` (class axis 1, class weights,
+  `ignore_index`, `none`/`mean`/`sum`), and the ONNX
+  `NegativeLogLikelihoodLoss`/`SoftmaxCrossEntropyLoss` wrappers over them
+  (`tests/loss.rs`, `tests/onnx.rs`).
 - **Generalized ONNX `Einsum`.** `Tensor::einsum_many` (and the two-operand
   `einsum` wrapper) now supports N operands, ellipsis with right-aligned
   broadcasting, repeated labels (diagonal/trace) and implicit output. The ONNX

@@ -712,6 +712,99 @@ fn resize_cubic_half_pixel() {
 }
 
 #[test]
+fn negative_log_likelihood_loss_matches_manual() {
+    // Weighted, no reduction.
+    let w = b::f32_tensor("w", &[3], &[2.0, 3.0, 4.0]);
+    let nodes = vec![b::node(
+        "NegativeLogLikelihoodLoss",
+        &["x", "labels", "w"],
+        &["out"],
+        &[Attr::Str("reduction", "none")],
+    )];
+    let inputs = vec![
+        b::value_info("x", b::FLOAT, &[Dim::Val(2), Dim::Val(3)]),
+        b::value_info("labels", b::INT64, &[Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2)])];
+    let bytes = b::model(&b::graph(&nodes, &[w], &inputs, &outputs, "nll"), 13);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[-1.0f32, -2.0, -3.0, -0.5, -1.5, -2.5],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 3]);
+    let labels = Tensor::from_slice(m.ctx(), &[0i64, 1], Some(dtype::INT64), None)
+        .reshape([2i64]);
+    let mut out = m
+        .run(&[("x", x), ("labels", labels)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    close(&got, &[2.0, 4.5], 1e-6);
+
+    // Mean with an ignored target: only the first contributes.
+    let nodes = vec![b::node(
+        "NegativeLogLikelihoodLoss",
+        &["x", "labels"],
+        &["out"],
+        &[
+            Attr::Str("reduction", "mean"),
+            Attr::Int("ignore_index", 1),
+        ],
+    )];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "nll_mean"), 13);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[-1.0f32, -2.0, -3.0, -0.5, -1.5, -2.5],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 3]);
+    let labels = Tensor::from_slice(m.ctx(), &[0i64, 1], Some(dtype::INT64), None)
+        .reshape([2i64]);
+    let mut out = m
+        .run(&[("x", x), ("labels", labels)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    close(&got, &[1.0], 1e-6);
+}
+
+#[test]
+fn softmax_cross_entropy_loss_and_log_prob() {
+    let nodes = vec![b::node(
+        "SoftmaxCrossEntropyLoss",
+        &["scores", "labels"],
+        &["out", "log"],
+        &[Attr::Str("reduction", "mean")],
+    )];
+    let inputs = vec![
+        b::value_info("scores", b::FLOAT, &[Dim::Val(2), Dim::Val(3)]),
+        b::value_info("labels", b::INT64, &[Dim::Val(2)]),
+    ];
+    let outputs = vec![
+        b::value_info("out", b::FLOAT, &[]),
+        b::value_info("log", b::FLOAT, &[Dim::Val(2), Dim::Val(3)]),
+    ];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "sce"), 13);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let scores = Tensor::from_slice(m.ctx(), &[0.0f32; 6], Some(dtype::FLOAT32), None)
+        .reshape([2i64, 3]);
+    let labels = Tensor::from_slice(m.ctx(), &[0i64, 1], Some(dtype::INT64), None)
+        .reshape([2i64]);
+    let mut out = m
+        .run(&[("scores", scores), ("labels", labels)])
+        .expect("run");
+    let loss: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    let log: Vec<f32> = out.remove("log").unwrap().to_list(m.session_mut());
+    let ln3 = 3.0f32.ln();
+    close(&loss, &[ln3], 1e-5);
+    close(&log, &[-ln3; 6], 1e-5);
+}
+
+#[test]
 fn constant_constant_of_shape_and_cast() {
     let val = b::f32_tensor("val", &[1], &[7.0]);
     let nodes = vec![

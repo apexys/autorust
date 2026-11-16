@@ -165,7 +165,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `LayerNormalization RMSNormalization GroupNormalization InstanceNormalization` | ✅ | `nn` layers + `Tensor::layernorm`. |
 | `LpNormalization MeanVarianceNormalization` | ✅ | `normalize` + mean/var composition. |
 | `LRN` | ✅ | `avg_pool2d` + `pow`. |
-| `Softmax LogSoftmax SoftmaxCrossEntropyLoss NegativeLogLikelihoodLoss` | 🟡 | softmax/log-softmax done; the loss wrappers need `nll_loss`. |
+| `Softmax LogSoftmax SoftmaxCrossEntropyLoss NegativeLogLikelihoodLoss` | ✅ | `Tensor::nll_loss`/`softmax_cross_entropy` (class axis 1); weights, `ignore_index`, `none`/`mean`/`sum`, and the optional `log_prob` output. |
 | `Dropout` | 🟡 | inference only; `training_mode=true` is rejected. |
 | `Attention` | ✅ | `scaled_dot_product_attention`. |
 | `RotaryEmbedding` | 🟡 | port the DA3 RoPE helper (Embedding cos/sin tables). |

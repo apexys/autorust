@@ -286,6 +286,8 @@ impl OnnxModel {
                 )?;
                 one(crate::tensor::nn::log_softmax(inp(ins, 0)?, Some(axis)))
             }
+            "NegativeLogLikelihoodLoss" => self.nll_loss_op(node, ins, false),
+            "SoftmaxCrossEntropyLoss" => self.nll_loss_op(node, ins, true),
             "Clip" => {
                 let x = inp(ins, 0)?;
                 let lo = match opt(ins, 1) {
@@ -1593,6 +1595,43 @@ impl OnnxModel {
             }
         }
         self.build_like(x, &out, &out_shape)
+    }
+
+    /// `NegativeLogLikelihoodLoss` / `SoftmaxCrossEntropyLoss`: thin wrappers
+    /// over [`Tensor::nll_loss_axis`] (class axis 1), returning the optional
+    /// log-probabilities for the second `SoftmaxCrossEntropyLoss` output.
+    fn nll_loss_op(
+        &mut self,
+        node: &Node,
+        ins: &[Option<Tensor>],
+        softmax: bool,
+    ) -> Result<Vec<Tensor>> {
+        let scores = inp(ins, 0)?;
+        let labels = inp(ins, 1)?;
+        let weight = opt(ins, 2);
+        let reduction = node.attr_str("reduction", "mean");
+        if !matches!(reduction, "none" | "mean" | "sum") {
+            return Err(OnnxError::Unsupported(format!(
+                "loss reduction `{reduction}`"
+            )));
+        }
+        let ignore = node.attr_i64("ignore_index", i64::MIN);
+        let ignore = if ignore == i64::MIN {
+            None
+        } else {
+            Some(ignore)
+        };
+        let logp = if softmax {
+            crate::tensor::nn::log_softmax(scores, Some(1))
+        } else {
+            scores.clone()
+        };
+        let loss = logp.nll_loss_axis(labels, weight, ignore, reduction, 1);
+        let mut outs = vec![loss];
+        if softmax && node.outputs.len() > 1 {
+            outs.push(logp);
+        }
+        Ok(outs)
     }
 
     fn gather_elements(&mut self, x: &Tensor, idx: &Tensor, axis: usize) -> Result<Tensor> {

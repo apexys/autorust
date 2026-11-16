@@ -6380,3 +6380,26 @@ Gates: `tests/interpolate_cubic.rs` (constant field, 1-D 4→8 half-pixel, 2-D
 2×2→4×4 half-pixel, align-corners edge preservation) and
 `tests/onnx.rs::resize_cubic_half_pixel`; the existing
 `resize_linear_align_corners` and `nn_tensor_ops` interpolate cases still pass.
+
+### 9.104 NLL/softmax cross-entropy on Tensor + ONNX (2026-11-16)
+
+The ONNX `NegativeLogLikelihoodLoss` and `SoftmaxCrossEntropyLoss` wrappers now
+have framework-level equivalents instead of living in the importer:
+
+- `Tensor::nll_loss(target, weight, ignore_index, reduction)` and
+  `nll_loss_axis(..., axis)` (log-probabilities, class axis 1 by default),
+  plus `softmax_cross_entropy(_axis)` which applies `log_softmax` first.
+- Optional per-class weights scale each loss and the weighted `mean`
+  denominator; `ignore_index` zeroes those targets and removes them from the
+  denominator; `reduction` is `none`/`mean`/`sum`.
+- The ONNX ops are thin wrappers over `nll_loss_axis`, returning the log-probs
+  as the optional second `SoftmaxCrossEntropyLoss` output.
+
+The zero constants use `mul(0)` and a `ctx`-derived element count, so the
+helpers do not re-borrow the arena (`numel()` inside a borrowed context was the
+first bug the tests caught).
+
+Gates: `tests/loss.rs` (reductions, ignore, class weights, softmax CE, class
+axis 1 on a rank-3 input) and `tests/onnx.rs`
+(`negative_log_likelihood_loss_matches_manual`,
+`softmax_cross_entropy_loss_and_log_prob`).
