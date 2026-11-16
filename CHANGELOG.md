@@ -34,6 +34,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **ONNX `TensorScatter`.** KV-cache-style updates along axis -2 (graph
   one-hot/matmul) or any other axis (host fallback), with `linear`/`circular`
   modes and per-batch `write_indices` (`tests/onnx.rs`).
+- **Runtime ONNX shape inputs.** Models whose `Pad`/`Resize`/`Reshape`/... shape
+  inputs are not constants now run eagerly instead of replaying a baked shape
+  (`tests/onnx.rs::pad_with_runtime_pads_recomputes_each_run`).
 - **Per-dimension ONNX `Conv` strides/dilations.** 2-D convolutions with
   differing stride/dilation per spatial axis expand the kernel and subsample
   (`tests/onnx.rs`).

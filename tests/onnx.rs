@@ -1616,6 +1616,63 @@ fn pad_constant_and_edge_reflect_wrap() {
 }
 
 #[test]
+fn pad_with_runtime_pads_recomputes_each_run() {
+    let nodes = vec![b::node("Pad", &["x", "pads"], &["out"], &[])];
+    let inputs = vec![
+        b::value_info(
+            "x",
+            b::FLOAT,
+            &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(2)],
+        ),
+        b::value_info("pads", b::INT64, &[Dim::Val(8)]),
+    ];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(4), Dim::Val(4)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "pad"), 13);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 2.0, 3.0, 4.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([1i64, 1, 2, 2]);
+
+    let p1 = Tensor::from_slice(
+        m.ctx(),
+        &[0i64, 0, 1, 1, 0, 0, 1, 1],
+        Some(dtype::INT64),
+        None,
+    )
+    .reshape([8i64]);
+    let mut o1 = m.run(&[("x", x.clone()), ("pads", p1)]).expect("run 1");
+    let v1: Vec<f32> = o1.remove("out").unwrap().to_list(m.session_mut());
+    close(
+        &v1,
+        &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ],
+        1e-6,
+    );
+
+    // A different pads tensor with the same signature must not replay the
+    // first plan (the shape inputs are dynamic).
+    let p2 = Tensor::from_slice(
+        m.ctx(),
+        &[0i64, 0, 0, 0, 0, 0, 0, 2],
+        Some(dtype::INT64),
+        None,
+    )
+    .reshape([8i64]);
+    let mut o2 = m.run(&[("x", x), ("pads", p2)]).expect("run 2");
+    let v2: Vec<f32> = o2.remove("out").unwrap().to_list(m.session_mut());
+    close(&v2, &[1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0], 1e-6);
+}
+
+#[test]
 fn split_squeeze_unsqueeze_flatten_tile() {
     let split = b::i64_tensor("split", &[2], &[1, 3]);
     let nodes = vec![

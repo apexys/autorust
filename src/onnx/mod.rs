@@ -141,6 +141,24 @@ impl OnnxModel {
                     | "CenterCropPad"
             )
         });
+        let mut constant_names: std::collections::HashSet<String> =
+            values.keys().cloned().collect();
+        for n in &graph.nodes {
+            if n.op_type == "Constant" {
+                for o in &n.outputs {
+                    if !o.is_empty() {
+                        constant_names.insert(o.clone());
+                    }
+                }
+            }
+        }
+        let dynamic_shape = graph.nodes.iter().any(|n| {
+            shape_inputs(&n.op_type).iter().any(|&i| {
+                n.inputs
+                    .get(i)
+                    .is_some_and(|name| !name.is_empty() && !constant_names.contains(name))
+            })
+        });
         let mut model = OnnxModel {
             ctx,
             sess: Session::new(),
@@ -154,7 +172,7 @@ impl OnnxModel {
             host_i64: HashMap::new(),
             host_f64: HashMap::new(),
             plan: None,
-            plan_enabled: !data_dependent,
+            plan_enabled: !data_dependent && !dynamic_shape,
         };
         // `from_bytes` stages initializers on PYTHON and returns a
         // copy-to-device graph; a replay would otherwise re-run that copy
@@ -500,6 +518,24 @@ impl OnnxModel {
             .into_iter()
             .next()
             .ok_or_else(|| OnnxError::Shape("expected a scalar constant".into()))
+    }
+}
+
+/// Inputs whose *values* shape the output (or the arithmetic) and are therefore
+/// baked by a replay plan. A dynamic (non-constant) one disables the plan.
+fn shape_inputs(op: &str) -> &'static [usize] {
+    match op {
+        "ConstantOfShape" => &[0],
+        "Range" => &[0, 1, 2],
+        "Slice" => &[1, 2, 3, 4],
+        "Pad" => &[1, 2, 3],
+        "Resize" => &[1, 2, 3],
+        "OneHot" => &[1, 2],
+        "Reshape" | "Expand" | "Tile" | "TopK" | "Squeeze" | "Unsqueeze" | "Split" | "Trilu"
+        | "AffineGrid" | "CumSum" => &[1],
+        "ReduceSum" | "ReduceMean" | "ReduceMax" | "ReduceMin" | "ReduceProd" | "ReduceL1"
+        | "ReduceL2" | "ReduceSumSquare" | "ReduceLogSum" | "ReduceLogSumExp" => &[1],
+        _ => &[],
     }
 }
 

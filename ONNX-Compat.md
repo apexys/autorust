@@ -10,7 +10,7 @@ repeated labels), `GatherND` (all `batch_dims`)/`GatherElements`, `Pad` modes,
 except `tf_crop_and_resize`, aspect-ratio policy), the fused transformer ops
 (`SkipLayerNormalization`, `EmbedLayerNormalization`, `RotaryEmbedding`,
 `AffineGrid`) and the loss wrappers. Remaining T1 limitations are storage or
-rare attributes: zero-element tensors, runtime `Pad` pads (host constants),
+rare attributes: zero-element tensors, runtime shape inputs (evaluated eagerly),
 `GatherND` `k=0`, `ConvTranspose` per-dimension attributes, and
 `GatherElements`' host-index loop (correct, not fast). T2 (quantization,
 training ops, ONNX-ML, control flow) is not implemented.
@@ -90,8 +90,8 @@ outputs remain valid after it is dropped.
 - `Scatter*`, `NonZero`, `Compress`, `CenterCropPad`, `MaxUnpool`,
   `TensorScatter` and `GatherElements` depend on runtime indices/values, so the
   replay plan is disabled for a model that uses them (eager each call).
-- `Pad` supports constant/edge/reflect/wrap, not arbitrary dynamic pads
-  (pads must resolve to host constants).
+- `Pad` supports constant/edge/reflect/wrap. A non-constant pads/axes/value
+  input disables the replay plan; the eager path resolves them per run.
 - `Resize` supports linear/nearest/cubic, every
   `coordinate_transformation_mode` except `tf_crop_and_resize` (needs `roi`),
   `antialias`, `cubic_coeff_a`/`exclude_outside`, all four `nearest_mode`
@@ -151,7 +151,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Gather` | ✅ | `Tensor::gather`. |
 | `GatherElements GatherND` | ✅ | `GatherND` all `batch_dims` (`k=0` caveat); `GatherElements` host-index loop (correct, not fast; plan-disabled). |
 | `Scatter ScatterElements ScatterND TensorScatter` | ✅ | `Scatter*` host-side with negative indices and reduction `none`/`add`/`mul`/`max`/`min`; `TensorScatter` uses the graph one-hot/matmul on axis -2 (the KV layout) and a host fallback on other axes, with `linear`/`circular` and per-batch `write_indices`. |
-| `Pad` | ✅ | constant/edge/reflect/wrap with static (host-resolved) pads. |
+| `Pad` | ✅ | constant/edge/reflect/wrap; runtime pads/axes/value run eagerly. |
 | `Resize Upsample` | ✅ | linear/nearest/cubic, antialias, all coordinate modes except `tf_crop_and_resize`, all `nearest_mode`s, `keep_aspect_ratio_policy`. |
 | `Shape Size` | ✅ | runtime `int64` tensors; symbolic declared dims are bound from the input. |
 | `Range ConstantOfShape EyeLike OneHot Trilu` | ✅ | `arange`/`full`/`eye`/`one_hot`/`tril`/`triu`. |

@@ -6507,3 +6507,17 @@ scalar attributes.
 
 Gate: `tests/onnx.rs::conv_per_dimension_strides_and_dilation` (a 2×3 kernel,
 strides [1,2], dilations [1,2] against a host reference).
+
+### 9.110 ONNX dynamic shape inputs disable the replay plan (2026-11-16)
+
+A replay plan bakes the *values* of shape/index inputs (`Reshape`, `Expand`,
+`Tile`, `Slice`, `Pad`, `Resize`, `TopK`, `OneHot`, `Squeeze`/`Unsqueeze`,
+`Split`, `Trilu`, `AffineGrid`, `CumSum`, `Range`, the reduce axes). At load,
+each such input is checked against the initializers and `Constant` outputs; if
+it is dynamic (a graph input or produced by another node), the plan is
+disabled and the model runs eagerly. This closes the runtime-`Pad` gap and the
+same class for the other shape ops; constant-pad models keep the plan.
+
+Gate: `tests/onnx.rs::pad_with_runtime_pads_recomputes_each_run` — the same
+input signature with two different `pads` tensors must recompute (not replay
+the first shape).
