@@ -85,6 +85,14 @@ heuristic:
   the prologue per output column. Training 179 -> 94 ms; the split + staging
   together took it from 332 to 94 ms.
 
+A bounded per-shape tile autotuner was evaluated against these defaults (six
+candidate `AUTORUST_MM_*` families over the GEMM sweep, plus the existing BEAM=1
+keyed search). It found no reproducible headroom: 2048³ candidates were
+2.18-2.21 ms across repeats, the batched case was 0.41 ms for every family, ViT
+preferred the current default, and BEAM=1 measured 2.31 ms after a ~30 s cold
+search. The 4x4/8x8 shape rule stays; a tuner is only worth revisiting with a
+different candidate space such as tensor-core tiles (`CURRENT_STATE §9.88`).
+
 The generated f32 kernel is memory-bound at large K (no shared-memory tiling;
 every block re-reads A/B from global). Kernel-only (2026-11, `SYNC=1`,
 `NOSYNC=1`):

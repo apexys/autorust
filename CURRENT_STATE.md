@@ -5962,3 +5962,37 @@ Not landed: the host kernel needs a lower-level capture integration that can
 append the launch after the producer's buffer is scheduled without a hard
 `realize` boundary. The code, tests and flags were removed. The 3x3 tensor-core
 implicit-GEMM path remains open.
+
+### 9.88 Item 14 (keyed per-shape tile autotuner): measured rejection (2026-11-16)
+
+Evaluated the bounded keyed tuner on the existing generated-matmul tile knobs
+(`AUTORUST_MM_M/N/K/LM/LN`) and on the existing BEAM keyed search. Candidate
+families: the small default 4x4/UP2/TH64 `(4,4,4,2,64)`, the large default
+8x8/UP4/TH16 `(8,8,4,4,16)`, and 4x8, 8x4, 8x8/UP2/TH64, 4x4/UP4/TH16.
+
+GEMM sweep, RTX 3060:
+
+- Focused 2048^3, two repeats: default 2.201/2.180 ms (7.80/7.88 TF/s), small
+  2.204/2.187 ms, large 2.200/2.206 ms - **the candidates are indistinguishable**.
+- Batched 8x512^3: default 0.416 ms after warmup, small 0.408-0.412 ms, large
+  0.406-0.416 ms - also inside noise.
+- The wider 8-shape sweep moved by at most a few percent, in both directions,
+  and the ordering changed between repeats.
+
+The current default already picks the right family: 4x4 for `M*N < 1M`
+(batched/small) and 8x8 above (square projections). Forcing one family globally
+hurts the other:
+
+| workload | default | 4x4 forced | 8x8 forced |
+|---|---:|---:|---:|
+| ViT infer bs 8 | **70.0 ms** | 74.3 ms | 77.5 ms |
+| ResNet-18 infer bs 32 | 273-274 ms | 263-299 ms (unstable) | 282 ms |
+
+The existing BEAM=1 keyed search on `2048^3` measured 2.310 ms (7.44 TF/s)
+against 2.18-2.20 ms for the default, with ~30 s of cold search; it did not pay.
+
+Not landed: there is no reproducible per-shape headroom for a runtime tile
+tuner, and the keyed cache would add cold cost/complexity for noise. The
+existing shape heuristic stays. The full autotuner proposal should be revisited
+only with a different candidate space (e.g. an actual tensor-core tile), not
+the current register tiles.
