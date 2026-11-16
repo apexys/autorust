@@ -947,21 +947,27 @@ fn resolve_params(ctx: &UOpCtx, call: UopId) -> Vec<UopId> {
     ctx.srcs(&call)[1..].to_vec()
 }
 
-/// `exec_copy` (realize.py:168) — dest/src engine buffers; copies through
-/// the backend allocators (host bounce for cross-device/CL, shared host
-/// windows memcpy directly).
-fn exec_copy(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId) {
-    let resolved = resolve_params(ctx, call);
-    assert!(resolved.len() >= 2, "TGERR: copy call args");
-    let dest = buffer_of(ctx, t, (resolved[0]).clone());
-    let src = buffer_of(ctx, t, (resolved[1]).clone());
+/// Copy `src` into `dest` through the backend allocators (host bounce for a
+/// real cross-device copy, shared host windows memcpy directly).
+///
+/// Callers that bind stable buffers (the ONNX plan's inputs, `exec_copy`) use
+/// this directly so a per-step input does not rebuild + re-schedule a STORE
+/// graph.
+pub(crate) fn copy_buffer(
+    dest: &crate::runtime::buffer::Buffer,
+    src: &crate::runtime::buffer::Buffer,
+) {
     let dest_dev = device(dest.device());
     let src_dev = device(src.device());
     dest.ensure_allocated(&dest_dev);
     src.ensure_allocated(&src_dev);
     let d = dest.get_buf(&dest_dev);
     let s = src.get_buf(&src_dev);
-    if dest.device() == src.device() {
+    // Device names are not always canonical (`CUDA` vs `CUDA:0`), so compare
+    // the canonical form: a false mismatch turns every copy into a host bounce.
+    let same_dev = crate::runtime::device::canonicalize_device_name(dest.device())
+        == crate::runtime::device::canonicalize_device_name(src.device());
+    if same_dev {
         crate::engine::prof::count("copy.d2d");
         dest_dev.allocator._copy_into(&*d, &*s);
         return;
@@ -970,6 +976,15 @@ fn exec_copy(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId) {
     let mut tmp = vec![0u8; s.size()];
     src_dev.allocator._copyout(&mut tmp, &*s);
     dest_dev.allocator._copyin(&*d, &tmp);
+}
+
+/// `exec_copy` (realize.py:168) — dest/src engine buffers.
+fn exec_copy(ctx: &mut UOpCtx, t: &mut BufTable, call: UopId) {
+    let resolved = resolve_params(ctx, call);
+    assert!(resolved.len() >= 2, "TGERR: copy call args");
+    let dest = buffer_of(ctx, t, (resolved[0]).clone());
+    let src = buffer_of(ctx, t, (resolved[1]).clone());
+    copy_buffer(&dest, &src);
 }
 
 /// `exec_kernel` (realize.py:180) — launch the PROGRAM through the device.

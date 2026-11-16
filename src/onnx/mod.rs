@@ -141,7 +141,7 @@ impl OnnxModel {
                     | "CenterCropPad"
             )
         });
-        Ok(OnnxModel {
+        let mut model = OnnxModel {
             ctx,
             sess: Session::new(),
             device: device.map(str::to_string),
@@ -155,7 +155,16 @@ impl OnnxModel {
             host_f64: HashMap::new(),
             plan: None,
             plan_enabled: !data_dependent,
-        })
+        };
+        // `from_bytes` stages initializers on PYTHON and returns a
+        // copy-to-device graph; a replay would otherwise re-run that copy
+        // (a host bounce) on every step. Materialize them once here.
+        {
+            let mut c = model.ctx.borrow_mut();
+            let vals: Vec<Tensor> = model.values.values().cloned().collect();
+            Tensor::realize_many(&mut c, &mut model.sess, vals.iter());
+        }
+        Ok(model)
     }
 
     /// The arena that owns this model's tensors.
@@ -210,8 +219,15 @@ impl OnnxModel {
             && let Some(plan) = self.plan.as_mut()
             && plan.sig == sig
         {
+            crate::engine::prof::count("onnx.replay");
             for (name, dst) in &plan.inputs {
-                dst.assign(&mut self.sess, &env_in[name]);
+                let src = &env_in[name];
+                let mut c = self.ctx.borrow_mut();
+                src.realize_device_ctx(&mut c, &mut self.sess);
+                drop(c);
+                let db = dst.realized_buffer().expect("plan input storage");
+                let sb = src.realized_buffer().expect("input storage");
+                crate::engine::realize::copy_buffer(&db, &sb);
             }
             let outs = {
                 let mut c = self.ctx.borrow_mut();
@@ -223,8 +239,10 @@ impl OnnxModel {
         if self.plan_enabled
             && let Some(out) = self.run_captured(env_in.clone(), sig)?
         {
+            crate::engine::prof::count("onnx.capture");
             return Ok(out);
         }
+        crate::engine::prof::count("onnx.eager");
         self.run_eager(env_in)
     }
 

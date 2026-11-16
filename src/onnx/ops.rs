@@ -881,6 +881,14 @@ impl OnnxModel {
                 let reduction = node.attr_str("reduction", "none");
                 one(self.scatter_nd(data, indices, updates, reduction)?)
             }
+            "TensorScatter" => {
+                let past = inp(ins, 0)?;
+                let update = inp(ins, 1)?;
+                let write = opt(ins, 2);
+                let axis = node.attr_i64("axis", -2);
+                let mode = node.attr_str("mode", "linear");
+                one(self.tensor_scatter_op(past, update, write, axis, mode)?)
+            }
 
             // ---------------- creation ----------------
             "Range" => {
@@ -1026,6 +1034,10 @@ impl OnnxModel {
                 }
                 Ok(vec![out, mean, inv])
             }
+            "SkipLayerNormalization" => self.skip_layer_norm_op(node, ins),
+            "EmbedLayerNormalization" => self.embed_layer_norm_op(node, ins),
+            "RotaryEmbedding" => self.rotary_embedding_op(node, ins),
+            "AffineGrid" => self.affine_grid_op(node, ins),
             "InstanceNormalization" => {
                 let x = inp(ins, 0)?;
                 let scale = inp(ins, 1)?;
@@ -1632,6 +1644,375 @@ impl OnnxModel {
             outs.push(logp);
         }
         Ok(outs)
+    }
+
+    fn skip_layer_norm_op(&mut self, node: &Node, ins: &[Option<Tensor>]) -> Result<Vec<Tensor>> {
+        let x = inp(ins, 0)?;
+        let skip = inp(ins, 1)?;
+        let gamma = inp(ins, 2)?;
+        let beta = opt(ins, 3);
+        let bias = opt(ins, 4);
+        let eps = node.attr_f64("epsilon", 1e-12);
+        let mut sum = x.add(skip);
+        if let Some(b) = bias {
+            sum = sum.add(b);
+        }
+        let ndim = sum.shape().as_slice().len();
+        let axis = vec![ndim - 1];
+        let mean = sum.mean(Some(&axis), true);
+        let inv = sum
+            .sub(&mean)
+            .square()
+            .mean(Some(&axis), true)
+            .add(eps)
+            .rsqrt();
+        let normed = sum.sub(&mean).mul(&inv).mul(gamma);
+        let out = match beta {
+            Some(b) => normed.add(b),
+            None => normed,
+        };
+        let n = node.outputs.len();
+        let mut outs = Vec::with_capacity(n);
+        outs.push(out);
+        if n > 1 {
+            outs.push(mean);
+        }
+        if n > 2 {
+            outs.push(inv);
+        }
+        if n > 3 {
+            outs.push(sum);
+        }
+        Ok(outs)
+    }
+
+    fn embed_layer_norm_op(&mut self, node: &Node, ins: &[Option<Tensor>]) -> Result<Vec<Tensor>> {
+        let input_ids = inp(ins, 0)?;
+        let segment_ids = opt(ins, 1);
+        let word = inp(ins, 2)?;
+        let pos = inp(ins, 3)?;
+        let segment = opt(ins, 4);
+        let gamma = opt(ins, 5);
+        let beta = opt(ins, 6);
+        let mask = opt(ins, 7);
+        let position_ids = opt(ins, 8);
+        let eps = node.attr_f64("epsilon", 1e-12);
+        if mask.is_some() {
+            return Err(OnnxError::Unsupported(
+                "EmbedLayerNormalization mask".into(),
+            ));
+        }
+        if segment_ids.is_some() != segment.is_some() {
+            return Err(OnnxError::Shape(
+                "EmbedLayerNormalization segment inputs".into(),
+            ));
+        }
+        let shape = input_ids.shape().into_vec();
+        let seq = shape[1].clone().as_i64().unwrap_or(0);
+        let pos_ids = match position_ids {
+            Some(p) => p.clone(),
+            None => Tensor::arange(&self.ctx, 0.0, Some(seq as f64), 1.0, Some(dtype::INT64))
+                .reshape([1i64, seq])
+                .expand(shape.clone()),
+        };
+        let embed = |ids: &Tensor, w: &Tensor| w.getitem(&[Ix::Tensor(ids.clone())]);
+        let mut sum = embed(input_ids, word).add(embed(&pos_ids, pos));
+        if let (Some(ids), Some(w)) = (segment_ids, segment) {
+            sum = sum.add(embed(ids, w));
+        }
+        let ndim = sum.shape().as_slice().len();
+        let axis = vec![ndim - 1];
+        let mean = sum.mean(Some(&axis), true);
+        let inv = sum
+            .sub(&mean)
+            .square()
+            .mean(Some(&axis), true)
+            .add(eps)
+            .rsqrt();
+        let mut out = sum.sub(&mean).mul(&inv);
+        if let Some(g) = gamma {
+            out = out.mul(g);
+        }
+        if let Some(b) = beta {
+            out = out.add(b);
+        }
+        let n = node.outputs.len();
+        let mut outs = Vec::with_capacity(n);
+        outs.push(out);
+        if n > 1 {
+            if !node.outputs[1].is_empty() {
+                return Err(OnnxError::Unsupported(
+                    "EmbedLayerNormalization mask_index output".into(),
+                ));
+            }
+            outs.push(sum.clone());
+        }
+        if n > 2 {
+            outs.push(sum);
+        }
+        Ok(outs)
+    }
+
+    fn rotary_embedding_op(&mut self, node: &Node, ins: &[Option<Tensor>]) -> Result<Vec<Tensor>> {
+        let x = inp(ins, 0)?;
+        let cos = inp(ins, 1)?;
+        let sin = inp(ins, 2)?;
+        let pos = opt(ins, 3);
+        let interleaved = node.attr_i64("interleaved", 0) != 0;
+        let num_heads = node.attr_i64("num_heads", 0);
+        let rot_dim = node.attr_i64("rotary_embedding_dim", 0);
+        let orig_rank = x.shape().as_slice().len();
+        let x4 = match orig_rank {
+            4 => x.permute(&[0, 2, 1, 3]),
+            3 => {
+                if num_heads <= 0 {
+                    return Err(OnnxError::Unsupported(
+                        "RotaryEmbedding 3-D input needs num_heads".into(),
+                    ));
+                }
+                let sh = x.shape().into_vec();
+                let b = sh[0].clone().as_i64().unwrap_or(0);
+                let s = sh[1].clone().as_i64().unwrap_or(0);
+                let h = sh[2].clone().as_i64().unwrap_or(0);
+                if h % num_heads != 0 {
+                    return Err(OnnxError::Shape("RotaryEmbedding hidden/heads".into()));
+                }
+                x.reshape([b, s, num_heads, h / num_heads])
+            }
+            _ => {
+                return Err(OnnxError::Unsupported(format!(
+                    "RotaryEmbedding rank {orig_rank}"
+                )));
+            }
+        };
+        let head = x4.shape().as_slice()[3].clone().as_i64().unwrap_or(0);
+        let rd = if rot_dim > 0 { rot_dim } else { head };
+        if rd % 2 != 0 || rd > head {
+            return Err(OnnxError::Shape("RotaryEmbedding rot_dim".into()));
+        }
+        let half = (rd / 2) as i64;
+        let mut xr_ix = vec![Ix::All; 4];
+        xr_ix[3] = Ix::Range {
+            start: Some(0),
+            stop: Some(rd),
+            step: 1,
+        };
+        let x_rot = x4.getitem(&xr_ix);
+        let mut xp_ix = vec![Ix::All; 4];
+        xp_ix[3] = Ix::Range {
+            start: Some(rd),
+            stop: None,
+            step: 1,
+        };
+        let x_pass = x4.getitem(&xp_ix);
+        let prep = |cache: &Tensor| -> Tensor {
+            let mut t = match pos {
+                Some(p) => cache.getitem(&[Ix::Tensor(p.clone())]),
+                None => {
+                    let seq = x4.shape().as_slice()[2].clone().as_i64().unwrap_or(0);
+                    cache.getitem(&[
+                        Ix::Range {
+                            start: Some(0),
+                            stop: Some(seq),
+                            step: 1,
+                        },
+                        Ix::All,
+                    ])
+                }
+            };
+            let rank = t.shape().as_slice().len();
+            let mut cix = vec![Ix::All; rank];
+            cix[rank - 1] = Ix::Range {
+                start: Some(0),
+                stop: Some(half),
+                step: 1,
+            };
+            t = t.getitem(&cix);
+            if t.shape().as_slice().len() == 2 {
+                t = t.unsqueeze(0);
+            }
+            t.unsqueeze(2)
+        };
+        let cos = prep(cos);
+        let sin = prep(sin);
+        let (x1, x2) = if interleaved {
+            let mut ex = vec![Ix::All; 4];
+            ex[3] = Ix::Range {
+                start: Some(0),
+                stop: None,
+                step: 2,
+            };
+            let mut ox = vec![Ix::All; 4];
+            ox[3] = Ix::Range {
+                start: Some(1),
+                stop: None,
+                step: 2,
+            };
+            (x_rot.getitem(&ex), x_rot.getitem(&ox))
+        } else {
+            let mut a = vec![Ix::All; 4];
+            a[3] = Ix::Range {
+                start: Some(0),
+                stop: Some(half),
+                step: 1,
+            };
+            let mut b = vec![Ix::All; 4];
+            b[3] = Ix::Range {
+                start: Some(half),
+                stop: None,
+                step: 1,
+            };
+            (x_rot.getitem(&a), x_rot.getitem(&b))
+        };
+        let real = x1.mul(&cos).sub(x2.mul(&sin));
+        let imag = x1.mul(&sin).add(x2.mul(&cos));
+        let rotated = if interleaved {
+            real.unsqueeze(-1)
+                .cat(&[imag.unsqueeze(-1)], -1)
+                .flatten(-2, -1)
+        } else {
+            real.cat(&[imag], -1)
+        };
+        let output = rotated.cat(&[x_pass], -1);
+        let output = if orig_rank == 3 {
+            output.flatten(2, 3)
+        } else {
+            output.permute(&[0, 2, 1, 3])
+        };
+        Ok(vec![output])
+    }
+
+    fn affine_grid_op(&mut self, node: &Node, ins: &[Option<Tensor>]) -> Result<Vec<Tensor>> {
+        let theta = inp(ins, 0)?;
+        let size = self.i64s(inp(ins, 1)?)?;
+        let align = node.attr_i64("align_corners", 0) != 0;
+        let tshape: Vec<i64> = theta
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        if tshape.len() != 3 {
+            return Err(OnnxError::Shape("AffineGrid theta rank".into()));
+        }
+        let n = tshape[0];
+        let ndim = tshape[1] as usize;
+        if size.len() != ndim + 2 {
+            return Err(OnnxError::Shape("AffineGrid size length".into()));
+        }
+        let spatial: Vec<i64> = size[2..].to_vec();
+        let grid = |steps: i64| -> Tensor {
+            if align {
+                Tensor::linspace(&self.ctx, -1.0, 1.0, steps, None)
+            } else {
+                let a = -1.0 + 1.0 / steps as f64;
+                Tensor::linspace(&self.ctx, a, 1.0 - 1.0 / steps as f64, steps, None)
+            }
+        };
+        let mut coords: Vec<Tensor> = Vec::with_capacity(ndim);
+        for d in 0..ndim {
+            let steps = spatial[ndim - 1 - d];
+            let mut rshape = vec![1i64; ndim];
+            rshape[ndim - 1 - d] = steps;
+            coords.push(grid(steps).reshape(rshape).expand(spatial.clone()));
+        }
+        let ones = coords[0].mul(0.0).add(1.0);
+        let base = coords[0].unsqueeze(-1);
+        let mut rest: Vec<Tensor> = coords[1..].iter().map(|t| t.unsqueeze(-1)).collect();
+        rest.push(ones.unsqueeze(-1));
+        let base = base.cat(&rest, -1);
+        let prod: i64 = spatial.iter().product();
+        let flat = base
+            .reshape([1i64, prod, (ndim + 1) as i64])
+            .expand([n, prod, (ndim + 1) as i64]);
+        let out = flat.matmul(theta.transpose(1, 2));
+        let mut oshape = vec![n];
+        oshape.extend_from_slice(&spatial);
+        oshape.push(ndim as i64);
+        Ok(vec![out.reshape(oshape)])
+    }
+
+    fn tensor_scatter_op(
+        &mut self,
+        past: &Tensor,
+        update: &Tensor,
+        write: Option<&Tensor>,
+        axis: i64,
+        mode: &str,
+    ) -> Result<Tensor> {
+        let shape: Vec<i64> = past
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let rank = shape.len();
+        let ax = resolve_index(axis, rank as i64) as usize;
+        if ax != rank - 2 {
+            return Err(OnnxError::Unsupported(
+                "TensorScatter axis other than -2".into(),
+            ));
+        }
+        if !matches!(mode, "linear" | "circular") {
+            return Err(OnnxError::Unsupported(format!("TensorScatter mode `{mode}`")));
+        }
+        let b = shape[0];
+        let d = shape[rank - 2];
+        let last = shape[rank - 1];
+        let pfx: i64 = shape[1..rank - 2].iter().product();
+        let p = b.saturating_mul(pfx);
+        let ushape: Vec<i64> = update
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let seq = ushape[rank - 2];
+        if seq <= 0 || p <= 0 || d <= 0 {
+            return Err(OnnxError::Shape("TensorScatter empty update".into()));
+        }
+        let past_f = past.reshape([p, d, last]).cast(dtype::FLOAT32);
+        let upd_f = update.reshape([p, seq, last]).cast(dtype::FLOAT32);
+        let write = match write {
+            Some(w) => w.cast(dtype::INT64),
+            None => Tensor::full_const(
+                &mut self.ctx.borrow_mut(),
+                [b],
+                ConstVal::Int(0),
+                Some(dtype::INT64),
+            ),
+        };
+        let w = write.reshape([b, 1]).expand([b, pfx]).reshape([p, 1]);
+        let sidx = Tensor::arange(
+            &self.ctx,
+            0.0,
+            Some(seq as f64),
+            1.0,
+            Some(dtype::INT64),
+        )
+        .reshape([1, seq]);
+        let mut cidx = w.add(&sidx);
+        if mode == "circular" {
+            cidx = cidx.mod_(d);
+        } else {
+            let mx = cidx
+                .max(None, false)
+                .to_list::<i64>(&mut self.sess)
+                .first()
+                .copied()
+                .unwrap_or(0);
+            if mx >= d {
+                return Err(OnnxError::Runtime(
+                    "TensorScatter write exceeds max_sequence_length".into(),
+                ));
+            }
+        }
+        let mask = cidx.unsqueeze(-1).one_hot_along_dim(d, -1).cast(dtype::FLOAT32);
+        let scattered = mask.transpose(1, 2).matmul(&upd_f);
+        let has = mask.max(Some(&[1]), false);
+        let keep = has.mul(-1.0).add(1.0).unsqueeze(-1);
+        let present = past_f.mul(&keep).add(&scattered);
+        Ok(present.cast(past.dtype()).reshape(shape))
     }
 
     fn gather_elements(&mut self, x: &Tensor, idx: &Tensor, axis: usize) -> Result<Tensor> {

@@ -28,6 +28,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ignore_index`, `none`/`mean`/`sum`), and the ONNX
   `NegativeLogLikelihoodLoss`/`SoftmaxCrossEntropyLoss` wrappers over them
   (`tests/loss.rs`, `tests/onnx.rs`).
+- **Fused ONNX transformer/vision ops.** `SkipLayerNormalization`,
+  `EmbedLayerNormalization`, `RotaryEmbedding` and `AffineGrid` as
+  compositions over the existing `Tensor` primitives (`tests/onnx.rs`).
+- **ONNX `TensorScatter`.** KV-cache-style updates along axis -2 with
+  `linear`/`circular` modes and per-batch `write_indices`, as a graph
+  one-hot/matmul (`tests/onnx.rs`).
 - **Generalized ONNX `Einsum`.** `Tensor::einsum_many` (and the two-operand
   `einsum` wrapper) now supports N operands, ellipsis with right-aligned
   broadcasting, repeated labels (diagonal/trace) and implicit output. The ONNX
@@ -97,7 +103,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **`--no-default-features` builds again.** The fused reduction and conv
+- **ONNX replay no longer re-uploads weights or re-schedules input copies.**
+  Initializers are materialized once at load and plan inputs are bound with a
+  raw buffer copy (`copy_buffer`, canonical device comparison). Fused-op
+  replay: SkipLayerNorm 8.0 → 0.54 ms, EmbedLayerNorm 5.7 → 0.05, Rotary
+  2.1 → 0.13, AffineGrid 1.86 → 0.12 ms on RTX 3060. The fused reduction and conv
   helpers referenced `runtime::cuda_reduce` / `runtime::cuda_conv_tc`
   unconditionally; they are now behind `backend_cuda`, like the kernels
   they call.

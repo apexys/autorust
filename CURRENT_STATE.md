@@ -6427,3 +6427,66 @@ Gates: `tests/resize.rs` (asymmetric, half_pixel_symmetric,
 tf_half_pixel_for_nn, linear/cubic antialias against an independent host
 kernel) and `tests/onnx.rs` (asymmetric linear, antialias linear,
 not_larger aspect ratio), plus the existing cubic/linear/nearest tests.
+
+### 9.106 ONNX fused transformer/vision ops (2026-11-16)
+
+Implemented the remaining fused ops as compositions over the existing
+`Tensor` primitives (no new kernels):
+
+- **`SkipLayerNormalization`**: `sum = x + skip (+ bias)`, then
+  `(sum - mean) * inv_std * gamma (+ beta)` over the last axis; optional
+  `mean`, `inv_std_var` and pre-layernorm `input` outputs.
+- **`EmbedLayerNormalization`**: `word[ids] + pos[position_ids] (+
+  segment[seg_ids])` via `getitem`, then layernorm + affine; `position_ids`
+  defaults to `arange(seq)`; optional `embedding_sum`. `mask`/`mask_index`
+  are unsupported (the upstream reference also skips them).
+- **`RotaryEmbedding`**: 4-D (B,H,S,D) or 3-D (B,S,H*D with `num_heads`),
+  interleaved or half-split, optional `position_ids`/`rotary_embedding_dim`;
+  the cos/sin caches are sliced/gathered and broadcast over heads.
+- **`AffineGrid`**: 2-D/3-D base grid from `linspace` (with `align_corners`),
+  tiled to `(N, prod(spatial), ndim+1)` and mapped by `theta`.
+
+Gates in `tests/onnx.rs`: `skip_layer_normalization_matches_manual`,
+`embed_layer_normalization_matches_manual`, `rotary_embedding_identity`,
+`affine_grid_identity`.
+
+### 9.107 ONNX replay: initializers and input binding (2026-11-16)
+
+Two pre-existing replay costs made every ONNX model pay per step:
+
+1. **Initializers were re-uploaded.** `from_bytes` stages bytes on `PYTHON` and
+   returns a `copy_to_device` graph; the plan captured that copy, so a replay
+   bounced the weights through host memory. Materialize `values` once at load
+   (`Tensor::realize_many`) so the plan references device buffers.
+2. **Input binding re-scheduled a STORE graph.** The plan replay called
+   `dst.assign(src)`, which builds and schedules a STORE every step. Replace it
+   with a raw buffer copy (`engine::realize::copy_buffer`) after realizing the
+   source; `copy_buffer` also compares canonical device names so `CUDA` vs
+   `CUDA:0` cannot turn a d2d copy into a host bounce.
+
+Measured with a temporary replay harness (RTX 3060; BERT/ViT shapes), per step:
+
+| op | before | after |
+|---|---:|---:|
+| SkipLayerNormalization [1,128,768] | 8.0 ms | **0.54 ms** |
+| EmbedLayerNormalization (vocab 4096) | 5.7 ms | **0.05 ms** |
+| RotaryEmbedding [1,12,128,64] | 2.1 ms | **0.13 ms** |
+| AffineGrid [8,224,224,2] | 1.86 ms | **0.12 ms** |
+
+`onnx_resnet`/`onnx_mnist` are kernel-bound and stay at ~7.6/1.8 ms; the win is
+for layernorm/embedding-heavy ONNX models. The `onnx.replay`/`onnx.capture`
+profile counters remain for diagnosis.
+
+### 9.108 ONNX TensorScatter (2026-11-16)
+
+`TensorScatter` (opset 24) updates a KV-style cache: the update rows are
+written at `write_indices[b] + s` along axis -2 (`linear`, or modulo
+`max_sequence_length` for `circular`). Implemented as a graph
+one-hot/matmul: `mask = one_hot(write_index + arange(seq))`,
+`scattered = maskᵀ @ update`, then `present = past * (1 - any_mask) +
+scattered`; `write_indices` defaults to zero. Axis -2 is supported (the KV
+layout); other axes and out-of-range linear writes return `Unsupported`. The op
+is in the plan-disabled set because the write indices are runtime.
+
+Gate: `tests/onnx.rs::tensor_scatter_kv_cache_linear_and_circular` (the spec's
+linear example plus a circular wrap).

@@ -80,9 +80,9 @@ outputs remain valid after it is dropped.
 
 - `NonZero`/`Compress` with an empty selection return `Unsupported`: the
   storage layer cannot allocate zero-element tensors yet.
-- `Scatter*`, `NonZero`, `Compress`, `CenterCropPad`, `MaxUnpool` and
-  `GatherElements` are host-side (they realize their index/selection inputs),
-  so a model that uses them runs eagerly; the replay plan is disabled for it.
+- `Scatter*`, `NonZero`, `Compress`, `CenterCropPad`, `MaxUnpool`,
+  `TensorScatter` and `GatherElements` depend on runtime indices/values, so the
+  replay plan is disabled for a model that uses them (eager each call).
 - `Pad` supports constant/edge/reflect/wrap, not arbitrary dynamic pads
   (pads must resolve to host constants).
 - `Resize` supports linear/nearest/cubic, every
@@ -143,7 +143,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Slice` | ✅ | `Ix::Range`; constant starts/ends/axes/steps. |
 | `Gather` | ✅ | `Tensor::gather`. |
 | `GatherElements GatherND` | 🟡 | `GatherND` supports all `batch_dims`; `GatherElements` uses a host-index loop (also plan-disabled). |
-| `Scatter ScatterElements ScatterND` | ✅ | host-side; `axis`/negative indices and reduction `none`/`add`/`mul`/`max`/`min`. `TensorScatter` remains missing. |
+| `Scatter ScatterElements ScatterND TensorScatter` | ✅ | `Scatter*` host-side with negative indices and reduction `none`/`add`/`mul`/`max`/`min`; `TensorScatter` is a graph one-hot/matmul for axis -2, `linear`/`circular`, per-batch `write_indices`. |
 | `Pad` | ✅ | constant/edge/reflect/wrap with static (host-resolved) pads. |
 | `Resize Upsample` | ✅ | linear/nearest/cubic, antialias, all coordinate modes except `tf_crop_and_resize`, all `nearest_mode`s, `keep_aspect_ratio_policy`. |
 | `Shape Size` | ✅ | runtime `int64` tensors; symbolic declared dims are bound from the input. |
@@ -168,9 +168,10 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Softmax LogSoftmax SoftmaxCrossEntropyLoss NegativeLogLikelihoodLoss` | ✅ | `Tensor::nll_loss`/`softmax_cross_entropy` (class axis 1); weights, `ignore_index`, `none`/`mean`/`sum`, and the optional `log_prob` output. |
 | `Dropout` | 🟡 | inference only; `training_mode=true` is rejected. |
 | `Attention` | ✅ | `scaled_dot_product_attention`. |
-| `RotaryEmbedding` | 🟡 | port the DA3 RoPE helper (Embedding cos/sin tables). |
-| `SkipLayerNormalization EmbedLayerNormalization` | 🟡 | compositions (layernorm + residual + embedding). |
-| `AffineGrid` | 🟡 | grid construction from arange/linear. |
+| `RotaryEmbedding` | ✅ | 3-D/4-D, interleaved, `position_ids`, optional `rotary_embedding_dim`. |
+| `SkipLayerNormalization` | ✅ | residual (+bias) + layernorm + affine; optional mean/inv_std/input outputs. |
+| `EmbedLayerNormalization` | ✅ | word/position/(segment) embedding + layernorm; the optional `mask_index` output is unsupported. |
+| `AffineGrid` | ✅ | 2-D/3-D base grid from `theta`, `align_corners`. |
 | `If` | T2 | subgraph runner; `Loop` is not in tinygrad's table. |
 | `OptionalGetElement OptionalHasElement` | T2 | optional/sequence value plumbing. |
 

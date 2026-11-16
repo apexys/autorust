@@ -253,7 +253,12 @@ How to read it:
 
 - **Replay plan.** MNIST 11.7 → 1.8 ms, ResNet-0.25 73.8 → 9.7 ms; recaptures
   on a shape change, `set_plan_cache(false)` forces eager.
-- **`Conv` → tensor-core kernel.** -29% on ONNX ResNet (above).
+- **`Conv` → tensor-core kernel.** -29% on ONNX ResNet (above).- **`Conv` → tensor-core kernel.** -29% on ONNX ResNet (above).
+- **Replay no longer re-uploads weights or re-schedules inputs.** Initializers
+  are materialized once at load and plan inputs use a raw `copy_buffer` instead
+  of a per-step STORE graph. Fused-op replay (BERT/ViT shapes): SkipLayerNorm
+  8.0 → 0.54 ms, EmbedLayerNorm 5.7 → 0.05, Rotary 2.1 → 0.13, AffineGrid
+  1.86 → 0.12 (`CURRENT_STATE §9.107`).
 - **Graph preprocessing.** Measured skip: 0 `Constant` nodes; 16 `Identity`
   nodes alias to 0 kernels; the replay is 29 kernels/step; torch already
   folded BN; the remaining gap was conv lowering, not graph work.

@@ -712,6 +712,228 @@ fn resize_cubic_half_pixel() {
 }
 
 #[test]
+fn skip_layer_normalization_matches_manual() {
+    let nodes = vec![b::node(
+        "SkipLayerNormalization",
+        &["x", "skip", "gamma", "beta"],
+        &["out"],
+        &[Attr::Float("epsilon", 1e-12)],
+    )];
+    let inputs = vec![
+        b::value_info("x", b::FLOAT, &[Dim::Val(1), Dim::Val(2)]),
+        b::value_info("skip", b::FLOAT, &[Dim::Val(1), Dim::Val(2)]),
+        b::value_info("gamma", b::FLOAT, &[Dim::Val(2)]),
+        b::value_info("beta", b::FLOAT, &[Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(1), Dim::Val(2)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "sln"), 13);
+    let got = f32_model(
+        &bytes,
+        &[
+            ("x", vec![1.0, 2.0], vec![1, 2]),
+            ("skip", vec![3.0, 4.0], vec![1, 2]),
+            ("gamma", vec![2.0, 3.0], vec![2]),
+            ("beta", vec![1.0, -1.0], vec![2]),
+        ],
+        "out",
+    );
+    close(&got, &[-1.0, 2.0], 1e-5);
+}
+
+#[test]
+fn embed_layer_normalization_matches_manual() {
+    let nodes = vec![b::node(
+        "EmbedLayerNormalization",
+        &["input_ids", "", "word", "pos", "", "gamma", "beta"],
+        &["out"],
+        &[Attr::Float("epsilon", 1e-12)],
+    )];
+    let inputs = vec![
+        b::value_info("input_ids", b::INT64, &[Dim::Val(1), Dim::Val(1)]),
+        b::value_info("word", b::FLOAT, &[Dim::Val(2), Dim::Val(2)]),
+        b::value_info("pos", b::FLOAT, &[Dim::Val(1), Dim::Val(2)]),
+        b::value_info("gamma", b::FLOAT, &[Dim::Val(2)]),
+        b::value_info("beta", b::FLOAT, &[Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(2)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "eln"), 13);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let ids = Tensor::from_slice(m.ctx(), &[0i64], Some(dtype::INT64), None)
+        .reshape([1i64, 1]);
+    let word = Tensor::from_slice(m.ctx(), &[1.0f32, 2.0, 3.0, 4.0], Some(dtype::FLOAT32), None)
+        .reshape([2i64, 2]);
+    let pos = Tensor::from_slice(m.ctx(), &[0.0f32, 0.0], Some(dtype::FLOAT32), None)
+        .reshape([1i64, 2]);
+    let gamma = Tensor::from_slice(m.ctx(), &[1.0f32, 1.0], Some(dtype::FLOAT32), None);
+    let beta = Tensor::from_slice(m.ctx(), &[0.0f32, 0.0], Some(dtype::FLOAT32), None);
+    let mut out = m
+        .run(&[
+            ("input_ids", ids),
+            ("word", word),
+            ("pos", pos),
+            ("gamma", gamma),
+            ("beta", beta),
+        ])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    close(&got, &[-1.0, 1.0], 1e-5);
+}
+
+#[test]
+fn rotary_embedding_identity() {
+    let nodes = vec![b::node(
+        "RotaryEmbedding",
+        &["x", "cos", "sin", "pos"],
+        &["out"],
+        &[
+            Attr::Int("interleaved", 0),
+            Attr::Int("num_heads", 1),
+            Attr::Int("rotary_embedding_dim", 4),
+        ],
+    )];
+    let inputs = vec![
+        b::value_info(
+            "x",
+            b::FLOAT,
+            &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(4)],
+        ),
+        b::value_info("cos", b::FLOAT, &[Dim::Val(2), Dim::Val(2)]),
+        b::value_info("sin", b::FLOAT, &[Dim::Val(2), Dim::Val(2)]),
+        b::value_info("pos", b::INT64, &[Dim::Val(1), Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(4)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "rope"), 13);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let x = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([1i64, 1, 2, 4]);
+    let cos = Tensor::from_slice(m.ctx(), &[1.0f32; 4], Some(dtype::FLOAT32), None)
+        .reshape([2i64, 2]);
+    let sin = Tensor::from_slice(m.ctx(), &[0.0f32; 4], Some(dtype::FLOAT32), None)
+        .reshape([2i64, 2]);
+    let pos = Tensor::from_slice(m.ctx(), &[0i64, 1], Some(dtype::INT64), None)
+        .reshape([1i64, 2]);
+    let mut out = m
+        .run(&[("x", x), ("cos", cos), ("sin", sin), ("pos", pos)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    close(&got, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 1e-5);
+}
+
+#[test]
+fn affine_grid_identity() {
+    let size = b::i64_tensor("size", &[4], &[1, 1, 2, 2]);
+    let nodes = vec![b::node(
+        "AffineGrid",
+        &["theta", "size"],
+        &["out"],
+        &[Attr::Int("align_corners", 0)],
+    )];
+    let inputs = vec![b::value_info(
+        "theta",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(2), Dim::Val(3)],
+    )];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(2), Dim::Val(2), Dim::Val(2)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[size], &inputs, &outputs, "ag"), 13);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let theta = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([1i64, 2, 3]);
+    let mut out = m.run(&[("theta", theta)]).expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    close(&got, &[-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5], 1e-5);
+}
+
+#[test]
+fn tensor_scatter_kv_cache_linear_and_circular() {
+    // Linear: write one row per batch at write_indices.
+    let nodes = vec![b::node(
+        "TensorScatter",
+        &["past", "update", "write"],
+        &["out"],
+        &[Attr::Str("mode", "linear")],
+    )];
+    let inputs = vec![
+        b::value_info("past", b::FLOAT, &[Dim::Val(2), Dim::Val(1), Dim::Val(4), Dim::Val(5)]),
+        b::value_info("update", b::FLOAT, &[Dim::Val(2), Dim::Val(1), Dim::Val(1), Dim::Val(5)]),
+        b::value_info("write", b::INT64, &[Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2), Dim::Val(1), Dim::Val(4), Dim::Val(5)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "ts"), 24);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let past_data = [
+        1.0f32, 2.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 8.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 4.0,
+        3.0, 2.0, 1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 8.0, 9.0, 8.0, 7.0, 6.0,
+        5.0, 4.0, 4.0, 3.0, 2.0, 1.0, 0.0,
+    ];
+    let upd_data = [5.0f32, 5.0, 5.0, 5.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+    let past = Tensor::from_slice(m.ctx(), &past_data, Some(dtype::FLOAT32), None)
+        .reshape([2i64, 1, 4, 5]);
+    let update = Tensor::from_slice(m.ctx(), &upd_data, Some(dtype::FLOAT32), None)
+        .reshape([2i64, 1, 1, 5]);
+    let write = Tensor::from_slice(m.ctx(), &[1i64, 2], Some(dtype::INT64), None)
+        .reshape([2i64]);
+    let mut out = m
+        .run(&[("past", past), ("update", update), ("write", write)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    let expected = [
+        1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 8.0, 7.0, 6.0, 5.0, 4.0, 4.0, 3.0,
+        2.0, 1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 8.0, 9.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 4.0, 3.0, 2.0, 1.0, 0.0,
+    ];
+    close(&got, &expected, 1e-6);
+
+    // Circular: two rows starting at index 2 in a length-3 cache wrap to 2,0.
+    let nodes = vec![b::node(
+        "TensorScatter",
+        &["past", "update", "write"],
+        &["out"],
+        &[Attr::Str("mode", "circular")],
+    )];
+    let inputs = vec![
+        b::value_info("past", b::FLOAT, &[Dim::Val(1), Dim::Val(1), Dim::Val(3), Dim::Val(1)]),
+        b::value_info("update", b::FLOAT, &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(1)]),
+        b::value_info("write", b::INT64, &[Dim::Val(1)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(1), Dim::Val(1), Dim::Val(3), Dim::Val(1)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "tsc"), 24);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let past = Tensor::from_slice(m.ctx(), &[1.0f32, 2.0, 3.0], Some(dtype::FLOAT32), None)
+        .reshape([1i64, 1, 3, 1]);
+    let update = Tensor::from_slice(m.ctx(), &[7.0f32, 8.0], Some(dtype::FLOAT32), None)
+        .reshape([1i64, 1, 2, 1]);
+    let write = Tensor::from_slice(m.ctx(), &[2i64], Some(dtype::INT64), None)
+        .reshape([1i64]);
+    let mut out = m
+        .run(&[("past", past), ("update", update), ("write", write)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    close(&got, &[8.0, 2.0, 7.0], 1e-6);
+}
+
+#[test]
 fn resize_asymmetric_linear() {
     let sizes = b::i64_tensor("sizes", &[4], &[1, 1, 1, 8]);
     let nodes = vec![b::node(
@@ -995,14 +1217,14 @@ fn negative_gather_indices_are_normalized() {
 
 #[test]
 fn unsupported_op_reports_the_name() {
-    let nodes = vec![b::node("TensorScatter", &["x"], &["out"], &[])];
+    let nodes = vec![b::node("MaxRoiPool", &["x"], &["out"], &[])];
     let inputs = vec![b::value_info("x", b::FLOAT, &[Dim::Val(3)])];
     let outputs = vec![b::value_info("out", b::INT64, &[Dim::Val(1)])];
     let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "nz"), 17);
     let mut m = OnnxModel::from_bytes(&bytes, None).unwrap();
     let x = Tensor::from_slice(m.ctx(), &[1.0f32, 0.0, 2.0], Some(dtype::FLOAT32), None);
     match m.run(&[("x", x)]) {
-        Err(OnnxError::Unsupported(s)) => assert!(s.contains("TensorScatter"), "{s}"),
+        Err(OnnxError::Unsupported(s)) => assert!(s.contains("MaxRoiPool"), "{s}"),
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }
