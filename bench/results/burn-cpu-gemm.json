@@ -1,0 +1,63 @@
+{
+  "framework": "burn",
+  "version": "0.22.1",
+  "device": "CPU",
+  "workload": "gemm",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 0.0,
+  "ms_median": 382.9558,
+  "ms_min": 0.0,
+  "ms_iqr": 0.0,
+  "images_per_s": 0.0,
+  "cases": [
+    {
+      "case": "f32 1024\u00b3",
+      "ms": 6.6647,
+      "tflops": 0.3222
+    },
+    {
+      "case": "f32 2048\u00b3",
+      "ms": 37.3634,
+      "tflops": 0.4598
+    },
+    {
+      "case": "f32 4096\u00b3",
+      "ms": 208.4479,
+      "tflops": 0.6593
+    },
+    {
+      "case": "f32 1024x1024x4096",
+      "ms": 12.6497,
+      "tflops": 0.6791
+    },
+    {
+      "case": "f32 4096x1024x1024",
+      "ms": 26.0616,
+      "tflops": 0.3296
+    },
+    {
+      "case": "f32 TN 2048\u00b3",
+      "ms": 43.5283,
+      "tflops": 0.3947
+    },
+    {
+      "case": "f32 NT 2048\u00b3",
+      "ms": 42.3052,
+      "tflops": 0.4061
+    },
+    {
+      "case": "f32 batched 8x512\u00b3",
+      "ms": 5.935,
+      "tflops": 0.3618
+    }
+  ],
+  "name": "burn-cpu-gemm",
+  "variant": "cpu",
+  "commit": "8a6f7ea",
+  "date": "2026-11-16T09:00:21",
+  "notes": "Flex CPU"
+}

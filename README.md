@@ -74,24 +74,30 @@ Here's a benchmark ([`bench`](https://github.com/apexys/autorust/tree/main/bench
 
 See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md) for methodology and tuning.
 
-| workload | device | autorust | candle | torch | tinygrad |
-|---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 64 | CPU | 19.0 ms (RUST) | 434.6 ms | **17.5 ms** | 404.4 ms |
-| MNIST CNN train, bs 64 | CUDA | 3.5 ms | 17.4 ms | **2.3 ms** | 8.4 ms |
-| MNIST CNN train, bs 512 | CPU | **63.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
-| MNIST CNN train, bs 512 | CUDA | 22.4 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | **156.4 ms** (RUST) | 229.4 ms | 165.1 ms | 14639.3 ms |
-| ViT-B/16 infer, bs 1 | CUDA | 14.2 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1103.1 ms (RUST) | 1403.5 ms | **826.9 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 69.8 ms | 114.6 ms | **48.6 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 95.9 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| workload | device | autorust | burn | candle | torch | tinygrad |
+|---|---|---:|---:|---:|---:|---:|
+| MNIST CNN train, bs 64 | CPU | 19.0 ms (RUST) | 76.6 ms (Flex) | 434.6 ms | **17.5 ms** | 404.4 ms |
+| MNIST CNN train, bs 64 | CUDA | 3.5 ms | 4.3 ms | 17.4 ms | **2.3 ms** | 8.4 ms |
+| MNIST CNN train, bs 512 | CPU | **63.2 ms** (RUST) | 611.6 ms (Flex) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CUDA | 22.4 ms | 32.0 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| ViT-B/16 infer, bs 1 | CPU | **156.4 ms** (RUST) | 195.7 ms (Flex) | 229.4 ms | 165.1 ms | 14639.3 ms |
+| ViT-B/16 infer, bs 1 | CUDA | 14.2 ms | 9.4 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
+| ViT-B/16 infer, bs 8 | CPU | 1103.1 ms (RUST) | 1194.6 ms (Flex) | 1403.5 ms | **826.9 ms** | — |
+| ViT-B/16 infer, bs 8 | CUDA | 69.8 ms | 52.1 ms | 114.6 ms | **48.6 ms** | 136.2 ms |
+| ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | 1048.4 ms (Flex) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CUDA | 95.9 ms | 36.8 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
-ViT training remains the largest gap: at bs 1 autorust/CUDA is 95.9 ms vs
-torch's 43.8 ms, and at bs 4 it is 216.7 ms vs 100.4 ms. The remaining cost is
-steady-state f32 GEMM/elementwise throughput rather than launch overhead. MNIST
-scales the other way: autorust is 2.8x faster than torch on CPU at bs 512 and
-within 1.1x at bs 64. Full sweep in
+Burn's f32 CUDA matmul stages operands as TF32, while the autorust/candle/torch
+rows are strict f32; the Burn CPU rows are strict f32. With that caveat, Burn is
+2.4-2.6x faster than autorust on CUDA ViT training and within 7% of torch at
+bs 8 inference; candle remains the fastest ViT-training framework. autorust
+keeps the CPU MNIST and inference lead; on CPU ViT training burn is 1.6x ahead
+of autorust, torch 2.7x and candle 6.7x. ViT training remains the largest gap
+to candle and torch: at bs 1 autorust/CUDA is 95.9 ms vs torch's 43.8 ms, and at
+bs 4 it is 216.7 ms vs 100.4 ms. The remaining cost is steady-state f32
+GEMM/elementwise throughput rather than launch overhead. MNIST scales the other
+way: autorust is 2.8x faster than torch on CPU at bs 512 and within 1.1x at
+bs 64. Full sweep in
 [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#batch-size-scaling).
 
 ### More workloads

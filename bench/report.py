@@ -103,7 +103,7 @@ def main():
             for c in r["cases"]:
                 key = (c["case"], norm_device(r["device"]))
                 table.setdefault(key, {})[fw] = (c["ms"], c.get(metric) if metric else None)
-        frameworks = [f for f in ("autorust", "candle", "torch", "tinygrad")
+        frameworks = [f for f in ("autorust", "candle", "burn", "torch", "tinygrad")
                       if any(f in v for v in table.values())]
         head = "| case | device | " + " | ".join(frameworks) + " |"
         lines += [head, "|---|---|" + "---:|" * len(frameworks)]

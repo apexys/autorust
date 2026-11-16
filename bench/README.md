@@ -1,9 +1,9 @@
 # Cross-framework benchmark
 
-Compares **autorust**, **candle**, **torch** and **tinygrad** on the same
-workloads, on CPU and CUDA. This directory is development-only: it is excluded
-from the published crate, and `bench/candle` is a standalone package so candle
-never enters autorust's dependency graph.
+Compares **autorust**, **burn**, **candle**, **torch** and **tinygrad** on the
+same workloads, on CPU and CUDA. This directory is development-only: it is
+excluded from the published crate, and `bench/candle` and `bench/burn` are
+standalone packages so neither framework enters autorust's dependency graph.
 
 Results live in [`results/`](results) as raw JSON plus a generated
 `summary.md`; the curated table is in [`../PERFORMANCE.md`](../PERFORMANCE.md).
@@ -30,7 +30,10 @@ Results live in [`results/`](results) as raw JSON plus a generated
 
 `VK` (Vulkan) and `CL` (OpenCL) rows cover the same workloads as the `RUST`/
 `CUDA` ones, without clBLAST on the CL side, so the two GPU APIs can be compared
-directly; `PERFORMANCE.md` has the summary and the known gaps.
+directly; `PERFORMANCE.md` has the summary and the known gaps. Burn covers
+`mnist_train`, `vit_infer`, `vit_train` and `gemm` (f32/bf16); the conv, LLM,
+ONNX and frozen-plan rows remain autorust-vs-torch because the burn driver does
+not implement those models.
 
 Inputs are **synthetic and device-resident** (`rand` for MNIST, `zeros` for
 ViT), with fixed labels; the timed region is one training/inference step and
@@ -55,7 +58,22 @@ transpose or stride shows up as a divergent loss.
   single-threaded and is labelled as such.
 - autorust runs with `Jit` capture/replay (its steady-state path), tinygrad
   with `TinyJit`, torch eager (no `torch.compile`), candle without JIT (it has
-  none).
+  none). Burn relies on its own fusion (CubeCL backends fuse by default) plus
+  per-shape kernel autotuning; its compiled-kernel and tuner caches persist
+  across processes (`persistence` feature), so the `run.py` warm pass makes the
+  timed process start from compiled kernels. Burn's first call still compiles
+  and benchmarks candidates, so its `ms_cold` is much larger and is excluded
+  from steady-state tables.
+- Burn CPU is `Device::flex()` (the pure-Rust CPU backend burn's examples use;
+  NdArray is deprecated in 0.22), built with SIMD + rayon. Burn CUDA is
+  `Device::cuda(0)` through CubeCL. ViT inference calls burn's fused attention
+  op (`burn::tensor::module::attention`, flash on CUDA); training uses the
+  autodiff fallback (materialized scores), matching the other drivers.
+- **Burn's f32 matmul on CUDA stages operands as TF32** (`cubek`'s
+  `adjust_dtypes` selects the TF32 tensor-core tile when the device supports
+  it). The autorust, candle and torch f32 rows are strict f32 (torch defaults
+  to `highest` precision), so the burn f32 CUDA numbers are not a bit-for-bit
+  apples-to-apples comparison. The burn CPU rows are strict f32.
 - On CPU autorust uses `AUTORUST_ATTN=sdpa`; the fused FlashAttention path is
   CUDA-only and the graph-level port is much slower (see `PERFORMANCE.md`). On
   CUDA it uses the fused flash path.
@@ -105,10 +123,11 @@ Caveats that affect interpretation:
 | torch | 2.6.0+cu124 (Python 3.12.11) |
 | tinygrad | v0.14.0 (`6f87158d7`) |
 | candle | 0.11.1 |
+| burn | 0.22.1 (CubeCL 0.11.4, cubek 0.3.1) |
 
 The committed results in [`results/`](results) are from commit `5cf311a`
 (2026-11-10); the candle runs were re-taken at `82f6408` after the CUDA
-class-token fix.
+class-token fix, and the burn rows at `8a6f7ea` (2026-11-16).
 
 ## Running
 
@@ -125,6 +144,7 @@ UV_CACHE_DIR=/tmp/opencode/uv-cache uv pip install \
 cargo build --release -p autorust-bench
 cargo build --release --example vit_freeze                   # frozen-plan row
 (cd bench/candle && cargo build --release --features cuda)   # CPU path included
+(cd bench/burn && cargo build --release)                     # Flex CPU + CUDA
 
 # 3. Run / report
 bench/run.py --list

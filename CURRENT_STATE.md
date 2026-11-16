@@ -5675,3 +5675,63 @@ by the schedule) - i.e. the serialized-plan work and its buffer-slot risk. The
 benchmark captures once per process, so a same-process instruction cache has no
 consumer to measure; the cacheable slice is the ~73 ms schedule+callify of a
 ~500-730 ms cold start. Recorded as a measured skip for the cheaper variant.
+
+### 9.80 Burn cross-framework benchmark and code review (2026-11-16)
+
+Added `bench/burn` (standalone crate, `burn = 0.22.1` with CubeCL 0.11.4/cubek
+0.3.1, `cuda` + `flex` + `persistence`) and wired it into `bench/run.py` /
+`bench/report.py`. It runs the same `beautiful_mnist` CNN, ViT-B/16
+infer/train and GEMM sweep as the other drivers, with burn's own fusion and
+per-shape autotune enabled. CPU is `Device::flex()` (the backend burn's examples
+use; NdArray is deprecated), CUDA is `Device::cuda(0)`. Eval uses
+`burn::tensor::module::attention` (fused flash/flex); training uses the autodiff
+fallback (materialized scores), matching the other drivers. `run.py` gives burn
+a warm cache pass; the first call still compiles/autotunes (2-50 s of `ms_cold`).
+
+Measured (median ms/step; RTX 3060 / Ryzen 3900X, commit `8a6f7ea`):
+
+| workload | device | autorust | burn | torch | candle |
+|---|---|---:|---:|---:|---:|
+| MNIST train bs 512 | CPU | **63.2** (RUST) | 611.6 (Flex) | 175.9 | 3902.0 |
+| MNIST train bs 512 | CUDA | **22.4** | 32.0 | 13.1 | 131.9 |
+| MNIST train bs 64 | CPU | 19.0 (RUST) | 76.6 (Flex) | **17.5** | 434.6 |
+| MNIST train bs 64 | CUDA | 3.5 | 4.3 | **2.3** | 17.4 |
+| ViT infer bs 1 | CPU | **156.4** (RUST) | 195.7 (Flex) | 165.1 | 229.4 |
+| ViT infer bs 1 | CUDA | 14.2 | 9.4 | **8.7** | 19.2 |
+| ViT infer bs 8 | CPU | 1103.1 (RUST) | 1194.6 (Flex) | **826.9** | 1403.5 |
+| ViT infer bs 8 | CUDA | 69.8 | 52.1 | **48.6** | 114.6 |
+| ViT train bs 1 | CPU | 1634.5 (RUST) | 1048.4 (Flex) | 616.3 | **243.4** |
+| ViT train bs 1 | CUDA | 95.9 | 36.8 | 43.8 | **19.0** |
+| ViT train bs 4 | CPU | 3861.2 (RUST) | 2428.8 (Flex) | 1470.0 | **851.3** |
+| ViT train bs 4 | CUDA | 216.7 | 88.7 | 100.4 | **62.4** |
+
+GEMM (TFLOP/s): burn 10.4 at f32 4096³ (autorust 8.0), 22.1 at bf16 4096³
+(autorust 14.5, torch 25.3), 0.66 at CPU f32 4096³ (autorust 0.4, candle 0.8).
+The burn f32 CUDA numbers use TF32 tensor cores (cubek `adjust_dtypes`), while
+the autorust/candle/torch rows are strict f32; the burn CPU rows are strict f32.
+That caveat is carried in `bench/README.md`, `PERFORMANCE.md` and `README.md`.
+
+What the burn source suggests for us (recorded as items 11-15 in
+`PROPOSED_OPTIMIZATIONS.md`):
+
+1. **Implicit-GEMM conv with tensor-core tiles and per-shape autotune**
+   (`burn-cubecl/src/kernel/conv/forward/`): direct/1x1/depthwise/implicit-GEMM
+   (CMMA/MMA, async, TMA) candidates selected by `LocalTuner`. This addresses
+   our largest absolute gap (ResNet-18 CUDA 17x, UNet 12x behind torch).
+2. **Fused single-pass reductions/softmax** (`burn-cubecl/src/kernel/reduce/tune.rs`
+   plus fusion): matches our memops gap (softmax 155 vs torch 288 GB/s, amax 64
+   vs 292) without a separate two-pass broadcast.
+3. **A keyed per-shape autotuner** for the remaining tiled matmul/conv
+   candidates, reusing our `opt_search` and disk cache. Burn's candidates are
+   keyed by anchored shape/dtype/layout/alignment and persisted; our knobs are
+   global or per-run.
+4. **Broadcast-rhs batched matmul folding** (`burn-std/src/tensor/matmul.rs`)
+   for decode/per-head shapes, and **multi-stream execution** for independent
+   SINKs (`burn-fusion/src/stream/multi.rs`), complementing the CUDA-graph item
+   for `llm_decode`.
+
+Do not copy burn's TF32 default (our f32 stays strict; TF32 is opt-in) or its
+Flex CPU backend: Flex is 1.6x faster than RUST on CPU ViT training but ~10x
+slower on the MNIST CNN, so the useful part is the conv tiling/autotune, not the
+backend swap. No optimisation was landed in this pass; these are measured
+baselines for the backlog.

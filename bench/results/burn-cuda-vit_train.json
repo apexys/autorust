@@ -1,0 +1,21 @@
+{
+  "framework": "burn",
+  "version": "0.22.1",
+  "device": "CUDA",
+  "workload": "vit_train",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 3,
+  "iters": 5,
+  "ms_cold": 5315.5345,
+  "ms_median": 36.8455,
+  "ms_min": 33.278,
+  "ms_iqr": 3.3756,
+  "images_per_s": 27.14,
+  "name": "burn-cuda-vit_train",
+  "variant": "cuda",
+  "commit": "8a6f7ea",
+  "date": "2026-11-16T08:59:46",
+  "notes": "CubeCL + autotune"
+}

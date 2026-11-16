@@ -1,0 +1,21 @@
+{
+  "framework": "burn",
+  "version": "0.22.1",
+  "device": "CUDA",
+  "workload": "vit_infer",
+  "batch": 8,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 3,
+  "iters": 5,
+  "ms_cold": 1715.3929,
+  "ms_median": 52.0528,
+  "ms_min": 49.781,
+  "ms_iqr": 1.0899,
+  "images_per_s": 153.69,
+  "name": "burn-cuda-vit_infer-bs8",
+  "variant": "cuda",
+  "commit": "8a6f7ea",
+  "date": "2026-11-16T08:59:23",
+  "notes": "fused attention"
+}

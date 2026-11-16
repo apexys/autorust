@@ -29,6 +29,7 @@ TORCH_PY = BENCH / ".venv" / "bin" / "python"
 TINYGRAD_PY = ROOT.parent / "tinygrad" / ".venv" / "bin" / "python"
 AUTORUST_BIN = ROOT / "target" / "release" / "autorust-bench"
 CANDLE_BIN = BENCH / "candle" / "target" / "release" / "candle-bench"
+BURN_BIN = BENCH / "burn" / "target" / "release" / "burn-bench"
 
 # (name, framework, device, workload, batch, warmup, iters, notes)
 RUNS = [
@@ -38,6 +39,8 @@ RUNS = [
     ("autorust-rayon-mnist", "autorust", "RAYON", "mnist_train", 32, 0, 1, "typed interpreter, bs=32 (per-step memory growth)"),
     ("candle-cpu-mnist", "candle", "cpu", "mnist_train", 512, 2, 8, ""),
     ("candle-cuda-mnist", "candle", "cuda", "mnist_train", 512, 2, 8, ""),
+    ("burn-cpu-mnist", "burn", "cpu", "mnist_train", 512, 3, 8, "Flex CPU"),
+    ("burn-cuda-mnist", "burn", "cuda", "mnist_train", 512, 3, 8, "CubeCL + autotune"),
     ("torch-cpu-mnist", "torch", "cpu", "mnist_train", 512, 2, 10, ""),
     ("torch-cuda-mnist", "torch", "cuda", "mnist_train", 512, 2, 10, ""),
     ("tinygrad-cpu-mnist", "tinygrad", "cpu", "mnist_train", 512, 2, 5, "single-threaded"),
@@ -47,6 +50,8 @@ RUNS = [
     ("autorust-cuda-mnist-bs64", "autorust", "CUDA", "mnist_train", 64, 3, 10, ""),
     ("candle-cpu-mnist-bs64", "candle", "cpu", "mnist_train", 64, 2, 8, ""),
     ("candle-cuda-mnist-bs64", "candle", "cuda", "mnist_train", 64, 2, 8, ""),
+    ("burn-cpu-mnist-bs64", "burn", "cpu", "mnist_train", 64, 3, 8, "Flex CPU"),
+    ("burn-cuda-mnist-bs64", "burn", "cuda", "mnist_train", 64, 3, 8, "CubeCL + autotune"),
     ("torch-cpu-mnist-bs64", "torch", "cpu", "mnist_train", 64, 2, 10, ""),
     ("torch-cuda-mnist-bs64", "torch", "cuda", "mnist_train", 64, 2, 10, ""),
     ("tinygrad-cpu-mnist-bs64", "tinygrad", "cpu", "mnist_train", 64, 2, 5, "single-threaded"),
@@ -56,6 +61,8 @@ RUNS = [
     ("autorust-cuda-vit_infer-bs1", "autorust", "CUDA", "vit_infer", 1, 1, 3, "fused FA2"),
     ("candle-cpu-vit_infer-bs1", "candle", "cpu", "vit_infer", 1, 1, 2, ""),
     ("candle-cuda-vit_infer-bs1", "candle", "cuda", "vit_infer", 1, 1, 3, ""),
+    ("burn-cpu-vit_infer-bs1", "burn", "cpu", "vit_infer", 1, 2, 3, "Flex CPU, fused attention"),
+    ("burn-cuda-vit_infer-bs1", "burn", "cuda", "vit_infer", 1, 3, 5, "fused attention"),
     ("torch-cpu-vit_infer-bs1", "torch", "cpu", "vit_infer", 1, 1, 3, ""),
     ("torch-cuda-vit_infer-bs1", "torch", "cuda", "vit_infer", 1, 1, 3, ""),
     ("tinygrad-cpu-vit_infer-bs1", "tinygrad", "cpu", "vit_infer", 1, 0, 1, "single-threaded"),
@@ -65,6 +72,8 @@ RUNS = [
     ("autorust-cuda-vit_infer-bs8", "autorust", "CUDA", "vit_infer", 8, 1, 3, "fused FA2"),
     ("candle-cpu-vit_infer-bs8", "candle", "cpu", "vit_infer", 8, 1, 2, ""),
     ("candle-cuda-vit_infer-bs8", "candle", "cuda", "vit_infer", 8, 1, 3, ""),
+    ("burn-cpu-vit_infer-bs8", "burn", "cpu", "vit_infer", 8, 2, 3, "Flex CPU, fused attention"),
+    ("burn-cuda-vit_infer-bs8", "burn", "cuda", "vit_infer", 8, 3, 5, "fused attention"),
     ("torch-cpu-vit_infer-bs8", "torch", "cpu", "vit_infer", 8, 1, 2, ""),
     ("torch-cuda-vit_infer-bs8", "torch", "cuda", "vit_infer", 8, 1, 3, ""),
     ("tinygrad-cuda-vit_infer-bs8", "tinygrad", "cuda", "vit_infer", 8, 1, 3, ""),
@@ -73,6 +82,8 @@ RUNS = [
     ("autorust-cuda-vit_train", "autorust", "CUDA", "vit_train", 1, 1, 3, "SDPA (training)"),
     ("candle-cpu-vit_train", "candle", "cpu", "vit_train", 1, 1, 2, ""),
     ("candle-cuda-vit_train", "candle", "cuda", "vit_train", 1, 1, 3, ""),
+    ("burn-cpu-vit_train", "burn", "cpu", "vit_train", 1, 2, 3, "Flex CPU"),
+    ("burn-cuda-vit_train", "burn", "cuda", "vit_train", 1, 3, 5, "CubeCL + autotune"),
     ("torch-cpu-vit_train", "torch", "cpu", "vit_train", 1, 1, 2, ""),
     ("torch-cuda-vit_train", "torch", "cuda", "vit_train", 1, 1, 3, ""),
     ("tinygrad-cuda-vit_train", "tinygrad", "cuda", "vit_train", 1, 1, 3, ""),
@@ -81,6 +92,8 @@ RUNS = [
     ("autorust-cuda-vit_train-bs4", "autorust", "CUDA", "vit_train", 4, 1, 3, "SDPA (training)"),
     ("candle-cpu-vit_train-bs4", "candle", "cpu", "vit_train", 4, 1, 2, ""),
     ("candle-cuda-vit_train-bs4", "candle", "cuda", "vit_train", 4, 1, 3, ""),
+    ("burn-cpu-vit_train-bs4", "burn", "cpu", "vit_train", 4, 2, 3, "Flex CPU"),
+    ("burn-cuda-vit_train-bs4", "burn", "cuda", "vit_train", 4, 3, 5, "CubeCL + autotune"),
     ("torch-cpu-vit_train-bs4", "torch", "cpu", "vit_train", 4, 1, 2, ""),
     ("torch-cuda-vit_train-bs4", "torch", "cuda", "vit_train", 4, 1, 3, ""),
     ("tinygrad-cuda-vit_train-bs4", "tinygrad", "cuda", "vit_train", 4, 1, 3, ""),
@@ -89,10 +102,13 @@ RUNS = [
     ("autorust-cuda-gemm", "autorust", "CUDA", "gemm", 1, 1, 3, ""),
     ("candle-cpu-gemm", "candle", "cpu", "gemm", 1, 1, 3, ""),
     ("candle-cuda-gemm", "candle", "cuda", "gemm", 1, 1, 3, ""),
+    ("burn-cpu-gemm", "burn", "cpu", "gemm", 1, 2, 3, "Flex CPU"),
+    ("burn-cuda-gemm", "burn", "cuda", "gemm", 1, 2, 3, "CubeCL autotune"),
     ("torch-cpu-gemm", "torch", "cpu", "gemm", 1, 1, 3, ""),
     ("torch-cuda-gemm", "torch", "cuda", "gemm", 1, 1, 3, ""),
     ("tinygrad-cuda-gemm", "tinygrad", "cuda", "gemm", 1, 1, 3, ""),
     ("autorust-cuda-gemm-bf16", "autorust", "CUDA", "gemm_bf16", 1, 1, 3, ""),
+    ("burn-cuda-gemm-bf16", "burn", "cuda", "gemm_bf16", 1, 2, 3, "CubeCL autotune"),
     ("torch-cuda-gemm-bf16", "torch", "cuda", "gemm_bf16", 1, 1, 3, ""),
     ("autorust-rust-memops", "autorust", "RUST", "memops", 1, 2, 5, ""),
     ("autorust-cuda-memops", "autorust", "CUDA", "memops", 1, 2, 5, ""),
@@ -251,6 +267,23 @@ def cmd_candle(device, workload, batch, warmup, iters):
     return [str(CANDLE_BIN)], env
 
 
+def cmd_burn(device, workload, batch, warmup, iters):
+    if not BURN_BIN.exists():
+        raise SystemExit("missing burn-bench: (cd bench/burn && cargo build --release)")
+    env = base_env()
+    base = {"gemm_bf16": "gemm"}.get(workload, workload)
+    env.update(
+        BENCH_DEVICE=device,
+        BENCH_WORKLOAD=base,
+        BENCH_BS=str(batch),
+        BENCH_WARMUP=str(warmup),
+        BENCH_ITERS=str(iters),
+    )
+    if workload.endswith("bf16"):
+        env["BENCH_BF16"] = "1"
+    return [str(BURN_BIN)], env
+
+
 def cmd_torch(device, workload, batch, warmup, iters):
     dtype = "bf16" if workload.endswith("bf16") else "f32"
     base = {"gemm_bf16": "gemm"}.get(workload, workload)
@@ -274,6 +307,7 @@ def cmd_tinygrad(device, workload, batch, warmup, iters):
 COMMANDS = {
     "autorust": cmd_autorust,
     "candle": cmd_candle,
+    "burn": cmd_burn,
     "torch": cmd_torch,
     "tinygrad": cmd_tinygrad,
 }
@@ -306,10 +340,10 @@ def main():
         cmd, env = COMMANDS[framework](device, workload, batch, warmup, iters)
         print(f"==> {name}: {' '.join(cmd)}", flush=True)
         t = time.time()
-        if framework == "autorust":
-            # Warm the on-disk caches (PTX + rendered kernels) like the docs'
-            # protocol says; otherwise ms_cold measures this binary's first
-            # process after a rebuild. Discard the result.
+        if framework in ("autorust", "burn"):
+            # Warm the on-disk caches (PTX/compiled kernels + autotune picks)
+            # like the docs' protocol says; otherwise ms_cold measures this
+            # binary's first process after a rebuild. Discard the result.
             warm = dict(env, BENCH_ITERS="0", BENCH_WARMUP="0")
             subprocess.run(cmd, cwd=ROOT, env=warm, capture_output=True,
                            text=True, timeout=args.timeout)

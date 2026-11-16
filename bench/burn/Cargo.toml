@@ -1,0 +1,20 @@
+[package]
+name = "burn-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "burn side of the autorust cross-framework benchmark (dev-only)"
+
+# Standalone so burn's dependency tree never enters the autorust lockfile.
+[workspace]
+
+[dependencies]
+# `cuda` is the CubeCL CUDA runtime; `flex` is the recommended pure-Rust CPU
+# backend (SIMD + rayon by default). The binary picks one at run time from
+# BENCH_DEVICE, so a single build covers both tables.
+burn = { version = "=0.22.1", features = ["cuda", "flex", "persistence"] }
+
+[profile.release]
+# Burn's fused CubeCL kernels are compiled at run time; the host side is not
+# the hot path, but opt-level 3 matches the other bench crates.
+opt-level = 3

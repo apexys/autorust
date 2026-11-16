@@ -1,0 +1,21 @@
+{
+  "framework": "burn",
+  "version": "0.22.1",
+  "device": "CPU",
+  "workload": "vit_infer",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 945.7804,
+  "ms_median": 195.7456,
+  "ms_min": 188.4669,
+  "ms_iqr": 10.9161,
+  "images_per_s": 5.11,
+  "name": "burn-cpu-vit_infer-bs1",
+  "variant": "cpu",
+  "commit": "8a6f7ea",
+  "date": "2026-11-16T08:59:05",
+  "notes": "Flex CPU, fused attention"
+}

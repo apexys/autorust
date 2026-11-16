@@ -648,100 +648,180 @@ there only rounds the f16-representable activations.
 ## Cross-framework comparison
 
 [`bench/`](bench/README.md) runs the same two models — `beautiful_mnist` CNN
-training and ViT-B/16 — through autorust, candle, torch and tinygrad on CPU and
-CUDA. Inputs are synthetic and device-resident, the timed region is one
+training and ViT-B/16 — through autorust, burn, candle, torch and tinygrad on
+CPU and CUDA. Inputs are synthetic and device-resident, the timed region is one
 training/inference step (no data loading, evaluation or logging), and each run
 is a fresh process with warmup. Raw JSON and the generated per-run tables are in
 [`bench/results/`](bench/results); these medians are from the `0.2.0` sources
 (commit `63cfeaf`; later A/B runs improve some rows further) on the
 environment above
 (the candle runs were re-taken at `82f6408` with the class-token fix; torch is
-eager, no `torch.compile`; autorust uses `Jit`, tinygrad `TinyJit`).
+eager, no `torch.compile`; autorust uses `Jit`, tinygrad `TinyJit`; burn uses
+its own fusion plus per-shape autotuning, and its rows were taken at `8a6f7ea`).
 
-All step times are milliseconds (lower is better).
+All step times are milliseconds (lower is better). Burn CPU is its Flex backend,
+Burn CUDA goes through CubeCL. **Burn's f32 CUDA matmul uses TF32 tensor cores**
+(`cubek`'s `adjust_dtypes`); the autorust/candle/torch rows are strict f32, and
+Burn's CPU rows are strict f32, so the CUDA f32 comparison is not bit-exact.
 
-| workload | device | autorust | candle | torch | tinygrad |
-|---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **63.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
-| MNIST CNN train, bs 512 | CUDA | 22.4 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | **156.4 ms** (RUST) | 229.4 ms | 165.1 ms | 14639.3 ms |
-| ViT-B/16 infer, bs 1 | CUDA | 14.2 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1103.1 ms (RUST) | 1403.5 ms | **826.9 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 69.8 ms | 114.6 ms | **48.6 ms** | 136.2 ms |
-| ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
-| ViT-B/16 train, bs 1 | CUDA | 95.9 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
+| workload | device | autorust | burn | candle | torch | tinygrad |
+|---|---|---:|---:|---:|---:|---:|
+| MNIST CNN train, bs 512 | CPU | **63.2 ms** (RUST) | 611.6 ms (Flex) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CUDA | 22.4 ms | 32.0 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| ViT-B/16 infer, bs 1 | CPU | **156.4 ms** (RUST) | 195.7 ms (Flex) | 229.4 ms | 165.1 ms | 14639.3 ms |
+| ViT-B/16 infer, bs 1 | CUDA | 14.2 ms | 9.4 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
+| ViT-B/16 infer, bs 8 | CPU | 1103.1 ms (RUST) | 1194.6 ms (Flex) | 1403.5 ms | **826.9 ms** | — |
+| ViT-B/16 infer, bs 8 | CUDA | 69.8 ms | 52.1 ms | 114.6 ms | **48.6 ms** | 136.2 ms |
+| ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | 1048.4 ms (Flex) | **243.4 ms** | 616.3 ms | — |
+| ViT-B/16 train, bs 1 | CUDA | 95.9 ms | 36.8 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
-- **MNIST CUDA**: autorust is 2.5x faster than tinygrad and 1.7x slower than
-  torch (cuDNN + cuBLAS + fused BN/optimizer). The direct-conv tile reuses the
-  5x5 weights across two output rows, and im2col feeds the longer contractions
-  to the host GEMM, which is most of the gap that remains.
-- **ViT inference CUDA**: eval mode uses the hand-written FA2 kernels through
-  `ViT::forward_with`, so torch's cuBLAS/cuDNN path is only ~1.5x ahead at
-  both batches. autorust is 8.6x/1.9x faster than tinygrad and ~1.6x faster
-  than candle at bs 8.
-- **ViT training CUDA**: autorust is 4.1x faster than tinygrad and 2.2x slower
-  than torch. Splitting the summed q/k/v input gradient and staging the
-  pointwise contraction operands (GELU derivative, dropout mask, softmax
-  backward) took the step from 332 to 96 ms; the remaining gap is the f32
-  backward against cuBLAS/cuDNN (see §9.20-§9.23).
-- **CPU**: autorust's `RUST` backend is 55x/62x faster than
-  tinygrad/candle on MNIST, is now ahead of torch on ViT inference at bs 1
-  (156.4 vs 165.1 ms) and 1.33x behind at bs 8 (1103 vs 827 ms); training is
-  2.65x (torch's MKL GEMMs and its fused attention/optimizer are the gap).
-  tinygrad's `CPU` backend is single-threaded by design. `RAYON` is the typed
-  interpreter (`mnist_train` bs 32: 348 ms/step) and is not a throughput
-  backend.
+- **MNIST CUDA**: autorust (22.4 ms) is 1.4x faster than burn (32.0 ms) and
+  2.5x faster than tinygrad, but 1.7x slower than torch (cuDNN + cuBLAS + fused
+  BN/optimizer). The direct-conv tile reuses the 5x5 weights across two output
+  rows, and im2col feeds the longer contractions to the host GEMM, which is
+  most of the gap that remains. Burn's CubeCL path is close, but its Flex CPU
+  backend is an order of magnitude behind our RUST backend on this conv-heavy
+  model (611.6 vs 63.2 ms), so that result is about the backend choice, not
+  burn's CUDA kernels.
+- **ViT inference CUDA**: burn (9.4/52.1 ms) and torch (8.7/48.6) are within 7%
+  of each other at both batches; autorust (14.2/69.8) is ~1.5x behind torch
+  even with the hand-written FA2 kernels. Burn's edge is its autotuned f32
+  matmul (TF32 tensor cores) plus the fused attention op. On CPU autorust keeps
+  the lead (156.4 vs 195.7 ms at bs 1, 1103 vs 1195 at bs 8).
+- **ViT training CUDA**: burn is 2.4-2.6x faster than autorust (36.8 vs 95.9
+  ms at bs 1, 88.7 vs 216.7 at bs 4) and slightly ahead of torch, while candle
+  is still the fastest (19.0/62.4 ms). Burn gets that from the same TF32
+  matmul, its own fused backward, and an autotuned conv/implicit-GEMM path;
+  the autorust gap is the f32 backward against cuBLAS/cuDNN (see
+  §9.20-§9.23), not launch overhead. On CPU burn is 1.6x faster than autorust
+  for ViT training (1048 vs 1634 ms) but 1.6x slower for ViT inference, and
+  candle remains much faster on CPU training.
+- **CPU**: autorust's `RUST` backend is 55x/62x faster than tinygrad/candle on
+  MNIST and ~10x faster than burn Flex, is ahead of torch on ViT inference at
+  bs 1 (156.4 vs 165.1 ms) and 1.33x behind at bs 8 (1103 vs 827 ms). Burn
+  Flex wins the CPU ViT-training row (1048 vs 1634 ms) through its tiled
+  im2col + `gemm` conv and vectorized elementwise kernels. tinygrad's `CPU`
+  backend is single-threaded by design. `RAYON` is the typed interpreter
+  (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
 
 Caveats that matter for the comparison: tinygrad CPU is single-threaded;
 candle-nn's BatchNorm is inference-only, so its MNIST training normalizes with
 batch statistics but does not update running stats; candle's ViT forward
 dominates its step (a manual profile shows ~1.4 ms of autograd against an
 ~18 ms forward), so its training and inference medians are nearly equal;
-autorust runs with a warm on-disk kernel cache, while the other frameworks
-compile per process (`ms_cold` is recorded in the JSON but excluded from these
-steady-state medians).
+autorust runs with a warm on-disk kernel cache. Burn also persists its compiled
+kernels and autotune picks, but its first call still compiles and benchmarks
+candidates (2-50 s of `ms_cold`, depending on the shape set), and its f32 CUDA
+matmul is TF32. The other frameworks compile per process; `ms_cold` is recorded
+in the JSON but excluded from these steady-state medians.
 
 ### Batch-size scaling
 
 The headline rows compare at one batch each. Re-running the same steps at other
 batches (`bench/run.py --only '.*(mnist-bs64|vit_train-bs4)'`; raw JSON in
 `bench/results/`) shows that MNIST is ahead on CPU at bs 512 and close at bs 64,
-while the ViT training gap is about 2.2x on CUDA at both bs 1 and 4:
+while the ViT training gap is about 2.2x to torch and 2.4-2.6x to burn on CUDA
+at both bs 1 and 4:
 
-| workload | device | batch | autorust | torch | ratio |
-|---|---|---:|---:|---:|---:|
-| MNIST CNN train | CPU | 64 | 19.0 ms | 17.5 ms | 1.08x |
-| MNIST CNN train | CPU | 512 | 63.2 ms | 175.9 ms | 0.36x |
-| MNIST CNN train | CUDA | 64 | 3.5 ms | 2.3 ms | 1.49x |
-| MNIST CNN train | CUDA | 512 | 22.4 ms | 13.1 ms | 1.70x |
-| ViT-B/16 train | CPU | 1 | 1634.5 ms | 616.3 ms | 2.65x |
-| ViT-B/16 train | CPU | 4 | 3861.2 ms | 1470.0 ms | 2.63x |
-| ViT-B/16 train | CUDA | 1 | 95.9 ms | 43.8 ms | 2.19x |
-| ViT-B/16 train | CUDA | 4 | 216.7 ms | 100.4 ms | 2.16x |
+| workload | device | batch | autorust | burn | torch | autorust/torch | burn/torch |
+|---|---|---:|---:|---:|---:|---:|---:|
+| MNIST CNN train | CPU | 64 | 19.0 ms | 76.6 ms | 17.5 ms | 1.08x | 4.37x |
+| MNIST CNN train | CPU | 512 | 63.2 ms | 611.6 ms | 175.9 ms | 0.36x | 3.48x |
+| MNIST CNN train | CUDA | 64 | 3.5 ms | 4.3 ms | 2.3 ms | 1.49x | 1.85x |
+| MNIST CNN train | CUDA | 512 | 22.4 ms | 32.0 ms | 13.1 ms | 1.70x | 2.44x |
+| ViT-B/16 train | CPU | 1 | 1634.5 ms | 1048.4 ms | 616.3 ms | 2.65x | 1.70x |
+| ViT-B/16 train | CPU | 4 | 3861.2 ms | 2428.8 ms | 1470.0 ms | 2.63x | 1.65x |
+| ViT-B/16 train | CUDA | 1 | 95.9 ms | 36.8 ms | 43.8 ms | 2.19x | 0.84x |
+| ViT-B/16 train | CUDA | 4 | 216.7 ms | 88.7 ms | 100.4 ms | 2.16x | 0.88x |
 
 ViT-B/16 training, ms per step and per image at the measured batches:
 
-| device | batch | autorust step | autorust ms/img | torch step | torch ms/img |
-|---|---:|---:|---:|---:|---:|
-| CUDA | 1 | 95.9 | 95.9 | 43.8 | 43.8 |
-| CUDA | 4 | 216.7 | 54.2 | 100.4 | 25.1 |
-| CPU | 1 | 1634.5 | 1634.5 | 616.3 | 616.3 |
-| CPU | 4 | 3861.2 | 965.3 | 1470.0 | 367.5 |
+| device | batch | autorust step | autorust ms/img | burn step | burn ms/img | torch step | torch ms/img |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| CUDA | 1 | 95.9 | 95.9 | 36.8 | 36.8 | 43.8 | 43.8 |
+| CUDA | 4 | 216.7 | 54.2 | 88.7 | 22.2 | 100.4 | 25.1 |
+| CPU | 1 | 1634.5 | 1634.5 | 1048.4 | 1048.4 | 616.3 | 616.3 |
+| CPU | 4 | 3861.2 | 965.3 | 2428.8 | 607.2 | 1470.0 | 367.5 |
 
-Per-image cost still falls with batch on both devices (CUDA 95.9 -> 54.2
-ms/image from bs 1 to 4), but the ratio stays ~2.2x, so the remaining
-ViT-training gap is not launch or scheduling overhead that a bigger batch would
-amortize; it is the steady-state GEMM/elementwise throughput of the f32 path.
-MNIST, which is conv- and optimizer-heavy, behaves differently: on CPU autorust
-is 2.8x faster than torch at bs 512 and within 1.1x at bs 64, and on CUDA it is
-within 1.5x at bs 64.
+Per-image cost still falls with batch on all three (autorust CUDA 95.9 -> 54.2
+ms/image from bs 1 to 4, burn 36.8 -> 22.2), but the autorust/torch ratio stays
+~2.2x, so the remaining ViT-training gap is not launch or scheduling overhead
+that a bigger batch would amortize; it is the steady-state GEMM/elementwise
+throughput of the f32 path. Burn's ratio moves the other way: it starts slightly
+ahead of torch at bs 1 (0.84x) and stays ahead at bs 4 (0.88x). MNIST, which is
+conv- and optimizer-heavy, behaves differently: on CPU autorust is 2.8x faster
+than torch at bs 512 and within 1.1x at bs 64, and on CUDA it is within 1.5x at
+bs 64.
 
 CPU batch sizes above 1 used to hang: a cold `threefry` RNG kernel made rustc's
 loop vectorizer run for over ten minutes (CURRENT_STATE §9.50). The RUST
 renderer now keeps that vectorizer off shift-chain kernels, so the batch 2/4
 rows run in seconds.
+
+### What burn does differently
+
+Burn 0.22.1 (CubeCL 0.11.4, cubek 0.3.1) is a useful independent implementation
+to read against; several of its choices explain the rows above. Paths are from
+the burn checkout, not this repository.
+
+- **Per-shape kernel autotuning is the structural difference.** CubeCL's
+  `LocalTuner` benchmarks a set of candidate kernels per *anchored* problem key
+  (shape, dtype, layout, alignment), keeps the winner, and persists it on disk.
+  Burn uses it for matmul (`burn-cubecl/src/kernel/matmul/tune/`), conv
+  (`conv/forward/tune.rs`: direct, 1×1 im2col, four depthwise tilings, implicit
+  GEMM with CMMA/MMA, async and TMA staging), attention
+  (`kernel/attention/base.rs`: flash blackbox-accelerated, flash unit, fallback,
+  autotune), reduce (`kernel/reduce/tune.rs`: unit/plane/cube routines plus
+  output vectorization) and interpolate. This is the same idea as
+  `PROPOSED_OPTIMIZATIONS.md` item 1, but applied to the compute kernels and
+  keyed per shape. Our matmul spread (8.0 TF/s at 4096³ vs 5.1 at 1024³) and the
+  bf16 gap are exactly the cases where a measured per-shape candidate would pay.
+- **Implicit-GEMM convolution with tensor-core tiles.** Burn's conv forward does
+  not just im2col + a generic GEMM: it has a dedicated depthwise kernel, a 1×1
+  path, and implicit-GEMM routines that tile the contraction with MMA/CMMA,
+  stage asynchronously and can use TMA (`kernel/conv/forward/`). This is the
+  path behind our largest remaining gap (ResNet-18 CUDA 17x, UNet 12x behind
+  torch, `#conv-models`), and the first item in the burn-derived backlog.
+- **Fused reductions and softmax.** Burn decomposes softmax into max/exp/sum and
+  lets fusion emit one kernel, and its reduce op autotunes a unit/plane/cube
+  routine with vectorized output. Our standalone softmax/layernorm/sum/amax are
+  two-pass on CUDA (the Memory-bound ops table: 155/156/176/64 GB/s vs torch's
+  288/209/287/292), and this is a large share of the ViT training step. The
+  fused attention kernels already solve it locally; the general path should too.
+- **Fusion execution plans and multiple streams.** Burn's fusion runtime caches
+  an execution plan per relative graph and reuses it (`burn-fusion/src/stream/`)
+  and keeps a lazy stream per thread (`stream/multi.rs`) with explicit read
+  plans and `Device::sync()` barriers. Our `Jit`/`StepPlan` captures one ordered
+  stream, which is right for a training step but leaves independent decode
+  branches serialized. Item 15 in the backlog proposes reusing the captured
+  dependency graph to launch independent SINKs on secondary streams.
+- **Broadcast-rhs batched matmul folding.** `MatmulTransformPolicy`
+  (`burn-std/src/tensor/matmul.rs`) rewrites `[.., b, m, k] @ [.., 1, k, n]`
+  into one `[b*m, k] @ [k, n]` when the per-batch rows do not fill a tile. This
+  is a metadata-only change aimed at decode/broadcast shapes, and a cheap
+  candidate for our LLM decode path.
+- **TF32 by default, which we should not copy blindly.** `cubek`'s
+  `adjust_dtypes` stages f32 operands as TF32 on supporting hardware, so burn's
+  f32 CUDA matmul and ViT numbers use 10-bit mantissas. Our f32 path is strict
+  f32 (TF32 is opt-in via `AUTORUST_CUBLAS_TF32=1`) and measured within noise of
+  pedantic cuBLAS at our shapes, so the burn CUDA f32 rows in the tables above
+  are a performance upper bound for that arithmetic, not a like-for-like
+  replacement.
+- **What not to copy: the CPU backend.** Burn's Flex CPU backend is excellent on
+  its own terms (its tiled im2col + `gemm` conv and vectorized elementwise path
+  beat autorust on ViT training CPU), but it is ~10x slower than our RUST
+  backend on the MNIST CNN (611.6 vs 63.2 ms) and 1.6x slower on ViT inference.
+  The right read is to borrow the conv tiling and autotune ideas, not to move
+  the CPU path to Flex.
+
+The priority order from this comparison is: (1) tensor-core implicit-GEMM conv
+plus depthwise, (2) fused single-pass reductions/softmax, (3) a keyed per-shape
+autotuner for the remaining tiled matmul/conv candidates, (4) broadcast-rhs
+folding and multi-stream decode. They are recorded as items 11-15 in
+`PROPOSED_OPTIMIZATIONS.md`; none is landed here, because the measurements above
+are the baseline they would have to beat.
 
 
 ## Microbenches
@@ -756,21 +836,22 @@ Eight shapes per dtype: 1024³, 2048³, 4096³, 1024×1024×4096, 4096×1024×10
 transposed-A ("TN"), transposed-B ("NT") and a batched 8×512³. One-element
 readback forces completion; TFLOP/s is `2·M·N·K·B / time`.
 
-| case | device | autorust | candle | torch | tinygrad |
-|---|---|---:|---:|---:|---:|
-| f32 1024³ | CUDA | 5.1 | 3.1 | **6.4** | 1.3 |
-| f32 2048³ | CUDA | **7.8** | 4.6 | **7.8** | 1.5 |
-| f32 4096³ | CUDA | **8.0** | 2.5 | 7.7 | 1.5 |
-| f32 TN 2048³ | CUDA | **9.4** | 4.8 | 8.5 | 4.9 |
-| f32 batched 8×512³ | CUDA | **5.1** | 2.1 | 6.2 | 1.3 |
-| bf16 2048³ | CUDA | 14.4 | — | **23.0** | — |
-| bf16 4096³ | CUDA | 14.5 | — | **25.3** | — |
-| bf16 TN 2048³ | CUDA | 11.3 | — | **12.8** | — |
-| f32 2048³ | CPU | 0.5 | 0.6 | **0.7** | — |
-| f32 4096³ | CPU | 0.4 | **0.8** | 0.6 | — |
-| f32 TN 2048³ | CPU | 0.3 | **0.7** | **0.7** | — |
+| case | device | autorust | burn | candle | torch | tinygrad |
+|---|---|---:|---:|---:|---:|---:|
+| f32 1024³ | CUDA | 5.1 | 5.7 | 3.1 | **6.4** | 1.3 |
+| f32 2048³ | CUDA | 7.8 | **9.5** | 4.6 | 7.8 | 1.5 |
+| f32 4096³ | CUDA | 8.0 | **10.4** | 2.5 | 7.7 | 1.5 |
+| f32 TN 2048³ | CUDA | 9.4 | **10.4** | 4.8 | 8.5 | 4.9 |
+| f32 batched 8×512³ | CUDA | 5.1 | **6.7** | 2.1 | 6.2 | 1.3 |
+| bf16 2048³ | CUDA | 14.4 | 18.0 | — | **23.0** | — |
+| bf16 4096³ | CUDA | 14.5 | 22.1 | — | **25.3** | — |
+| bf16 TN 2048³ | CUDA | 11.3 | **18.0** | — | 12.8 | — |
+| f32 2048³ | CPU | 0.5 | 0.5 | 0.6 | **0.7** | — |
+| f32 4096³ | CPU | 0.4 | 0.7 | **0.8** | 0.6 | — |
+| f32 TN 2048³ | CPU | 0.3 | 0.4 | **0.7** | **0.7** | — |
 
-(TFLOP/s, higher is better.)
+(TFLOP/s, higher is better. Burn's f32 CUDA rows use TF32 tensor cores; the
+other CUDA rows are strict f32. Burn's CPU rows are strict f32.)
 
 Reading it:
 
@@ -778,14 +859,17 @@ Reading it:
   7.4-8.5 TFLOP/s), and ahead of candle and tinygrad. Only the smallest shape
   (1024³) loses to torch, where launch/tile overhead dominates. This is the
   important control for the ViT training gap: the generated tiled matmul is not
-  what is 2-3x behind.
-- **bf16 is 0.4-0.9x torch**: tensor cores are selected (`AUTORUST_TENSOR_CORES=0`
-  drops 1024³ from 8.1 to 5.3 TFLOP/s, so the TC path is in use), but torch's
-  cutlass/cuBLAS kernels reach 13-25 TFLOP/s where ours sit at 8-15. The gap is
-  the TC kernel itself, not dispatch.
-- On CPU the packed GEMM reaches 0.4-0.6 TFLOP/s against torch/MKL's 0.6-1.0.
-  The transposed-A case is the weakest (0.3 vs 0.7): `AᵀB` needs a copy that the
-  direct-operand path cannot avoid.
+  what is 2-3x behind. Burn is 20-30% faster here, but it stages f32 operands
+  as TF32 on the tensor cores, so that is not the same arithmetic.
+- **bf16 is 0.4-0.9x torch** for autorust: tensor cores are selected
+  (`AUTORUST_TENSOR_CORES=0` drops 1024³ from 8.1 to 5.3 TFLOP/s, so the TC path
+  is in use), but torch's cutlass/cuBLAS kernels reach 13-25 TFLOP/s where ours
+  sit at 8-15. Burn's autotuned bf16 matmul reaches 18-22 TFLOP/s and closes
+  most of that gap (still behind torch at 4096³), which points at tile/layout
+  selection rather than a missing instruction.
+- On CPU the packed GEMM reaches 0.4-0.6 TFLOP/s against torch/MKL's 0.6-1.0 and
+  burn Flex's 0.5-0.7. The transposed-A case is the weakest (0.3 vs 0.7): `AᵀB`
+  needs a copy that the direct-operand path cannot avoid.
 
 ### Memory-bound ops
 

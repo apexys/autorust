@@ -1,0 +1,21 @@
+{
+  "framework": "burn",
+  "version": "0.22.1",
+  "device": "CPU",
+  "workload": "vit_train",
+  "batch": 1,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 2,
+  "iters": 3,
+  "ms_cold": 2089.1149,
+  "ms_median": 1048.4388,
+  "ms_min": 1030.2778,
+  "ms_iqr": 2.0832,
+  "images_per_s": 0.95,
+  "name": "burn-cpu-vit_train",
+  "variant": "cpu",
+  "commit": "8a6f7ea",
+  "date": "2026-11-16T08:59:33",
+  "notes": "Flex CPU"
+}

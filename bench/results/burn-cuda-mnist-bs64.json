@@ -1,0 +1,21 @@
+{
+  "framework": "burn",
+  "version": "0.22.1",
+  "device": "CUDA",
+  "workload": "mnist_train",
+  "batch": 64,
+  "dtype": "f32",
+  "jit": false,
+  "warmup": 3,
+  "iters": 8,
+  "ms_cold": 3482.8467,
+  "ms_median": 4.3262,
+  "ms_min": 3.7589,
+  "ms_iqr": 1.3799,
+  "images_per_s": 14793.54,
+  "name": "burn-cuda-mnist-bs64",
+  "variant": "cuda",
+  "commit": "8a6f7ea",
+  "date": "2026-11-16T08:59:02",
+  "notes": "CubeCL + autotune"
+}
