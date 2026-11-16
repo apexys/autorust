@@ -96,6 +96,51 @@ fn matmul_gemm_and_layernorm_match_manual() {
 }
 
 #[test]
+fn einsum_multi_operand_chain() {
+    let nodes = vec![b::node(
+        "Einsum",
+        &["x", "y", "z"],
+        &["out"],
+        &[Attr::Str("equation", "ij,jk,kl->il")],
+    )];
+    let inputs = vec![
+        b::value_info("x", b::FLOAT, &[Dim::Val(2), Dim::Val(3)]),
+        b::value_info("y", b::FLOAT, &[Dim::Val(3), Dim::Val(4)]),
+        b::value_info("z", b::FLOAT, &[Dim::Val(4), Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2), Dim::Val(2)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "einsum"), 17);
+
+    let xv = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let yv = [
+        1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, 0.5, -1.0, 2.0, 1.0, 0.0, -1.0,
+    ];
+    let zv = [1.0f32, 2.0, 0.0, 1.0, -1.0, 0.5, 2.0, -2.0];
+    let got = f32_model(
+        &bytes,
+        &[
+            ("x", xv.to_vec(), vec![2, 3]),
+            ("y", yv.to_vec(), vec![3, 4]),
+            ("z", zv.to_vec(), vec![4, 2]),
+        ],
+        "out",
+    );
+    let mut want = vec![0.0f32; 4];
+    for i in 0..2 {
+        for l in 0..2 {
+            let mut acc = 0.0;
+            for j in 0..3 {
+                for k in 0..4 {
+                    acc += xv[i * 3 + j] * yv[j * 4 + k] * zv[k * 2 + l];
+                }
+            }
+            want[i * 2 + l] = acc;
+        }
+    }
+    close(&got, &want, 1e-5);
+}
+
+#[test]
 fn movement_slice_gather_concat_and_expand() {
     let shape = b::i64_tensor("shape", &[2], &[2, 12]);
     let gather_idx = b::i64_tensor("gidx", &[2], &[0, 11]);

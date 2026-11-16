@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Generalized ONNX `Einsum`.** `Tensor::einsum_many` (and the two-operand
+  `einsum` wrapper) now supports N operands, ellipsis with right-aligned
+  broadcasting, repeated labels (diagonal/trace) and implicit output. The ONNX
+  `Einsum` op no longer rejects >2 operands (`tests/einsum.rs`,
+  `tests/onnx.rs::einsum_multi_operand_chain`).
+
 ## [0.3.0] - 2026-11-16
 
 ### Changed

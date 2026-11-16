@@ -6288,3 +6288,27 @@ is exposed as `AUTORUST_CONV_TC_MIN_ROWS` (default 4096) rather than only a
 constant. `AUTORUST_CONV_TC_MIN_ROWS=16384` reproduces the old behaviour
 (157.6 ms). `tests/cuda_conv_tc.rs` adds a 6400-row case against INTERP so the
 new band is covered.
+
+### 9.100 ONNX `Einsum`: N operands, ellipsis and repeated labels (2026-11-16)
+
+The ONNX `Einsum` handler rejected every equation with more than two operands,
+and `Tensor::einsum` rejected ellipsis and repeated labels. Generalized it to
+`Tensor::einsum_many(&[&Tensor], equation)` (the two-operand `einsum` is now a
+wrapper):
+
+- **N operands**: the operands are prepared against the union of labels and
+  multiplied/summed once, so `"ij,jk,kl->il"` runs as a single contraction.
+- **Ellipsis**: `...` expands to synthetic labels, right-aligned per operand, so
+  operands of different ranks broadcast like numpy/ONNX.
+- **Repeated labels**: a label repeated inside one operand is extracted as a
+  diagonal (`t * eye(n)` then a reduction) before the contraction, so `"ii->i"`,
+  `"ii->"` (trace) and `"iij->j"` work.
+- **Implicit output**: ellipsis first, then labels that occur exactly once in
+  the input, sorted (numpy rule).
+
+Gates: `tests/einsum.rs` (three-operand chain, batched ellipsis, lower-rank
+ellipsis broadcast, diagonal/trace, `iij->j`, implicit output) and
+`tests/onnx.rs::einsum_multi_operand_chain` through the ONNX builder.
+`ONNX-Compat.md` moves `Einsum` to ✅. The remaining T1 gap is the
+`Scatter*`/`NonZero`/`Compress`/`CenterCropPad` family (needs
+`masked_select`/scatter primitives), then the CLIP end-to-end gate.

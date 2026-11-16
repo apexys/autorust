@@ -785,13 +785,9 @@ impl OnnxModel {
             }
             "Einsum" => {
                 let eq = node.attr_str("equation", "");
-                if ins.len() == 2 {
-                    one(inp(ins, 0)?.einsum(inp(ins, 1)?, eq))
-                } else {
-                    Err(OnnxError::Unsupported(
-                        "Einsum with more than two operands".into(),
-                    ))
-                }
+                let operands: Result<Vec<&Tensor>> =
+                    (0..ins.len()).map(|i| inp(ins, i)).collect();
+                one(Tensor::einsum_many(&operands?, eq))
             }
             "MaxPool" => Ok(self.max_pool_op(node, ins)?),
             "AveragePool" => one(self.avg_pool_op(node, ins)?),

@@ -549,75 +549,194 @@ impl Tensor {
 }
 
 impl Tensor {
-    /// Two-operand `einsum` (e.g. `"ij,jk->ik"`). Covers the common attention /
-    /// ONNX cases; ellipsis and repeated labels within one operand are rejected.
+    /// Two-operand `einsum` (e.g. `"ij,jk->ik"`). Thin wrapper over
+    /// [`Tensor::einsum_many`].
     pub fn einsum(&self, other: &Tensor, subscripts: &str) -> Tensor {
-        let (lhs, rhs, out) = parse_einsum(subscripts);
-        let a_labels: Vec<char> = lhs.chars().collect();
-        let b_labels: Vec<char> = rhs.chars().collect();
+        Tensor::einsum_many(&[self, other], subscripts)
+    }
+
+    /// N-operand `einsum`, with ellipsis, implicit output and repeated labels.
+    ///
+    /// Examples: `"ij,jk,kl->il"`, `"...ij,...jk->...ik"`, `"ii->i"`.
+    /// Shared named labels must have equal sizes; `...` dims broadcast
+    /// right-aligned (numpy/ONNX rules). A label repeated within one operand
+    /// is extracted as a diagonal before the contraction.
+    pub fn einsum_many(operands: &[&Tensor], subscripts: &str) -> Tensor {
+        assert!(!operands.is_empty(), "einsum: no operands");
+        let eq = subscripts.replace(' ', "");
+        let (inputs, out_spec) = match eq.split_once("->") {
+            Some((a, b)) => (a, Some(b)),
+            None => (eq.as_str(), None),
+        };
+        let specs: Vec<&str> = inputs.split(',').collect();
         assert_eq!(
-            a_labels.len(),
-            self.shape().as_slice().len(),
-            "einsum: lhs rank mismatch"
-        );
-        assert_eq!(
-            b_labels.len(),
-            other.shape().as_slice().len(),
-            "einsum: rhs rank mismatch"
-        );
-        assert_eq!(
-            a_labels
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            a_labels.len(),
-            "einsum: repeated lhs labels are unsupported"
-        );
-        assert_eq!(
-            b_labels
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            b_labels.len(),
-            "einsum: repeated rhs labels are unsupported"
+            specs.len(),
+            operands.len(),
+            "einsum: operand count mismatch"
         );
 
-        let mut sizes = std::collections::HashMap::new();
-        for (lab, sz) in a_labels.iter().zip(self.shape().as_slice()) {
-            sizes.insert(*lab, sz.clone().as_i64().unwrap_or(1));
-        }
-        for (lab, sz) in b_labels.iter().zip(other.shape().as_slice()) {
-            let v = sz.clone().as_i64().unwrap_or(1);
-            if let Some(old) = sizes.get(lab) {
-                assert_eq!(*old, v, "einsum: size mismatch for label {lab}");
-            }
-            sizes.insert(*lab, v);
-        }
-        let out_labels: Vec<char> = match out {
-            Some(s) => s.chars().collect(),
-            None => {
-                let mut counts = std::collections::HashMap::new();
-                for c in a_labels.iter().chain(b_labels.iter()) {
-                    *counts.entry(*c).or_insert(0) += 1;
+        // Parse each spec into its explicit labels and whether it has `...`.
+        let mut explicit: Vec<Vec<char>> = Vec::new();
+        let mut has_ell: Vec<bool> = Vec::new();
+        for spec in &specs {
+            let mut labels = Vec::new();
+            let mut ell = false;
+            let bytes = spec.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'.' {
+                    assert!(
+                        bytes.get(i + 1) == Some(&b'.') && bytes.get(i + 2) == Some(&b'.'),
+                        "einsum: bad ellipsis in {spec:?}"
+                    );
+                    assert!(!ell, "einsum: more than one ellipsis in {spec:?}");
+                    ell = true;
+                    i += 3;
+                } else {
+                    let c = bytes[i] as char;
+                    assert!(c.is_ascii_alphabetic(), "einsum: bad label {c:?}");
+                    labels.push(c);
+                    i += 1;
                 }
-                let mut v: Vec<char> = counts
+            }
+            explicit.push(labels);
+            has_ell.push(ell);
+        }
+
+        let ranks: Vec<usize> = operands.iter().map(|t| t.shape().as_slice().len()).collect();
+        let ell_ranks: Vec<usize> = (0..operands.len())
+            .map(|i| {
+                if has_ell[i] {
+                    assert!(
+                        ranks[i] >= explicit[i].len(),
+                        "einsum: operand {i} has more labels than dims"
+                    );
+                    ranks[i] - explicit[i].len()
+                } else {
+                    assert_eq!(
+                        ranks[i],
+                        explicit[i].len(),
+                        "einsum: operand {i} rank/label mismatch"
+                    );
+                    0
+                }
+            })
+            .collect();
+        let ell_rank = *ell_ranks.iter().max().unwrap_or(&0);
+        let ell_label = |j: usize| char::from_u32(0xE000 + j as u32).unwrap();
+        let is_ell = |c: char| (0xE000..0xE000 + ell_rank as u32).contains(&(c as u32));
+
+        // Full label list per operand (ellipsis expanded, right-aligned) + sizes.
+        let mut full: Vec<Vec<char>> = Vec::new();
+        let mut named: std::collections::HashMap<char, i64> = std::collections::HashMap::new();
+        let mut ell_sizes: Vec<i64> = vec![1; ell_rank];
+        for i in 0..operands.len() {
+            let mut labels = Vec::new();
+            if has_ell[i] {
+                labels.extend((ell_rank - ell_ranks[i]..ell_rank).map(ell_label));
+            }
+            labels.extend(explicit[i].iter().copied());
+            assert_eq!(labels.len(), ranks[i], "einsum: operand {i} rank mismatch");
+            for (lab, dim) in labels.iter().zip(operands[i].shape().as_slice()) {
+                let d = dim.clone().as_i64().unwrap_or(1);
+                if is_ell(*lab) {
+                    let j = (*lab as u32 - 0xE000) as usize;
+                    if ell_sizes[j] == 1 {
+                        ell_sizes[j] = d;
+                    } else {
+                        assert!(
+                            d == 1 || d == ell_sizes[j],
+                            "einsum: ellipsis dim {j} mismatch"
+                        );
+                    }
+                } else if let Some(old) = named.get(lab) {
+                    assert_eq!(*old, d, "einsum: size mismatch for label {lab:?}");
+                } else {
+                    named.insert(*lab, d);
+                }
+            }
+            full.push(labels);
+        }
+        let size_of = |lab: char| -> i64 {
+            if is_ell(lab) {
+                ell_sizes[(lab as u32 - 0xE000) as usize]
+            } else {
+                named[&lab]
+            }
+        };
+
+        // Implicit output: ellipsis dims, then labels that occur exactly once in
+        // the input (original occurrence counts, like numpy).
+        let mut counts: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+        for labels in &full {
+            for &lab in labels {
+                *counts.entry(lab).or_insert(0) += 1;
+            }
+        }
+        let out_labels: Vec<char> = match out_spec {
+            Some(spec) => {
+                let mut labels = Vec::new();
+                let bytes = spec.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i] == b'.' {
+                        assert!(
+                            bytes.get(i + 1) == Some(&b'.') && bytes.get(i + 2) == Some(&b'.'),
+                            "einsum: bad output ellipsis"
+                        );
+                        labels.extend((0..ell_rank).map(ell_label));
+                        i += 3;
+                    } else {
+                        let c = bytes[i] as char;
+                        assert!(c.is_ascii_alphabetic(), "einsum: bad output label {c:?}");
+                        labels.push(c);
+                        i += 1;
+                    }
+                }
+                labels
+            }
+            None => {
+                let mut v: Vec<char> = (0..ell_rank).map(ell_label).collect();
+                let mut named_once: Vec<char> = full
                     .iter()
-                    .filter(|(_, n)| **n == 1)
-                    .map(|(c, _)| *c)
+                    .flatten()
+                    .copied()
+                    .filter(|c| !is_ell(*c) && counts.get(c) == Some(&1))
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
                     .collect();
-                v.sort_unstable();
+                named_once.sort_unstable();
+                v.extend(named_once);
                 v
             }
         };
-        let mut union: Vec<char> = out_labels.clone();
-        for c in a_labels.iter().chain(b_labels.iter()) {
-            if !union.contains(c) {
-                union.push(*c);
+        let mut out_seen = std::collections::HashSet::new();
+        for &c in &out_labels {
+            assert!(out_seen.insert(c), "einsum: repeated output label {c:?}");
+            assert!(counts.contains_key(&c), "einsum: output label {c:?} not in input");
+        }
+
+        // Repeated labels within one operand become diagonals.
+        let mut prepared_inputs: Vec<Tensor> = Vec::new();
+        let mut prepared_labels: Vec<Vec<char>> = Vec::new();
+        for (i, t) in operands.iter().enumerate() {
+            let (t, labels) = dedup_diagonals(t, &full[i]);
+            prepared_inputs.push(t);
+            prepared_labels.push(labels);
+        }
+
+        // Union: output labels first, then every other label in first-seen order.
+        let mut union = out_labels.clone();
+        for labels in &prepared_labels {
+            for &c in labels {
+                if !union.contains(&c) {
+                    union.push(c);
+                }
             }
         }
-        let union_shape: Vec<i64> = union.iter().map(|c| sizes[c]).collect();
-
-        let prepare = |t: &Tensor, labels: &[char]| -> Tensor {
+        let union_shape: Vec<i64> = union.iter().map(|&c| size_of(c)).collect();
+        let mut prod: Option<Tensor> = None;
+        for (t, labels) in prepared_inputs.iter().zip(&prepared_labels) {
             let present: Vec<usize> = (0..union.len())
                 .filter(|&ui| labels.contains(&union[ui]))
                 .collect();
@@ -632,55 +751,56 @@ impl Tensor {
             };
             let mut shape = vec![1i64; union.len()];
             for &ui in &present {
-                shape[ui] = sizes[&union[ui]];
+                shape[ui] = union_shape[ui];
             }
-            out = out.reshape(shape);
-            out.expand(union_shape.clone())
-        };
-        let prod = prepare(self, &a_labels).mul(prepare(other, &b_labels));
-        let red: Vec<usize> = union
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !out_labels.contains(c))
-            .map(|(i, _)| i)
-            .collect();
-        let summed = if red.is_empty() {
-            prod
-        } else {
-            prod.sum(Some(&red), false, None)
-        };
-        let rem: Vec<char> = union
-            .iter()
-            .filter(|c| out_labels.contains(c))
-            .cloned()
-            .collect();
-        let perm: Vec<i64> = out_labels
-            .iter()
-            .map(|c| rem.iter().position(|x| x == c).unwrap() as i64)
-            .collect();
-        if perm.is_empty() {
-            summed
-        } else {
-            summed.permute(&perm)
+            out = out.reshape(shape).expand(union_shape.clone());
+            prod = Some(match prod {
+                Some(p) => p.mul(&out),
+                None => out,
+            });
         }
+        let mut summed = prod.expect("einsum: no product");
+        let red: Vec<usize> = (out_labels.len()..union.len()).collect();
+        if !red.is_empty() {
+            summed = summed.sum(Some(&red), false, None);
+        }
+        summed
     }
 }
 
-fn parse_einsum(s: &str) -> (String, String, Option<String>) {
-    let s = s.replace(' ', "");
-    let (inputs, out) = match s.split_once("->") {
-        Some((a, b)) => (a, Some(b.to_string())),
-        None => (s.as_str(), None),
-    };
-    let mut parts = inputs.split(',');
-    let lhs = parts.next().unwrap_or("").to_string();
-    let rhs = parts.next().unwrap_or("").to_string();
-    assert!(
-        parts.next().is_none(),
-        "einsum: expected exactly two operands"
-    );
-    (lhs, rhs, out)
+fn dedup_diagonals(t: &Tensor, labels: &[char]) -> (Tensor, Vec<char>) {
+    let mut t = t.clone();
+    let mut labels = labels.to_vec();
+    loop {
+        let mut counts = std::collections::HashMap::new();
+        for &c in &labels {
+            *counts.entry(c).or_insert(0usize) += 1;
+        }
+        let Some((&dup, _)) = counts.iter().find(|&(_, &n)| n > 1) else {
+            break;
+        };
+        let pos: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c == dup)
+            .map(|(i, _)| i)
+            .collect();
+        let (p0, p1) = (pos[0], pos[1]);
+        let shape = t.shape();
+        let n = shape.as_slice()[p0].clone().as_i64().unwrap_or(0);
+        let m = shape.as_slice()[p1].clone().as_i64().unwrap_or(0);
+        assert_eq!(n, m, "einsum: diagonal size mismatch for {dup:?}");
+        assert!(n > 0, "einsum: zero-length diagonal is unsupported");
+        let eye = Tensor::eye(t.ctx(), n, Some(n), Some(t.dtype()));
+        let mut mshape = vec![1i64; labels.len()];
+        mshape[p0] = n;
+        mshape[p1] = n;
+        t = t.mul(eye.reshape(mshape)).sum(Some(&[p1]), false, None);
+        labels.remove(p1);
+    }
+    (t, labels)
 }
+
 
 impl Tensor {
     /// `asin()` (Abramowitz–Stegun 4.4.46, matching tinygrad).

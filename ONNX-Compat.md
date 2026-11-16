@@ -93,7 +93,6 @@ outputs remain valid after it is dropped.
 - `Conv`/`ConvTranspose` require the same stride/dilation/output-padding on
   every spatial dim (the `Tensor` API takes scalars); differing per-dim values
   return `Unsupported`.
-- `Einsum` covers two operands; ellipsis and repeated labels are rejected.
 - `Dropout` is inference-only; `BatchNormalization` rejects `training_mode`.
 - Quantized ops, ONNX training ops, windows, `If`, optional/sequence values and
   ONNX-ML are T2.
@@ -183,12 +182,12 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `HannWindow HammingWindow BlackmanWindow` | 🟡 | T2; `arange`+`cos` composition. |
 | `Binarizer ArrayFeatureExtractor` | T2 | ONNX-ML domain. |
 | `ImageDecoder` | ❌ | image codecs are out of scope; feed tensors. |
-| `Einsum` | 🟡 | two-operand path; ellipsis/repeated labels are rejected. |
+| `Einsum` | ✅ | N operands, ellipsis (right-aligned broadcast), repeated labels (diagonal) and implicit output. |
 
 ## Validation plan (remaining)
 
-1. **CLIP text/vision ONNX** for the T1 set (`Einsum`, `GatherND`, `TopK`,
-   `Pad` modes, and the still-missing `Scatter*` family).
+1. **CLIP text/vision ONNX** for the T1 set (`GatherND`, `TopK`, `Pad`
+   modes, and the still-missing `Scatter*` family; `Einsum` is now general).
 2. **ONNX backend node tests** from `../tinygrad/test/external/` for op-level
    correctness; compare against `onnxruntime` in the dev environment only.
 3. **Golden fixtures**: `tests/onnx.rs` builds models in-memory; add committed
