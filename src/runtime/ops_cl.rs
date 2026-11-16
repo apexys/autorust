@@ -155,7 +155,7 @@ __kernel void autorust_epi_f32(__global float* c, __global const float* b,
                 "clCreateProgramWithSource(epilogue)",
             );
             let devices = [self.dev.id()];
-            if let Err(e) = program.build(&devices, "") {
+            if let Err(e) = program.build(&devices, build_options()) {
                 let log = program.get_build_log(devices[0]).unwrap_or_default();
                 panic!("TGERR: OpenCL epilogue build error: {e}\n{log}");
             }
@@ -409,6 +409,15 @@ struct ClCompiler {
     inner: Rc<ClInner>,
 }
 
+fn build_options() -> &'static str {
+    if crate::settings::global().math_mode == crate::settings::MathMode::Fast {
+        // OpenCL's fast-math option: relaxed precision, no errno/NaN guards.
+        "-cl-fast-relaxed-math"
+    } else {
+        ""
+    }
+}
+
 impl Comp for ClCompiler {
     /// `CLCompiler.compile` — build from source, fetch the device binary.
     fn compile(&self, src: &str) -> Vec<u8> {
@@ -417,7 +426,7 @@ impl Comp for ClCompiler {
             "clCreateProgramWithSource",
         );
         let devices = [self.inner.dev.id()];
-        if let Err(e) = program.build(&devices, "") {
+        if let Err(e) = program.build(&devices, build_options()) {
             let log = program.get_build_log(devices[0]).unwrap_or_default();
             panic!("TGERR: OpenCL Compile Error\n--- src ---\n{src}\n--- log ---\n{log}\n{e}");
         }

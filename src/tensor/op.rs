@@ -265,6 +265,29 @@ impl Tensor {
             dtype,
         )
     }
+    /// [`Tensor::conv2d`] with a session, using the fused CUDA tensor-core
+    /// 3x3 kernel for groups=1/stride=1/dilation=1/padding=1 f32 convs with a
+    /// realized input. Forward-only; the graph conv remains the fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv2d_with(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        groups: i64,
+        stride: i64,
+        dilation: i64,
+        padding: &[i64],
+        dtype: Option<DTypeId>,
+        sess: &mut crate::engine::session::Session,
+    ) -> Tensor {
+        if let Some(t) = crate::tensor::conv_fused::conv3x3_with(
+            self, weight, bias, groups, stride, dilation, padding, dtype, sess,
+        ) {
+            return t;
+        }
+        self.conv2d(weight, bias, groups, stride, dilation, padding, dtype)
+    }
+
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)] // signature mirrors the tinygrad oracle
     pub fn conv2d_ctx(

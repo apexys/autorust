@@ -59,7 +59,10 @@ kernel, but the bounded cuBLAS-tensor-core path landed: opt-in conv-only TF32
 (`CURRENT_STATE §9.91`, `tests/conv_tf32.rs`). A graph-level conv_transpose
 pixel-shuffle specialization was also tried and rejected: UNet CUDA was
 neutral (10.69 vs 10.61 ms) and CPU was 2x worse (`CURRENT_STATE §9.92`). The
-custom tensor-core 3x3 implicit-GEMM kernel remains the open piece.
+custom tensor-core 3x3 implicit-GEMM kernel then landed as a bounded TF32
+`wmma` kernel (no im2col copy, 64x64 block tile) under the new Fast math mode:
+ResNet-18 277 -> 201-208 ms and ViT infer 82.8 -> 65.6 ms vs Exact; see
+`CURRENT_STATE §9.93` and `tests/cuda_conv3x3_tc.rs`.
 12. Fused reductions: softmax/layernorm/sum/amax (burn reduce tuner)
 Why: our CUDA reductions are the remaining memory-bound gap (softmax 155 vs torch 288 GB/s,
 layernorm 156 vs 209, sum 176 vs 287, amax 64 vs 292). Burn decomposes softmax and lets fusion

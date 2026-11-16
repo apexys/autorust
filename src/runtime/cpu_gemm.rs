@@ -574,6 +574,7 @@ mod tests {
             a_acc: 0,
             b_acc: 0,
             c_bo: 0,
+            tf32: false,
         }
     }
 

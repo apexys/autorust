@@ -44,6 +44,7 @@ pub mod rand;
 pub mod state;
 pub use state::State;
 pub mod reduce;
+pub(crate) mod conv_fused;
 pub(crate) mod reduce_fused;
 
 use crate::dtype::ConstVal;

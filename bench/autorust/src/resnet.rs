@@ -50,7 +50,27 @@ impl Cb {
     }
 
     fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {
-        let y = self.conv.forward(x);
+        let tc3x3 = !training
+            && self.conv.groups == 1
+            && self.conv.kernel_size == [3, 3]
+            && self.conv.stride == 1
+            && self.conv.dilation == 1
+            && self.conv.padding == [1, 1, 1, 1]
+            && match std::env::var("AUTORUST_CONV3X3_TC") {
+                Ok(v) => v != "0" && !v.is_empty(),
+                Err(_) => {
+                    x.ctx().borrow().settings.math_mode == autorust::settings::MathMode::Fast
+                }
+            };
+        let y = if tc3x3 {
+            {
+                let mut c = x.ctx().borrow_mut();
+                x.realize_device_ctx(&mut c, sess);
+            }
+            self.conv.forward_with(x, sess)
+        } else {
+            self.conv.forward(x)
+        };
         if self.folded && !training {
             return y;
         }

@@ -47,6 +47,38 @@ Benchmarks (`cargo run --release --example …`):
 Read the source of each example for the full list; `DEV`/`DEFAULT_DEVICE`
 selects the backend.
 
+## Math mode
+
+`Settings::math_mode` (`AUTORUST_MATH`, alias `AUTORUST_ACCURACY`) has two
+values:
+
+- **`Fast` (default)** — TF32 tensor-core math for f32: cuBLAS f32 GEMMs,
+  generated tensor-core matmuls, conv-only TF32, and the custom tensor-core 3x3
+  conv. `CC` adds `-ffast-math`, OpenCL adds `-cl-fast-relaxed-math`.
+- **`Exact`** — pedantic f32 everywhere; disables the TF32 host paths and the
+  tensor-core conv kernel.
+
+Measured, RTX 3060, default vs `AUTORUST_MATH=exact`:
+
+| workload | Exact | Fast | result |
+|---|---:|---:|---:|
+| ResNet-18 infer bs 32 | 277.2 ms | **201.2 ms** | -27% |
+| ViT-B/16 infer bs 8 | 82.8 ms | **65.6 ms** | -21% |
+
+The individual switches still override the mode
+(`AUTORUST_CUBLAS_TF32`, `AUTORUST_TENSOR_CORES`, `AUTORUST_CONV_TF32`,
+`AUTORUST_CONV3X3_TC`). The committed cross-framework tables were collected
+before `Fast` became the default and are therefore **Exact-mode** numbers;
+re-run with `AUTORUST_MATH=exact` to reproduce them, or leave the default for
+the current Fast-mode numbers.
+
+The `CC`/OpenCL compiler flags are real but small on memory-bound kernels:
+OpenCL fast math measured softmax `1.065 -> 0.982 ms` while other memops were
+neutral; `CC` amax `2.38 -> 2.11 ms`, add `10.64 -> 10.20 ms`, but gelu
+`9.38 -> 10.63 ms` (mixed). `RUST` has no stable fast-math flag and Vulkan has
+no compiler-level flag; Metal keeps the explicit `METAL_FAST_MATH` switch
+because fast math drops the attention `-inf` masks.
+
 ## Generated GEMM
 
 Matmul-shaped contractions (`MUL -> REDUCE(ADD)`) get a register tile from the

@@ -446,7 +446,7 @@ extern "C" __global__ void autorust_epi_bf16(__nv_bfloat16* c, const __nv_bfloat
             && g.dtype == crate::dtype::FLOAT32
             && g.batch > 1
             && g.n >= 28;
-        handle.set_math_mode(crate::settings::global().allow_tf32 || conv_tf32);
+        handle.set_math_mode(g.tf32 || conv_tf32);
         CUBLAS_GEMMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // A two-axis `(batch, head)` layout has no single cuBLAS batch stride.
         // cuBLAS can still run it as `outer` strided-batched calls over the inner

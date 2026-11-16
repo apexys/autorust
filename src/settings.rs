@@ -61,11 +61,29 @@ impl Default for LibraryGemmPolicy {
     }
 }
 
+/// Arithmetic policy for a context.
+///
+/// `Fast` (the default) allows TF32 tensor-core math for f32 GEMMs and the
+/// conv-only tensor-core paths; `Exact` keeps pedantic f32 everywhere. The
+/// individual `AUTORUST_CUBLAS_TF32`, `AUTORUST_TENSOR_CORES`,
+/// `AUTORUST_CONV_TF32` and `AUTORUST_CONV3X3_TC` switches still override the
+/// mode for their scope.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MathMode {
+    /// TF32 tensor cores where available (10-bit mantissa).
+    #[default]
+    Fast,
+    /// Pedantic f32; disables TF32/TF32-only host kernels.
+    Exact,
+}
+
 /// Configuration for one context.
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// Attention implementation used by `Tensor::attention`.
     pub attention: AttentionKind,
+    /// Arithmetic policy (`Fast` by default; `AUTORUST_MATH=exact`).
+    pub math_mode: MathMode,
     /// Library-GEMM policy, per backend.
     pub library_gemm: LibraryGemmPolicy,
     /// Use TF32 (f32 mantissa, 10 bits) for cuBLAS f32 GEMMs.
@@ -128,8 +146,9 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             attention: AttentionKind::Flash,
+            math_mode: MathMode::Fast,
             library_gemm: LibraryGemmPolicy::default(),
-            allow_tf32: false,
+            allow_tf32: true,
             tensor_cores: true,
             cpu_gemm_tile: None,
             beam: 0,
@@ -180,28 +199,37 @@ impl Settings {
         if let Some(v) = env("AUTORUST_VK_GEMM") {
             library_gemm.vk = parse(Some(&v));
         }
+        let math_mode = match env("AUTORUST_MATH")
+            .or_else(|| env("AUTORUST_ACCURACY"))
+            .as_deref()
+        {
+            Some("exact") | Some("strict") | Some("0") => MathMode::Exact,
+            _ => MathMode::Fast,
+        };
         let attention = match env("AUTORUST_ATTN").as_deref() {
             Some("sdpa") | Some("0") => AttentionKind::Sdpa,
             Some("sage") => AttentionKind::Sage,
             _ => AttentionKind::Flash,
         };
-        // Opt-in: TF32 cuBLAS is within noise of pedantic f32 at our shapes
-        // (measured 789x1536x384 and 2048^3) and changes the model output.
-        let allow_tf32 = matches!(
-            env("AUTORUST_CUBLAS_TF32")
-                .or_else(|| env("ALLOW_TF32"))
-                .as_deref(),
-            Some("1") | Some("true")
-        );
+        let allow_tf32 = match env("AUTORUST_CUBLAS_TF32")
+            .or_else(|| env("ALLOW_TF32"))
+            .as_deref()
+        {
+            Some("0") | Some("false") => false,
+            Some("1") | Some("true") => true,
+            _ => math_mode == MathMode::Fast,
+        };
         // Master switch for hand-written tensor-core kernels. Independent of
         // `allow_tf32` so a caller can keep TF32 cuBLAS but demand the exact
         // scalar attention kernel (or the other way round).
-        let tensor_cores = !matches!(
-            env("AUTORUST_TENSOR_CORES")
-                .or_else(|| env("AUTORUST_TC"))
-                .as_deref(),
-            Some("0") | Some("false")
-        );
+        let tensor_cores = match env("AUTORUST_TENSOR_CORES")
+            .or_else(|| env("AUTORUST_TC"))
+            .as_deref()
+        {
+            Some("0") | Some("false") => false,
+            Some(_) => true,
+            None => math_mode == MathMode::Fast,
+        };
         let cpu_gemm_tile = match (
             env("AUTORUST_CPU_GEMM_MC").and_then(|v| v.parse().ok()),
             env("AUTORUST_CPU_GEMM_NC").and_then(|v| v.parse().ok()),
@@ -236,6 +264,7 @@ impl Settings {
         let async_pipeline = !matches!(env("AUTORUST_ASYNC").as_deref(), Some("0") | Some("false"));
         Settings {
             attention,
+            math_mode,
             library_gemm,
             allow_tf32,
             tensor_cores,
@@ -250,6 +279,14 @@ impl Settings {
             vk_device,
             async_pipeline,
         }
+    }
+
+    /// Builder: set the arithmetic policy.
+    pub fn with_math_mode(mut self, math_mode: MathMode) -> Settings {
+        self.math_mode = math_mode;
+        self.allow_tf32 = math_mode == MathMode::Fast;
+        self.tensor_cores = math_mode == MathMode::Fast;
+        self
     }
 
     /// Builder: `Settings::default().with_attention(kind)`.

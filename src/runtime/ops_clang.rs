@@ -102,6 +102,10 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
+fn fast_math() -> bool {
+    crate::settings::global().math_mode == crate::settings::MathMode::Fast
+}
+
 fn cache_key(src: &str) -> u64 {
     let mut key = Vec::new();
     key.extend_from_slice(b"autorust-cc-v1");
@@ -111,6 +115,7 @@ fn cache_key(src: &str) -> u64 {
     key.extend_from_slice(std::env::consts::OS.as_bytes());
     key.extend_from_slice(std::env::consts::ARCH.as_bytes());
     key.extend_from_slice(arch_flag().as_bytes());
+    key.push(if fast_math() { 1 } else { 0 });
     fnv1a(&key)
 }
 
@@ -172,6 +177,11 @@ impl ClangCompiler {
             cmd.arg("-shared");
         }
         cmd.args(["-fPIC", "-O3", "-std=gnu11", "-fno-math-errno"]);
+        // `MathMode::Fast` is the C backend's fast-math switch. The source and
+        // this flag are both part of the cache key.
+        if fast_math() {
+            cmd.arg("-ffast-math");
+        }
         let arch = arch_flag();
         if arch != "none" {
             cmd.arg(format!("-march={arch}"));

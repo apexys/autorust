@@ -6096,3 +6096,48 @@ expensive on the CPU. Reverted; no flag/tests remain. The remaining path is a
 true custom tensor-core implicit-GEMM 3x3 kernel. The current tensor-core option
 is the opt-in conv-only TF32 path (§9.91, ResNet-18 -7-11%), which is already
 landed and benchmarked.
+
+### 9.93 Math mode (Fast default) + custom tensor-core 3x3 conv (2026-11-16)
+
+Added `Settings::math_mode` (`MathMode::{Fast, Exact}`, default **Fast**;
+`AUTORUST_MATH`/`AUTORUST_ACCURACY`), with `AUTORUST_MATH=exact` as the strict
+escape. Fast means TF32 tensor-core math for f32:
+
+- cuBLAS f32 GEMMs (`allow_tf32`);
+- generated tensor-core matmuls (`tensor_cores`);
+- conv-only TF32 and the new custom 3x3 tensor-core kernel;
+- `CC` passes `-ffast-math`, OpenCL passes `-cl-fast-relaxed-math`.
+
+The host-GEMM descriptor now carries `tf32` from the **context**, so a Ctx set
+to Exact stays strict even if the process default is Fast. The generated and
+custom kernels read the context mode directly.
+
+**Custom 3x3 conv.** `runtime::cuda_conv3x3` is a bounded TF32 `wmma` implicit-
+GEMM kernel: one block = 64 rows x 64 output channels (four warps, 16x16 tiles),
+patches generated directly into the A staging buffer (no im2col copy), K=cin*9.
+It covers groups=1/stride=1/pad=1/dilation=1 f32; everything else keeps the
+graph. `Conv2d::forward_with`/`Tensor::conv2d_with` make it opt-in for inference.
+
+Measured, RTX 3060:
+
+| config | ResNet-18 infer bs 32 |
+|---|---:|
+| Exact f32 (`AUTORUST_MATH=exact`) | 277.2 ms |
+| Fast, cuBLAS TF32 only | 250-255 ms |
+| Fast + custom 3x3 TC | **201-208 ms** |
+| ViT-B/16 infer bs 8: Exact 82.8 -> Fast **65.6 ms** | |
+
+The custom kernel alone (vs Fast cuBLAS) was 240-243 vs 250-259 ms in repeated
+pairs; with the global Fast mode it compounds to ~27% over Exact. `tests/cuda_conv3x3_tc.rs`
+checks forward vs INTERP (TF32 tolerance), the stride-2 fallback, and the graph
+dx/dw/db gradient (training stays on the graph). The full suite passes with
+Fast as the default.
+
+**Backend transfer.** CUDA-only: TF32 cuBLAS, the custom 3x3 `wmma` conv, and
+the conv-only TF32 gate. OpenCL gets `-cl-fast-relaxed-math` (softmax
+1.065 -> 0.982 ms, other memops neutral). `CC` gets `-ffast-math` (amax
+2.38 -> 2.11 ms, add 10.64 -> 10.20 ms, gelu 9.38 -> 10.63 ms, mixed). `RUST`
+has no stable fast-math flag; Vulkan emits SPIR-V with no compiler-level
+fast-math option; Metal keeps `METAL_FAST_MATH` explicit because fast math
+folds the attention `-inf` masks. The `CC` compile path on Windows works with
+clang/MinGW; MSVC `cl` is not supported by the current Unix-flag command line.

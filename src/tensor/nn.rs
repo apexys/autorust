@@ -342,6 +342,21 @@ impl Conv2d {
             None,
         )
     }
+
+    /// [`Conv2d::forward`] with a session, using the fused CUDA tensor-core
+    /// 3x3 kernel when the layer/input match. Inference-only.
+    pub fn forward_with(&self, x: &Tensor, sess: &mut Session) -> Tensor {
+        x.conv2d_with(
+            &self.weight,
+            self.bias.as_ref(),
+            self.groups,
+            self.stride,
+            self.dilation,
+            &self.padding,
+            None,
+            sess,
+        )
+    }
 }
 
 impl Module for Conv2d {

@@ -72,7 +72,10 @@ Here's a benchmark ([`bench`](https://github.com/apexys/autorust/tree/main/bench
 
 (CPU: Ryzen 9 3900X, 64GB of DDR4 RAM, RTX 3060 12GB, Ubuntu 26.04)
 
-See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md) for methodology and tuning.
+The table is **Exact-mode** (`AUTORUST_MATH=exact`) to keep the arithmetic
+comparable; the default is now Fast (`AUTORUST_MATH=fast`), which uses TF32
+tensor cores and measured 27% faster ResNet-18 inference and 21% faster ViT
+inference. See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#math-mode) for methodology and tuning.
 
 | workload | device | autorust | burn | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|---:|

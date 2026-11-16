@@ -119,6 +119,16 @@ These mirror the `Settings` fields above; the per-backend variables win over
 
 | variable | values | default | effect |
 |---|---|---|---|
+| `AUTORUST_MATH` / `AUTORUST_ACCURACY` | `fast`, `1`; `exact`, `strict`, `0` | `fast` | Arithmetic policy on new contexts. `Fast` enables TF32 cuBLAS, tensor cores, conv-only TF32 and the 3x3 tensor-core conv; `Exact` is pedantic f32. Individual `AUTORUST_CUBLAS_TF32` / `AUTORUST_TENSOR_CORES` / `AUTORUST_CONV_TF32` / `AUTORUST_CONV3X3_TC` settings override it. |
+| `AUTORUST_CONV3X3_TC` | `1`/`0` | follows math mode | Use the custom tensor-core 3x3 implicit-GEMM kernel for groups=1/stride=1/padding=1 inference (CUDA, sm_80+). `0` forces the graph/im2col path. |
+`AUTORUST_MATH` is also the switch for the C compiler's `-ffast-math` and
+OpenCL's `-cl-fast-relaxed-math`. `RUST` has no stable fast-math flag and Vulkan
+emits SPIR-V without a compiler fast-math option; Metal keeps
+`METAL_FAST_MATH` as its explicit switch (fast math drops the `x + -inf` masks
+used by attention).
+
+| variable | values | default | effect |
+|---|---|---|---|
 | `AUTORUST_ATTN` | `sdpa`/`0`, `sage`, anything else | `flash` | Attention implementation for `Tensor::attention`. |
 | `FA` | any non-`0` | off | Route `TransformerBlock` through the op-level FlashAttention port instead of SDPA (an algorithm reference; the fused kernels are reached by `Tensor::attention_with`). |
 | `AUTORUST_GEMM` | `0`/`never`, `all`/`force`/`always`, anything else | `auto` | Neutral library-GEMM policy. |

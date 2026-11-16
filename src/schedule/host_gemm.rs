@@ -131,6 +131,8 @@ pub struct HostGemm {
     /// has the m axis between the two batch axes, so the outer slice stride is
     /// not `inner * c_b`.
     pub c_bo: i64,
+    /// Allow TF32 tensor-core math for this f32 GEMM (the Ctx math mode).
+    pub tf32: bool,
 }
 
 impl HostGemm {
@@ -145,7 +147,7 @@ impl HostGemm {
              a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
              a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
              c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
-             scale_off: {}, res_slot: {}, res_off: {}, relu: {}, bias_m: {}, scale_m: {}, bias_outside: {}, acc: {}, a_acc: {}, b_acc: {}, c_bo: {} }}",
+             scale_off: {}, res_slot: {}, res_off: {}, relu: {}, bias_m: {}, scale_m: {}, bias_outside: {}, acc: {}, a_acc: {}, b_acc: {}, c_bo: {}, tf32: {} }}",
             self.a_slot,
             self.b_slot,
             self.c_slot,
@@ -181,7 +183,8 @@ impl HostGemm {
             self.acc,
             self.a_acc,
             self.b_acc,
-            self.c_bo
+            self.c_bo,
+            self.tf32
         )
     }
 
@@ -233,6 +236,7 @@ impl HostGemm {
                 ("a_acc".into(), int(self.a_acc)),
                 ("b_acc".into(), int(self.b_acc)),
                 ("c_bo".into(), int(self.c_bo)),
+                ("tf32".into(), Arg::Bool(self.tf32)),
             ],
         }
     }
@@ -329,6 +333,10 @@ impl HostGemm {
             a_acc: i("a_acc"),
             b_acc: i("b_acc"),
             c_bo: i("c_bo"),
+            tf32: match d.get("tf32") {
+                Arg::Bool(v) => *v,
+                _ => false,
+            },
         };
         Some(desc)
     }
@@ -1766,6 +1774,7 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
         a_acc: acc.map(|(_, a, _)| a).unwrap_or(0),
         b_acc: acc.map(|(_, _, b)| b).unwrap_or(0),
         c_bo,
+        tf32: ctx.settings.allow_tf32,
     };
     // The cooperative-matrix module is the only VK library GEMM, so it has to
     // accept the descriptor (f16 operands, f32 accumulate, contiguous row-major,
@@ -1915,6 +1924,7 @@ mod tests {
             a_acc: 0,
             b_acc: 0,
             c_bo: 0,
+            tf32: false,
         }
     }
 

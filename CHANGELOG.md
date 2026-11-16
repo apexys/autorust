@@ -6,8 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Fast math mode is now the default.** `Settings` gains `math_mode`
+  (`MathMode::Fast` by default) and `HostGemm` gains `tf32` (both
+  source-breaking for struct-literal construction). `Fast` enables TF32
+  cuBLAS, generated/custom tensor-core paths, `CC` `-ffast-math` and OpenCL
+  `-cl-fast-relaxed-math`; `AUTORUST_MATH=exact` restores pedantic f32.
+  Measured RTX 3060: ResNet-18 infer 277.2 → 201.2 ms, ViT-B/16 infer bs 8
+  82.8 → 65.6 ms. Existing benchmark tables were collected in Exact mode and
+  are labelled as such in `PERFORMANCE.md`.
+
 ### Added
 
+- **Custom tensor-core 3x3 implicit-GEMM convolution.** A bounded TF32 `wmma`
+  kernel generates patches directly into the A tile (no im2col copy), 64 rows x
+  64 output channels per block; `Tensor::conv2d_with`/`Conv2d::forward_with`
+  use it for groups=1/stride=1/padding=1 f32 inference. Gate:
+  `tests/cuda_conv3x3_tc.rs`.
 - **Opt-in conv-only TF32 tensor-core path.** `AUTORUST_CONV_TF32=1` switches
   batched f32 im2col host GEMMs with `n >= 28` to TF32 tensor-core math while
   keeping attention/linear f32 strict. Measured ResNet-18 -7-11%, UNet ~4% median
