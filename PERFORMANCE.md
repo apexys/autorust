@@ -1005,6 +1005,13 @@ Reading it:
   ms, so the boundary is the cost). A graph-level 4-D depthwise tiling tweak was
   neutral. The 3x3/conv_transpose gap still needs the tensor-core implicit-GEMM
   work (`CURRENT_STATE §9.87`).
+- **Low-K 3x3 convolutions now use im2col + cuBLAS on CUDA.** The im2col floor
+  moved from `cin*kh*kw >= 576` to `>= 256` for CUDA only (CPU/CL/VK keep 576,
+  where the host-GEMM setup costs more). UNet's 32-channel 3x3 layers (K=288)
+  improved **11.3-12.4 -> 10.2-10.3 ms (~10-14%)**; ResNet-18 and ONNX ResNet
+  were neutral, and CPU UNet is unchanged at the 576 floor. Gate:
+  `tests/conv_im2col.rs` compares CUDA forward and dx/dw/db against INTERP for
+  the K=288 shape.
 - The UNet exposes `conv_transpose`, nearest upsample and skip `cat`, all far
   behind cuDNN/oneDNN.
 

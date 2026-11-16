@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Low-K 3x3 convolution im2col on CUDA.** The im2col floor is now
+  `cin*kh*kw >= 256` on CUDA (`576` on CPU/CL/VK, where host-GEMM setup costs
+  more). UNet's 32-channel 3x3 layers moved to im2col + cuBLAS and improved
+  11.3-12.4 → 10.2-10.3 ms (~10-14%); ResNet-18/ONNX were neutral. Gate:
+  `tests/conv_im2col.rs` (CUDA forward and gradients vs INTERP at K=288).
 - **1x1 convolution fast path on CUDA.** A 1x1 conv with `groups=1`, stride 1,
   dilation 1 and zero padding now lowers as `[B*H*W, Cin] @ [Cin, Cout]`
   instead of the 3-axis convolution path, with a CUDA-only row gate

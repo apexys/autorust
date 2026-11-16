@@ -414,7 +414,16 @@ impl Tensor {
         // floor, while ResNet-18 is unchanged down to 256).
         let min_k = crate::helpers::env::get("AUTORUST_IM2COL_MIN_K")
             .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(576);
+            .unwrap_or_else(|| {
+                // CUDA's im2col + cuBLAS path pays off at K = 288 (UNet's
+                // 32-channel 3x3 layers: 12.0 -> 10.5 ms); the CPU/CL/VK host
+                // GEMM setup needs the historical 576 floor.
+                let cuda = matches!(
+                    crate::schedule::indexing::device_of(ctx, self.uop()),
+                    Some(crate::uop::arg::DeviceSpec::Single(ref d)) if d.starts_with("CUDA")
+                );
+                if cuda { 256 } else { 576 }
+            });
         let use_im2col = im2col_elems <= 64_000_000 && hw.iter().product::<i64>() > 1 && red >= min_k;
         let x = if use_im2col { x.contiguous_ctx(ctx) } else { x };
 

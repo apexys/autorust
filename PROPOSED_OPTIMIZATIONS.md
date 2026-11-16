@@ -50,6 +50,9 @@ MobileNetV2 -7%, ResNet-50 -2%, UNet -4%, CPU/ResNet-18 neutral
 kernel was also tried and rejected: it needs a realized-input boundary that
 costs more than the kernel saves (MobileNet 69.9 vs 56.3 ms unpinned graph), and
 a graph-level 4-D depthwise tiling tweak was neutral (`CURRENT_STATE §9.87`).
+The 3x3 layout specialization also landed: the im2col floor is 256 on CUDA
+(576 elsewhere), which moves UNet's K=288 layers onto im2col + cuBLAS
+(11.3-12.4 -> 10.2-10.3 ms, `CURRENT_STATE §9.90`, `tests/conv_im2col.rs`).
 Tensor-core implicit GEMM for 3x3/conv_transpose remains open.
 12. Fused reductions: softmax/layernorm/sum/amax (burn reduce tuner)
 Why: our CUDA reductions are the remaining memory-bound gap (softmax 155 vs torch 288 GB/s,

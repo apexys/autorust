@@ -6023,3 +6023,29 @@ sets and a second stream would be a cross-cutting executor change for a
 sub-1% model result, and the q/k/v group is already one fused linear in the
 generated plan. Not landed. A future revisit needs a workload with genuinely
 independent large SINKs, not transformer layers.
+
+### 9.90 Item 11 (3x3 implicit-GEMM layout): low-K im2col floor landed (2026-11-16)
+
+The 3x3 path already used im2col + cuBLAS above `cin*kh*kw >= 576`, but UNet's
+early 3x3 layers have `cin=32` (K=288) and stayed on the generated direct
+convolution. Lowering the floor to **256 on CUDA only** puts them on the
+host-GEMM path. The CPU/CL/VK floor stays 576: CPU UNet regressed 127.8 ->
+135.1 ms at 256, while CUDA improved.
+
+Interleaved A/B, RTX 3060:
+
+| workload | K=576 floor | K=256 floor | result |
+|---|---:|---:|---|
+| UNet infer bs 4 | 11.36 / 12.37 ms | **10.19 / 10.34 ms** | ~10-14% |
+| ResNet-18 infer bs 32 | 284.0 ms | 286.3 ms | neutral |
+| ONNX ResNet-18 w=0.25 bs 8 | 10.30 ms | 10.24 ms | neutral |
+| UNet infer bs 4, CPU | 127.8 ms | 135.1 ms (forced) | CPU keeps 576 |
+
+Gate: `tests/conv_im2col.rs` runs a 32-channel 3x3 conv (K=288) through CUDA and
+INTERP and compares forward and dx/dw/db (max abs < 2e-5).
+
+A host-GEMM **batch-to-N fold** for the 3x3 convs was also tried: merging the
+contiguous `oy` batch axis into `n` (`n=28, batch=896` -> `n=784, batch=32`)
+regressed ResNet-18 from 282.8 to 327.0 ms, so it was reverted. The remaining
+3x3/conv_transpose gap needs a real tensor-core implicit-GEMM kernel, not a
+descriptor rewrite.
