@@ -46,8 +46,11 @@ GFLOP/s before/after.
 Status (2026-11-16): started with the 1x1 case. CUDA 1x1 convs (groups=1,
 stride=1, dilation=1, no padding, >=2048 rows) now lower as a plain matmul:
 MobileNetV2 -7%, ResNet-50 -2%, UNet -4%, CPU/ResNet-18 neutral
-(`CURRENT_STATE §9.86`, `tests/conv1x1.rs`). Tensor-core implicit GEMM for
-3x3/depthwise/conv_transpose remains open.
+(`CURRENT_STATE §9.86`, `tests/conv1x1.rs`). A hand-written depthwise host
+kernel was also tried and rejected: it needs a realized-input boundary that
+costs more than the kernel saves (MobileNet 69.9 vs 56.3 ms unpinned graph), and
+a graph-level 4-D depthwise tiling tweak was neutral (`CURRENT_STATE §9.87`).
+Tensor-core implicit GEMM for 3x3/conv_transpose remains open.
 12. Fused reductions: softmax/layernorm/sum/amax (burn reduce tuner)
 Why: our CUDA reductions are the remaining memory-bound gap (softmax 155 vs torch 288 GB/s,
 layernorm 156 vs 209, sum 176 vs 287, amax 64 vs 292). Burn decomposes softmax and lets fusion

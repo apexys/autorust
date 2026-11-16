@@ -989,8 +989,12 @@ Reading it:
   ResNet-50 88.2-89.7 -> 82.8-87.9 ms (2-6%), UNet 12.3 -> 11.8 ms (~4% in one
   pair), ResNet-18 and the CPU rows unchanged. Gates:
   `tests/conv1x1.rs` (direct-sum reference and CUDA gradients).
-  The 3x3/depthwise/conv_transpose gap still needs the tensor-core
-  implicit-GEMM work.
+  A hand-written depthwise host kernel was tried next and rejected: it needs a
+  realized-input boundary, and MobileNet measured 69.9 vs 56.3 ms for the
+  unpinned graph (with the same forced pin, the host kernel was 71.5 vs 101.4
+  ms, so the boundary is the cost). A graph-level 4-D depthwise tiling tweak was
+  neutral. The 3x3/conv_transpose gap still needs the tensor-core implicit-GEMM
+  work (`CURRENT_STATE §9.87`).
 - The UNet exposes `conv_transpose`, nearest upsample and skip `cat`, all far
   behind cuDNN/oneDNN.
 

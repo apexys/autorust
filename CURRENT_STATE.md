@@ -5929,3 +5929,36 @@ Gates: `tests/conv1x1.rs` checks the fast path against a direct host sum
 against the analytic 1x1 sums; `tests/nn_conv.rs` still passes. The remaining
 tensor-core implicit-GEMM work is for 3x3, depthwise and conv_transpose, not
 1x1.
+
+### 9.87 Item 11 (depthwise conv): measured rejection (2026-11-16)
+
+After the 1x1 specialization (§9.86), tried the depthwise case. Implemented a
+CUDA host kernel `ar_depthwise2d` (one thread per output pixel, arbitrary
+stride/dilation/symmetric padding, optional bias), a session-aware
+`Tensor::conv2d_with`, `Conv2d::forward_with`, and wired the MobileNet bench to
+pin the input and use it for depthwise inference. Correctness before removal:
+
+- fused vs graph on 2x3x7x7 and 2x3x8x8 (stride 1/2, pad 1), max abs < 2e-5;
+- non-depthwise `groups=1` fell back exactly;
+- the graph depthwise gradient matched the analytic 3x3 sums for dx/dw/db.
+
+Performance, MobileNetV2 infer bs 32, RTX 3060:
+
+| variant | time |
+|---|---:|
+| graph, no pin | **56.3 ms** |
+| host kernel, input pinned | 69.9 ms |
+| graph, forced pin | 101.4 ms |
+| host kernel, same forced pin | 71.5 ms |
+
+The host kernel is faster than the *pinned* graph (71.5 vs 101.4), but the
+realized-input boundary it requires costs more than it saves: the generated
+path was fusing the producer into the depthwise conv. A graph-level variant that
+drops the unit `rcout` axis so `try_conv_tiling` sees a 4-D depthwise output
+(`AUTORUST_CONV_DW_TILE=1`) was neutral (57.86 vs 57.91 ms), so it was also
+reverted.
+
+Not landed: the host kernel needs a lower-level capture integration that can
+append the launch after the producer's buffer is scheduled without a hard
+`realize` boundary. The code, tests and flags were removed. The 3x3 tensor-core
+implicit-GEMM path remains open.
