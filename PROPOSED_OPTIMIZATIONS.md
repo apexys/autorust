@@ -72,6 +72,10 @@ minimum-work gate, anchored to 32/128-element buckets so ViT's 197 does not crea
 per kernel. Add `AUTORUST_AUTOTUNE_KERNELS=0` escape and a `GEMM_STATS`-style report of the
 winner per key.
 Measure: first-call cost, cache hit rate, steady-state gain on gemm/vit/resnet.
+Status (2026-11-16): the first per-shape selection landed as a fixed heuristic
+rather than a tuner - a batched CUDA f32 contraction stays on the generated
+kernel below 1.5M MACs/batch (MNIST CUDA 52.9 -> 23.3 ms/step, ONNX ResNet-18
+12.0 -> 10.2 ms; `CURRENT_STATE §9.81`). The full keyed tuner is still open.
 15. Multi-stream scheduling for independent branches
 Why: burn's fusion runtime is `Send + Clone` and keeps one lazy stream per thread
 (`burn-fusion/src/stream/multi.rs`), with read plans and `device.sync()` as the only hard
