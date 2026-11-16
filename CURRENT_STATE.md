@@ -6608,10 +6608,14 @@ recorded in `ONNX-Compat.md`:
 - **T2-B (after T2-A):** `GridSample`, `RoiAlign`/`MaxRoiPool`, `BitShift`,
   `Unique`; lower priority `Col2Im`/`DeformConv`. These were missing from the
   original matrix but are higher value than most of T2-C (spatial transformers,
-  detection post-processing, integer models).
+  detection post-processing, integer models). Low-priority random ops
+  (`RandomNormal`/`RandomUniform`/`*Like`, `Bernoulli`, `Multinomial`) also
+  belong here: `tensor::rand` already provides the Threefry RNG (graph and host
+  routes), so the work is per-op `seed`, runtime `shape` inputs and a
+  replay-plan policy, not new numerics.
 - **T2-C (deferred):** quantized ops (waiting for the INT8 W8A8 design),
-  training ops, `Loop`/`Scan`, the wider ONNX-ML/string domain,
-  `ImageDecoder`, and random ops.
+  training ops, `Loop`/`Scan`, the wider ONNX-ML/string domain, and
+  `ImageDecoder`.
 
 Do not do "all of T2 except quantization" as one batch: training/ONNX-ML/
 `Loop` have low deployment value or need architectural changes, while the

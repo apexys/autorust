@@ -16,9 +16,9 @@ limitations are rare: shape inputs fed at runtime (not derived from
 `Shape`/`Size`; evaluated eagerly) and `Resize`'s `tf_crop_and_resize` (needs
 `roi`). T2 is split into batches by cost/value: **T2-A** (windows, `If`,
 optional/sequence values, the two small ONNX-ML ops), **T2-B** (additional
-high-value vision/general ops), and **T2-C** (deferred: quantization, training
-ops, `Loop`/`Scan`, the wider ONNX-ML/string domain, `ImageDecoder`, random
-ops). See [T2 batches](#t2-batches).
+high-value vision/general ops, plus random ops), and **T2-C**
+(deferred: quantization, training ops, `Loop`/`Scan`, the wider ONNX-ML/string
+domain, `ImageDecoder`). See [T2 batches](#t2-batches).
 
 Legend:
 
@@ -27,7 +27,7 @@ Legend:
   attribute/mode, or a required primitive is still missing.
 - ⬜ **missing** — no importer support / primitive yet.
 - ❌ **not planned / deferred** — intentionally out of scope for now
-  (training graphs, `Loop`/`Scan`, wider ONNX-ML, image codecs, random ops).
+  (training graphs, `Loop`/`Scan`, wider ONNX-ML, image codecs).
 
 ## Scope
 
@@ -36,8 +36,8 @@ Legend:
 | T0 | protobuf parser, runner, runtime `Shape` folding, external data, Depth-Anything-style models | ✅ done |
 | T1 | transformer/CLIP op set (`Einsum`, `GatherND`, `Pad` modes, `TopK`, `Scatter*`, …) | ✅ done |
 | T2-A | near-term: `HannWindow`/`HammingWindow`/`BlackmanWindow`, `If`, optional/sequence values, `Binarizer`/`ArrayFeatureExtractor` | ⬜ next |
-| T2-B | additional high-value op coverage: `GridSample`, `RoiAlign`, `MaxRoiPool`, `BitShift`, `Unique`; lower priority `Col2Im`, `DeformConv` | ⬜ after T2-A |
-| T2-C | deferred / not planned: quantized ops, training ops, `Loop`/`Scan`, wider ONNX-ML, `ImageDecoder`, random ops | ❌ deferred |
+| T2-B | additional high-value op coverage: `GridSample`, `RoiAlign`, `MaxRoiPool`, `BitShift`, `Unique`; low priority `Col2Im`, `DeformConv`, random ops (`Random*`, `Bernoulli`, `Multinomial`) | ⬜ after T2-A |
+| T2-C | deferred / not planned: quantized ops, training ops, `Loop`/`Scan`, wider ONNX-ML, `ImageDecoder` | ❌ deferred |
 
 ## T2 batches
 
@@ -47,8 +47,8 @@ value and architectural risk:
 | Batch | Contents | Rationale |
 |---|---|---|
 | **T2-A** | `HannWindow`/`HammingWindow`/`BlackmanWindow`; `If` subgraphs; `OptionalGetElement`/`OptionalHasElement`; `Binarizer`/`ArrayFeatureExtractor` | Small, mostly compositional, and the only T2 features with realistic deployment value. `If` needs a nested graph runner and a recursion cap; runtime conditions disable the replay plan. |
-| **T2-B** | `GridSample`; `RoiAlign`/`MaxRoiPool`; `BitShift`; `Unique`; lower priority `Col2Im`/`DeformConv` | Not in the original T2 list, but higher value than most of T2-C: spatial transformers, detection post-processing and integer models. `GridSample`/`BitShift` are graph compositions; ROI pooling and `Unique` are host-assisted and data-dependent. |
-| **T2-C** | Quantized ops; training ops (`Adam`/`Adagrad`/`Momentum`/`Gradient`); `Loop`/`Scan`; the wider ONNX-ML/string domain; `ImageDecoder`; random ops (`Bernoulli`/`Multinomial`/`Random*`) | Deferred or not planned. Quantization waits for the INT8 W8A8 design; training graphs are rare in deployment and stateful; `Loop`/`Scan` need dynamic carried state; ONNX-ML is a long preprocessing tail; image codecs are out of scope; random ops need a seeding/reproducibility policy. |
+| **T2-B** | `GridSample`; `RoiAlign`/`MaxRoiPool`; `BitShift`; `Unique`; lower priority `Col2Im`/`DeformConv`; low priority random ops (`RandomNormal`/`RandomUniform` and `*Like`, `Bernoulli`, `Multinomial`) | Not in the original T2 list, but higher value than most of T2-C: spatial transformers, detection post-processing and integer models. `GridSample`/`BitShift` are graph compositions; ROI pooling and `Unique` are host-assisted and data-dependent. The RNG primitives already exist (`tensor::rand`); random ops need per-op `seed` handling, a replay-plan policy and distribution-level gates, not new numerics. |
+| **T2-C** | Quantized ops; training ops (`Adam`/`Adagrad`/`Momentum`/`Gradient`); `Loop`/`Scan`; the wider ONNX-ML/string domain; `ImageDecoder` | Deferred or not planned. Quantization waits for the INT8 W8A8 design; training graphs are rare in deployment and stateful; `Loop`/`Scan` need dynamic carried state; ONNX-ML is a long preprocessing tail; image codecs are out of scope. |
 
 Execution order: **T2-A → T2-B**, with T2-C explicitly out of scope until a
 concrete model requires a piece of it. The short T2-A items (windows, the two
@@ -129,10 +129,12 @@ outputs remain valid after it is dropped.
 - Windows, `If`, optional/sequence values and the two small ONNX-ML ops
   (`Binarizer`, `ArrayFeatureExtractor`) are T2-A.
 - `GridSample`, `RoiAlign`, `MaxRoiPool`, `BitShift`, `Unique`, `Col2Im` and
-  `DeformConv` are T2-B.
+  `DeformConv` are T2-B. Random ops are also T2-B (low priority): the RNG
+  primitives exist, but they need per-op `seed` handling and a replay-plan
+  policy.
 - Quantized ops (`MatMulInteger`/`ConvInteger`, `QuantizeLinear`/`DequantizeLinear`,
   the `QLinear*` family), training ops, `Loop`/`Scan`, the wider ONNX-ML/string
-  domain, `ImageDecoder` and random ops are T2-C (deferred / not planned).
+  domain and `ImageDecoder` are T2-C (deferred / not planned).
 
 ## Operator matrix
 
@@ -230,7 +232,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `HannWindow HammingWindow BlackmanWindow` | ⬜ T2-A | `arange`+`cos` composition. |
 | `Binarizer ArrayFeatureExtractor` | ⬜ T2-A | the only planned ONNX-ML ops. |
 | `ImageDecoder` | ❌ T2-C | image codecs are out of scope; feed tensors. |
-| `Bernoulli Multinomial RandomNormal RandomUniform` | ❌ T2-C | random ops; a seeding/reproducibility policy is needed first. |
+| `RandomNormal RandomUniform RandomNormalLike RandomUniformLike Bernoulli Multinomial` | ⬜ T2-B | RNG primitives exist; needs per-op `seed`, runtime shape input handling and a replay-plan policy. `Multinomial` is host-side/data-dependent. |
 | `Einsum` | ✅ | N operands, ellipsis (right-aligned broadcast), repeated labels (diagonal) and implicit output. |
 
 ## Validation plan (remaining)
@@ -243,8 +245,8 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 3. **Golden fixtures**: `tests/onnx.rs` builds models in-memory; add committed
    fixtures (when size allows) for the T1 op families.
 4. **T2**: land T2-A first (windows, then `If`), then T2-B (`GridSample`,
-   `RoiAlign`/`MaxRoiPool`, `BitShift`, `Unique`). T2-C stays documented as
-   deferred unless a target model forces a specific item.
+   `RoiAlign`/`MaxRoiPool`, `BitShift`, `Unique`; random ops last). T2-C stays
+   documented as deferred unless a target model forces a specific item.
 
 ## Security
 
