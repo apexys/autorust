@@ -6200,6 +6200,8 @@ Measured, RTX 3060, bs 32, 5 warmups + 20 iterations, alternating on/off
 | ResNet-18 infer | 213.9-215.7 ms | **154.6-156.0 ms** | -28% |
 | ResNet-50 infer | 82.9-83.1 ms | **35.2-36.6 ms** | -56% |
 | MobileNetV2 infer | 55.3 ms | 56.1 ms | neutral (depthwise 3x3, only the stem is covered) |
+| ResNet-18 train | 92.9 ms | 92.9 ms | unchanged (forward-only kernel; training stays on the graph) |
+| UNet infer bs 4 | 9.9 ms | 9.9 ms | unchanged (not wired; low-spatial layers are below `MIN_OUT`, the rest are im2col) |
 
 After the change the top KPROF row is `E_2` at 11%; the stem no longer
 dominates. `tests/cuda_conv_tc.rs` adds a 7x7/stride-2 test against INTERP
