@@ -121,6 +121,7 @@ These mirror the `Settings` fields above; the per-backend variables win over
 |---|---|---|---|
 | `AUTORUST_MATH` / `AUTORUST_ACCURACY` | `fast`, `1`; `exact`, `strict`, `0` | `fast` | Arithmetic policy on new contexts. `Fast` enables TF32 cuBLAS, tensor cores, conv-only TF32 and the kxk tensor-core conv; `Exact` is pedantic f32. Individual `AUTORUST_CUBLAS_TF32` / `AUTORUST_TENSOR_CORES` / `AUTORUST_CONV_TF32` / `AUTORUST_CONV_TC` settings override it. |
 | `AUTORUST_CONV_TC` (alias `AUTORUST_CONV3X3_TC`) | `1`/`0` | follows math mode | Use the custom tensor-core `k x k` implicit-GEMM kernel (groups=1, stride 1-2, symmetric `(k-1)/2` padding, CUDA sm_80+) for inference. It is picked for the measured 3x3 stride-1 case and for low-K convs below the im2col floor (the 7x7 ResNet stem). `0` forces the graph/im2col path. |
+| `AUTORUST_CONV_TC_MIN_ROWS` | integer rows | `4096` | Smallest `B*OH*OW` for the kxk tensor-core kernel. It is an occupancy/launch-cost knee, so it is device-dependent: 4096 keeps ResNet-18's 14x14 stages on the kernel (118 vs 157 ms on RTX 3060); raise it on a GPU/backend where the host launch does not pay. |
 `AUTORUST_MATH` is also the switch for the C compiler's `-ffast-math` and
 OpenCL's `-cl-fast-relaxed-math`. `RUST` has no stable fast-math flag and Vulkan
 emits SPIR-V without a compiler fast-math option; Metal keeps

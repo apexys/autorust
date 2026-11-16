@@ -106,7 +106,7 @@ pub fn conv_with(
     let oh = (h + 2 * pad - kh) / stride + 1;
     let ow = (w + 2 * pad - kw) / stride + 1;
     let rows = b.saturating_mul(oh).saturating_mul(ow);
-    if rows < crate::runtime::cuda_conv_tc::MIN_OUT {
+    if rows < crate::runtime::cuda_conv_tc::min_out() {
         return None;
     }
     let in_buf = x.realized_buffer()?;

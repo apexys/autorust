@@ -62,8 +62,8 @@ Measured, RTX 3060, default vs `AUTORUST_MATH=exact`:
 
 | workload | Exact | Fast | result |
 |---|---:|---:|---:|
-| ResNet-18 infer bs 32 | 264.6 ms | **154.4 ms** | -42% |
-| ResNet-50 infer bs 32 | 88.6 ms | **35.3 ms** | -60% |
+| ResNet-18 infer bs 32 | 264.6 ms | **118.0 ms** | -55% |
+| ResNet-50 infer bs 32 | 88.6 ms | **35.8 ms** | -60% |
 | ViT-B/16 infer bs 8 | 82.8 ms | **65.6 ms** | -21% |
 
 The individual switches still override the mode
@@ -77,7 +77,7 @@ The custom tensor-core conv kernel is a bounded TF32 `wmma` implicit-GEMM
 (square `k x k`, groups=1, stride 1-2, symmetric padding). It needs an
 already-realized input, so it only pays when 3x3 convs are contiguous (basic
 blocks) or when the graph has no fast path (the low-K 7x7 stem). Measured,
-ResNet infer bs 32: ResNet-18 **155 ms vs 214-216**, ResNet-50 **35-37 ms vs
+ResNet infer bs 32: ResNet-18 **118 ms vs 214-216**, ResNet-50 **35-37 ms vs
 83** (the stem was 61% of the step), MobileNet neutral. A bottleneck's 1x1 ->
 3x3 boundary forces a realize and regresses (ResNet-50 1110-1137 ms), so the
 benchmark harness keeps the path off for bottleneck `c2`; see

@@ -86,7 +86,10 @@ forces a schedule split (ResNet-50 13x slower); the harness only wires it where
 NCHW-store host-GEMM descriptor (`CURRENT_STATE §9.96`). The ONNX runner's
 `Conv` op now also calls `conv2d_with` (falling back without a forced realize),
 which improved ONNX ResNet-18 w=0.25 bs 8 by **-29%** (9.24-9.66 -> 6.94-7.38
-ms, `CURRENT_STATE §9.98`).
+ms, `CURRENT_STATE §9.98`). The row floor was then retuned from 16384 to 4096
+(`AUTORUST_CONV_TC_MIN_ROWS`), taking ResNet-18 infer to **118 ms** (157 ms at
+the old floor) while ResNet-50/MobileNet stayed neutral (`CURRENT_STATE
+§9.99`).
 12. Fused reductions: softmax/layernorm/sum/amax (burn reduce tuner)
 Why: our CUDA reductions are the remaining memory-bound gap (softmax 155 vs torch 288 GB/s,
 layernorm 156 vs 209, sum 176 vs 287, amax 64 vs 292). Burn decomposes softmax and lets fusion

@@ -13,8 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   source-breaking for struct-literal construction). `Fast` enables TF32
   cuBLAS, generated/custom tensor-core paths, `CC` `-ffast-math` and OpenCL
   `-cl-fast-relaxed-math`; `AUTORUST_MATH=exact` restores pedantic f32.
-  Measured RTX 3060: ResNet-18 infer 264.6 → 154.4 ms (-42%), ResNet-50
-  88.6 → 35.3 ms (-60%), ViT-B/16 infer bs 8 82.8 → 65.6 ms. Existing
+  Measured RTX 3060: ResNet-18 infer 264.6 → 118.0 ms (-55%), ResNet-50
+  88.6 → 35.8 ms (-60%), ViT-B/16 infer bs 8 82.8 → 65.6 ms. Existing
   benchmark tables were collected in Exact mode and are labelled as such in
   `PERFORMANCE.md`.
 
@@ -26,7 +26,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   use it for groups=1/stride 1-2/symmetric-padding f32 inference. It is picked
   for the measured 3x3 stride-1 case and for low-K convs below the im2col
   floor, notably ResNet's 7x7 stem (K=147). Measured RTX 3060, bs 32:
-  ResNet-18 infer 214-216 → 155 ms, ResNet-50 83 → 35-37 ms, MobileNet
+  ResNet-18 infer 214-216 → 118 ms, ResNet-50 83 → 35-37 ms, MobileNet
   neutral. Gate: `tests/cuda_conv_tc.rs`. The ONNX runner's `Conv` op also
   uses it when its input is already realized: ONNX ResNet-18 (w=0.25) bs 8
   went 9.24-9.66 → 6.94-7.38 ms (-29%) with no forced mid-graph realize.

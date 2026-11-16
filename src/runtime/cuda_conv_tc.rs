@@ -20,8 +20,21 @@ pub const THREADS: i64 = 128;
 pub const M_TILE: i64 = 64;
 /// Output channels per block.
 pub const N_TILE: i64 = 64;
-/// Smallest output worth a host launch.
-pub const MIN_OUT: i64 = 1 << 14;
+/// Default smallest output worth a host launch.
+///
+/// This is device-dependent (it is an occupancy/launch-cost trade-off), so it
+/// is only a default: `AUTORUST_CONV_TC_MIN_ROWS` overrides it per run. The
+/// measured RTX 3060 knee is below 8k rows; 4096 keeps the 14^2 ResNet stages
+/// on the kernel while leaving the 7^2 maps to the graph.
+pub const MIN_OUT: i64 = 1 << 12;
+
+/// Rows threshold for this call (`AUTORUST_CONV_TC_MIN_ROWS`, default
+/// [`MIN_OUT`]).
+pub fn min_out() -> i64 {
+    crate::helpers::env::get("AUTORUST_CONV_TC_MIN_ROWS")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(MIN_OUT)
+}
 /// Kernel entry point.
 pub const NAME: &str = "ar_conv_tc";
 

@@ -158,3 +158,25 @@ fn conv7x7_stem_tc_matches_interp() {
     let err = max(&reference, &fused);
     assert!(err < 3e-2, "TC 7x7 differs from INTERP: max abs {err:e}");
 }
+
+#[test]
+fn conv3x3_small_map_tc_matches_interp() {
+    let _guard = LOCK.lock().unwrap();
+    if !autorust::runtime::ops_cuda::available() {
+        return;
+    }
+    // rows = 16*20*20 = 6400: above the 4096 host-kernel floor but well below
+    // the old 16384 one. ResNet's 14x14 stages look like this.
+    let shape = (16i64, 8i64, 20i64, 20i64, 16i64);
+    let (b, cin, h, w, cout) = shape;
+    let xv = values(17, (b * cin * h * w) as usize);
+    let wv = values(18, (cout * cin * 9) as usize);
+    let bv = values(19, cout as usize);
+
+    let reference = run("INTERP", 1, shape, &xv, &wv, &bv, false);
+    unsafe { std::env::set_var("AUTORUST_CONV3X3_TC", "1") };
+    let fused = run("CUDA", 1, shape, &xv, &wv, &bv, true);
+    unsafe { std::env::remove_var("AUTORUST_CONV3X3_TC") };
+    let err = max(&reference, &fused);
+    assert!(err < 3e-2, "TC 3x3 small map differs: max abs {err:e}");
+}

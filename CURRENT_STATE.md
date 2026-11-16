@@ -6263,3 +6263,28 @@ Measured `onnx_resnet` (ResNet-18 w=0.25, bs 8), RTX 3060, alternating
 `AUTORUST_CONV_TC=0` vs default, 3 rounds, 3 warmups + 10 iterations:
 **9.24-9.66 ms -> 6.94-7.38 ms (-29%)**. `tests/onnx.rs` (27 tests) still
 passes; the shape/dtype fallback is the same `conv2d` call.
+
+### 9.99 kxk conv row floor: 16384 -> 4096 (2026-11-16)
+
+The kernel's `MIN_OUT` was 16384 rows, so ResNet-18's 14x14 stages
+(`rows = 32*14*14 = 6272`) stayed on the graph. Lowering it to **4096**
+(`1 << 12`) puts them on the host kernel. RTX 3060, bs 32, alternating builds,
+5 warmups + 20 iterations:
+
+| MIN_OUT | ResNet-18 infer | ResNet-50 infer |
+|---|---:|---:|
+| 16384 | 156.6-160.6 ms | 35.2 ms |
+| 4096 | **117.9-118.8 ms** | 35.8 ms |
+| 2048 | 119.8 ms | 36.0 ms |
+| 1024 | 118.4 ms | 36.1 ms |
+
+ResNet-18 is **-25%** further (154.6 -> 118.0 ms against the §9.95 number);
+ResNet-50 and MobileNet are neutral. The 7x7 stage (`rows = 1568`) is still
+below the floor and stays on the graph; 1024 did not improve on 4096, so the
+low-occupancy launches do not pay.
+
+The threshold is device-dependent (it is an occupancy/launch-cost knee), so it
+is exposed as `AUTORUST_CONV_TC_MIN_ROWS` (default 4096) rather than only a
+constant. `AUTORUST_CONV_TC_MIN_ROWS=16384` reproduces the old behaviour
+(157.6 ms). `tests/cuda_conv_tc.rs` adds a 6400-row case against INTERP so the
+new band is covered.
