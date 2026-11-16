@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **C2a decision trees and random forests.** `src/classic/tree.rs` adds
+  classification (Gini/entropy) and regression (MSE) CART with depth/leaf/
+  feature limits and deterministic seeds, bootstrap-aggregated
+  `RandomForest` classification/regression, and safetensors node-array
+  persistence (`tests/classic.rs`). GBT remains C2b.
+
 - **Classical ML C0/C1.** `src/classic/` provides host f64 linear algebra
   (`solve`, Cholesky, QR, SVD, symmetric eigh, least squares), metrics,
   `StandardScaler`, safetensors persistence, `LinearRegression` (OLS/ridge),

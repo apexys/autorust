@@ -3,8 +3,8 @@
 use autorust::classic::linalg;
 use autorust::classic::metrics;
 use autorust::classic::{
-    KMeans, KNNClassifier, LinearRegression, LinearSVC, LinearSVR, LogisticRegression, Persist,
-    StandardScaler, PCA,
+    DecisionTree, KMeans, KNNClassifier, LinearRegression, LinearSVC, LinearSVR,
+    LogisticRegression, Persist, RandomForest, StandardScaler, PCA,
 };
 use autorust::dtype;
 use autorust::engine::session::Session;
@@ -389,6 +389,142 @@ fn persistence_round_trip() {
     assert_eq!(
         knn.predict(&x).unwrap().to_list::<i64>(&mut sess),
         knn2.predict(&x).unwrap().to_list::<i64>(&mut sess)
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn decision_tree_classification_and_regression() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    // Two separable classes.
+    let mut xv = Vec::new();
+    let mut yv = Vec::new();
+    for i in 0..20 {
+        let v = i as f64 * 0.1 - 1.0;
+        xv.extend([v, 0.0]);
+        yv.push(0i64);
+        xv.extend([v + 2.0, 0.0]);
+        yv.push(1i64);
+    }
+    let x = tensor(&ctx, &xv, &[40, 2]);
+    let y = Tensor::from_slice(&ctx, &yv, Some(dtype::INT64), None);
+    let mut tree = DecisionTree::classifier(&ctx).with_max_depth(Some(3));
+    tree.fit(&x, &y).unwrap();
+    let p = tree.predict(&x).unwrap().to_list::<i64>(&mut sess);
+    assert!(metrics::accuracy(&yv, &p).unwrap() > 0.99);
+    let proba = tree.predict_proba(&x).unwrap();
+    let pv = read(&proba, &mut sess);
+    for row in 0..40 {
+        assert!((pv[row * 2] + pv[row * 2 + 1] - 1.0).abs() < 1e-6);
+    }
+
+    // Piecewise-constant regression target; a depth-4 tree fits it well.
+    let mut rx = Vec::new();
+    let mut ry = Vec::new();
+    for i in 0..32 {
+        let v = i as f64;
+        rx.push(v);
+        ry.push(if v < 10.0 {
+            0.0
+        } else if v < 20.0 {
+            5.0
+        } else {
+            10.0
+        });
+    }
+    let x = tensor(&ctx, &rx, &[32, 1]);
+    let y = tensor(&ctx, &ry, &[32]);
+    let mut tree = DecisionTree::regressor(&ctx).with_max_depth(Some(4));
+    tree.fit(&x, &y).unwrap();
+    let p = read(&tree.predict(&x).unwrap(), &mut sess);
+    assert!(
+        metrics::mse(&ry, &p).unwrap() < 0.1,
+        "mse {}",
+        metrics::mse(&ry, &p).unwrap()
+    );
+}
+
+#[test]
+fn random_forest_classification_and_regression() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let mut xv = Vec::new();
+    let mut yv = Vec::new();
+    for i in 0..30 {
+        let t = i as f64 * 0.03;
+        xv.extend([t.sin() * 0.2, t.cos() * 0.2]);
+        yv.push(0i64);
+        xv.extend([3.0 + t.sin() * 0.2, 3.0 + t.cos() * 0.2]);
+        yv.push(1i64);
+    }
+    let x = tensor(&ctx, &xv, &[60, 2]);
+    let y = Tensor::from_slice(&ctx, &yv, Some(dtype::INT64), None);
+    let mut rf = RandomForest::classifier(&ctx, 15)
+        .with_max_depth(Some(5))
+        .with_seed(11);
+    rf.fit(&x, &y).unwrap();
+    let p = rf.predict(&x).unwrap().to_list::<i64>(&mut sess);
+    assert!(metrics::accuracy(&yv, &p).unwrap() > 0.95);
+    let proba = rf.predict_proba(&x).unwrap();
+    let pv = read(&proba, &mut sess);
+    for row in 0..60 {
+        assert!((pv[row * 2] + pv[row * 2 + 1] - 1.0).abs() < 1e-5);
+    }
+
+    let mut rx = Vec::new();
+    let mut ry = Vec::new();
+    for i in 0..80 {
+        let v = i as f64 * 0.1 - 4.0;
+        rx.push(v);
+        ry.push(v.sin());
+    }
+    let x = tensor(&ctx, &rx, &[80, 1]);
+    let y = tensor(&ctx, &ry, &[80]);
+    let mut rf = RandomForest::regressor(&ctx, 20)
+        .with_max_depth(Some(5))
+        .with_seed(7);
+    rf.fit(&x, &y).unwrap();
+    let p = read(&rf.predict(&x).unwrap(), &mut sess);
+    assert!(metrics::mse(&ry, &p).unwrap() < 0.05);
+}
+
+#[test]
+fn tree_persistence_round_trip() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let mut xv = Vec::new();
+    let mut yv = Vec::new();
+    for i in 0..24 {
+        let v = i as f64 * 0.2 - 2.0;
+        xv.extend([v, v * 0.5]);
+        yv.push(if v < 0.0 { 0i64 } else { 1i64 });
+    }
+    let x = tensor(&ctx, &xv, &[24, 2]);
+    let y = Tensor::from_slice(&ctx, &yv, Some(dtype::INT64), None);
+    let mut tree = DecisionTree::classifier(&ctx).with_max_depth(Some(2));
+    tree.fit(&x, &y).unwrap();
+    let path = temp_path("tree");
+    tree.save(&path).unwrap();
+    let state = autorust::classic::load_state_file(&path).unwrap();
+    let mut tree2 = DecisionTree::classifier(&ctx);
+    tree2.load_state(&state).unwrap();
+    assert_eq!(
+        tree.predict(&x).unwrap().to_list::<i64>(&mut sess),
+        tree2.predict(&x).unwrap().to_list::<i64>(&mut sess)
+    );
+    let _ = std::fs::remove_file(&path);
+
+    let mut rf = RandomForest::classifier(&ctx, 7).with_seed(4);
+    rf.fit(&x, &y).unwrap();
+    let path = temp_path("forest");
+    rf.save(&path).unwrap();
+    let state = autorust::classic::load_state_file(&path).unwrap();
+    let mut rf2 = RandomForest::classifier(&ctx, 7);
+    rf2.load_state(&state).unwrap();
+    assert_eq!(
+        rf.predict(&x).unwrap().to_list::<i64>(&mut sess),
+        rf2.predict(&x).unwrap().to_list::<i64>(&mut sess)
     );
     let _ = std::fs::remove_file(&path);
 }

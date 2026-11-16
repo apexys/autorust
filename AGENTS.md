@@ -127,7 +127,7 @@ src/tensor/     Tensor front-end + Ctx, movement/elementwise/reduce, indexing,
 src/models/     reference models: transformer, ViT, FlashAttention dispatch
 src/onnx/       std-only protobuf parser + T0/T1 op runner
 src/classic/    classical ML: host f64 linalg, linear/logistic, PCA, k-means,
-                exact kNN, linear SVM/SVR (C0/C1)
+                exact kNN, linear SVM/SVR, decision trees/random forests (C0-C2a)
 src/schedule/   rangeify/indexing/memory, library-GEMM seam (Seam B)
 src/codegen/    to_program pipeline, linearize, simplify, coalesce, BEAM search
 src/renderer/   Renderer trait, cstyle (C/CL/CUDA/Metal/Rust), SPIR-V (VK),

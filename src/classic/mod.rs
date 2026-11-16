@@ -1,13 +1,14 @@
-//! Classical machine learning (C0/C1).
+//! Classical machine learning (C0/C1/C2a).
 //!
 //! This module provides dense tabular estimators that reuse the [`Tensor`]
 //! linear-algebra stack for prediction while keeping training algorithms in
 //! host `f64` where that is the straightforward, stable choice.
 //!
-//! The C0 foundation (`linalg`, `metrics`, `preprocess`, persistence) and the
-//! C1 estimators (linear/ridge, logistic, PCA, k-means, exact kNN and linear
-//! SVM/SVR) are implemented. Trees, forests, GBT, kernel SVM, sparse inputs and
-//! pipelines remain future work; see `CLASSIC-ML.md`.
+//! The C0 foundation (`linalg`, `metrics`, `preprocess`, persistence), the C1
+//! estimators (linear/ridge, logistic, PCA, k-means, exact kNN and linear
+//! SVM/SVR) and C2a (decision trees and random forests) are implemented. GBT,
+//! kernel SVM, sparse inputs and pipelines remain future work; see
+//! `CLASSIC-ML.md`.
 
 use std::path::Path;
 
@@ -23,6 +24,7 @@ pub mod metrics;
 pub mod neighbors;
 pub mod preprocess;
 pub mod svm;
+pub mod tree;
 
 pub use cluster::KMeans;
 pub use decomposition::PCA;
@@ -30,6 +32,7 @@ pub use linear::{LinearRegression, LogisticRegression};
 pub use neighbors::KNNClassifier;
 pub use preprocess::StandardScaler;
 pub use svm::{LinearSVC, LinearSVR};
+pub use tree::{DecisionTree, RandomForest, TreeCriterion, TreeTask};
 
 /// A classical-ML error.
 #[derive(Clone, Debug)]

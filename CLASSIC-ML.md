@@ -4,9 +4,9 @@ This document records the design and roadmap for a classical-machine-learning
 module alongside the deep-learning `Tensor`/`nn` stack. It records the scope,
 current implementation status and roadmap.
 
-**Status (2026-11-16):** **C0 and C1 are implemented** in `src/classic/` with
-`tests/classic.rs`; C2 and C3 remain planned. The tiers below are the scope
-contract, not a promise of additional work.
+**Status (2026-11-16):** **C0, C1 and C2a are implemented** in `src/classic/`
+with `tests/classic.rs`; C2b (GBT) and C3 remain planned. The tiers below are
+the scope contract, not a promise of additional work.
 
 ## Goals
 
@@ -108,7 +108,8 @@ The split is by **algorithmic fit to the tensor/GPU stack**, not by popularity.
 |---|---|
 | **C0** | ✅ `linalg` (`solve`/Cholesky/QR/SVD/symmetric eigh/least squares), metrics, `StandardScaler`, safetensors `Persist` state |
 | **C1** | ✅ `LinearRegression` (OLS/ridge), `LogisticRegression`, `PCA`, `KMeans`, exact `KNNClassifier`, `LinearSVC`, `LinearSVR` |
-| **C2** | ⬜ DecisionTree/RandomForest/GBT |
+| **C2a** | ✅ `DecisionTree` and `RandomForest` (classification/regression, CART, seeds, safetensors node arrays) |
+| **C2b** | ⬜ GBT |
 | **C3** | ⬜ kernel SVM, randomized SVD, approximate NN, sparse/categorical input, pipelines/CV |
 
 C1 training runs on the host in f64 for numerical stability; predictions build
@@ -153,15 +154,22 @@ forming an enormous decomposition on the host.
 - **Linear SVM/SVR:** hinge/epsilon-insensitive loss with SGD or coordinate
   descent; parameters are a weight/bias tensor. Kernel SVM is C3.
 
-### C2 — CPU-first trees
+### C2a — CPU-first trees (implemented)
 
-- **DecisionTree:** greedy axis-aligned splits via sorted feature values or
-  histograms; parallelize feature evaluation with `rayon` when the feature is
-  enabled, with a std-only fallback.
-- **RandomForest:** bagging plus per-tree parallelism; CPU is the right first
-  backend.
-- **GBT:** sequential boosting with histogram-based split search; gradients can
-  use `Tensor`/GPU, but tree construction is host/CPU.
+- **DecisionTree:** classification (Gini/entropy) and regression (MSE) CART via
+  exact sorted split search; `max_depth`, `min_samples_split`,
+  `min_samples_leaf`, `max_features` and a deterministic feature-subsampling
+  seed. Exposure: `DecisionTree::classifier`/`regressor`.
+- **RandomForest:** bootstrap aggregation with per-tree seeds and averaged
+  probabilities/regression values; exact host inference. Exposure:
+  `RandomForest::classifier`/`regressor`.
+- Both persist node arrays (`feature`, `threshold`, `left`, `right`, `value`)
+  as safetensors tensors. `freeze` is not applicable to host traversal.
+
+### C2b — GBT (planned)
+
+- Sequential boosting with histogram-based split search; gradients can use
+  `Tensor`/GPU, but tree construction is host/CPU.
 - Inference is branchy. Batch it over samples on the host; a GPU traversal is a
   later, measured optimization. Store nodes as column arrays
   (`feature`, `threshold`, `left`, `right`, `value`, `leaf`) plus metadata.

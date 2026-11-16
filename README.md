@@ -14,8 +14,9 @@ It includes:
 - Accelerated GEMM and fused FlashAttention kernels (including TF32/bf16
   tensor-core variants)
 - Safetensors checkpoint loading and ONNX model import
-- Classical ML (C0/C1): linear/ridge and logistic regression, PCA, k-means,
-  exact kNN, linear SVM/SVR, standard scaling and metrics
+- Classical ML (C0/C1/C2a): linear/ridge and logistic regression, PCA, k-means,
+  exact kNN, linear SVM/SVR, decision trees, random forests, standard scaling
+  and metrics
 
 This started as a somewhat faithful automated ("vibe-coded") Rust port of [tinygrad](https://github.com/tinygrad/tinygrad) v0.14 and now has gained a few more features. This README's introduction is the only thing I mostly wrote by hand, the rest was mostly done using Qwen 3.8 27b and DeepSeek v4.1 Flash, both hosted locally (no Claude or OpenAI). I have tested this extensively and am using this in production, but there might be rough edges.
 
@@ -60,7 +61,7 @@ several applications at the GEOMAR Helmholtz Centre for Ocean Research right
 now. The ergonomics are fine, but I am still looking at a few places where they
 could be improved. Scheduling is single-threaded for now and could be faster
 (kernel compilation is parallel where the backend allows it). There's also a
-lot of optimization potential in the backends. ONNX is relatively incomplete and I'd like to add an exporter as well. Classical ML covers C0/C1 (linear models, PCA, k-means, exact kNN, linear SVM/SVR); trees and the wider classic stack are planned.
+lot of optimization potential in the backends. ONNX is relatively incomplete and I'd like to add an exporter as well. Classical ML covers C0/C1/C2a (linear models, PCA, k-means, exact kNN, linear SVM/SVR, decision trees and random forests); GBT and the wider classic stack are planned.
 
 ## Performance
 

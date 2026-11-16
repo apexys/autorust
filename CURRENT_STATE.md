@@ -6739,3 +6739,27 @@ graphs on the selected backend.
 Gate: `tests/classic.rs` (10 tests: linalg solve/QR/SVD/eigh/least squares,
 metrics/scaler, OLS/ridge, binary+multiclass logistic, PCA, k-means, kNN,
 linear SVC/SVR, and safetensors round-trips for linear/PCA/k-means/logistic/kNN).
+
+### 9.120 Classical ML C2a: decision trees and random forests (2026-11-16)
+
+Added `src/classic/tree.rs`:
+
+- **`DecisionTree`:** CART classification (Gini/entropy) and regression (MSE)
+  with exact sorted split search, `max_depth`, `min_samples_split`,
+  `min_samples_leaf`, `max_features` and deterministic feature subsampling.
+  `DecisionTree::classifier`/`regressor`, `predict`, `predict_proba` (classification),
+  `n_nodes`.
+- **`RandomForest`:** bootstrap aggregation with per-tree seeded subsamples,
+  classification votes/probability averaging and regression averaging.
+  `RandomForest::classifier`/`regressor`, the same hyperparameters, deterministic
+  `with_seed`.
+- Nodes are stored as column arrays (`feature`, `threshold`, `left`, `right`,
+  `value`) and persisted as safetensors tensors; forests prefix each tree's
+  arrays. Loading validates feature/child indices and value widths. `freeze`
+  remains inapplicable (host traversal).
+- Training/inference are host `f64`; no backend/kernel changes. `rayon` tree
+  parallelism is intentionally deferred until a measured need.
+
+Gate: `tests/classic.rs` now has 13 tests, adding decision-tree
+classification/regression, random-forest classification/regression, and
+tree/forest safetensors round-trips. GBT (C2b) remains planned.
