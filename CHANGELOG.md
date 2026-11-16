@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Classical ML C0/C1.** `src/classic/` provides host f64 linear algebra
+  (`solve`, Cholesky, QR, SVD, symmetric eigh, least squares), metrics,
+  `StandardScaler`, safetensors persistence, `LinearRegression` (OLS/ridge),
+  multinomial `LogisticRegression`, `PCA`, `KMeans`, exact `KNNClassifier`,
+  `LinearSVC` and `LinearSVR` (`tests/classic.rs`). Predictions use `Tensor`
+  graphs; training is host-side f64. Trees, kernel SVM, sparse inputs and
+  pipelines remain C2/C3.
+
 - **Classic-ML design contract.** `CLASSIC-ML.md` records the `src/classic/`
   scope, tiers (linear/logistic/PCA/k-means/KNN/linear SVM; CPU-first trees;
   kernel SVM and sparse/pipeline work), GPU-fit notes, persistence rules and

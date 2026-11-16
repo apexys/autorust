@@ -6705,3 +6705,37 @@ document fixes scope before implementation:
   tree/kNN host loops.
 - **Missing primitive:** the core has no `solve`/`QR`/`SVD`/`eigh`; C0 adds
   small dense f64 host implementations before closed-form linear/PCA work.
+
+### 9.119 Classical ML C0/C1 implemented (2026-11-16)
+
+Added `src/classic/` with the C0 foundation and C1 estimators from
+`CLASSIC-ML.md`. Training is host `f64`; predictions are ordinary `Tensor`
+graphs on the selected backend.
+
+- **C0 `linalg`:** general LU `solve`, Cholesky solve, Householder `qr`,
+  thin `svd` via `AᵀA`, Jacobi `symmetric_eigh`, and SVD-based
+  `least_squares` with ridge and a rank-deficient pseudoinverse. The Jacobi
+  rotation and SVD were pinned by reconstruction/underdetermined tests.
+- **C0 metrics/scaling/state:** accuracy, confusion matrix,
+  precision/recall/F1, macro-F1, MSE/RMSE/MAE/R², silhouette; `StandardScaler`
+  (population variance, zero-variance guard); `Persist` over
+  `tensor::state`/safetensors with per-model metadata.
+- **C1 estimators:** `LinearRegression` (OLS/ridge via `alpha` or
+  `LinearRegression::ridge`), multinomial `LogisticRegression` (full-batch
+  gradient descent with backtracking), `PCA` (covariance + eigh, deterministic
+  signs), `KMeans` (k-means++, Lloyd, empty-cluster reseeding, seeded local
+  RNG), exact `KNNClassifier` (Tensor distance/top-k/vote), `LinearSVC`
+  (one-vs-rest hinge) and `LinearSVR` (epsilon-insensitive).
+- **Persistence detail:** `Persist::save` detaches each parameter into a fresh
+  `Ctx` from its buffer's initial bytes before `safe_save`. Without this, saving
+  realized parameters in a temporary session and then predicting in another
+  session read stale/zero buffers (found by the round-trip test). Detaching also
+  avoids mutating the model's live parameter handles.
+- **Caveats:** labels are contiguous `0..n_classes-1`; logistic `predict`
+  selects the class on the host from the probability matrix to avoid a
+  floating-equality graph `argmax` on fused softmax output; trees/kernel
+  SVM/sparse/pipelines are C2/C3.
+
+Gate: `tests/classic.rs` (10 tests: linalg solve/QR/SVD/eigh/least squares,
+metrics/scaler, OLS/ridge, binary+multiclass logistic, PCA, k-means, kNN,
+linear SVC/SVR, and safetensors round-trips for linear/PCA/k-means/logistic/kNN).

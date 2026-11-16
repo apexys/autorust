@@ -1,11 +1,12 @@
 # Classic ML
 
 This document records the design and roadmap for a classical-machine-learning
-module alongside the deep-learning `Tensor`/`nn` stack. It is a contract for
-scope and API shape, not an implementation status.
+module alongside the deep-learning `Tensor`/`nn` stack. It records the scope,
+current implementation status and roadmap.
 
-**Status (2026-11-16):** design only. No classic-ML code exists yet. The tiers
-below are the intended order of work.
+**Status (2026-11-16):** **C0 and C1 are implemented** in `src/classic/` with
+`tests/classic.rs`; C2 and C3 remain planned. The tiers below are the scope
+contract, not a promise of additional work.
 
 ## Goals
 
@@ -68,7 +69,8 @@ Start with dense, row-major tensors:
 Validation returns `Result` (shape, finite values, label range, sample count);
 tensor misuse continues to panic with `TGERR:` per the project convention.
 
-Minimal traits:
+The C1 estimators expose inherent `fit`/`predict`/`transform` methods. A
+common trait layer is a C3 refinement; the intended shape is:
 
 ```rust
 pub trait Fit<X, Y> {
@@ -99,6 +101,21 @@ The split is by **algorithmic fit to the tensor/GPU stack**, not by popularity.
 | **C1** | Linear/Ridge, Logistic, PCA, KMeans, exact KNN, LinearSVC/SVR | GEMM/reduction/distances; strong GPU candidates |
 | **C2** | DecisionTree, RandomForest, GBT | Host/CPU-first; branchy split search and histograms |
 | **C3** | Kernel SVM/SMO, randomized PCA/SVD, approximate NN, sparse/categorical input, pipelines/CV | Larger numerical/algorithmic projects |
+
+### Implementation status
+
+| Tier | Status |
+|---|---|
+| **C0** | ✅ `linalg` (`solve`/Cholesky/QR/SVD/symmetric eigh/least squares), metrics, `StandardScaler`, safetensors `Persist` state |
+| **C1** | ✅ `LinearRegression` (OLS/ridge), `LogisticRegression`, `PCA`, `KMeans`, exact `KNNClassifier`, `LinearSVC`, `LinearSVR` |
+| **C2** | ⬜ DecisionTree/RandomForest/GBT |
+| **C3** | ⬜ kernel SVM, randomized SVD, approximate NN, sparse/categorical input, pipelines/CV |
+
+C1 training runs on the host in f64 for numerical stability; predictions build
+ordinary `Tensor` graphs (matmul/distance/top-k) and therefore use the selected
+backend. Persistence uses `tensor::state`/safetensors; parameters are detached
+from the model's live tensors before serialization so saving does not bind them
+to a temporary `Session`.
 
 ### C0 — foundation
 

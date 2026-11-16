@@ -30,6 +30,8 @@
 //! - [`tensor`] — the `Tensor` front-end, `nn` layers, optimizers, autograd.
 //! - [`models`] — reference model definitions (ViT, transformer, FlashAttention).
 //! - [`onnx`] — ONNX importer and runner (T0/T1 inference surface).
+//! - [`classic`] — classical ML (C0/C1: linear/logistic, PCA, k-means, kNN,
+//!   linear SVM/SVR).
 //! - [`dtype`] / [`helpers`] — dtypes and environment/context helpers.
 //! - [`engine`] — `Session`, `Jit`, realize, disk cache.
 //! - [`runtime`] / [`renderer`] — the backend seams and built-in backends.
@@ -69,6 +71,7 @@
 // about new undocumented items (the dedicated rustdoc gate adds `-W missing_docs`).
 #![warn(missing_docs)]
 
+pub mod classic;
 pub mod codegen;
 pub mod dtype;
 pub mod engine;
