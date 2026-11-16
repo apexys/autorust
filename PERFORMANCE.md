@@ -922,7 +922,10 @@ One pass over 16M f32 elements (64 MB) per op; GB/s counts the minimum traffic
   tried: the kernel is 2.1x (0.43 vs 0.89 ms at 4096x4096), but the end-to-end
   `memops` step only gains ~8% because the one-element readback dominates, LLM
   prefill is neutral, and a forward-only host kernel cannot carry ViT's
-  attention autograd. It was not landed; see `CURRENT_STATE §9.82`.
+  attention autograd. It was not landed; see `CURRENT_STATE §9.82`. A fused
+  shared-memory layernorm was tried next: memops measured 0.82-0.87 vs
+  0.87-0.88 ms depending on the repeat, ViT eval was neutral and training needs
+  autograd, so it was also rejected (`CURRENT_STATE §9.85`).
 - On CPU, `amax` is the outlier in the other direction (torch is 5x faster):
   our max reduction is a scalar loop where torch uses a vectorized reduction.
 

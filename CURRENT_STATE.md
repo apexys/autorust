@@ -5868,3 +5868,35 @@ differences there are noise. On ViT the fold changes the host-GEMM family from
 family is faster for training. The fold was reverted; no `AUTORUST_FOLD_MM`
 flag remains. The host GEMM already folds broadcast batches where it wins, so
 the generated path has no measured case to claim.
+
+### 9.85 Item 12 (fused layernorm): measured rejection (2026-11-16)
+
+Tried the remaining layernorm case after the sum/amax landing (§9.83) and the
+softmax rejection (§9.82). The kernel was the same shape as the softmax one:
+one block per row, 256 threads, the row in 16 KiB shared memory, vectorized
+`float4` loads/stores, a block sum for the mean, a second shared pass for the
+variance, then one normalized+affine store. It supported affine and no-affine
+rows, and fell back to the graph for multi-axis normalized shapes, unrealized
+inputs, non-CUDA devices and cols > 4096.
+
+Correctness (before removal): fused vs graph on 8x64, 17x257 and 5x4096 with and
+without affine, max abs < 2e-5; the multi-axis fallback matched exactly.
+
+Performance, RTX 3060, 16M f32 (4096x4096), 3 warmups + 20 iterations:
+
+- memops `layernorm`: graph 0.870-0.883 ms; fused 0.821-0.839 ms in the clean
+  repeats (~4-5%), but a later repeat with the same code/readback gave
+  0.869 vs 0.874 ms (~0.6%). The one-element readback of the 16M output is a
+  large, path-dependent share, so the step-level win is not robust.
+- ViT infer bs 1: 15.39 -> 15.56 ms (slightly worse); bs 8: 72.3 -> 71.2 ms
+  (~1.5%, noise). ViT train bs 1 is unchanged (the training path has no
+  session/autograd node for a forward-only host kernel).
+- Wiring the eval `TransformerBlock` layernorms to the fused call also adds one
+  host sync per layernorm (24 per forward at 12 layers).
+
+Not landed: the kernel is correct and likely reduces work, but the measured A/B
+is a single-digit memops result with no model-level win, and the ViT training
+step cannot use it. This is the same disposition as the fused softmax: the
+useful follow-up is a graph-level layernorm with an autograd node, not an
+inference-only host call. The code, test and `AUTORUST_LAYERNORM_KERNEL` flag
+were removed.

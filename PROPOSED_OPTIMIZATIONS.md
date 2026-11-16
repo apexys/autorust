@@ -59,8 +59,10 @@ CUDA; `CURRENT_STATE §9.83`). **Softmax was a measured rejection** for the
 forward-only host-kernel version: the kernel ran 4096x4096 in 0.43 ms vs 0.89
 for the graph (2.1x), but the end-to-end memops step improved only ~8%
 (readback dominates), LLM prefill was neutral, and ViT training needs an
-autograd node (`CURRENT_STATE §9.82`). A graph-level softmax with autograd and a
-fused layernorm kernel remain open.
+autograd node (`CURRENT_STATE §9.82`). A fused layernorm host kernel was also
+tried and rejected: memops was 0.82-0.87 vs 0.87-0.88 ms (not robust), ViT eval
+was neutral and training needs autograd (`CURRENT_STATE §9.85`). A graph-level
+softmax/layernorm with autograd remains open.
 13. Fold broadcast-rhs batched matmul (LLM decode / per-head broadcast)
 Why: burn's `MatmulTransformPolicy` (burn-std/src/tensor/matmul.rs) rewrites
 `[.., b, m, k] @ [.., 1, k, n]` into one `[b*m, k] @ [k, n]` when the batch rows do not fill a
