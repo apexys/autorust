@@ -1658,6 +1658,10 @@ fn extract_impl(ctx: &mut UOpCtx, store: UopId) -> Option<HostGemm> {
     let policy = ctx.settings.library_gemm_for(backend);
     let force = policy == crate::settings::LibraryGemm::Always;
     let cuda_f32 = kind == GemmDevice::Cuda && ctx.dt_of(&mul) == crate::dtype::FLOAT32;
+    if cuda_f32 && !force && small_batch_worth_generated(m, n, k, batch_count, small_batch_limit())
+    {
+        return reject("cuda-small-batch");
+    }
     if kind == GemmDevice::Metal {
         // MPS is opt-in (`AUTORUST_MPS=all`): measured on an M2 it is within
         // noise of (sometimes slower than) the generated kernel, while adding
@@ -1820,6 +1824,27 @@ fn range_extent(ctx: &mut UOpCtx, root: &UopId, key: RKey) -> Option<i64> {
     None
 }
 
+/// Minimum per-batch MACs for a batched contraction to go to cuBLAS.
+///
+/// The host GEMM issues one cuBLAS call per batch. Below this much work the
+/// calls dominate: MNIST's `64x6x576x3072` (221k MACs/batch) took **52.9 ms** on
+/// cuBLAS versus **22.9 ms** on the generated batched kernel on an RTX 3060.
+/// ResNet-18's smallest host family is `128x28x576x896` (2.06M/batch) and still
+/// wins on cuBLAS, so the gate sits between the two. `AUTORUST_CUBLAS_BATCH_WORK`
+/// overrides it for a sweep; `AUTORUST_CUBLAS=all` still forces the library.
+const MIN_CUBLAS_BATCH_WORK: i64 = 1_500_000;
+
+fn small_batch_limit() -> i64 {
+    crate::helpers::env::get("AUTORUST_CUBLAS_BATCH_WORK")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(MIN_CUBLAS_BATCH_WORK)
+}
+
+/// Whether a `batch`-sized contraction is too small per batch for the host GEMM.
+fn small_batch_worth_generated(m: i64, n: i64, k: i64, batch: i64, limit: i64) -> bool {
+    limit > 0 && batch > 1 && m.saturating_mul(n).saturating_mul(k) < limit
+}
+
 /// Collapse a set of batch ranges into `(count, a_stride, b_stride, c_stride)`.
 fn fold_batches(batch: &mut [(RKey, i64, i64, i64, i64)]) -> Option<(i64, i64, i64, i64)> {
     if batch.is_empty() {
@@ -1921,5 +1946,18 @@ mod tests {
         let mut biased = plain.clone();
         biased.bias_slot = 4;
         assert_ne!(trace_key(&plain), trace_key(&biased));
+    }
+
+    #[test]
+    fn tiny_batches_stay_on_the_generated_kernel() {
+        let limit = MIN_CUBLAS_BATCH_WORK;
+        // MNIST's conv weight-gradient family: 221k MACs per batch.
+        assert!(small_batch_worth_generated(64, 6, 576, 3072, limit));
+        // ResNet-18's smallest host family: 2.06M per batch, still cuBLAS.
+        assert!(!small_batch_worth_generated(128, 28, 576, 896, limit));
+        // Unbatched contractions are unaffected.
+        assert!(!small_batch_worth_generated(64, 6, 576, 1, limit));
+        // The override can disable the gate for an A/B.
+        assert!(!small_batch_worth_generated(64, 6, 576, 3072, 0));
     }
 }

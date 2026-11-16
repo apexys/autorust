@@ -1,3 +1,8 @@
+Status: items 1-10 were evaluated in `CURRENT_STATE §9.62` (4 landed, 2 measured
+decisions, 4 skipped). New burn-derived items 11-15 are below. The first landed
+follow-up is the CUDA small-batch host-GEMM gate (2026-11-16, `CURRENT_STATE
+§9.81`): MNIST CUDA 52.9 -> 23.3 ms/step.
+
 1. Small per-kernel opt search (LOCAL/UPCAST candidates), cached
 Why: the optimizer's 3,125,000-element kernels were stuck at LOCAL 2 because the heuristic must divide the extent; a 6-candidate sweep measured on the real buffers would have found the better launch. The same class hits every odd extent (ViT's 197-derived elementwise kernels).
 Try: candidate set {(up4,loc2),(up4,loc8),(up2,loc16),(up1,loc32),(up4,loc32),(up8,loc4)}, bounded to ~6, timed after 2 warmups on the capture path only, winner cached by (device, kernel content key, shape signature) in the existing disk cache. Reuse opt_search rather than writing a new searcher.

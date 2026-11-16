@@ -142,6 +142,17 @@ strides and turns it into a `HostGemm` descriptor: shapes, strides, dtype,
   (medians of two processes, 2 warmups + 5 iterations; -5.4%). bs 1 training
   and bs 4 inference are unchanged. The non-contiguous weight-gradient
   reductions (12 at bs 4) still keep the generated kernel.
+  **Small batched contractions stay generated.** A batched host GEMM issues one
+  cuBLAS call per batch on the host, which loses when the per-batch work is
+  small. MNIST's `64x6x576x3072` (221k MACs/batch) measured **52.9 ms/step** on
+  cuBLAS versus **22.9 ms** on the generated batched kernel; the 10-class
+  `10x576x512` / `512x576x10` families were not the problem. `Auto` therefore
+  rejects batched CUDA f32 contractions below **1.5M MACs/batch**
+  (`AUTORUST_CUBLAS_BATCH_WORK`, `AUTORUST_CUBLAS=all` still forces them), which
+  also removes the two bad ONNX ResNet-18 (w=0.25) families (10.7 vs 11.7 ms).
+  ResNet-18's smallest remaining host family is 2.06M/batch and still wins on
+  cuBLAS, so the gate sits between them. Gate:
+  `tests` in `schedule/host_gemm.rs` (`tiny_batches_stay_on_the_generated_kernel`).
 - **Column-major C (a store through a transposed view).** `assign`-style
   outputs write the product through a transposed view of the destination, so the
   scheduler's C index has stride 1 on the *m* axis. `extract` now recognises
@@ -199,7 +210,7 @@ Selection (`Settings::library_gemm`, per backend):
 
 | backend | `Auto` policy |
 |---|---|
-| CUDA f32 | always use cuBLAS (faster at square and batch-8 projection shapes) |
+| CUDA f32 | cuBLAS at square/batch-8 projection shapes; generated when a batched contraction has < 1.5M MACs/batch (one cuBLAS call per batch loses there) |
 | CUDA f16/bf16 | library only when some of `m,n,k` is not divisible by 4 |
 | CL | same shape heuristic |
 | CPU | library only above `m*n*k >= 1_000_000` (packing costs dominate below) |
@@ -213,6 +224,7 @@ missing library simply disables that backend's path.
 |---|---|
 | `AUTORUST_GEMM=all\|0` | force/disable the library on every backend |
 | `AUTORUST_CUBLAS=all\|0` | CUDA-only override |
+| `AUTORUST_CUBLAS_BATCH_WORK=n` | per-batch MACs below which a batched CUDA f32 contraction stays generated (default 1.5M; `0` disables) |
 | `AUTORUST_CLBLAST=all\|0` | OpenCL-only override |
 | `AUTORUST_CPU_GEMM=all\|0` | CPU-only override |
 | `AUTORUST_MPS=all\|0` (alias `AUTORUST_METAL_GEMM`) | Metal MPS override |

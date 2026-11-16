@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Small batched contractions no longer go through one cuBLAS call per
+  batch.** CUDA `Auto` now keeps a batched f32 contraction on the generated
+  kernel below `m*n*k = 1.5M` per batch (`AUTORUST_CUBLAS_BATCH_WORK`; `0`
+  disables it, `AUTORUST_CUBLAS=all` still forces cuBLAS). This fixes a
+  regression in current `main`: MNIST train bs 512 CUDA measured 52.9 ms/step
+  and now measures 23.3 ms (the committed 22.4 ms row); ONNX ResNet-18 (w=0.25)
+  bs 8 goes 12.0 → 10.2 ms. ResNet-18's 2.06M/batch host families stay on
+  cuBLAS. Unit test: `schedule::host_gemm::tests::
+  tiny_batches_stay_on_the_generated_kernel`.
+
 ### Added
 
 - **Burn cross-framework benchmark.** `bench/burn` runs the same

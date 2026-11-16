@@ -123,6 +123,7 @@ These mirror the `Settings` fields above; the per-backend variables win over
 | `FA` | any non-`0` | off | Route `TransformerBlock` through the op-level FlashAttention port instead of SDPA (an algorithm reference; the fused kernels are reached by `Tensor::attention_with`). |
 | `AUTORUST_GEMM` | `0`/`never`, `all`/`force`/`always`, anything else | `auto` | Neutral library-GEMM policy. |
 | `AUTORUST_CUBLAS` | same | auto | CUDA override. |
+| `AUTORUST_CUBLAS_BATCH_WORK` | integer (per-batch MACs), `0` disables the gate | `1500000` | Keep a batched CUDA f32 contraction on the generated kernel when `m*n*k` per batch is below this. The host GEMM issues one cuBLAS call per batch, which loses below this work; MNIST's `64x6x576x3072` is 221k/batch. `AUTORUST_CUBLAS=all` still forces the library. |
 | `AUTORUST_CLBLAST` | same | auto | OpenCL override. |
 | `AUTORUST_MPS` / `AUTORUST_METAL_GEMM` | same | auto (MPS needs `all`) | Metal MPS override. |
 | `AUTORUST_CPU_GEMM` | same | auto | CPU host-GEMM override. |

@@ -5735,3 +5735,43 @@ Flex CPU backend: Flex is 1.6x faster than RUST on CPU ViT training but ~10x
 slower on the MNIST CNN, so the useful part is the conv tiling/autotune, not the
 backend swap. No optimisation was landed in this pass; these are measured
 baselines for the backlog.
+
+### 9.81 Small batched contractions stay on the generated kernel (2026-11-16)
+
+While re-baselining for the Burn comparison, the current tree measured
+`mnist_train` CUDA bs 512 at **52.9 ms/step**, although `bench/results/` says
+22.4 ms (commit `63cfeaf`). `AUTORUST_CUBLAS=0` restored 21.1 ms, so the
+regression was in the post-`63cfeaf` cuBLAS policy, not the conv/optimizer code.
+`AUTORUST_GEMM_STATS=1` showed four accepted families per step, including
+`64x6x576x3072`: a small per-batch contraction that the host GEMM turns into
+**3072 separate cuBLAS calls**. The two 10-class families (`10x576x512`,
+`512x576x10`) were not the cost.
+
+Fix: `Auto` on CUDA f32 now rejects a batched contraction below
+**1.5M MACs/batch** and keeps the generated kernel, which keeps the batch loop on
+device. The limit is `MIN_CUBLAS_BATCH_WORK` in `schedule/host_gemm.rs`,
+overridable with `AUTORUST_CUBLAS_BATCH_WORK` (`0` disables; `AUTORUST_CUBLAS=all`
+still forces the library). Interleaved A/B, 3 warmups + 5 iterations, RTX 3060:
+
+| workload | old (`BATCH_WORK=0`) | new (1.5M) | change |
+|---|---:|---:|---:|
+| MNIST train bs 512, CUDA | 55.7 ms | **23.3 ms** | -58% |
+| ONNX ResNet-18 w=0.25 bs 8, CUDA | 12.0 ms | **10.2 ms** | -15% |
+| ResNet-18 infer bs 32, CUDA | 277.4 ms | 274.6 ms | -1% (noise; same accepted families) |
+| ViT infer bs 8, CUDA | 70.1 ms | 72.5 ms | +3% (noise; same accepted families) |
+| ViT train bs 1, CUDA | 75.1 ms | 75.7 ms | +1% (noise; same accepted families) |
+
+The gate is unit-tested (`schedule::host_gemm::tests::
+tiny_batches_stay_on_the_generated_kernel`): MNIST's 221k/batch rejects,
+ResNet-18's 2.06M/batch stays on cuBLAS, unbatched contracts are unaffected.
+
+Two rejected alternatives, measured rather than guessed:
+
+- A minimum `m`/`n` gate (`AUTORUST_CUBLAS_MIN_DIM=32`) fixed MNIST (52.6 ->
+  20.6 ms) but regressed ResNet-18 infer 263.8 -> 323.4 ms because its accepted
+  families are `n=28/14/7` with 2-8M MACs per batch. The per-batch work, not the
+  small dimension, is the discriminator.
+- A global/full-reduction split divisor (`AUTORUST_RSPLIT`, `_FULL`) was
+  inconclusive under load: CUDA `sum`/`amax` moved 10-30% in different
+  directions across repeats, and forcing it on CPU ViT train cost 7%. Reverted;
+  no split heuristic landed.
