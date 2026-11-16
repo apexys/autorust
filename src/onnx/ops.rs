@@ -1377,7 +1377,10 @@ impl OnnxModel {
                 "Conv with per-dimension strides/dilations".into(),
             ));
         }
-        Ok(x.conv2d(w, b, groups, s, d, &padding, None))
+        // Use the tensor-core kxk kernel when the input is already realized
+        // (notably the stem); `conv2d_with` falls back without a forced realize,
+        // so later layers keep the fused/captured graph.
+        Ok(x.conv2d_with(w, b, groups, s, d, &padding, None, &mut self.sess))
     }
 
     fn conv_transpose_op(&mut self, node: &Node, ins: &[Option<Tensor>]) -> Result<Tensor> {

@@ -6249,3 +6249,17 @@ Three items were re-examined because the conv changes altered their premise:
   was not reproducible: MobileNet was slightly worse in all three alternating
   rounds (54.23/54.38/54.75 vs 54.03/54.30/54.45 ms) and UNet was mixed
   (9.69/9.83/9.61 vs 9.71/9.97/9.73). The default stays 2048.
+
+### 9.98 ONNX Conv uses the tensor-core kernel (2026-11-16)
+
+The ONNX runner owns a `Session` and its `Conv` op called `conv2d` directly.
+`conv2d_with` only takes the host path when the input already has a realized
+buffer and otherwise falls back *without* forcing a realize, so wiring `Conv`
+to it is safe: the stem's input is the captured graph input and gets the kernel,
+while later layers keep the fused/captured graph. No mid-graph realize is
+introduced (the §9.94 bottleneck trap).
+
+Measured `onnx_resnet` (ResNet-18 w=0.25, bs 8), RTX 3060, alternating
+`AUTORUST_CONV_TC=0` vs default, 3 rounds, 3 warmups + 10 iterations:
+**9.24-9.66 ms -> 6.94-7.38 ms (-29%)**. `tests/onnx.rs` (27 tests) still
+passes; the shape/dtype fallback is the same `conv2d` call.

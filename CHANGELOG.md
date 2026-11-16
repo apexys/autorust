@@ -27,7 +27,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for the measured 3x3 stride-1 case and for low-K convs below the im2col
   floor, notably ResNet's 7x7 stem (K=147). Measured RTX 3060, bs 32:
   ResNet-18 infer 214-216 → 155 ms, ResNet-50 83 → 35-37 ms, MobileNet
-  neutral. Gate: `tests/cuda_conv_tc.rs`.
+  neutral. Gate: `tests/cuda_conv_tc.rs`. The ONNX runner's `Conv` op also
+  uses it when its input is already realized: ONNX ResNet-18 (w=0.25) bs 8
+  went 9.24-9.66 → 6.94-7.38 ms (-29%) with no forced mid-graph realize.
 - **Opt-in conv-only TF32 tensor-core path.** `AUTORUST_CONV_TF32=1` switches
   batched f32 im2col host GEMMs with `n >= 28` to TF32 tensor-core math while
   keeping attention/linear f32 strict. Measured ResNet-18 -7-11%, UNet ~4% median
