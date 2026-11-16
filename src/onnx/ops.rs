@@ -2150,6 +2150,35 @@ impl OnnxModel {
         } else {
             return Err(OnnxError::Runtime("Resize needs sizes or scales".into()));
         };
+        let policy = node.attr_str("keep_aspect_ratio_policy", "stretch");
+        if policy != "stretch" {
+            if sizes.is_none() {
+                return Err(OnnxError::Unsupported(
+                    "Resize keep_aspect_ratio_policy with scales".into(),
+                ));
+            }
+            let ratios: Vec<f64> = targets
+                .iter()
+                .zip(axes.iter())
+                .map(|(&t, &a)| t as f64 / in_shape[a] as f64)
+                .collect();
+            let scale = match policy {
+                "not_larger" => ratios.iter().cloned().fold(f64::INFINITY, f64::min),
+                "not_smaller" => ratios.iter().cloned().fold(0.0, f64::max),
+                other => {
+                    return Err(OnnxError::Unsupported(format!(
+                        "Resize keep_aspect_ratio_policy `{other}`"
+                    )));
+                }
+            };
+            for (i, &a) in axes.iter().enumerate() {
+                targets[i] = if policy == "not_larger" {
+                    (in_shape[a] as f64 * scale).floor() as i64
+                } else {
+                    (in_shape[a] as f64 * scale).ceil() as i64
+                };
+            }
+        }
         // Drop axes whose size is unchanged (avoids a 0/0 in the linear
         // coordinate transform for size-1 dimensions such as N/C).
         let mut axes = axes;
@@ -2165,9 +2194,7 @@ impl OnnxModel {
         if axes.is_empty() {
             return Ok(x.clone());
         }
-        if node.attr_i64("antialias", 0) != 0 {
-            return Err(OnnxError::Unsupported("Resize antialias".into()));
-        }
+        let antialias = node.attr_i64("antialias", 0) != 0;
         let mode = node.attr_str("mode", "nearest");
         let mode = match mode {
             "linear" | "bilinear" | "trilinear" => "linear",
@@ -2175,26 +2202,24 @@ impl OnnxModel {
             "cubic" => "cubic",
             other => return Err(OnnxError::Unsupported(format!("Resize mode `{other}`"))),
         };
-        if node.attr_str("keep_aspect_ratio_policy", "stretch") != "stretch" {
-            return Err(OnnxError::Unsupported(
-                "Resize keep_aspect_ratio_policy != stretch".into(),
-            ));
-        }
         let coord = node.attr_str("coordinate_transformation_mode", "half_pixel");
+        if !matches!(
+            coord,
+            "half_pixel"
+                | "align_corners"
+                | "asymmetric"
+                | "pytorch_half_pixel"
+                | "half_pixel_symmetric"
+                | "tf_half_pixel_for_nn"
+        ) {
+            return Err(OnnxError::Unsupported(format!(
+                "Resize coordinate_transformation_mode `{coord}`"
+            )));
+        }
         if mode == "nearest" {
             let nearest_mode = node.attr_str("nearest_mode", "round_prefer_floor");
             return self.resize_nearest(x, &axes, &targets, &in_shape, coord, nearest_mode);
         }
-        let align_corners = match coord {
-            "align_corners" => true,
-            "half_pixel" => false,
-            "pytorch_half_pixel" if !targets.contains(&1) => false,
-            other => {
-                return Err(OnnxError::Unsupported(format!(
-                    "Resize {mode} coordinate_transformation_mode `{other}`"
-                )));
-            }
-        };
         // Permute the resized axes to the end, resize, then invert.
         let others: Vec<i64> = (0..rank)
             .filter(|i| !axes.contains(i))
@@ -2210,9 +2235,9 @@ impl OnnxModel {
         let resized = if mode == "cubic" {
             let a = node.attr_f64("cubic_coeff_a", -0.75);
             let exclude = node.attr_i64("exclude_outside", 0) != 0;
-            xt.interpolate_cubic_ex(&targets, align_corners, a, exclude)
+            xt.interpolate_cubic_coord(&targets, coord, a, exclude, antialias)
         } else {
-            xt.interpolate(&targets, mode, align_corners)
+            xt.interpolate_linear_coord(&targets, coord, antialias)
         };
         if perm.iter().enumerate().all(|(i, &p)| i as i64 == p) {
             Ok(resized)

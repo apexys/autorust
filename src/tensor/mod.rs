@@ -2664,10 +2664,8 @@ impl Tensor {
         }
         x.cast_ctx(ctx, self.dtype_ctx(ctx))
     }
-    /// `Tensor.interpolate_cubic(size, align_corners, cubic_coeff_a)`: Keys /
-    /// cubic (Catmull-Rom) resize of the last `size.len()` dims. Taps are
-    /// edge-clamped and the weights normalised; `cubic_coeff_a` is the Keys
-    /// coefficient (-0.75 in ONNX/PyTorch).
+    /// `Tensor.interpolate_cubic(size, align_corners, cubic_coeff_a)`:
+    /// Keys/Catmull-Rom resize of the last `size.len()` dims.
     pub fn interpolate_cubic(
         &self,
         size: &[i64],
@@ -2676,9 +2674,7 @@ impl Tensor {
     ) -> Tensor {
         self.interpolate_cubic_ex(size, align_corners, cubic_coeff_a, false)
     }
-    /// [`Tensor::interpolate_cubic`] with ONNX `exclude_outside`: out-of-range
-    /// taps are dropped instead of edge-clamped, then the weights are
-    /// renormalised.
+    /// [`Tensor::interpolate_cubic`] with ONNX `exclude_outside`.
     #[doc(hidden)]
     pub fn interpolate_cubic_ex(
         &self,
@@ -2687,22 +2683,57 @@ impl Tensor {
         cubic_coeff_a: f64,
         exclude_outside: bool,
     ) -> Tensor {
-        self.interpolate_cubic_ctx(
+        let coord = if align_corners {
+            "align_corners"
+        } else {
+            "half_pixel"
+        };
+        self.interpolate_cubic_coord(size, coord, cubic_coeff_a, exclude_outside, false)
+    }
+    /// Cubic resize with an explicit ONNX coordinate transformation and
+    /// optional antialiasing (only affects downscaling).
+    pub fn interpolate_cubic_coord(
+        &self,
+        size: &[i64],
+        coord: &str,
+        cubic_coeff_a: f64,
+        exclude_outside: bool,
+        antialias: bool,
+    ) -> Tensor {
+        self.interpolate_generic_ctx(
             &mut self.ctx.borrow_mut(),
             size,
-            align_corners,
-            cubic_coeff_a,
+            coord,
+            ResizeKernel::Cubic(cubic_coeff_a),
             exclude_outside,
+            antialias,
         )
     }
-    #[doc(hidden)]
-    pub fn interpolate_cubic_ctx(
+    /// Linear resize with an explicit ONNX coordinate transformation and
+    /// optional antialiasing (only affects downscaling).
+    pub fn interpolate_linear_coord(
+        &self,
+        size: &[i64],
+        coord: &str,
+        antialias: bool,
+    ) -> Tensor {
+        self.interpolate_generic_ctx(
+            &mut self.ctx.borrow_mut(),
+            size,
+            coord,
+            ResizeKernel::Linear,
+            false,
+            antialias,
+        )
+    }
+    fn interpolate_generic_ctx(
         &self,
         ctx: &mut UOpCtx,
         size: &[i64],
-        align_corners: bool,
-        a: f64,
+        coord: &str,
+        kernel: ResizeKernel,
         exclude_outside: bool,
+        antialias: bool,
     ) -> Tensor {
         let ndim = self.shape_ctx(ctx).len();
         assert!(
@@ -2720,29 +2751,42 @@ impl Tensor {
             if os == in_sz {
                 continue;
             }
-            let mut taps: Vec<Vec<i64>> = (0..4).map(|_| Vec::with_capacity(os as usize)).collect();
+            let scale = os as f64 / in_sz as f64;
+            let aa = antialias && scale < 1.0;
+            let radius = match kernel {
+                ResizeKernel::Linear => 1.0,
+                ResizeKernel::Cubic(_) => 2.0,
+            };
+            let support = if aa {
+                (radius / scale).ceil() as i64
+            } else {
+                radius as i64
+            };
+            let ntaps = (2 * support + 1) as usize;
+            let mut taps: Vec<Vec<i64>> =
+                (0..ntaps).map(|_| Vec::with_capacity(os as usize)).collect();
             let mut weights: Vec<Vec<f32>> =
-                (0..4).map(|_| Vec::with_capacity(os as usize)).collect();
+                (0..ntaps).map(|_| Vec::with_capacity(os as usize)).collect();
             for i in 0..os {
-                let xc = if align_corners {
-                    if os > 1 {
-                        (i as f64) * ((in_sz - 1) as f64) / ((os - 1) as f64)
-                    } else {
-                        0.0
-                    }
-                } else {
-                    ((i as f64) + 0.5) * (in_sz as f64) / (os as f64) - 0.5
-                };
+                let xc = resize_coord(coord, i as f64, in_sz, os);
                 let floor = xc.floor();
-                let frac = xc - floor;
-                let mut w = [0.0f64; 4];
-                let mut raw = [0i64; 4];
-                for j in 0..4 {
-                    w[j] = cubic_weight(frac + 1.0 - j as f64, a);
-                    raw[j] = floor as i64 - 1 + j as i64;
+                let mut w = vec![0.0f64; ntaps];
+                let mut raw = vec![0i64; ntaps];
+                for j in 0..ntaps {
+                    let tap = floor as i64 - support + j as i64;
+                    let d = if aa {
+                        (tap as f64 - xc) * scale
+                    } else {
+                        tap as f64 - xc
+                    };
+                    w[j] = match kernel {
+                        ResizeKernel::Linear => (1.0 - d.abs()).max(0.0),
+                        ResizeKernel::Cubic(a) => cubic_weight(d, a),
+                    };
+                    raw[j] = tap;
                 }
                 if exclude_outside {
-                    for j in 0..4 {
+                    for j in 0..ntaps {
                         if raw[j] < 0 || raw[j] >= in_sz {
                             w[j] = 0.0;
                         }
@@ -2750,13 +2794,17 @@ impl Tensor {
                 }
                 let mut sum: f64 = w.iter().sum();
                 if sum.abs() < 1e-12 {
-                    // No in-range tap (only possible at a boundary with
-                    // exclude_outside): fall back to the nearest sample.
-                    w = [0.0; 4];
-                    w[1] = 1.0;
+                    let nearest = xc.round().clamp(0.0, (in_sz - 1) as f64) as i64;
+                    for j in 0..ntaps {
+                        w[j] = if raw[j].clamp(0, in_sz - 1) == nearest {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                    }
                     sum = 1.0;
                 }
-                for j in 0..4 {
+                for j in 0..ntaps {
                     taps[j].push(raw[j].clamp(0, in_sz - 1));
                     weights[j].push((w[j] / sum) as f32);
                 }
@@ -2766,7 +2814,7 @@ impl Tensor {
             let mut expand: Vec<SVal> = x.shape_ctx(ctx).into_vec();
             expand[dim] = SVal::I(os as i128);
             let mut acc: Option<Tensor> = None;
-            for j in 0..4 {
+            for j in 0..ntaps {
                 if weights[j].iter().all(|&w| w == 0.0) {
                     continue;
                 }
@@ -2785,15 +2833,15 @@ impl Tensor {
                     Some(crate::dtype::FLOAT32),
                     dev.as_deref(),
                 )
-                    .reshape_ctx(ctx, reshape.clone())
-                    .expand_ctx(ctx, expand.clone());
+                .reshape_ctx(ctx, reshape.clone())
+                .expand_ctx(ctx, expand.clone());
                 let term = gathered.mul_ctx(ctx, &wt);
                 acc = Some(match acc {
                     Some(prev) => prev.add_ctx(ctx, &term),
                     None => term,
                 });
             }
-            x = acc.expect("TGERR: cubic tap has no in-range weight");
+            x = acc.expect("TGERR: resize has no in-range weight");
         }
         x.cast_ctx(ctx, self.dtype_ctx(ctx))
     }
@@ -3300,5 +3348,44 @@ fn cubic_weight(t: f64, a: f64) -> f64 {
         a * t.powi(3) - 5.0 * a * t.powi(2) + 8.0 * a * t - 4.0 * a
     } else {
         0.0
+    }
+}
+
+/// Resize kernel family used by [`Tensor::interpolate_generic_ctx`].
+#[derive(Clone, Copy)]
+enum ResizeKernel {
+    Linear,
+    Cubic(f64),
+}
+
+/// ONNX `coordinate_transformation_mode` for one output index (nearest uses the
+/// same mapping in `onnx::ops`).
+fn resize_coord(coord: &str, i: f64, in_sz: i64, out_sz: i64) -> f64 {
+    let scale = out_sz as f64 / in_sz as f64;
+    match coord {
+        "half_pixel" => (i + 0.5) / scale - 0.5,
+        "align_corners" => {
+            if out_sz > 1 {
+                i * (in_sz - 1) as f64 / (out_sz - 1) as f64
+            } else {
+                0.0
+            }
+        }
+        "asymmetric" => i / scale,
+        "pytorch_half_pixel" => {
+            if out_sz > 1 {
+                (i + 0.5) / scale - 0.5
+            } else {
+                0.0
+            }
+        }
+        "half_pixel_symmetric" => {
+            let output_dim_scaled = in_sz as f64 * scale;
+            (in_sz as f64 / 2.0) * (1.0 - (out_sz as f64 / output_dim_scaled))
+                + (i + 0.5) / scale
+                - 0.5
+        }
+        "tf_half_pixel_for_nn" => (i + 0.5) / scale,
+        other => panic!("TGERR: unsupported resize coordinate {other:?}"),
     }
 }

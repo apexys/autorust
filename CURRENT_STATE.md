@@ -6403,3 +6403,27 @@ Gates: `tests/loss.rs` (reductions, ignore, class weights, softmax CE, class
 axis 1 on a rank-3 input) and `tests/onnx.rs`
 (`negative_log_likelihood_loss_matches_manual`,
 `softmax_cross_entropy_loss_and_log_prob`).
+
+### 9.105 Resize coordinate modes, antialias and aspect ratio (2026-11-16)
+
+Generalized the linear/cubic resize kernel on `Tensor`:
+
+- `interpolate_linear_coord(size, coord, antialias)` and
+  `interpolate_cubic_coord(size, coord, cubic_coeff_a, exclude_outside,
+  antialias)` share one host-coordinate kernel. The taps/weights are computed
+  on the host (the sizes and transform are static), so each axis is a small sum
+  of `gather`s; `cubic`/`_ex` remain wrappers over `half_pixel`/`align_corners`.
+- Coordinate modes: `half_pixel`, `align_corners`, `asymmetric`,
+  `pytorch_half_pixel`, `half_pixel_symmetric` and `tf_half_pixel_for_nn`
+  (matching the nearest path; `tf_crop_and_resize` still needs `roi`).
+- `antialias` stretches the kernel by `1/scale` for downscaling and renormalises;
+  `exclude_outside` drops out-of-range taps (cubic) before normalising.
+- ONNX `Resize`: all of the above plus `keep_aspect_ratio_policy`
+  `stretch`/`not_larger` (floor)/`not_smaller` (ceil). It no longer rejects
+  `antialias`, `asymmetric`, `half_pixel_symmetric` or `pytorch_half_pixel`
+  with a size-1 target.
+
+Gates: `tests/resize.rs` (asymmetric, half_pixel_symmetric,
+tf_half_pixel_for_nn, linear/cubic antialias against an independent host
+kernel) and `tests/onnx.rs` (asymmetric linear, antialias linear,
+not_larger aspect ratio), plus the existing cubic/linear/nearest tests.

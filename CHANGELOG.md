@@ -18,6 +18,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Cubic resize.** `Tensor::interpolate_cubic` (Keys/Catmull-Rom, host-side
   tap weights, `cubic_coeff_a`, `exclude_outside`) and ONNX `Resize`
   `mode="cubic"` (`tests/interpolate_cubic.rs`, `tests/onnx.rs`).
+- **Resize coordinate modes, antialias and aspect ratio.**
+  `Tensor::interpolate_linear_coord`/`interpolate_cubic_coord` support every
+  ONNX coordinate transform, antialias and `exclude_outside`; ONNX `Resize`
+  also implements `keep_aspect_ratio_policy` (`tests/resize.rs`,
+  `tests/onnx.rs`).
 - **NLL / softmax cross-entropy.** `Tensor::nll_loss` and
   `Tensor::softmax_cross_entropy` (class axis 1, class weights,
   `ignore_index`, `none`/`mean`/`sum`), and the ONNX

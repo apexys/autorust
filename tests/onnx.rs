@@ -712,6 +712,102 @@ fn resize_cubic_half_pixel() {
 }
 
 #[test]
+fn resize_asymmetric_linear() {
+    let sizes = b::i64_tensor("sizes", &[4], &[1, 1, 1, 8]);
+    let nodes = vec![b::node(
+        "Resize",
+        &["x", "", "", "sizes"],
+        &["out"],
+        &[
+            Attr::Str("mode", "linear"),
+            Attr::Str("coordinate_transformation_mode", "asymmetric"),
+        ],
+    )];
+    let inputs = vec![b::value_info(
+        "x",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(1), Dim::Val(4)],
+    )];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(1), Dim::Val(8)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[sizes], &inputs, &outputs, "resize"), 13);
+    let got = f32_model(
+        &bytes,
+        &[("x", vec![0.0, 1.0, 2.0, 3.0], vec![1, 1, 1, 4])],
+        "out",
+    );
+    close(
+        &got,
+        &[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.0],
+        1e-5,
+    );
+}
+
+#[test]
+fn resize_antialias_linear() {
+    let sizes = b::i64_tensor("sizes", &[4], &[1, 1, 1, 4]);
+    let nodes = vec![b::node(
+        "Resize",
+        &["x", "", "", "sizes"],
+        &["out"],
+        &[
+            Attr::Str("mode", "linear"),
+            Attr::Str("coordinate_transformation_mode", "half_pixel"),
+            Attr::Int("antialias", 1),
+        ],
+    )];
+    let inputs = vec![b::value_info(
+        "x",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(1), Dim::Val(8)],
+    )];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(1), Dim::Val(4)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[sizes], &inputs, &outputs, "resize"), 13);
+    let got = f32_model(
+        &bytes,
+        &[("x", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![1, 1, 1, 8])],
+        "out",
+    );
+    close(&got, &[1.625, 3.5, 5.5, 7.375], 1e-5);
+}
+
+#[test]
+fn resize_keep_aspect_ratio_not_larger() {
+    let sizes = b::i64_tensor("sizes", &[4], &[1, 1, 2, 3]);
+    let nodes = vec![b::node(
+        "Resize",
+        &["x", "", "", "sizes"],
+        &["out"],
+        &[
+            Attr::Str("mode", "linear"),
+            Attr::Str("coordinate_transformation_mode", "half_pixel"),
+            Attr::Str("keep_aspect_ratio_policy", "not_larger"),
+        ],
+    )];
+    let inputs = vec![b::value_info(
+        "x",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(4), Dim::Val(4)],
+    )];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(2)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[sizes], &inputs, &outputs, "resize"), 13);
+    let xv: Vec<f32> = (0..16).map(|i| i as f32).collect();
+    let got = f32_model(&bytes, &[("x", xv, vec![1, 1, 4, 4])], "out");
+    close(&got, &[2.5, 4.5, 10.5, 12.5], 1e-5);
+}
+
+#[test]
 fn negative_log_likelihood_loss_matches_manual() {
     // Weighted, no reduction.
     let w = b::f32_tensor("w", &[3], &[2.0, 3.0, 4.0]);
