@@ -2664,6 +2664,139 @@ impl Tensor {
         }
         x.cast_ctx(ctx, self.dtype_ctx(ctx))
     }
+    /// `Tensor.interpolate_cubic(size, align_corners, cubic_coeff_a)`: Keys /
+    /// cubic (Catmull-Rom) resize of the last `size.len()` dims. Taps are
+    /// edge-clamped and the weights normalised; `cubic_coeff_a` is the Keys
+    /// coefficient (-0.75 in ONNX/PyTorch).
+    pub fn interpolate_cubic(
+        &self,
+        size: &[i64],
+        align_corners: bool,
+        cubic_coeff_a: f64,
+    ) -> Tensor {
+        self.interpolate_cubic_ex(size, align_corners, cubic_coeff_a, false)
+    }
+    /// [`Tensor::interpolate_cubic`] with ONNX `exclude_outside`: out-of-range
+    /// taps are dropped instead of edge-clamped, then the weights are
+    /// renormalised.
+    #[doc(hidden)]
+    pub fn interpolate_cubic_ex(
+        &self,
+        size: &[i64],
+        align_corners: bool,
+        cubic_coeff_a: f64,
+        exclude_outside: bool,
+    ) -> Tensor {
+        self.interpolate_cubic_ctx(
+            &mut self.ctx.borrow_mut(),
+            size,
+            align_corners,
+            cubic_coeff_a,
+            exclude_outside,
+        )
+    }
+    #[doc(hidden)]
+    pub fn interpolate_cubic_ctx(
+        &self,
+        ctx: &mut UOpCtx,
+        size: &[i64],
+        align_corners: bool,
+        a: f64,
+        exclude_outside: bool,
+    ) -> Tensor {
+        let ndim = self.shape_ctx(ctx).len();
+        assert!(
+            !size.is_empty() && size.len() <= ndim,
+            "TGERR: invalid interpolate size"
+        );
+        let self_shape: Vec<SVal> = self.shape_ctx(ctx).into_vec();
+        let dev = self.device_ctx(ctx);
+        let mut x = self.clone();
+        for k in 0..size.len() {
+            let dim = ndim - size.len() + k;
+            let os = size[k];
+            let in_sz = self_shape[dim].clone().as_i64().unwrap_or(0);
+            assert!(in_sz > 0 && os > 0, "TGERR: interpolate zero-sized dim");
+            if os == in_sz {
+                continue;
+            }
+            let mut taps: Vec<Vec<i64>> = (0..4).map(|_| Vec::with_capacity(os as usize)).collect();
+            let mut weights: Vec<Vec<f32>> =
+                (0..4).map(|_| Vec::with_capacity(os as usize)).collect();
+            for i in 0..os {
+                let xc = if align_corners {
+                    if os > 1 {
+                        (i as f64) * ((in_sz - 1) as f64) / ((os - 1) as f64)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    ((i as f64) + 0.5) * (in_sz as f64) / (os as f64) - 0.5
+                };
+                let floor = xc.floor();
+                let frac = xc - floor;
+                let mut w = [0.0f64; 4];
+                let mut raw = [0i64; 4];
+                for j in 0..4 {
+                    w[j] = cubic_weight(frac + 1.0 - j as f64, a);
+                    raw[j] = floor as i64 - 1 + j as i64;
+                }
+                if exclude_outside {
+                    for j in 0..4 {
+                        if raw[j] < 0 || raw[j] >= in_sz {
+                            w[j] = 0.0;
+                        }
+                    }
+                }
+                let mut sum: f64 = w.iter().sum();
+                if sum.abs() < 1e-12 {
+                    // No in-range tap (only possible at a boundary with
+                    // exclude_outside): fall back to the nearest sample.
+                    w = [0.0; 4];
+                    w[1] = 1.0;
+                    sum = 1.0;
+                }
+                for j in 0..4 {
+                    taps[j].push(raw[j].clamp(0, in_sz - 1));
+                    weights[j].push((w[j] / sum) as f32);
+                }
+            }
+            let mut reshape: Vec<SVal> = vec![SVal::I(1); ndim];
+            reshape[dim] = SVal::I(os as i128);
+            let mut expand: Vec<SVal> = x.shape_ctx(ctx).into_vec();
+            expand[dim] = SVal::I(os as i128);
+            let mut acc: Option<Tensor> = None;
+            for j in 0..4 {
+                if weights[j].iter().all(|&w| w == 0.0) {
+                    continue;
+                }
+                let idx = Tensor::from_slice(
+                    &mut *ctx,
+                    &taps[j],
+                    Some(crate::dtype::default_int()),
+                    dev.as_deref(),
+                )
+                .reshape_ctx(ctx, reshape.clone())
+                .expand_ctx(ctx, expand.clone());
+                let gathered = x.gather_ctx(ctx, dim as i64, &idx);
+                let wt = Tensor::from_slice(
+                    &mut *ctx,
+                    &weights[j],
+                    Some(crate::dtype::FLOAT32),
+                    dev.as_deref(),
+                )
+                    .reshape_ctx(ctx, reshape.clone())
+                    .expand_ctx(ctx, expand.clone());
+                let term = gathered.mul_ctx(ctx, &wt);
+                acc = Some(match acc {
+                    Some(prev) => prev.add_ctx(ctx, &term),
+                    None => term,
+                });
+            }
+            x = acc.expect("TGERR: cubic tap has no in-range weight");
+        }
+        x.cast_ctx(ctx, self.dtype_ctx(ctx))
+    }
 
     /// Tensor-level elementwise sugar for the oracle/schedule corpus.
     pub fn add(&self, other: impl Into<TensorAddArg>) -> Tensor {
@@ -3155,5 +3288,17 @@ impl std::ops::Neg for Tensor {
     type Output = Tensor;
     fn neg(self) -> Tensor {
         Tensor::neg(&self)
+    }
+}
+
+/// Keys cubic-convolution kernel (`a` is the Catmull-Rom coefficient).
+fn cubic_weight(t: f64, a: f64) -> f64 {
+    let t = t.abs();
+    if t <= 1.0 {
+        (a + 2.0) * t.powi(3) - (a + 3.0) * t.powi(2) + 1.0
+    } else if t < 2.0 {
+        a * t.powi(3) - 5.0 * a * t.powi(2) + 8.0 * a * t - 4.0 * a
+    } else {
+        0.0
     }
 }

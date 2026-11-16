@@ -6357,3 +6357,26 @@ Gates: `tests/onnx.rs::gather_nd_honours_batch_dims` (2x3x2 data, 2x2x1
 indices, `batch_dims=1`) and `::max_unpool_places_values_at_indices`
 (`output_shape` [1,1,4,4]); full ONNX suite. `ONNX-Compat.md` updates both rows;
 `TensorScatter`, empty tensors and `GatherElements`'s host loop remain.
+
+### 9.103 Resize cubic and `Tensor::interpolate_cubic` (2026-11-16)
+
+The Tensor side already had `Tensor::interpolate(size, mode, align_corners)`
+(linear and nearest/nearest-exact, last `size.len()` dims, built from
+`gather` + `lerp`, so it is plan-safe and backend-neutral). Added the missing
+cubic mode there and wired ONNX `Resize` to it:
+
+- `Tensor::interpolate_cubic(size, align_corners, cubic_coeff_a)` and the
+  doc-hidden `_ex(..., exclude_outside)`/`_ctx` variants. The taps and the four
+  Keys weights are **host constants** (the size and coordinate transform are
+  static), so the graph is four `gather`s + weighted sums per axis; taps are
+  edge-clamped, weights normalised, and `exclude_outside` drops out-of-range
+  taps before renormalising.
+- ONNX `Resize` accepts `mode="cubic"` with `cubic_coeff_a` (default `-0.75`)
+  and `exclude_outside`; it uses the existing `align_corners`/`half_pixel`/
+  `pytorch_half_pixel` coordinate transforms. `antialias`,
+  `asymmetric`/`half_pixel_symmetric` and non-`stretch` aspect ratios remain.
+
+Gates: `tests/interpolate_cubic.rs` (constant field, 1-D 4→8 half-pixel, 2-D
+2×2→4×4 half-pixel, align-corners edge preservation) and
+`tests/onnx.rs::resize_cubic_half_pixel`; the existing
+`resize_linear_align_corners` and `nn_tensor_ops` interpolate cases still pass.

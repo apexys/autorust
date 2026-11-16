@@ -672,6 +672,46 @@ fn resize_linear_align_corners() {
 }
 
 #[test]
+fn resize_cubic_half_pixel() {
+    let sizes = b::i64_tensor("sizes", &[4], &[1, 1, 4, 4]);
+    let nodes = vec![b::node(
+        "Resize",
+        &["x", "", "", "sizes"],
+        &["out"],
+        &[
+            Attr::Str("mode", "cubic"),
+            Attr::Str("coordinate_transformation_mode", "half_pixel"),
+            Attr::Float("cubic_coeff_a", -0.75),
+        ],
+    )];
+    let inputs = vec![b::value_info(
+        "x",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(2), Dim::Val(2)],
+    )];
+    let outputs = vec![b::value_info(
+        "out",
+        b::FLOAT,
+        &[Dim::Val(1), Dim::Val(1), Dim::Val(4), Dim::Val(4)],
+    )];
+    let bytes = b::model(&b::graph(&nodes, &[sizes], &inputs, &outputs, "resize_cubic"), 13);
+
+    let got = f32_model(
+        &bytes,
+        &[("x", vec![1.0, 2.0, 3.0, 4.0], vec![1, 1, 2, 2])],
+        "out",
+    );
+    close(
+        &got,
+        &[
+            0.6835938, 1.015625, 1.5625, 1.8945312, 1.3476562, 1.6796875, 2.2265625, 2.5585938,
+            2.4414062, 2.7734375, 3.3203125, 3.6523438, 3.1054688, 3.4375, 3.984375, 4.3164062,
+        ],
+        1e-5,
+    );
+}
+
+#[test]
 fn constant_constant_of_shape_and_cast() {
     let val = b::f32_tensor("val", &[1], &[7.0]);
     let nodes = vec![

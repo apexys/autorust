@@ -2133,9 +2133,7 @@ impl OnnxModel {
         let mode = match mode {
             "linear" | "bilinear" | "trilinear" => "linear",
             "nearest" => "nearest",
-            "cubic" => {
-                return Err(OnnxError::Unsupported("Resize cubic".into()));
-            }
+            "cubic" => "cubic",
             other => return Err(OnnxError::Unsupported(format!("Resize mode `{other}`"))),
         };
         if node.attr_str("keep_aspect_ratio_policy", "stretch") != "stretch" {
@@ -2154,7 +2152,7 @@ impl OnnxModel {
             "pytorch_half_pixel" if !targets.contains(&1) => false,
             other => {
                 return Err(OnnxError::Unsupported(format!(
-                    "Resize linear coordinate_transformation_mode `{other}`"
+                    "Resize {mode} coordinate_transformation_mode `{other}`"
                 )));
             }
         };
@@ -2170,7 +2168,13 @@ impl OnnxModel {
         } else {
             x.permute(&perm)
         };
-        let resized = xt.interpolate(&targets, mode, align_corners);
+        let resized = if mode == "cubic" {
+            let a = node.attr_f64("cubic_coeff_a", -0.75);
+            let exclude = node.attr_i64("exclude_outside", 0) != 0;
+            xt.interpolate_cubic_ex(&targets, align_corners, a, exclude)
+        } else {
+            xt.interpolate(&targets, mode, align_corners)
+        };
         if perm.iter().enumerate().all(|(i, &p)| i as i64 == p) {
             Ok(resized)
         } else {

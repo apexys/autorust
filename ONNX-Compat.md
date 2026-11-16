@@ -86,9 +86,9 @@ outputs remain valid after it is dropped.
 - `Pad` supports constant/edge/reflect/wrap, not arbitrary dynamic pads
   (pads must resolve to host constants).
 - `Resize` supports linear (align-corners/half-pixel/pytorch-half-pixel for
-  outputs > 1) and all four `nearest_mode` choices; cubic, antialias,
-  `asymmetric`/`half_pixel_symmetric` linear, and non-`stretch` aspect-ratio
-  policies are missing.
+  outputs > 1), cubic (`cubic_coeff_a`, `exclude_outside`) and all four
+  `nearest_mode` choices; `antialias`, `asymmetric`/`half_pixel_symmetric`
+  linear, and non-`stretch` aspect-ratio policies are still missing.
 - `GatherElements` uses a host-index loop (correct, not fast).
 - Zero-element tensors are rejected: the storage layer cannot allocate empty
   storage yet.
@@ -145,7 +145,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `GatherElements GatherND` | 🟡 | `GatherND` supports all `batch_dims`; `GatherElements` uses a host-index loop (also plan-disabled). |
 | `Scatter ScatterElements ScatterND` | ✅ | host-side; `axis`/negative indices and reduction `none`/`add`/`mul`/`max`/`min`. `TensorScatter` remains missing. |
 | `Pad` | ✅ | constant/edge/reflect/wrap with static (host-resolved) pads. |
-| `Resize Upsample` | 🟡 | linear (align-corners/half-pixel) and nearest with all `nearest_mode`s; no cubic/antialias. |
+| `Resize Upsample` | 🟡 | linear (align-corners/half-pixel), cubic (`cubic_coeff_a`/`exclude_outside`) and nearest with all `nearest_mode`s; no antialias/asymmetric/half_pixel_symmetric/non-stretch. |
 | `Shape Size` | ✅ | runtime `int64` tensors; symbolic declared dims are bound from the input. |
 | `Range ConstantOfShape EyeLike OneHot Trilu` | ✅ | `arange`/`full`/`eye`/`one_hot`/`tril`/`triu`. |
 | `DepthToSpace SpaceToDepth` | ✅ | reshape+permute composition (DCR/CRD). |
