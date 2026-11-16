@@ -9,11 +9,13 @@ repeated labels), `GatherND` (all `batch_dims`)/`GatherElements`, `Pad` modes,
 `MaxUnpool`, `Resize` (linear/nearest/cubic, antialias, every coordinate mode
 except `tf_crop_and_resize`, aspect-ratio policy), the fused transformer ops
 (`SkipLayerNormalization`, `EmbedLayerNormalization`, `RotaryEmbedding`,
-`AffineGrid`) and the loss wrappers. Remaining T1 limitations are storage or
-rare attributes: zero-element tensors, runtime shape inputs (evaluated eagerly),
-`GatherND` `k=0`, `ConvTranspose` per-dimension attributes, and
-`GatherElements`' host-index loop (correct, not fast). T2 (quantization,
-training ops, ONNX-ML, control flow) is not implemented.
+`AffineGrid`) and the loss wrappers. Zero-element tensors and `NonZero`/
+`Compress` empty selections are supported. The CLIP text/vision exports are
+validated end-to-end against onnxruntime (`tests/clip.rs`). Remaining T1
+limitations are rare: shape inputs fed at runtime (not derived from
+`Shape`/`Size`; evaluated eagerly) and `Resize`'s `tf_crop_and_resize` (needs
+`roi`). T2 (quantization, training ops, ONNX-ML, control flow) is not
+implemented.
 
 Legend:
 
@@ -29,7 +31,7 @@ Legend:
 | Tier | Contents | Status |
 |---|---|---|
 | T0 | protobuf parser, runner, runtime `Shape` folding, external data, Depth-Anything-style models | ✅ done |
-| T1 | transformer/CLIP op set (`Einsum`, `GatherND`, `Pad` modes, `TopK`, `Scatter*`, …) | 🟡 mostly done (see gaps) |
+| T1 | transformer/CLIP op set (`Einsum`, `GatherND`, `Pad` modes, `TopK`, `Scatter*`, …) | ✅ done |
 | T2 | quantized ops, training ops (`Adam`/`Momentum`/`Gradient`), windows, `If` subgraphs, ONNX-ML | ⬜ not started |
 
 ## Parser and runner features
@@ -85,23 +87,24 @@ outputs remain valid after it is dropped.
 
 ## Known T1/T2 gaps
 
-- `NonZero`/`Compress` with an empty selection return `Unsupported`: the
-  storage layer cannot allocate zero-element tensors yet.
-- `Scatter*`, `NonZero`, `Compress`, `CenterCropPad`, `MaxUnpool`,
-  `TensorScatter` and `GatherElements` depend on runtime indices/values, so the
-  replay plan is disabled for a model that uses them (eager each call).
-- `Pad` supports constant/edge/reflect/wrap. A non-constant pads/axes/value
-  input disables the replay plan; the eager path resolves them per run.
+- Zero-element tensors use zero-byte storage (`ZeroOpaque`): their kernels are
+  skipped, their copies are no-ops, and `NonZero`/`Compress` return an empty
+  result when nothing is selected.
+- `Scatter*`, `NonZero`, `Compress`, `CenterCropPad`, `MaxUnpool` and
+  `TensorScatter` depend on runtime indices/values, so the replay plan is
+  disabled for a model that uses them (eager each call). `GatherElements`
+  builds a graph gather and keeps the plan.
+- `Pad` supports constant/edge/reflect/wrap. A `Pad`/`Resize`/`Reshape` shape
+  input derived from `Shape`/`Size` keeps the replay plan (stable per input
+  signature); one fed by the caller disables it and runs eagerly.
 - `Resize` supports linear/nearest/cubic, every
   `coordinate_transformation_mode` except `tf_crop_and_resize` (needs `roi`),
   `antialias`, `cubic_coeff_a`/`exclude_outside`, all four `nearest_mode`
   choices and `keep_aspect_ratio_policy` `stretch`/`not_larger`/`not_smaller`.
-- `GatherElements` uses a host-index loop (correct, not fast).
-- Zero-element tensors are rejected: the storage layer cannot allocate empty
-  storage yet.
 - `Conv` supports per-dimension stride/dilation in 2-D (the kernel is dilated
-  with zeros, run at stride 1, then subsampled). `ConvTranspose` still requires
-  scalar stride/dilation/output-padding.
+  with zeros, run at stride 1, then subsampled). `ConvTranspose` does the same
+  for per-dimension stride/dilation/output-padding (dilate the kernel,
+  zero-insert the input, run at stride 1, append the output padding).
 - `Dropout` is inference-only; `BatchNormalization` rejects `training_mode`.
 - Quantized ops, ONNX training ops, windows, `If`, optional/sequence values and
   ONNX-ML are T2.
@@ -139,7 +142,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `ReduceL1 ReduceL2 ReduceSumSquare ReduceLogSum ReduceLogSumExp` | ✅ | compositions over `sum`/`square`/`log`. |
 | `CumSum` | ✅ | `Tensor::cumsum`. |
 | `TopK` | ✅ | bitonic `sort`/`topk`; indices cast to int64. |
-| `NonZero` | ✅ | host-side; output `[rank, nnz]` int64. An empty selection is unsupported (zero-element storage). |
+| `NonZero` | ✅ | host-side; output `[rank, nnz]` int64, including `nnz = 0`. |
 | `Hardmax` | ✅ | `argmax` + one-hot. |
 
 ### Movement / shape / indexing
@@ -149,21 +152,21 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Reshape Flatten Squeeze Unsqueeze Transpose Concat Split Expand Tile Identity` | ✅ | direct movement ops. |
 | `Slice` | ✅ | `Ix::Range`; constant starts/ends/axes/steps. |
 | `Gather` | ✅ | `Tensor::gather`. |
-| `GatherElements GatherND` | ✅ | `GatherND` all `batch_dims` (`k=0` caveat); `GatherElements` host-index loop (correct, not fast; plan-disabled). |
+| `GatherElements GatherND` | ✅ | `GatherND` all `batch_dims` including `k=0`; `GatherElements` as one advanced-index gather (graph, plan-enabled, negative indices). |
 | `Scatter ScatterElements ScatterND TensorScatter` | ✅ | `Scatter*` host-side with negative indices and reduction `none`/`add`/`mul`/`max`/`min`; `TensorScatter` uses the graph one-hot/matmul on axis -2 (the KV layout) and a host fallback on other axes, with `linear`/`circular` and per-batch `write_indices`. |
 | `Pad` | ✅ | constant/edge/reflect/wrap; runtime pads/axes/value run eagerly. |
 | `Resize Upsample` | ✅ | linear/nearest/cubic, antialias, all coordinate modes except `tf_crop_and_resize`, all `nearest_mode`s, `keep_aspect_ratio_policy`. |
 | `Shape Size` | ✅ | runtime `int64` tensors; symbolic declared dims are bound from the input. |
 | `Range ConstantOfShape EyeLike OneHot Trilu` | ✅ | `arange`/`full`/`eye`/`one_hot`/`tril`/`triu`. |
 | `DepthToSpace SpaceToDepth` | ✅ | reshape+permute composition (DCR/CRD). |
-| `CenterCropPad Compress` | ✅ | host-side; centre crop/pad and axis/flatten selection. An empty selection is unsupported. |
+| `CenterCropPad Compress` | ✅ | host-side; centre crop/pad and axis/flatten selection, including an empty selection. |
 | `Shrink` | ✅ | `where` composition. |
 
 ### Neural-network ops
 
 | ONNX ops | Status | Notes |
 |---|---|---|
-| `Conv ConvTranspose Gemm MatMul` | ✅ | `conv2d`/`conv_transpose2d`/`linear`/`matmul`; 2-D `Conv` accepts per-dimension stride/dilation. |
+| `Conv ConvTranspose Gemm MatMul` | ✅ | `conv2d`/`conv_transpose2d`/`linear`/`matmul`; both `Conv` and `ConvTranspose` accept per-dimension strides/dilations (and `ConvTranspose` per-dim `output_padding`). |
 | `MatMulInteger ConvInteger` | 🟡 | T2; integer matmul/conv on dequantized inputs. |
 | `MaxPool` | ✅ | `max_pool2d`. |
 | `AveragePool GlobalAveragePool GlobalMaxPool` | ✅ | N-D `avg_pool2d` + reductions. |
@@ -196,12 +199,13 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 
 ## Validation plan (remaining)
 
-1. **CLIP text/vision ONNX** for the T1 set (`TopK`, `Pad` modes; `Einsum`,
-   `GatherND`, `MaxUnpool` and the scatter family are now general).
+1. ~~**CLIP text/vision ONNX** for the T1 set.~~ Done:
+   `tests/clip.rs` compares the fp32 Xenova exports against onnxruntime
+   (max abs diff 2.4e-4 text, 1.7e-4 vision).
 2. **ONNX backend node tests** from `../tinygrad/test/external/` for op-level
    correctness; compare against `onnxruntime` in the dev environment only.
 3. **Golden fixtures**: `tests/onnx.rs` builds models in-memory; add committed
-   fixtures for the T1 op families once the CLIP gate exists.
+   fixtures (when size allows) for the T1 op families.
 
 ## Security
 

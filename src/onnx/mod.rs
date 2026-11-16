@@ -133,7 +133,6 @@ impl OnnxModel {
                 "NonZero"
                     | "Compress"
                     | "MaxUnpool"
-                    | "GatherElements"
                     | "Scatter"
                     | "ScatterElements"
                     | "ScatterND"
@@ -141,6 +140,9 @@ impl OnnxModel {
                     | "CenterCropPad"
             )
         });
+        // Constants plus values derived only from `Shape`/`Size` are stable
+        // for a given input signature; a graph input or a value computed from
+        // one is not (e.g. runtime `Pad` pads fed by the caller).
         let mut constant_names: std::collections::HashSet<String> =
             values.keys().cloned().collect();
         for n in &graph.nodes {
@@ -149,6 +151,25 @@ impl OnnxModel {
                     if !o.is_empty() {
                         constant_names.insert(o.clone());
                     }
+                }
+            }
+        }
+        for n in &graph.nodes {
+            let from_shape = matches!(n.op_type.as_str(), "Shape" | "Size");
+            if !(from_shape || shape_safe_op(&n.op_type)) {
+                continue;
+            }
+            if !from_shape
+                && !n
+                    .inputs
+                    .iter()
+                    .all(|i| i.is_empty() || constant_names.contains(i))
+            {
+                continue;
+            }
+            for o in &n.outputs {
+                if !o.is_empty() {
+                    constant_names.insert(o.clone());
                 }
             }
         }
@@ -523,6 +544,47 @@ impl OnnxModel {
 
 /// Inputs whose *values* shape the output (or the arithmetic) and are therefore
 /// baked by a replay plan. A dynamic (non-constant) one disables the plan.
+/// Ops that only move/derive small integer *shape* values. A shape/index
+/// input derived exclusively from these (and from initializers/`Constant`s)
+/// is a function of the input shapes, so a replay plan keyed by the input
+/// signature may bake it.
+fn shape_safe_op(op: &str) -> bool {
+    matches!(
+        op,
+        "Shape"
+            | "Size"
+            | "Gather"
+            | "Slice"
+            | "Concat"
+            | "Squeeze"
+            | "Unsqueeze"
+            | "Cast"
+            | "Identity"
+            | "Reshape"
+            | "Expand"
+            | "Tile"
+            | "Add"
+            | "Sub"
+            | "Mul"
+            | "Div"
+            | "Mod"
+            | "Max"
+            | "Min"
+            | "Range"
+            | "ConstantOfShape"
+            | "ReduceProd"
+            | "ReduceMax"
+            | "ReduceMin"
+            | "Where"
+            | "Equal"
+            | "Less"
+            | "Greater"
+            | "Not"
+            | "And"
+            | "Or"
+    )
+}
+
 fn shape_inputs(op: &str) -> &'static [usize] {
     match op {
         "ConstantOfShape" => &[0],
@@ -555,12 +617,6 @@ pub(crate) fn tensor_from_proto(
     device: Option<&str>,
 ) -> Result<Tensor> {
     let dtype = tp.dtype()?;
-    if tp.numel()? == 0 {
-        return Err(OnnxError::Unsupported(format!(
-            "zero-element tensor `{}` (empty storage is not supported yet)",
-            tp.name
-        )));
-    }
     let bytes = tp.to_bytes(origin)?;
     let t = Tensor::from_bytes(ctx, &bytes, dtype, device);
     let dims = tp.dims.clone();

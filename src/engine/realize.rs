@@ -957,6 +957,11 @@ pub(crate) fn copy_buffer(
     dest: &crate::runtime::buffer::Buffer,
     src: &crate::runtime::buffer::Buffer,
 ) {
+    // Empty storage has nothing to move (and the backend handle may be the
+    // device-agnostic `ZeroOpaque`, which a CUDA copyout cannot downcast).
+    if dest.nbytes() == 0 && src.nbytes() == 0 {
+        return;
+    }
     let dest_dev = device(dest.device());
     let src_dev = device(src.device());
     dest.ensure_allocated(&dest_dev);
@@ -998,6 +1003,13 @@ fn exec_kernel(
     let prof = crate::engine::prof::enabled();
     let t0 = prof.then(std::time::Instant::now);
     let resolved = resolve_params(ctx, call);
+    // A zero-element output means the kernel's global grid has a zero extent:
+    // there is nothing to run (and no buffer to bind).
+    let (gs0, _) = cp.pi.launch_dims(var_vals);
+    if gs0.contains(&0) {
+        crate::engine::prof::count("kx.skip_empty");
+        return None;
+    }
     // device from the first global arg (python: to_tuple(call.src[1].device))
     let g0 = *cp.pi.globals.first().unwrap_or(&0) as usize;
     let dev_name = buffer_of(ctx, t, (resolved[g0]).clone())
@@ -1208,6 +1220,42 @@ fn materialize_target(ctx: &mut UOpCtx, tensor_uop: UopId) -> UopId {
     }
 }
 
+/// Whether the uop's (all-int) shape has a zero dimension. Such a tensor has no
+/// elements: there is no grid to launch, the buffer is zero bytes, and the
+/// regular callify/buffer-map path has no buffer leaf for it.
+fn is_empty_uop(ctx: &mut UOpCtx, u: &UopId) -> bool {
+    ctx.shape(u)
+        .ok()
+        .flatten()
+        .is_some_and(|shape| {
+            shape.iter().all(|d| matches!(d, crate::uop::sint::SVal::I(_)))
+                && shape
+                    .iter()
+                    .map(|d| d.clone().as_i128_or_panic())
+                    .product::<i128>()
+                    == 0
+        })
+}
+
+/// The empty tensor's storage and its realized leaf (no schedule).
+fn realize_empty(
+    ctx: &mut UOpCtx,
+    t: &mut BufTable,
+    u: &UopId,
+) -> (crate::runtime::buffer::Buffer, UopId) {
+    let dev = crate::schedule::indexing::device_of(ctx, u.clone())
+        .and_then(|d| match d {
+            crate::uop::arg::DeviceSpec::Single(s) => Some(s),
+            crate::uop::arg::DeviceSpec::Multi(v) => v.first().cloned(),
+        })
+        .or_else(|| t.device().map(str::to_string))
+        .unwrap_or_else(|| "PYTHON".to_string());
+    let dt = ctx.dt_of(u);
+    let b = crate::runtime::buffer::Buffer::new_base(&dev, 0, dt);
+    let leaf = buffer_leaf(ctx, t, &b, u);
+    (b, leaf)
+}
+
 /// `Tensor.realize(*tensors)` (tensor.py): schedule every root into **one** SINK,
 /// run the resulting linear once, and return each root's final storage buffer.
 /// This is the co-realization tinygrad uses to fold a loss and its optimizer
@@ -1234,6 +1282,18 @@ pub fn realize_many(
         .iter()
         .map(|u| materialize_target(ctx, u.clone()))
         .collect();
+    if targets.iter().any(|u| is_empty_uop(ctx, u)) {
+        // An empty root has no scheduled buffer leaf; realize each target on
+        // its own (the empty ones shortcut to zero storage).
+        let mut bufs = Vec::with_capacity(targets.len());
+        let mut leaves = Vec::with_capacity(targets.len());
+        for target in targets {
+            let (b, u) = realize_tensor(ctx, target, t, cache, capture.as_deref_mut());
+            bufs.push(b);
+            leaves.push(u);
+        }
+        return (bufs, leaves);
+    }
     if targets.len() == 1 {
         let (b, u) = realize_tensor(ctx, targets.into_iter().next().unwrap(), t, cache, capture);
         return (vec![b], vec![u]);
@@ -1299,11 +1359,12 @@ pub(crate) fn buffer_leaf(
     let shape = ctx.shape(like).ok().flatten().unwrap_or_default();
     let dt = ctx.dt_of(like);
     let dev = b.device().to_string();
+    // An empty product is 1 (a scalar); a zero dim makes it 0, which must stay
+    // 0 so the leaf buffer matches the empty tensor's storage.
     let numel: i128 = shape
         .iter()
         .map(|s| s.clone().as_i64().unwrap_or(1) as i128)
-        .product::<i128>()
-        .max(1);
+        .product::<i128>();
     let buf =
         crate::tensor::creation::new_buffer(ctx, &dev, crate::uop::sint::SVal::I(numel), dt, None);
     t.alias(buf.id(), b);
@@ -1329,6 +1390,9 @@ pub fn realize_tensor(
         t.set_device(Some(s));
     }
     let target = materialize_target(ctx, tensor_uop.clone());
+    if is_empty_uop(ctx, &target) {
+        return realize_empty(ctx, t, &tensor_uop);
+    }
     let sink = crate::tensor::sink(ctx, vec![target.clone()]);
     let (call, buffer_map) = crate::tensor::callify::transform_to_call(ctx, sink);
     let (linear, planned, _held) = crate::schedule::sched::create_linear_with_vars(ctx, call);

@@ -219,9 +219,10 @@ impl Buffer {
 
     /// `Buffer.view(size, dtype, offset)` — offset in bytes.
     pub fn view(&self, size: usize, dtype: DTypeId, offset: usize) -> Buffer {
+        // A zero-length view is valid (empty tensors / slices at the end).
         assert!(
-            offset < self.nbytes(),
-            "TGERR: offset must be less than nbytes"
+            offset <= self.nbytes(),
+            "TGERR: offset must not exceed nbytes"
         );
         Buffer {
             base: self.base.clone(),
@@ -239,7 +240,9 @@ impl Buffer {
         let o = dev.allocator.alloc(self.base.nbytes());
         if let Some(bytes) = self.base.pending_copyin.borrow_mut().take() {
             assert_eq!(bytes.len(), o.size(), "TGERR: initial data size mismatch");
-            dev.allocator._copyin(&*o, &bytes);
+            if !bytes.is_empty() {
+                dev.allocator._copyin(&*o, &bytes);
+            }
         }
         *self.base.buf.borrow_mut() = Some(o);
     }
@@ -256,7 +259,10 @@ impl Buffer {
             None => {
                 let o = dev.allocator.alloc(self.base.nbytes());
                 if let Some(bytes) = self.base.pending_copyin.borrow_mut().take() {
-                    dev.allocator._copyin(&*o, &bytes);
+                    assert_eq!(bytes.len(), o.size(), "TGERR: initial data size mismatch");
+                    if !bytes.is_empty() {
+                        dev.allocator._copyin(&*o, &bytes);
+                    }
                 }
                 *self.base.buf.borrow_mut() = Some(o);
             }

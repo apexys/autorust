@@ -37,6 +37,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Runtime ONNX shape inputs.** Models whose `Pad`/`Resize`/`Reshape`/... shape
   inputs are not constants now run eagerly instead of replaying a baked shape
   (`tests/onnx.rs::pad_with_runtime_pads_recomputes_each_run`).
+- **Zero-element tensors.** Empty storage (`ZeroOpaque`) makes `NonZero`/
+  `Compress` empty selections and `GatherND` with `k=0` work
+  (`tests/onnx.rs`).
+- **Per-dimension `ConvTranspose`.** Stride, dilation and output padding may
+  differ per spatial axis (kernel dilation + zero-inserted input, stride-1
+  transposed conv).
+- **`GatherElements` as a graph gather.** One advanced-index `getitem` with
+  broadcast `arange` coordinates; no host index loop, replay stays enabled.
+- **Large-table advanced indexing is correct again.** A split reduction had
+  made the gated-load gather lift add the row once per partial block (256x for
+  a 49408-row embedding); such reductions stay whole. Gather is flat across
+  vocabulary again (~1.3 ms at vocab 49408, sequence 128).
+- **Shape-derived shape inputs keep the ONNX replay plan.** Values computed
+  from `Shape`/`Size` and integer arithmetic are stable per input signature;
+  only true runtime shape inputs (e.g. fed `Pad` pads) run eagerly. CLIP
+  text/vision replay: 484/361 ms -> 9.9/10.9 ms.
+- **CLIP T1 end-to-end gate** against onnxruntime (max abs diff 2.4e-4 /
+  1.7e-4; `tests/clip.rs`, ignored without the downloaded assets).
 - **Per-dimension ONNX `Conv` strides/dilations.** 2-D convolutions with
   differing stride/dilation per spatial axis expand the kernel and subsample
   (`tests/onnx.rs`).

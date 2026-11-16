@@ -676,10 +676,6 @@ pub fn from_slice<T: SliceElem>(
         !dtype::is_weak(target),
         "TGERR: cannot create storage for weak dtype {target:?}"
     );
-    assert!(
-        !data.is_empty(),
-        "TGERR: cannot create Tensor from an empty list"
-    );
     let shape = [SVal::I(data.len() as i128)];
     // bfloat16 and fp8 have no struct format: pack a float32 buffer and cast
     let bdtype = if dtype::in_set(
@@ -709,7 +705,9 @@ pub fn from_slice<T: SliceElem>(
             .flat_map(|v| crate::runtime::interp::to_storage_scalar(v.to_f64(), bdtype))
             .collect()
     };
-    register_initial(ctx, ret.clone(), packed);
+    if !packed.is_empty() {
+        register_initial(ctx, ret.clone(), packed);
+    }
     let ret = if bdtype != target {
         ctx.cast(ret, target)
     } else {
@@ -733,10 +731,6 @@ pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<
         !dtype::is_weak(dtype),
         "TGERR: cannot create storage for weak dtype {dtype:?}"
     );
-    assert!(
-        !data.is_empty(),
-        "TGERR: cannot create Tensor from empty bytes"
-    );
     let dev = canonicalize_device(device);
     let target = metal_lower_f64(&dev, dtype);
     let converted = if target != dtype {
@@ -754,7 +748,9 @@ pub fn from_bytes(ctx: &mut UOpCtx, data: &[u8], dtype: DTypeId, device: Option<
     let size = SVal::I((converted.len() / dtype.itemsize()) as i128);
     let _ = &size;
     let ret = new_buffer(ctx, "PYTHON", size, dtype, None);
-    register_initial(ctx, ret.clone(), converted);
+    if !converted.is_empty() {
+        register_initial(ctx, ret.clone(), converted);
+    }
     let dev = canonicalize_device(device);
     let ret = if dev == "PYTHON" {
         ret

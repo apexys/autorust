@@ -102,6 +102,26 @@ pub type RuntimeCtor = Rc<dyn Fn(&TinyElf) -> Rc<RefCell<dyn Prog>>>;
 /// Programs compiled for one device, keyed by ELF hash.
 type RuntimeCache = HashMap<u64, Rc<RefCell<dyn Prog>>>;
 
+/// Zero-byte storage handle for an empty tensor.
+///
+/// `Buffer`, `BufferBase::nbytes` and the scheduler all still see a buffer; its
+/// `size()` matches `nbytes()` (0), so `get_buf`/`_offset` stay consistent. No
+/// byte is ever read or written: zero-element kernels are skipped and copies
+/// of zero bytes are no-ops.
+pub struct ZeroOpaque;
+
+impl OpaqueT for ZeroOpaque {
+    fn size(&self) -> usize {
+        0
+    }
+    fn storage_id(&self) -> usize {
+        self as *const Self as usize
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// `LRUAllocator` (device.py:276) — the (size, options)-keyed free-list cache
 /// with OOM-triggered `free_cache()` retry. Perf-critical for real backends
 /// (every uncached alloc is a clCreateBuffer in M8).
@@ -128,8 +148,14 @@ impl LruAllocator {
     }
 
     /// Allocate `size` bytes, reusing a cached free-list entry when possible.
+    ///
+    /// A zero-byte request returns the shared-model [`ZeroOpaque`]: empty
+    /// tensors still hold a buffer handle, but no driver allocation happens and
+    /// no kernel is launched for their (empty) grid.
     pub fn alloc(&self, size: usize) -> Rc<dyn OpaqueT> {
-        assert!(size > 0, "TGERR: alloc size must be positive");
+        if size == 0 {
+            return Rc::new(ZeroOpaque);
+        }
         if let Some(o) = self
             .cache
             .borrow_mut()
@@ -153,6 +179,9 @@ impl LruAllocator {
     /// Capped per size class so a long-lived process cannot keep an unbounded
     /// number of foreign allocations alive; overflow goes back to the backend.
     pub fn free(&self, opaque: Rc<dyn OpaqueT>, size: usize) {
+        if size == 0 {
+            return;
+        }
         const MAX_PER_SIZE: usize = 32;
         let mut cache = self.cache.borrow_mut();
         let list = cache.entry((size, Default::default())).or_default();
@@ -415,6 +444,9 @@ impl Compiled {
 
     /// `as_memoryview` + copyout: read a buffer window's bytes.
     pub fn copyout(&self, o: &dyn OpaqueT) -> Vec<u8> {
+        if o.size() == 0 {
+            return Vec::new();
+        }
         let mut out = vec![0u8; o.size()];
         self.allocator._copyout(&mut out, o);
         out
@@ -422,12 +454,18 @@ impl Compiled {
 
     /// `_copyin`: write bytes into a buffer window.
     pub fn copyin_to(&self, o: &dyn OpaqueT, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
         self.allocator._copyin(o, data);
     }
 
     /// Direct device-to-device copy between two opaque windows on *this* device
     /// (`clEnqueueCopyBuffer`; host backends copy the windows directly).
     pub fn copy_into(&self, dest: &dyn OpaqueT, src: &dyn OpaqueT) {
+        if dest.size() == 0 {
+            return;
+        }
         self.allocator._copy_into(dest, src);
     }
 

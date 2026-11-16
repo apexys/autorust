@@ -29,7 +29,24 @@ fn gather_nd_0(x: &Tensor, idx: &Tensor) -> Result<Tensor> {
         .as_i64()
         .unwrap_or(0);
     if k == 0 {
-        return Ok(x.clone());
+        // `indices[..., :0]` selects the whole `x` once per index prefix:
+        // output shape is `indices.shape[:-1] + x.shape` (broadcast).
+        let ishape = idx.shape();
+        let prefix = &ishape.as_slice()[..rank - 1];
+        let xshape: Vec<i64> = x
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let mut out_shape: Vec<i64> = prefix
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        out_shape.extend_from_slice(&xshape);
+        let mut target = vec![1i64; prefix.len()];
+        target.extend_from_slice(&xshape);
+        return Ok(x.reshape(target).expand(out_shape));
     }
     let (idx, squeeze_out) = if rank == 1 {
         (idx.unsqueeze(0), true)
@@ -47,6 +64,101 @@ fn gather_nd_0(x: &Tensor, idx: &Tensor) -> Result<Tensor> {
     } else {
         out
     })
+}
+
+
+/// Insert `d-1` zeros between the taps of each spatial kernel axis (dilation
+/// expansion). The resulting kernel has size `(k-1)*d+1`; pair it with a
+/// dilation-1 convolution.
+fn expand_kernel_dilation(w: &Tensor, dilations: &[i64]) -> Tensor {
+    let mut cur = w.clone();
+    for (i, &d) in dilations.iter().enumerate() {
+        if d <= 1 {
+            continue;
+        }
+        let ax = 2 + i;
+        let shp: Vec<i64> = cur
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let k = shp[ax];
+        // split the axis into (k, 1)
+        let mut split: Vec<i64> = Vec::with_capacity(shp.len() + 1);
+        for (j, &v) in shp.iter().enumerate() {
+            split.push(v);
+            if j == ax {
+                split.push(1);
+            }
+        }
+        cur = cur.reshape(split.clone());
+        // zero-pad the singleton axis to d
+        let mut parg = vec![(0i64, 0i64); split.len()];
+        parg[split.len() - 1] = (0, d - 1);
+        cur = cur.pad(&parg);
+        // merge (k, d) back into one axis of length k*d
+        let mut merged = split.clone();
+        merged[ax] = k * d;
+        merged.remove(ax + 1);
+        cur = cur.reshape(merged);
+        // keep only the taps up to (k-1)*d
+        let mut target: Vec<crate::uop::sint::SVal> = shp
+            .iter()
+            .map(|v| crate::uop::sint::SVal::I(*v as i128))
+            .collect();
+        target[ax] = crate::uop::sint::SVal::I(((k - 1) * d + 1) as i128);
+        cur = cur.shrink_to(&target);
+    }
+    cur
+}
+
+/// Zero-insert the input along each spatial axis with stride > 1, so a
+/// transposed convolution of stride 1 sees the same samples at `i*s`.
+fn zero_insert_strides(x: &Tensor, strides: &[i64]) -> Tensor {
+    if strides.iter().all(|&s| s == 1) {
+        return x.clone();
+    }
+    let xs: Vec<i64> = x
+        .shape()
+        .as_slice()
+        .iter()
+        .map(|s| s.clone().as_i64().unwrap_or(0))
+        .collect();
+    // split every spatial axis into (k, 1)
+    let mut split: Vec<i64> = vec![xs[0], xs[1]];
+    for k in &xs[2..] {
+        split.push(*k);
+        split.push(1);
+    }
+    let mut y = x.reshape(split.clone());
+    // pad each singleton block to `stride`
+    let mut parg: Vec<(i64, i64)> = vec![(0, 0), (0, 0)];
+    for &s in strides {
+        parg.push((0, 0));
+        parg.push((0, s - 1));
+    }
+    y = y.pad(&parg);
+    // collapse each (k, stride) block into k*stride
+    let ys: Vec<i64> = y
+        .shape()
+        .as_slice()
+        .iter()
+        .map(|s| s.clone().as_i64().unwrap_or(0))
+        .collect();
+    let mut merged: Vec<i64> = vec![ys[0], ys[1]];
+    for (i, &s) in strides.iter().enumerate() {
+        merged.push(ys[2 + 2 * i] * s);
+    }
+    y = y.reshape(merged);
+    // keep (k-1)*s+1 samples: the interleaved positions with the final pad cut
+    let mut target: Vec<crate::uop::sint::SVal> =
+        vec![crate::uop::sint::SVal::I(-1), crate::uop::sint::SVal::I(-1)];
+    for (i, &s) in strides.iter().enumerate() {
+        let k = xs[2 + i];
+        target.push(crate::uop::sint::SVal::I(((k - 1) * s + 1) as i128));
+    }
+    y.shrink_to(&target)
 }
 
 impl OnnxModel {
@@ -738,9 +850,15 @@ impl OnnxModel {
                     }
                 }
                 if nnz == 0 {
-                    return Err(OnnxError::Unsupported(
-                        "NonZero with no nonzero elements (zero-element tensor)".into(),
-                    ));
+                    return one(
+                        Tensor::from_slice(
+                            &self.ctx,
+                            &[] as &[i64],
+                            Some(dtype::INT64),
+                            self.device.as_deref(),
+                        )
+                        .reshape([rank as i64, 0]),
+                    );
                 }
                 // `coords` is [nnz][rank]; the ONNX output is [rank][nnz].
                 let mut out = vec![0i64; rank * nnz as usize];
@@ -783,11 +901,6 @@ impl OnnxModel {
                     .filter(|(i, v)| **v != 0 && (*i as i64) < dim)
                     .map(|(i, _)| i as i64)
                     .collect();
-                if keep.is_empty() {
-                    return Err(OnnxError::Unsupported(
-                        "Compress selected no elements (zero-element tensor)".into(),
-                    ));
-                }
                 let idx = Tensor::from_slice(
                     &self.ctx,
                     &keep,
@@ -1512,15 +1625,6 @@ impl OnnxModel {
             }
         }
         let k = ishape[q - 1].max(0) as usize;
-        if k == 0 {
-            return if b == 0 {
-                Ok(x.clone())
-            } else {
-                Err(OnnxError::Unsupported(
-                    "GatherND batch_dims>0 with empty index depth".into(),
-                ))
-            };
-        }
         if b + k > r {
             return Err(OnnxError::Shape("GatherND index depth".into()));
         }
@@ -2093,49 +2197,51 @@ impl OnnxModel {
     }
 
     fn gather_elements(&mut self, x: &Tensor, idx: &Tensor, axis: usize) -> Result<Tensor> {
-        // GatherElements is Gather with full-shape indices: flatten both along
-        // the axis and gather per position, then restore the index shape.
-        let xshape = x.shape().as_slice().to_vec();
-        let ishape = idx.shape().as_slice().to_vec();
-        if xshape.len() != ishape.len() {
+        // Build the gather as one advanced-index `getitem`: axis coordinates
+        // come from `indices`, every other axis from an `arange` broadcast to
+        // the output shape. No index values are read on the host, so the op
+        // stays inside the replay plan.
+        let xshape: Vec<i64> = x
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let ishape: Vec<i64> = idx
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let rank = ishape.len();
+        if xshape.len() != rank {
             return Err(OnnxError::Shape("GatherElements rank mismatch".into()));
         }
-        let mut out = Vec::with_capacity(idx.numel() as usize);
-        // Read the index tensor once (host-side); it is small in practice.
-        let indices = self.i64s(idx)?;
-        for (flat, &raw) in indices.iter().enumerate() {
-            let mut rem = flat;
-            let mut coords = vec![0i64; xshape.len()];
-            for d in (0..xshape.len()).rev() {
-                let s = ishape[d].clone().as_i64().unwrap_or(1) as usize;
-                coords[d] = (rem % s) as i64;
-                rem /= s;
-            }
-            let n = xshape[axis].clone().as_i64().unwrap_or(0);
-            let mut i = raw;
-            if i < 0 {
-                i += n;
-            }
-            coords[axis] = i;
-            out.push(coords);
+        if axis >= rank {
+            return Err(OnnxError::Shape("GatherElements axis".into()));
         }
-        let mut ixs: Vec<Ix> = Vec::with_capacity(xshape.len());
-        for d in 0..xshape.len() {
-            let col: Vec<i64> = out.iter().map(|c| c[d]).collect();
-            ixs.push(Ix::Tensor(Tensor::from_slice(
-                &self.ctx,
-                &col,
-                Some(dtype::INT32),
-                self.device(),
-            )));
+        // Negative indices wrap like ONNX (`i + dim`).
+        let dim = xshape[axis];
+        let idx = idx.cast(dtype::INT64);
+        let idx = idx.add(idx.lt(0).cast(dtype::INT64).mul(dim));
+        let mut ixs: Vec<Ix> = Vec::with_capacity(rank);
+        for d in 0..rank {
+            if d == axis {
+                ixs.push(Ix::Tensor(idx.clone()));
+            } else {
+                let ar = Tensor::arange(
+                    &self.ctx,
+                    0.0,
+                    Some(ishape[d] as f64),
+                    1.0,
+                    Some(dtype::INT32),
+                );
+                let mut sh = vec![1i64; rank];
+                sh[d] = ishape[d];
+                ixs.push(Ix::Tensor(ar.reshape(sh)));
+            }
         }
-        let flat = x.getitem(&ixs);
-        Ok(flat.reshape(
-            ishape
-                .into_iter()
-                .map(|s| s.clone().as_i64().unwrap_or(0))
-                .collect::<Vec<_>>(),
-        ))
+        Ok(x.getitem(&ixs).reshape(ishape))
     }
 }
 
@@ -2453,16 +2559,27 @@ impl OnnxModel {
         let s = strides[0];
         let d = dilations[0];
         let op = output_padding[0];
-        if strides.iter().any(|&v| v != s)
-            || dilations.iter().any(|&v| v != d)
-            || output_padding.iter().any(|&v| v != op)
-        {
-            return Err(OnnxError::Unsupported(
-                "ConvTranspose with per-dimension strides/dilations/output_padding".into(),
-            ));
-        }
         let groups = node.attr_i64("group", 1);
-        Ok(x.conv_transpose2d(w, b, groups, s, d, &pads, op))
+        if strides.iter().all(|&v| v == s)
+            && dilations.iter().all(|&v| v == d)
+            && output_padding.iter().all(|&v| v == op)
+        {
+            return Ok(x.conv_transpose2d(w, b, groups, s, d, &pads, op));
+        }
+        // Per-dimension attributes: expand the dilation into the kernel, insert
+        // zeros between input samples for the strides, run a stride-1/dilation-1
+        // transposed convolution, then append the per-axis output padding.
+        let w2 = expand_kernel_dilation(w, &dilations);
+        let x2 = zero_insert_strides(x, &strides);
+        let mut out = x2.conv_transpose2d(&w2, b, groups, 1, 1, &pads, 0);
+        if output_padding.iter().any(|&v| v > 0) {
+            let mut parg = vec![(0i64, 0i64); out.shape().as_slice().len()];
+            for (i, &v) in output_padding.iter().enumerate() {
+                parg[2 + i] = (0, v);
+            }
+            out = out.pad(&parg);
+        }
+        Ok(out)
     }
 
     fn max_pool_op(&mut self, node: &Node, ins: &[Option<Tensor>]) -> Result<Vec<Tensor>> {

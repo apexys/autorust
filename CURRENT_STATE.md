@@ -6521,3 +6521,77 @@ same class for the other shape ops; constant-pad models keep the plan.
 Gate: `tests/onnx.rs::pad_with_runtime_pads_recomputes_each_run` — the same
 input signature with two different `pads` tensors must recompute (not replay
 the first shape).
+
+### 9.111 Zero-element tensor storage (2026-11-16)
+
+Empty tensors are first-class now:
+
+- `LruAllocator::alloc(0)` returns a `ZeroOpaque` (size 0, no driver
+  allocation); `free(0)` is a no-op. `Buffer::view` allows `offset == nbytes`,
+  and `ensure_allocated`/`allocate` skip an empty copy-in.
+- `Compiled::copyout`/`copyin_to`/`copy_into` and `realize::copy_buffer` early
+  return for zero bytes, so a host readback of an empty tensor is `[]`.
+- `realize_tensor`/`realize_many` short-circuit an all-int shape with a zero
+  dim to `realize_empty` (a zero-byte buffer + leaf) instead of scheduling;
+  kernel launches whose grid has a zero extent are skipped
+  (`kx.skip_empty`). `buffer_leaf` no longer clamps `numel` to 1.
+- `Tensor::from_slice`/`from_bytes` accept empty data, and the ONNX tensor
+  loader accepts zero-element initializers.
+
+This unblocks empty `NonZero` (`[rank, 0]`) and `Compress` selections, and
+`GatherND` with `k = 0` / an empty index depth (`indices.shape[:-1] +
+data.shape`, including `batch_dims > 0`). Gates:
+`tests/onnx.rs::nonzero_all_zero_is_empty`,
+`compress_empty_selection_is_empty`,
+`gather_nd_empty_index_depth_broadcasts`.
+
+### 9.112 Remaining T1 attributes and GatherElements (2026-11-16)
+
+- **`ConvTranspose` per-dimension attributes.** Dilate the kernel with zeros,
+  zero-insert the input for each stride, run a stride-1/dilation-1 transposed
+  convolution with the original padding, then append the per-axis
+  `output_padding` (`expand_kernel_dilation`/`zero_insert_strides`). Gates:
+  `conv_transpose_per_dimension_strides_dilation_and_padding`,
+  `conv_transpose_per_dimension_with_pads`.
+- **`GatherElements` is a graph gather.** The axis coordinate comes from
+  `indices` (negative values wrapped), every other axis from an `arange`
+  broadcast to the output shape, all fed to one advanced-index `getitem`.
+  No host read, so the op left the plan-disabled set. Gate:
+  `gather_elements_negative_indices_and_smaller_non_axis_dims`.
+
+### 9.113 Split-reduce gather fix and shape-derived plans (2026-11-16)
+
+Two issues found by the CLIP gate:
+
+1. **Advanced indexing returned a scaled row for large tables.** `getitem`
+   lowers to a one-hot mask + sum; `pm_load_collapse` lifts a gated load +
+   reduce into a direct gather, but `split_reduceop` had already split a
+   >= 32768-element reduction into per-block partials. The lift then dropped
+   the block offset and every partial added the same row (observed 256x for a
+   49408-row table). Fix: `split_reduceop` leaves a reduction whole when its
+   source contains a compare-gated `WHERE` (`has_compare_where`); the
+   (correct) lift then covers the full axis. Gather is again
+   O(sequence x width): vocab 4096/32000/49408 all ~1.1-1.3 ms at
+   sequence 128 (was 1.5/7.9/17.1 ms with the mask sum). Regression:
+   `tests/indexing.rs::tensor_index_large_table_keeps_one_row`.
+2. **Shape-derived shape inputs should not disable the plan.** The plan gate
+   now treats values derived only from initializers/`Constant`/`Shape`/`Size`
+   and small integer arithmetic as stable for an input signature; a real graph
+   input (e.g. runtime `Pad` pads) still runs eagerly. CLIP text/vision replay
+   dropped from 484/361 ms to **9.9/10.9 ms** (`tests/clip.rs`).
+
+### 9.114 CLIP T1 end-to-end gate (2026-11-16)
+
+Ran the `Xenova/clip-vit-base-patch32` fp32 ONNX exports
+(`text_model.onnx` opset 14, `vision_model.onnx` opset 11) against
+onnxruntime 1.32 (CPU, `ORT_DISABLE_ALL`) with deterministic inputs:
+
+| model | max abs diff | cosine | first / replay |
+|---|---:|---:|---:|
+| CLIP text (1x77 ids) | 2.4e-4 | 0.99999999 | 686 / 9.9 ms |
+| CLIP vision (1x3x224x224) | 1.7e-4 | 0.99999999 | 533 / 10.9 ms |
+
+Replay is bit-identical to the first run. The gate is
+`tests/clip.rs::clip_text_and_vision_match_onnxruntime` (`#[ignore]`, assets
+under `CLIP_ASSET_DIR`, default `/tmp/opencode/clip`). This closes the T1
+acceptance gate.
