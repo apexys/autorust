@@ -72,6 +72,15 @@ before `Fast` became the default and are therefore **Exact-mode** numbers;
 re-run with `AUTORUST_MATH=exact` to reproduce them, or leave the default for
 the current Fast-mode numbers.
 
+The custom 3x3 tensor-core kernel needs an already-realized input, so it only
+pays when 3x3 convs are contiguous (basic blocks): ResNet-18 infer bs 32 is
+**202 ms** with it vs 215-226 ms without (20-iteration alternating runs). In a
+bottleneck its input is a 1x1 output, and forcing the realize there splits the
+schedule: ResNet-50 was 1110-1137 ms vs 84 ms, so the benchmark harness keeps
+the path off for bottleneck `c2` (ResNet-50 stays at 83 ms). See
+`CURRENT_STATE §9.94`. Stride 2 was implemented and rejected for the same
+reason (and the isolated kernel was not faster than the graph).
+
 The `CC`/OpenCL compiler flags are real but small on memory-bound kernels:
 OpenCL fast math measured softmax `1.065 -> 0.982 ms` while other memops were
 neutral; `CC` amax `2.38 -> 2.11 ms`, add `10.64 -> 10.20 ms`, but gelu

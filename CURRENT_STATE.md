@@ -6141,3 +6141,34 @@ has no stable fast-math flag; Vulkan emits SPIR-V with no compiler-level
 fast-math option; Metal keeps `METAL_FAST_MATH` explicit because fast math
 folds the attention `-inf` masks. The `CC` compile path on Windows works with
 clang/MinGW; MSVC `cl` is not supported by the current Unix-flag command line.
+
+### 9.94 Custom 3x3 TC conv: stride 2 and bottleneck limits (2026-11-16)
+
+Two follow-ups to §9.93, both measured before landing anything.
+
+**Stride 2 — rejected.** The kernel's row -> `(b, oy, ox)` mapping and its
+`iy = oy*stride + ky - 1` load generalize to stride 2, and `OH = (H-1)/stride+1`
+for pad 1. Implemented and checked against INTERP (`tests`: max abs < 3e-2 with
+TF32). It is a clear regression: ResNet-50 infer bs 32 went **85.7 -> 1132 ms**
+(3 alternating pairs), while ResNet-18 was unchanged. The isolated kernel is
+also not faster than the graph: timing one conv after realized inputs, host vs
+graph was 8.47/7.97 ms (32x64x56x56->64), 6.26/5.99 (32x128x28x28->128) and
+7.06/6.82 (32x256x14x14->256). The stride-2 change was reverted.
+
+**Bottleneck mid-graph realize — the real limit.** The catastrophic part is not
+the kernel but forcing a realize between a block's 1x1 and 3x3 convs. In a
+bottleneck block `c2`'s input is `relu(c1(x))`, so `Cb::forward` calls
+`x.realize_device_ctx` mid-graph. Eager ResNet-50 then makes 40 schedules per
+step instead of 2, 550 generated kernel launches instead of 126, and
+`kx.buffers` rises from 1.1 to 4.3 ms per launch (2.38 s of the 1.85 s step) —
+**1110-1137 ms vs 84 ms**. Basic blocks (ResNet-18) chain 3x3 -> 3x3, so the
+input is already realized and the same path is a real win: **202-208 ms vs
+215-226 ms (~6-8%)** in 20-iteration alternating runs.
+
+The benchmark harness therefore carries a per-conv `fused` flag: on for basic
+blocks, off for a bottleneck's `c2`. With that gate ResNet-50 returns to
+**82.9-83.1 ms** (same as `AUTORUST_CONV3X3_TC=0`, 83.2-84.7) and ResNet-18 keeps
+**202.0 vs 215.4-219.2 ms**. The library API is unchanged: `conv2d_with` stays
+opt-in and is correct at every shape (the tests cover stride 1, the odd-shape
+fallback and the graph gradient); callers should only wire it where the input is
+already realized, and a mid-graph realize must be treated as a schedule split.

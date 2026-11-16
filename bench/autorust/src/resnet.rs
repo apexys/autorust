@@ -21,6 +21,11 @@ struct Cb {
     bn: BatchNorm,
     /// BN folded into `conv` for inference (see [`Cb::fold`]).
     folded: bool,
+    /// Allow the fused tensor-core 3x3 path. A bottleneck's 3x3 sits between
+    /// two 1x1 convs, so its input is never realized and taking the host path
+    /// forces a mid-graph realize that fragments the schedule (measured 13x
+    /// slower on ResNet-50). Basic blocks chain 3x3 -> 3x3 and keep it on.
+    fused: bool,
 }
 
 impl Cb {
@@ -39,6 +44,7 @@ impl Cb {
             ),
             bn: BatchNorm::new(ctx, cout, 1e-5, true, true, 0.1),
             folded: false,
+            fused: true,
         }
     }
 
@@ -51,6 +57,7 @@ impl Cb {
 
     fn forward(&self, x: &Tensor, sess: &mut Session, training: bool) -> Tensor {
         let tc3x3 = !training
+            && self.fused
             && self.conv.groups == 1
             && self.conv.kernel_size == [3, 3]
             && self.conv.stride == 1
@@ -155,9 +162,13 @@ impl Bottleneck {
     fn new(ctx: &Ctx, cin: i64, cout: i64, stride: i64) -> Bottleneck {
         let mid = cout / 4;
         let down = (stride != 1 || cin != cout).then(|| Cb::new(ctx, cin, cout, 1, stride, 0, 1));
+        // Only c2 is 3x3, and its input is the 1x1 c1 output: the host path
+        // would force a realize there and regress the whole model.
+        let mut c2 = Cb::new(ctx, mid, mid, 3, stride, 1, 1);
+        c2.fused = false;
         Bottleneck {
             c1: Cb::new(ctx, cin, mid, 1, 1, 0, 1),
-            c2: Cb::new(ctx, mid, mid, 3, stride, 1, 1),
+            c2,
             c3: Cb::new(ctx, mid, cout, 1, 1, 0, 1),
             down,
         }
