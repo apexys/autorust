@@ -23,6 +23,11 @@ How to read it:
 ### Scheduler and cold start
 
 - **S1. Serialized (AOT) lowered plans, or a SINK-content schedule cache.**
+  *Deferred 2026-11-16.* Measured warm-cache cold start (`vit_infer` bs 8):
+  768 ms total, of which the cache can reach ~100-180 ms (`sched.rangeify`
+  116 ms, `realize.schedule` 55 ms, `callify` 11 ms); the other ~75% is model
+  init, first execution and GPU clock ramp. Revisit if cold start becomes a
+  product concern.
   Evidence: a replay step is 38.5 ms, but the first step in a warm-cache
   process is 570-595 ms. The cacheable host work is only ~70-120 ms of that
   (`realize.schedule` ~61 ms + `callify` ~11.5 ms at `vit_infer` bs 8); the
