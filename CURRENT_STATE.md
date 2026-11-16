@@ -5845,3 +5845,26 @@ deterministic for a given shape.
 This does not cover layernorm (two row reductions plus normalize) or softmax;
 those remain graph paths. A fused layernorm would need a row kernel in the same
 style and would still be forward-only, so it is only useful for inference.
+
+### 9.84 Item 13 (broadcast-rhs matmul fold): measured rejection (2026-11-16)
+
+Tried the generated-matmul analogue of the host GEMM's batch fold in
+`Tensor::dot_impl`: when the lhs is `[B..., M, K]` and the rhs is a shared
+`[K, N]`, reshape the lhs to `[B*M, K]`, do one contraction, and reshape the
+result back. The policy mirrored burn's: `B > 1`, `M % 32 != 0`, and the merged
+output is closer to square. Gated by `AUTORUST_FOLD_MM=1` for the A/B.
+
+| workload | fold off | fold on | result |
+|---|---:|---:|---|
+| ViT infer bs 8, CUDA | 71.9 ms | 71.3 ms | noise |
+| ViT train bs 4, CUDA | **205.4 ms** | 238.1 ms | **-16%** |
+| LLM prefill 512 tok, CUDA | 334.1 ms | 336.8 ms | no candidate (B=1) |
+| LLM decode 1 tok, CUDA | 18.44 ms | 19.09 ms | no candidate (B=1) |
+
+`AUTORUST_MM_DEBUG=1` shows the LLM layers are `B=1` (`m=512` prefill,
+`m=1/3` decode), so there is no broadcast-rhs batched matmul to fold; the
+differences there are noise. On ViT the fold changes the host-GEMM family from
+`197x768x768x8/4` to a merged `1576x768x768x1` (or `788...`), and the batched
+family is faster for training. The fold was reverted; no `AUTORUST_FOLD_MM`
+flag remains. The host GEMM already folds broadcast batches where it wins, so
+the generated path has no measured case to claim.

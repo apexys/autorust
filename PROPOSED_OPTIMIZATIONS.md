@@ -69,6 +69,10 @@ tile, instead of launching b matmuls that each re-read the shared rhs. Our decod
 Try: the same metadata-only fold in `schedule/host_gemm.rs`/the generated matmul path, keyed by
 the inferred shape and only when the row count is not already tile-aligned.
 Measure: llm_decode CUDA/CPU ms/token and launch count; verify identical logits.
+Status (2026-11-16): **measured rejection**. The LLM workloads are `B=1`, so
+there is no broadcast-rhs batched matmul to fold; on ViT bs 4 the fold regressed
+training 205.4 -> 238.1 ms while bs 8 inference was noise. The host GEMM already
+folds broadcast batches where it wins. See `CURRENT_STATE §9.84`.
 14. Keyed per-shape autotuner for host-GEMM / conv candidates
 Why: burn's `LocalTuner` benchmarks candidate implementations per anchored problem key
 (shape+dtype+layout+alignment), keeps the winner, and persists it in the existing cache. Our
