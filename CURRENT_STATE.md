@@ -6484,9 +6484,11 @@ written at `write_indices[b] + s` along axis -2 (`linear`, or modulo
 `max_sequence_length` for `circular`). Implemented as a graph
 one-hot/matmul: `mask = one_hot(write_index + arange(seq))`,
 `scattered = maskᵀ @ update`, then `present = past * (1 - any_mask) +
-scattered`; `write_indices` defaults to zero. Axis -2 is supported (the KV
-layout); other axes and out-of-range linear writes return `Unsupported`. The op
-is in the plan-disabled set because the write indices are runtime.
+scattered`; `write_indices` defaults to zero. Axis -2 (the KV layout) uses the
+graph path; other axes use a host fallback (a permuted graph load hits a
+pre-existing symbolic-load codegen path). Out-of-range linear writes return
+`Unsupported`. The op is in the plan-disabled set because the write indices are
+runtime.
 
 Gate: `tests/onnx.rs::tensor_scatter_kv_cache_linear_and_circular` (the spec's
 linear example plus a circular wrap).

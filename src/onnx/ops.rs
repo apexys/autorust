@@ -1944,22 +1944,26 @@ impl OnnxModel {
         axis: i64,
         mode: &str,
     ) -> Result<Tensor> {
+        let rank = past.shape().as_slice().len();
+        let ax = resolve_index(axis, rank as i64) as usize;
+        if ax == 0 {
+            return Err(OnnxError::Unsupported("TensorScatter axis 0".into()));
+        }
+        if !matches!(mode, "linear" | "circular") {
+            return Err(OnnxError::Unsupported(format!("TensorScatter mode `{mode}`")));
+        }
+        if ax != rank - 2 {
+            // The KV layout (-2) uses the fast one-hot/matmul graph. Other axes
+            // are rare and hit a pre-existing symbolic-load codegen path when
+            // permuted, so scatter them on the host.
+            return self.tensor_scatter_host(past, update, write, ax, mode);
+        }
         let shape: Vec<i64> = past
             .shape()
             .as_slice()
             .iter()
             .map(|s| s.clone().as_i64().unwrap_or(0))
             .collect();
-        let rank = shape.len();
-        let ax = resolve_index(axis, rank as i64) as usize;
-        if ax != rank - 2 {
-            return Err(OnnxError::Unsupported(
-                "TensorScatter axis other than -2".into(),
-            ));
-        }
-        if !matches!(mode, "linear" | "circular") {
-            return Err(OnnxError::Unsupported(format!("TensorScatter mode `{mode}`")));
-        }
         let b = shape[0];
         let d = shape[rank - 2];
         let last = shape[rank - 1];
@@ -2011,12 +2015,81 @@ impl OnnxModel {
                 ));
             }
         }
-        let mask = cidx.unsqueeze(-1).one_hot_along_dim(d, -1).cast(dtype::FLOAT32);
+        let mask = cidx
+            .unsqueeze(-1)
+            .one_hot_along_dim(d, -1)
+            .cast(dtype::FLOAT32);
         let scattered = mask.transpose(1, 2).matmul(&upd_f);
         let has = mask.max(Some(&[1]), false);
         let keep = has.mul(-1.0).add(1.0).unsqueeze(-1);
         let present = past_f.mul(&keep).add(&scattered);
         Ok(present.cast(past.dtype()).reshape(shape))
+    }
+
+    fn tensor_scatter_host(
+        &mut self,
+        past: &Tensor,
+        update: &Tensor,
+        write: Option<&Tensor>,
+        ax: usize,
+        mode: &str,
+    ) -> Result<Tensor> {
+        let shape: Vec<i64> = past
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let rank = shape.len();
+        let ushape: Vec<i64> = update
+            .shape()
+            .as_slice()
+            .iter()
+            .map(|s| s.clone().as_i64().unwrap_or(0))
+            .collect();
+        let b = shape[0];
+        let max_seq = shape[ax];
+        let seq = ushape[ax];
+        if seq <= 0 || max_seq <= 0 {
+            return Err(OnnxError::Shape("TensorScatter empty update".into()));
+        }
+        let pv = past.to_list::<f64>(&mut self.sess);
+        let uv = update.to_list::<f64>(&mut self.sess);
+        let wv: Vec<i64> = match write {
+            Some(w) => w.to_list::<i64>(&mut self.sess),
+            None => vec![0; b as usize],
+        };
+        if wv.len() != b as usize {
+            return Err(OnnxError::Shape("TensorScatter write_indices length".into()));
+        }
+        let mut strides = vec![1i64; rank];
+        for d in (0..rank.saturating_sub(1)).rev() {
+            strides[d] = strides[d + 1] * shape[d + 1];
+        }
+        let total: i64 = ushape.iter().product();
+        let mut out = pv.clone();
+        let mut coords = vec![0i64; rank];
+        for flat in 0..total {
+            let mut rem = flat;
+            for d in (0..rank).rev() {
+                coords[d] = rem % ushape[d];
+                rem /= ushape[d];
+            }
+            let bi = coords[0] as usize;
+            let mut cs = wv[bi] + coords[ax];
+            if mode == "circular" {
+                cs = cs.rem_euclid(max_seq);
+            } else if cs < 0 || cs >= max_seq {
+                return Err(OnnxError::Runtime(
+                    "TensorScatter write exceeds max_sequence_length".into(),
+                ));
+            }
+            let mut ci = coords.clone();
+            ci[ax] = cs;
+            let di: i64 = ci.iter().zip(&strides).map(|(c, s)| c * s).sum();
+            out[di as usize] = uv[flat as usize];
+        }
+        self.build_like(past, &out, &shape)
     }
 
     fn gather_elements(&mut self, x: &Tensor, idx: &Tensor, axis: usize) -> Result<Tensor> {

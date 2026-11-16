@@ -31,9 +31,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Fused ONNX transformer/vision ops.** `SkipLayerNormalization`,
   `EmbedLayerNormalization`, `RotaryEmbedding` and `AffineGrid` as
   compositions over the existing `Tensor` primitives (`tests/onnx.rs`).
-- **ONNX `TensorScatter`.** KV-cache-style updates along axis -2 with
-  `linear`/`circular` modes and per-batch `write_indices`, as a graph
-  one-hot/matmul (`tests/onnx.rs`).
+- **ONNX `TensorScatter`.** KV-cache-style updates along axis -2 (graph
+  one-hot/matmul) or any other axis (host fallback), with `linear`/`circular`
+  modes and per-batch `write_indices` (`tests/onnx.rs`).
 - **Per-dimension ONNX `Conv` strides/dilations.** 2-D convolutions with
   differing stride/dilation per spatial axis expand the kernel and subsample
   (`tests/onnx.rs`).

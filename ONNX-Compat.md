@@ -150,7 +150,7 @@ exists; "compose" means it can be built from existing ops but needs a wrapper;
 | `Slice` | ✅ | `Ix::Range`; constant starts/ends/axes/steps. |
 | `Gather` | ✅ | `Tensor::gather`. |
 | `GatherElements GatherND` | ✅ | `GatherND` all `batch_dims` (`k=0` caveat); `GatherElements` host-index loop (correct, not fast; plan-disabled). |
-| `Scatter ScatterElements ScatterND TensorScatter` | ✅ | `Scatter*` host-side with negative indices and reduction `none`/`add`/`mul`/`max`/`min`; `TensorScatter` is a graph one-hot/matmul for axis -2, `linear`/`circular`, per-batch `write_indices`. |
+| `Scatter ScatterElements ScatterND TensorScatter` | ✅ | `Scatter*` host-side with negative indices and reduction `none`/`add`/`mul`/`max`/`min`; `TensorScatter` uses the graph one-hot/matmul on axis -2 (the KV layout) and a host fallback on other axes, with `linear`/`circular` and per-batch `write_indices`. |
 | `Pad` | ✅ | constant/edge/reflect/wrap with static (host-resolved) pads. |
 | `Resize Upsample` | ✅ | linear/nearest/cubic, antialias, all coordinate modes except `tf_crop_and_resize`, all `nearest_mode`s, `keep_aspect_ratio_policy`. |
 | `Shape Size` | ✅ | runtime `int64` tensors; symbolic declared dims are bound from the input. |

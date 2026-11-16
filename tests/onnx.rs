@@ -963,6 +963,51 @@ fn tensor_scatter_kv_cache_linear_and_circular() {
 }
 
 #[test]
+fn tensor_scatter_axis_one() {
+    let nodes = vec![b::node(
+        "TensorScatter",
+        &["past", "update", "write"],
+        &["out"],
+        &[Attr::Int("axis", 1), Attr::Str("mode", "linear")],
+    )];
+    let inputs = vec![
+        b::value_info("past", b::FLOAT, &[Dim::Val(2), Dim::Val(3), Dim::Val(1), Dim::Val(2)]),
+        b::value_info("update", b::FLOAT, &[Dim::Val(2), Dim::Val(2), Dim::Val(1), Dim::Val(2)]),
+        b::value_info("write", b::INT64, &[Dim::Val(2)]),
+    ];
+    let outputs = vec![b::value_info("out", b::FLOAT, &[Dim::Val(2), Dim::Val(3), Dim::Val(1), Dim::Val(2)])];
+    let bytes = b::model(&b::graph(&nodes, &[], &inputs, &outputs, "ts1"), 24);
+    let mut m = OnnxModel::from_bytes(&bytes, None).expect("parse");
+    let past = Tensor::from_slice(
+        m.ctx(),
+        &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 3, 1, 2]);
+    let update = Tensor::from_slice(
+        m.ctx(),
+        &[10.0f32, 11.0, 12.0, 13.0, 20.0, 21.0, 22.0, 23.0],
+        Some(dtype::FLOAT32),
+        None,
+    )
+    .reshape([2i64, 2, 1, 2]);
+    let write = Tensor::from_slice(m.ctx(), &[1i64, 0], Some(dtype::INT64), None)
+        .reshape([2i64]);
+    let mut out = m
+        .run(&[("past", past), ("update", update), ("write", write)])
+        .expect("run");
+    let got: Vec<f32> = out.remove("out").unwrap().to_list(m.session_mut());
+    close(
+        &got,
+        &[
+            1.0, 2.0, 10.0, 11.0, 12.0, 13.0, 20.0, 21.0, 22.0, 23.0, 11.0, 12.0,
+        ],
+        1e-6,
+    );
+}
+
+#[test]
 fn resize_asymmetric_linear() {
     let sizes = b::i64_tensor("sizes", &[4], &[1, 1, 1, 8]);
     let nodes = vec![b::node(
