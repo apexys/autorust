@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-16
+
 ### Changed
 
 - **Fast math mode is now the default.** `Settings` gains `math_mode`
@@ -67,6 +69,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`--no-default-features` builds again.** The fused reduction and conv
+  helpers referenced `runtime::cuda_reduce` / `runtime::cuda_conv_tc`
+  unconditionally; they are now behind `backend_cuda`, like the kernels
+  they call.
 - **Small batched contractions no longer go through one cuBLAS call per
   batch.** CUDA `Auto` now keeps a batched f32 contraction on the generated
   kernel below `m*n*k = 1.5M` per batch (`AUTORUST_CUBLAS_BATCH_WORK`; `0`
