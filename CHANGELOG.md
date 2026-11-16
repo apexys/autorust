@@ -6,8 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
+Feature release: a fourth GPU backend (`VK`, SPIR-V emitted directly and now in
+the default feature set), eager `StepPlan` capture/replay, ONNX replay plans,
+fused CUDA/OpenCL optimizer kernels, inference Conv+BN folding, and a large
+host-GEMM/cuBLAS and codegen pass. ViT-B/16 f32 training at bs 4 on CUDA drops
+from 317 to ~200 ms (216.7 in the full matrix) and ResNet-18 inference from 374
+to 323 ms. `StepPlan` is on by default; two public structs gained Vulkan fields,
+which is source-breaking for struct-literal construction and is called out
+below.
+
 ### Changed
 
+- **Vulkan fields on public settings structs (source-breaking).** `Settings`
+  gains `vk_device` and `LibraryGemmPolicy` gains `vk`. Neither struct is
+  `#[non_exhaustive]`, so code that constructs them with a struct literal must
+  add the field; use `Settings::default()`/`from_env()` or
+  `..Default::default()`. The `backend_vk` feature is also in the default set,
+  so default builds compile the Vulkan backend and pull `ash` (bindings only;
+  `libvulkan` is loaded at run time).
 - **Measured items 15 (symbolic plans) and 1 (schedule cache) as explicit
   skips.** The port has no symbolic-variable machinery at all (`SInt::U` is
   never built, there is no `Variable` op, `Session.var_vals` is unused,
@@ -96,9 +114,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   O(1) tick map instead of a `VecDeque` scan per hit and keeps no LRU state when
   uncapped; `Scheduler` caches `rngs`/`full_shape`/`axis_types` and
   `realize_many` uses a hash map for large co-realizations.
-
-### Changed
-
 - **Device buffers return to the free list.** `BufferBase::drop` hands the base
   allocation back to the device allocator's size-capped free list instead of
   releasing it, so steady-state realizes stop paying a driver allocation per

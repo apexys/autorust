@@ -652,9 +652,8 @@ training and ViT-B/16 — through autorust, candle, torch and tinygrad on CPU an
 CUDA. Inputs are synthetic and device-resident, the timed region is one
 training/inference step (no data loading, evaluation or logging), and each run
 is a fresh process with warmup. Raw JSON and the generated per-run tables are in
-[`bench/results/`](bench/results); these medians are from the `v0.1.1` release
-sources (autorust CPU and CUDA rows re-taken together after the codegen,
-packed-GEMM and attention changes in CURRENT_STATE §9.20-§9.49) on the
+[`bench/results/`](bench/results); these medians are from the `0.2.0` sources
+(commit `63cfeaf`; later A/B runs improve some rows further) on the
 environment above
 (the candle runs were re-taken at `82f6408` with the class-token fix; torch is
 eager, no `torch.compile`; autorust uses `Jit`, tinygrad `TinyJit`).
@@ -663,36 +662,37 @@ All step times are milliseconds (lower is better).
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 512 | CPU | **65.5 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
-| MNIST CNN train, bs 512 | CUDA | 22.2 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | 170.6 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
+| MNIST CNN train, bs 512 | CPU | **63.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CUDA | 22.4 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| ViT-B/16 infer, bs 1 | CPU | **156.4 ms** (RUST) | 229.4 ms | 165.1 ms | 14639.3 ms |
 | ViT-B/16 infer, bs 1 | CUDA | 14.2 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1188.0 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 70.5 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
+| ViT-B/16 infer, bs 8 | CPU | 1103.1 ms (RUST) | 1403.5 ms | **826.9 ms** | — |
+| ViT-B/16 infer, bs 8 | CUDA | 69.8 ms | 114.6 ms | **48.6 ms** | 136.2 ms |
 | ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
 | ViT-B/16 train, bs 1 | CUDA | 95.9 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
 Reading it:
 
-- **MNIST CUDA**: autorust is 2.6x faster than tinygrad and 1.7x slower than
-  torch (cuDNN + cuBLAS + fused BN/optimizer). The direct-conv tile now reuses
-  the 5x5 weights across two output rows, which is most of the gap that
-  remains.
+- **MNIST CUDA**: autorust is 2.5x faster than tinygrad and 1.7x slower than
+  torch (cuDNN + cuBLAS + fused BN/optimizer). The direct-conv tile reuses the
+  5x5 weights across two output rows, and im2col feeds the longer contractions
+  to the host GEMM, which is most of the gap that remains.
 - **ViT inference CUDA**: eval mode uses the hand-written FA2 kernels through
   `ViT::forward_with`, so torch's cuBLAS/cuDNN path is only ~1.5x ahead at
   both batches. autorust is 8.6x/1.9x faster than tinygrad and ~1.6x faster
   than candle at bs 8.
-- **ViT training CUDA**: autorust is 4.1x faster than tinygrad and 2.15x slower
+- **ViT training CUDA**: autorust is 4.1x faster than tinygrad and 2.2x slower
   than torch. Splitting the summed q/k/v input gradient and staging the
   pointwise contraction operands (GELU derivative, dropout mask, softmax
-  backward) took the step from 332 to 94 ms; the remaining gap is the f32
+  backward) took the step from 332 to 96 ms; the remaining gap is the f32
   backward against cuBLAS/cuDNN (see §9.20-§9.23).
-- **CPU**: autorust's `RUST` backend is 60x/60x faster than tinygrad/candle on
-  MNIST and now lands within 2x of torch on ViT inference at both batches
-  (173 vs 165 ms at bs 1, 1164 vs 702 ms at bs 8); training is 2.65x (torch's
-  MKL GEMMs and its fused attention/optimizer are the gap). tinygrad's
-  `CPU` backend is single-threaded by design. `RAYON` is the typed interpreter
-  (`mnist_train` bs 32: 348 ms/step) and is not a throughput backend.
+- **CPU**: autorust's `RUST` backend is 55x/62x faster than
+  tinygrad/candle on MNIST, is now ahead of torch on ViT inference at bs 1
+  (156.4 vs 165.1 ms) and 1.33x behind at bs 8 (1103 vs 827 ms); training is
+  2.65x (torch's MKL GEMMs and its fused attention/optimizer are the gap).
+  tinygrad's `CPU` backend is single-threaded by design. `RAYON` is the typed
+  interpreter (`mnist_train` bs 32: 348 ms/step) and is not a throughput
+  backend.
 
 Caveats that matter for the comparison: tinygrad CPU is single-threaded;
 candle-nn's BatchNorm is inference-only, so its MNIST training normalizes with
@@ -707,41 +707,36 @@ steady-state medians).
 
 The headline rows compare at one batch each. Re-running the same steps at other
 batches (`bench/run.py --only '.*(mnist-bs64|vit_train-bs4)'`; raw JSON in
-`bench/results/`) shows that the MNIST gap is stable while the ViT training gap
-grows with batch:
+`bench/results/`) shows that MNIST is ahead on CPU at bs 512 and close at bs 64,
+while the ViT training gap is about 2.2x on CUDA at both bs 1 and 4:
 
 | workload | device | batch | autorust | torch | ratio |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train | CPU | 64 | 9.9 ms | 19.9 ms | 0.50x |
-| MNIST CNN train | CPU | 512 | 65.5 ms | 175.9 ms | 0.37x |
-| MNIST CNN train | CUDA | 64 | 3.1 ms | 2.3 ms | 1.32x |
-| MNIST CNN train | CUDA | 512 | 22.2 ms | 13.1 ms | 1.69x |
+| MNIST CNN train | CPU | 64 | 19.0 ms | 17.5 ms | 1.08x |
+| MNIST CNN train | CPU | 512 | 63.2 ms | 175.9 ms | 0.36x |
+| MNIST CNN train | CUDA | 64 | 3.5 ms | 2.3 ms | 1.49x |
+| MNIST CNN train | CUDA | 512 | 22.4 ms | 13.1 ms | 1.70x |
 | ViT-B/16 train | CPU | 1 | 1634.5 ms | 616.3 ms | 2.65x |
-| ViT-B/16 train | CPU | 4 | 4205.1 ms | 1498.0 ms | 2.81x |
+| ViT-B/16 train | CPU | 4 | 3861.2 ms | 1470.0 ms | 2.63x |
 | ViT-B/16 train | CUDA | 1 | 95.9 ms | 43.8 ms | 2.19x |
-| ViT-B/16 train | CUDA | 4 | 317.1 ms | 102.4 ms | 3.10x |
+| ViT-B/16 train | CUDA | 4 | 216.7 ms | 100.4 ms | 2.16x |
 
-A wider ad-hoc sweep (five timed iterations per point) on the same steps shows
-the per-image cost directly. ViT-B/16 training, ms per step and per image:
+ViT-B/16 training, ms per step and per image at the measured batches:
 
 | device | batch | autorust step | autorust ms/img | torch step | torch ms/img |
 |---|---:|---:|---:|---:|---:|
-| CUDA | 1 | 98.8 | 98.8 | 45.8 | 45.8 |
-| CUDA | 2 | 169.6 | 84.8 | 65.5 | 32.7 |
-| CUDA | 4 | 320.8 | 80.2 | 102.2 | 25.5 |
-| CUDA | 8 | 628.8 | 78.6 | 177.0 | 22.1 |
-| CPU | 1 | 1600.9 | 1600.9 | 609.5 | 609.5 |
-| CPU | 2 | 3152.8 | 1576.4 | 999.0 | 499.5 |
-| CPU | 4 | 4211.8 | 1053.0 | 1342.4 | 335.6 |
+| CUDA | 1 | 95.9 | 95.9 | 43.8 | 43.8 |
+| CUDA | 4 | 216.7 | 54.2 | 100.4 | 25.1 |
+| CPU | 1 | 1634.5 | 1634.5 | 616.3 | 616.3 |
+| CPU | 4 | 3861.2 | 965.3 | 1470.0 | 367.5 |
 
-The step time grows almost linearly with batch on both devices: the generated
-f32 GEMM is close to saturation at batch 1 (per-image 98.8 -> 78.6 ms on CUDA
-from bs 1 to 8), so extra rows buy little, while cuBLAS keeps improving its tile
-choice (torch's CUDA per-image cost halves from bs 1 to bs 8). In other words, the remaining ViT-training gap is not launch or
-scheduling overhead that a bigger batch would amortize; it is the steady-state
-GEMM/elementwise throughput of the f32 path. MNIST, which is conv- and
-optimizer-heavy, behaves differently: on CPU autorust is 2x faster than torch at
-bs 64 and 2.7x at bs 512, and on CUDA it is within 1.3x at bs 64.
+Per-image cost still falls with batch on both devices (CUDA 95.9 -> 54.2
+ms/image from bs 1 to 4), but the ratio stays ~2.2x, so the remaining
+ViT-training gap is not launch or scheduling overhead that a bigger batch would
+amortize; it is the steady-state GEMM/elementwise throughput of the f32 path.
+MNIST, which is conv- and optimizer-heavy, behaves differently: on CPU autorust
+is 2.8x faster than torch at bs 512 and within 1.1x at bs 64, and on CUDA it is
+within 1.5x at bs 64.
 
 CPU batch sizes above 1 used to hang: a cold `threefry` RNG kernel made rustc's
 loop vectorizer run for over ten minutes (CURRENT_STATE §9.50). The RUST
@@ -834,7 +829,7 @@ traffic per parameter (grad, m, v, p reads; m, v, p writes).
 
 | device | autorust | torch |
 |---|---:|---:|
-| CUDA | **26.0 ms (107.7 GB/s)** | 26.3 ms (106.3 GB/s) |
+| CUDA | 25.7 ms (108.8 GB/s) | **25.4 ms (110.2 GB/s)** |
 | CPU | **232.0 ms (12.1 GB/s)** | 295.8 ms (9.5 GB/s) |
 
 On CUDA and OpenCL the update is a single fused kernel per parameter
@@ -854,8 +849,8 @@ ResNet-18 trains, the others infer (batch 32; UNet batch 4 at 64²).
 
 | workload | device | autorust | torch | ratio |
 |---|---|---:|---:|---:|
-| ResNet-18 infer | CPU | 1781.2 ms | **374.4 ms** | 4.8x |
-| ResNet-18 infer | CUDA | 326.9 ms | **17.1 ms** | 19.1x |
+| ResNet-18 infer | CPU | 1.20 s | **374.3 ms** | 3.2x |
+| ResNet-18 infer | CUDA | 322.7 ms | **18.8 ms** | 17.2x |
 | ResNet-18 train | CPU | 1177.5 ms | **1110.8 ms** | 1.06x |
 | ResNet-18 train | CUDA | 441.8 ms | **64.2 ms** | 6.9x |
 | ResNet-50 infer | CPU | 531.9 ms | **306.1 ms** | 1.7x |
@@ -870,11 +865,10 @@ Reading it:
 - **Dense conv is the weak path.** The direct-conv kernels run at ~9-30 GFLOP/s
   (a 7×7 stem conv: 3.0 GFLOP in 0.32 s) where the GEMM microbench reaches
   8 TFLOP/s. torch uses oneDNN on CPU and cuDNN on CUDA, both far ahead.
-- ResNet-18 *inference* is slower than its own training step on CPU
-  (1781 vs 1177 ms) although training does more work: the inference forward
-  fuses the BatchNorm into the convolution and that variant selects a much
-  slower lowering than the plain conv used during training. The conv-im2col +
-  batch-norm epilogue is the lever to pull.
+- ResNet-18 *inference* is now close to its own training step on CPU (1.20 s vs
+  1.18 s) although training does more work: `fold_bn_eval` folds the BatchNorm
+  into the conv weight and bias, so the store is a plain bias(+ReLU) GEMM. The
+  remaining gap is conv lowering (im2col + host GEMM), not BatchNorm.
 - MobileNetV2 is the exception: depthwise convolutions have no GEMM lowering,
   and our elementwise path beats torch on CPU by 3.4x (torch's CPU depthwise
   kernel is slow at this size). CUDA is 2.4x behind.
@@ -907,23 +901,24 @@ on CUDA is the attention matmuls at 513 keys plus the same launch count.
 |---|---|---:|---:|---:|
 | ViT-B/16 infer (bf16) | CUDA | 61.6 ms | **18.2 ms** | 3.4x |
 | ViT-B/16 train (bf16) | CUDA | 84.3 ms | **20.9 ms** | 4.0x |
-| MNIST infer via ONNX, bs 32 | CPU | 14.7 ms | **3.7 ms** | 4.0x |
-| MNIST infer via ONNX, bs 32 | CUDA | 1.7 ms | **0.35 ms** | 4.8x |
-| ResNet-18 (w=0.25) via ONNX, bs 8 | CPU | 204.8 ms | **17.4 ms** | 11.8x |
-| ResNet-18 (w=0.25) via ONNX, bs 8 | CUDA | 12.0 ms | **1.25 ms** | 9.6x |
+| MNIST infer via ONNX, bs 32 | CPU | 9.7 ms | **4.2 ms** | 2.3x |
+| MNIST infer via ONNX, bs 32 | CUDA | 1.80 ms | **0.34 ms** | 5.3x |
+| ResNet-18 (w=0.25) via ONNX, bs 8 | CPU | 126.5 ms | **17.4 ms** | 7.3x |
+| ResNet-18 (w=0.25) via ONNX, bs 8 | CUDA | 9.68 ms | **1.81 ms** | 5.3x |
 
 - The bf16 ViT rows exercise the tensor-core matmul and the bf16 attention
-  path. Inference is 1.15x faster than f32 (61.6 vs 70.5 ms) and training 1.14x
+  path. Inference is 1.13x faster than f32 (61.6 vs 69.8 ms) and training 1.14x
   (84.3 vs 95.9 ms), because the 197-token axis is prime and the TC tiling pads
-  it. torch's bf16 halves its f32 cost (43.8 -> 20.9 ms train, 70.5 -> 18.2 ms
-  infer at bs 8), so the mixed-precision gap (3.4-4.0x) is wider than f32's.
+  it. torch's bf16 inference is 18.2 ms at bs 8 (f32: 48.6 ms) and training is
+  20.9 ms (f32: 43.8 ms), so the mixed-precision gap (3.4-4.0x) is wider than
+  f32's.
 - The ONNX rows load exported models (`bench/assets/mnist_bs32.onnx` and the
   width-0.25 `resnet18w25_bs8.onnx`, regenerated by
   `bench/tools/export_onnx.py`) through `OnnxModel::run`. The first call for an
   input shape captures a replay plan (the whole graph's LINEARS, lowered once)
   and later calls copy the inputs into the plan's buffers and replay it, so
   per-call scheduling is paid only on capture. That took CUDA ONNX MNIST from
-  11.7 to **1.7 ms** and ResNet-0.25 from 73.8 to **12.0 ms**; the remaining gap
+  11.7 to **1.8 ms** and ResNet-0.25 from 73.8 to **9.7 ms**; the remaining gap
   to torch is kernel time and conv lowering, not host scheduling. A changed
   input shape recaptures; `OnnxModel::set_plan_cache(false)` forces the eager
   path for debugging. Static shapes are the T0/T1 contract — the plan is not

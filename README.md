@@ -15,7 +15,7 @@ It includes:
   tensor-core variants)
 - Safetensors checkpoint loading and ONNX model import
 
-This started as a somewhat faithful automated ("vibe-coded") Rust port of [tinygrad](https://github.com/tinygrad/tinygrad) v0.14 and now has gained a few more features. This README's introduction is the only thing I really wrote by hand, the rest was mostly done using Qwen 3.8 27b and DeepSeek v4.1 Flash, both hosted locally (no Claude or OpenAI). I have tested this extensively and am using this in production, but there might be rough edges.
+This started as a somewhat faithful automated ("vibe-coded") Rust port of [tinygrad](https://github.com/tinygrad/tinygrad) v0.14 and now has gained a few more features. This README's introduction is the only thing I mostly wrote by hand, the rest was mostly done using Qwen 3.8 27b and DeepSeek v4.1 Flash, both hosted locally (no Claude or OpenAI). I have tested this extensively and am using this in production, but there might be rough edges.
 
 ## Quick start
 
@@ -64,8 +64,9 @@ lot of optimization potential in the backends. ONNX is relatively incomplete and
 
 `autorust` is pretty okay right now (fast enough to be usable).
 We integrate with native GEMM libraries when available (cuBLAS, CLBlast,
-MetalPerformanceShaders, plus our own packed CPU kernel) and have fast paths
-for attention and, to a lesser extent, convolutions.
+MetalPerformanceShaders, the Vulkan cooperative-matrix path, plus our own packed
+CPU kernel) and have fast paths for attention and, to a lesser extent,
+convolutions.
 
 Here's a benchmark ([`bench`](https://github.com/apexys/autorust/tree/main/bench)) comparing the performance across workloads and frameworks:
 
@@ -75,22 +76,22 @@ See [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.
 
 | workload | device | autorust | candle | torch | tinygrad |
 |---|---|---:|---:|---:|---:|
-| MNIST CNN train, bs 64 | CPU | **9.9 ms** (RUST) | 434.6 ms | 19.9 ms | 404.4 ms |
-| MNIST CNN train, bs 64 | CUDA | 3.1 ms | 17.4 ms | **2.3 ms** | 8.4 ms |
-| MNIST CNN train, bs 512 | CPU | **65.5 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
-| MNIST CNN train, bs 512 | CUDA | 22.2 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
-| ViT-B/16 infer, bs 1 | CPU | 170.6 ms (RUST) | 229.4 ms | **165.1 ms** | 14639.3 ms |
+| MNIST CNN train, bs 64 | CPU | 19.0 ms (RUST) | 434.6 ms | **17.5 ms** | 404.4 ms |
+| MNIST CNN train, bs 64 | CUDA | 3.5 ms | 17.4 ms | **2.3 ms** | 8.4 ms |
+| MNIST CNN train, bs 512 | CPU | **63.2 ms** (RUST) | 3902.0 ms | 175.9 ms | 3464.8 ms |
+| MNIST CNN train, bs 512 | CUDA | 22.4 ms | 131.9 ms | **13.1 ms** | 56.8 ms |
+| ViT-B/16 infer, bs 1 | CPU | **156.4 ms** (RUST) | 229.4 ms | 165.1 ms | 14639.3 ms |
 | ViT-B/16 infer, bs 1 | CUDA | 14.2 ms | 19.2 ms | **8.7 ms** | 116.9 ms |
-| ViT-B/16 infer, bs 8 | CPU | 1188.0 ms (RUST) | 1403.5 ms | **701.5 ms** | — |
-| ViT-B/16 infer, bs 8 | CUDA | 70.5 ms | 114.6 ms | **46.4 ms** | 136.2 ms |
+| ViT-B/16 infer, bs 8 | CPU | 1103.1 ms (RUST) | 1403.5 ms | **826.9 ms** | — |
+| ViT-B/16 infer, bs 8 | CUDA | 69.8 ms | 114.6 ms | **48.6 ms** | 136.2 ms |
 | ViT-B/16 train, bs 1 | CPU | 1634.5 ms (RUST) | **243.4 ms** | 616.3 ms | — |
 | ViT-B/16 train, bs 1 | CUDA | 95.9 ms | **19.0 ms** | 43.8 ms | 388.5 ms |
 
-The ViT training gap is batch-dependent rather than a fixed overhead: the
-generated f32 GEMM is close to saturation already at bs 1 (per-image 98.8 ->
-78.6 ms on CUDA from bs 1 to 8), while torch's cuBLAS keeps improving
-(45.8 -> 22.1 ms/image). At bs 4 autorust/CUDA is 317 ms vs torch's 102 ms. MNIST scales the other way: autorust is 2x faster than torch on CPU at
-both bs 64 and bs 512. Full sweep in
+ViT training remains the largest gap: at bs 1 autorust/CUDA is 95.9 ms vs
+torch's 43.8 ms, and at bs 4 it is 216.7 ms vs 100.4 ms. The remaining cost is
+steady-state f32 GEMM/elementwise throughput rather than launch overhead. MNIST
+scales the other way: autorust is 2.8x faster than torch on CPU at bs 512 and
+within 1.1x at bs 64. Full sweep in
 [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#batch-size-scaling).
 
 ### More workloads
@@ -99,30 +100,29 @@ The bench also isolates the pieces the two models hide:
 
 | workload | device | autorust | torch | note |
 |---|---|---:|---:|---|
-| f32 GEMM, 2048³ | CUDA | **2.20 ms** (7.8 TF/s) | 2.21 ms (7.8 TF/s) | at parity with cuBLAS |
+| f32 GEMM, 2048³ | CUDA | 2.22 ms (7.7 TF/s) | **2.21 ms** (7.8 TF/s) | at parity with cuBLAS |
 | bf16 GEMM, 4096³ | CUDA | 9.50 ms (14.5 TF/s) | **5.43 ms** (25.3 TF/s) | tensor cores selected, kernel ~0.6x |
 | memory-bound add, 64 MB | CUDA | **0.62 ms** (325 GB/s) | 0.63 ms (322 GB/s) | elementwise at peak |
-| memory-bound softmax | CUDA | 0.86 ms (155 GB/s) | **0.47 ms** (288 GB/s) | two-pass reduce |
-| AdamW, 100M params | CUDA | 102 ms | **26 ms** | per-tensor launch overhead |
-| ResNet-18 infer, bs 32 | CUDA | 373.6 ms | **17.1 ms** | conv lowering is the gap |
-| ResNet-18 train, bs 32 | CPU | **1177.5 ms** | 1110.8 ms | parity on CPU |
+| memory-bound softmax | CUDA | 0.87 ms (154 GB/s) | **0.47 ms** (287 GB/s) | two-pass reduce |
+| AdamW, 100M params | CUDA | 25.7 ms | **25.4 ms** | fused kernel, parity with torch |
+| ResNet-18 infer, bs 32 | CUDA | 322.7 ms | **18.8 ms** | conv lowering is the gap |
+| ResNet-18 train, bs 32 | CPU | 1177.5 ms | **1110.8 ms** | near parity on CPU |
 | MobileNetV2 infer, bs 32 | CPU | **243.7 ms** | 837.6 ms | depthwise beats oneDNN |
 | UNet infer, 64² | CUDA | 18.7 ms | **1.6 ms** | conv_transpose/upsample |
-| LLM prefill, 512 tok | CUDA | 317 ms | **16.4 ms** | attention + head |
+| LLM prefill, 512 tok | CUDA | 317.1 ms | **16.4 ms** | attention + head |
 | LLM decode, 1 tok | CUDA | 17.1 ms | **3.6 ms** | ~300 kernels/token |
 | ViT-B/16 infer, bf16 | CUDA | 61.6 ms | **18.2 ms** | TC tiling on 197 tokens |
 | ViT-B/16 train, bf16 | CUDA | 84.3 ms | **20.9 ms** | f32 was 95.9 vs 43.8 |
-| MNIST infer via ONNX, bs 32 | CUDA | 10.9 ms | **0.35 ms** | runner reschedules per call |
-| ResNet-18 (w=0.25) via ONNX, bs 8 | CUDA | 67.7 ms | **1.25 ms** | same, larger graph |
+| MNIST infer via ONNX, bs 32 | CUDA | 1.80 ms | **0.34 ms** | runner replays one plan per shape |
+| ResNet-18 (w=0.25) via ONNX, bs 8 | CUDA | 9.68 ms | **1.81 ms** | same, larger graph |
 
-Vulkan (`VK`) emits SPIR-V directly and runs the same kernels as OpenCL: seven of
-eight memory-bound microbenches are at parity or faster (softmax 1.20 vs 1.38 ms,
-layernorm 1.13 vs 1.43 ms, add 0.85 vs 1.07 ms), ViT-B/16 infer at bs 8 is
-**132.5 vs 179.9 ms**, ResNet-18 inference **321 vs 376 ms**, UNet 18.1 vs
-21.2 ms, AdamW 95.8 vs 97.4 ms, and MNIST train 22.6 vs 21.9 ms. bf16 is the
-remaining gap (ViT-B/16 bf16 154 vs 92 ms). The remaining gaps are `LOCAL`-memory reductions
-(softmax/layernorm), decode-heavy graphs (one command buffer per kernel) and
-bf16 inference; see
+Vulkan (`VK`) emits SPIR-V directly and runs the same kernels as OpenCL: all
+eight memory-bound microbenches are faster (softmax 0.89 vs 1.39 ms, layernorm
+0.90 vs 1.43 ms, add 0.64 vs 1.05 ms), ViT-B/16 inference at bs 8 is
+**116.6 vs 179.5 ms**, ResNet-18 inference **319.7 vs 376.3 ms**, UNet 16.4 vs
+19.0 ms, AdamW 94.5 vs 96.3 ms, and MNIST train 21.1 vs 21.0 ms. bf16 remains
+the gap (ViT-B/16 bf16 113.4 vs 90.9 ms); MobileNetV2 (61.4 vs 56.1 ms) and LLM
+prefill (421.7 vs 394.3 ms) are the other rows more than 6% behind. See
 [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.md#vulkan-vk).
 
 Per-case tables (GEMM shapes, each memory op, both optimizer devices, the
@@ -139,8 +139,9 @@ and [`PERFORMANCE.md`](https://github.com/apexys/autorust/blob/main/PERFORMANCE.
   warning. Use `INTERP`/`CPU`/`CL`/`CUDA` when true f64 is required.
 - The front-end is single-threaded (`Tensor` is `Rc`-based and `!Send`); the CPU
   backends parallelize their kernels internally.
-- cuDNN is not wired up: convolutions use generated kernels and attention uses
-  the fused hand-written kernels.
+- cuDNN is not wired up: convolutions use generated kernels plus an im2col +
+  host-GEMM path where the contraction is long enough, and attention uses the
+  fused hand-written kernels.
 - CUDA tensor cores target `sm_80+`; older cards fall back to the scalar path.
 - The `RUST` CPU backend is x86-64-first; other architectures fall back to libm
   math.
