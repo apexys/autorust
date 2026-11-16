@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ONNX export E0-E2.** `src/onnx/export.rs` and `src/onnx/write.rs` add a
+  std-only ONNX model writer, manual `GraphBuilder`, static `export_fn` trace
+  and `export_module` with `named_state` initializers. Supported lowering
+  covers core elementwise/movement/reduction ops and MLP-style graphs; tests
+  round-trip through the importer and `bench/onnx_export_check.py` verifies
+  E0/E1/E2 with onnxruntime. E3/E4 remain planned.
+
 - **C2a decision trees and random forests.** `src/classic/tree.rs` adds
   classification (Gini/entropy) and regression (MSE) CART with depth/leaf/
   feature limits and deterministic seeds, bootstrap-aggregated

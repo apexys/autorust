@@ -4,8 +4,9 @@ This file is the contract for the ONNX **exporter**. The importer and its
 operator matrix live in `ONNX-Compat.md`; this document covers producing ONNX
 models from `autorust` graphs and models.
 
-**Status (2026-11-16):** design and roadmap, not implemented. No exporter code
-exists yet. The tiers below are the intended order of work.
+**Status (2026-11-16):** **E0, E1 and E2 are implemented** in `src/onnx/export.rs`
+and `src/onnx/write.rs`, with `tests/onnx_export.rs` and the dev-only
+`bench/onnx_export_check.py` onnxruntime gate. E3 and E4 remain planned.
 
 ## Goals
 
@@ -34,18 +35,12 @@ exists yet. The tiers below are the intended order of work.
 
 ```
 src/onnx/
-  mod.rs            # pub mod export;
+  mod.rs            # pub mod export
   pb.rs             # importer wire reader (unchanged)
   write.rs          # std-only protobuf writer helpers
-  export/
-    mod.rs          # public API, InputSpec/OutputSpec, ExportOptions, ExportError
-    builder.rs      # ModelProto/GraphProto builder (E0)
-    trace.rs        # UOp capture, freeze, naming, topological order
-    lower.rs        # UOp -> ONNX node/attribute mapping
-    module.rs       # nn::Module / named_params convenience
-    opset.rs        # per-op minimum opset and decompositions
+  export.rs         # E0 GraphBuilder, E1/E2 trace, UOp lowering
 tests/onnx_export.rs
-examples/export_onnx.rs
+bench/onnx_export_check.py
 ONNX-Export.md      # this file
 ```
 
@@ -70,15 +65,18 @@ complexity**. A higher tier includes the lower tiers.
 
 | Tier | Source | Shapes | Scope | Status |
 |---|---|---|---|---|
-| **E0** | Manual `GraphBuilder` | any | Protobuf/model writer: nodes, attributes, tensors, initializers, value info, opset/IR metadata, external data | planned |
-| **E1** | `export_fn` closure | fixed | Trace a lazy `Tensor`/UOp graph; params/constants as initializers; dedup; core standard ops | planned |
-| **E2** | `export_module` + `Module` | fixed | `named_params`/`named_buffers`, shared parameters, multiple inputs/outputs, eval mode, metadata | planned |
+| **E0** | Manual `GraphBuilder` | any | Protobuf/model writer: nodes, attributes, tensors, initializers, value info, opset/IR metadata (external data is E3) | ✅ done |
+| **E1** | `export_fn` closure | fixed | Trace a lazy `Tensor`/UOp graph; params/constants as initializers; dedup; core standard ops | ✅ done |
+| **E2** | `export_module` + `Module` | fixed | `named_params`/`named_buffers`, shared parameters, multiple inputs/outputs, eval mode, metadata | ✅ done |
 | **E3** | E1/E2 | symbolic/dynamic | `Dim::Param`, shape inference, opset targeting/decomposition, constant folding, external data | planned |
 | **E4** | E1/E2 | data-dependent | `If` (later `Loop`/`Scan`), training, QDQ/quantized, sequences/optionals, custom domains | deferred |
 
-### E0 — proto and graph builder
+### E0 — proto and graph builder (implemented)
 
-The mechanical foundation:
+`GraphBuilder` in `export.rs` takes inputs, initializers, nodes and outputs
+directly and writes the model through `write.rs`. The writer covers tensors,
+attributes, value info, opset imports and IR metadata. The mechanical
+foundation:
 
 - `ModelProto`, `GraphProto`, `Node`, `Attribute`, `TensorProto`, `ValueInfo`.
 - Initializers, inputs/outputs, opset imports, IR version, producer metadata.
@@ -88,7 +86,7 @@ The mechanical foundation:
 E0 is not the primary user API, but it is essential for importer reverse tests
 and for compatibility fixtures.
 
-### E1 — static trace
+### E1 — static trace (implemented)
 
 The `torch.onnx.export`-equivalent path:
 
@@ -117,7 +115,7 @@ Rules:
 - Every UOp must lower to a standard ONNX node or a documented decomposition;
   otherwise return `UnsupportedOp` with the node path.
 
-### E2 — module export
+### E2 — module export (implemented)
 
 A convenience layer over E1:
 
@@ -126,6 +124,7 @@ pub fn export_module<M, F>(
     path: impl AsRef<Path>,
     model: &M,
     inputs: &[InputSpec],
+    outputs: &[OutputSpec],
     forward: F,
     opts: &ExportOptions,
 ) -> Result<(), ExportError>
@@ -134,12 +133,29 @@ where
     F: FnOnce(&M, &[Tensor]) -> Vec<Tensor>;
 ```
 
-- Initializer names come from `named_params()`/`named_buffers()`.
+- Initializer names come from `named_state()` (parameters and buffers).
 - Shared parameter tensors are emitted once and referenced by name.
 - Multiple inputs and outputs are supported.
 - Model metadata (producer, version, doc string) is configurable.
 - `ModuleForward` can get a convenience adapter later; the explicit closure
   keeps the API usable for modules whose `forward` has a non-trivial input type.
+
+### Current implementation coverage (E0-E2)
+
+- Writer: model/graph/node/attribute/tensor/value-info protobufs, opset import,
+  IR version, raw initializers, fixed shapes. External data is E3.
+- Tracer: lazy UOp graph, graph inputs, materialized module parameters/const
+  leaves, initializer dedup by UOp identity, explicit `UnsupportedOp` errors.
+- Lowering: elementwise arithmetic/logical/comparison, `Where`, `Cast`,
+  `Sqrt`/`Sin`/`Neg`/`Trunc`/`Reciprocal`, `Exp2`/`Log2`, `Reshape`,
+  `Expand`, `Permute`, `Reduce` (`Add`/`Mul`/`Max`), and `Identity` output
+  aliases. This covers MLP-style graphs (Linear/dot + bias + ReLU) and their
+  constants.
+- Not yet: direct `Gemm`/`MatMul`/`Conv` normalization (these may export as
+  expanded arithmetic graphs), `Resize`, attention/transformer patterns,
+  dynamic axes, external data, and control flow. These are E3/E4 work and
+  return `UnsupportedOp` rather than silently degrading when an unmapped UOp
+  appears.
 
 ### E3 — dynamic axes and deployment polish
 
@@ -172,30 +188,28 @@ Deferred until the importer has the corresponding features:
 pub struct InputSpec {
     pub name: String,
     pub dtype: DTypeId,
-    pub shape: Vec<Dim>, // Dim::Val or Dim::Param
+    pub shape: Vec<i64>, // fixed shape in E1/E2
 }
 
 pub struct OutputSpec {
-    pub name: String,
-    pub dtype: Option<DTypeId>, // inferred when None
-    pub shape: Option<Vec<Dim>>,
+    pub name: String, // dtype/shape inferred from the traced tensor
 }
 
 pub struct ExportOptions {
-    pub opset: i64,           // default 17
-    pub ir_version: i64,      // default 8, paired with opset 17
-    pub producer: String,     // default "autorust"
-    pub external_data: ExternalData, // threshold/path policy
-    pub strict: bool,         // standard ops only (default true)
-    pub fold_constants: bool, // default true
+    pub opset: i64,       // default 17
+    pub ir_version: i64,  // default 8
+    pub producer: String, // default "autorust"
 }
 
-pub enum ExternalData {
-    Never,
-    AboveBytes(u64), // default 2 GiB in a future release
+// E0 manual builder:
+impl GraphBuilder {
+    pub fn new(name: impl Into<String>) -> Self;
+    pub fn input(&mut self, name, dtype: DTypeId, dims: &[i64]) -> &mut Self;
+    pub fn initializer(&mut self, name, dtype: DTypeId, dims: &[i64], raw: Vec<u8>) -> Result<&mut Self>;
+    pub fn node(&mut self, op_type, inputs: &[&str], outputs: &[&str], attrs: &[(&str, Attribute)]) -> &mut Self;
+    pub fn output(&mut self, name, dtype: DTypeId, dims: &[i64]) -> &mut Self;
+    pub fn save(&self, path: impl AsRef<Path>, opts: &ExportOptions) -> Result<()>;
 }
-
-pub struct GraphBuilder { /* E0 */ }
 ```
 
 `ExportError` is export-specific so diagnostics can carry the node and op path:
@@ -204,11 +218,9 @@ pub struct GraphBuilder { /* E0 */ }
 pub enum ExportError {
     Io(String),
     UnsupportedOp { op: String, path: String },
-    UnsupportedAttribute { op: String, attr: String },
-    DynamicControlFlow(String),
-    MissingInitializer(String),
+    UnsupportedTensor(String),
     Shape(String),
-    Internal(String),
+    Invalid(String),
 }
 ```
 
@@ -221,15 +233,16 @@ The stable capture point is the **lazy `Tensor` graph before any realize**:
 
 1. Build inputs from `InputSpec` in the model's `Ctx`.
 2. Run the user forward, producing output `Tensor`s.
-3. Walk `outputs -> sources` with `ctx.toposort` to collect the reachable graph.
+3. Walk `outputs -> sources` recursively, memoizing by UOp id so shared
+   subgraphs are emitted once in dependency order.
 4. Classify leaves:
    - registered inputs -> `GraphProto.input`;
    - parameters/buffers with host data -> initializers;
    - `Const`/constant-folded subtrees -> initializers;
-   - volatile leaves or buffers without exportable data -> `MissingInitializer`.
-5. Lower nodes in topological order and assign stable names.
-6. Emit only inputs, outputs, initializers and nodes; add intermediate
-   `value_info` only when it materially helps the consumer.
+   - volatile leaves or buffers without exportable data -> `UnsupportedTensor`.
+5. Lower nodes in dependency order and assign stable names.
+6. Emit only inputs, outputs, initializers and nodes; intermediate
+   `value_info` is optional.
 
 Do not use `Tensor::realized_buffer()` as the export source. A realized tensor
 is already a storage leaf (or a fused plan); re-run the forward in a fresh
@@ -237,8 +250,8 @@ is already a storage leaf (or a fused plan); re-run the forward in a fresh
 
 ## Lowering and normalization
 
-A direct UOp trace is correct but can be a poor ONNX graph. The exporter should
-normalize before lowering:
+A direct UOp trace is correct but can be a poor ONNX graph. E1/E2 currently
+emit the traced UOps directly; future normalization will include:
 
 - `nn::Embedding` / one-hot + sum -> `Gather` (otherwise a vocabulary-sized
   one-hot is exported).
@@ -254,9 +267,10 @@ no silent fallback: an unmapped UOp is an `UnsupportedOp` error with the node
 path. Layout conversions (conv weight layout, `Gemm` `transA`/`transB`,
 broadcast axes) are part of lowering and need round-trip tests.
 
-## Initial op coverage
+## Target op coverage (beyond the current E0-E2 subset)
 
-E1 should cover the inference subset already exercised by the importer:
+The current implemented subset is listed under "Current implementation coverage"
+above. The target inference subset is:
 
 | Family | Initial coverage |
 |---|---|
@@ -280,7 +294,8 @@ serialize Rust module structure. Module-specific normalization is what turns
   torch).
 - `opset` is an explicit option; the exporter does not silently raise it for a
   single op.
-- `export/opset.rs` holds the per-op minimum and optional decomposition:
+- E3 will add a per-op minimum/decomposition table; the current E1/E2 subset
+  uses opset 17. Planned examples:
   - `LayerNormalization` requires opset 17; below that, decompose or error.
   - `GroupNormalization` requires opset 18; below that, decompose or error.
   - `Attention`/`RotaryEmbedding` require newer opsets (23+); decompose to
@@ -292,8 +307,8 @@ serialize Rust module structure. Module-specific normalization is what turns
 
 ## Shapes and dynamic axes
 
-- `Dim::Val` for static dimensions; `Dim::Param` for symbolic ones (batch,
-  sequence length).
+- E1/E2 use fixed `i64` dimensions. E3 will add `Dim::Param` for symbolic
+  batch/sequence axes.
 - Inputs and outputs get `value_info` with the declared/inferred shapes.
 - Static trace (E1/E2) requires all declared input dimensions to be concrete;
   otherwise the user must opt into E3.

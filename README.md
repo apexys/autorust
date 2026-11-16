@@ -13,7 +13,7 @@ It includes:
 - AOT CPU compilation (embed ML models as Rust code with a build script)
 - Accelerated GEMM and fused FlashAttention kernels (including TF32/bf16
   tensor-core variants)
-- Safetensors checkpoint loading and ONNX model import
+- Safetensors checkpoint loading, ONNX model import and ONNX export (E0-E2)
 - Classical ML (C0/C1/C2a): linear/ridge and logistic regression, PCA, k-means,
   exact kNN, linear SVM/SVR, decision trees, random forests, standard scaling
   and metrics
@@ -61,7 +61,7 @@ several applications at the GEOMAR Helmholtz Centre for Ocean Research right
 now. The ergonomics are fine, but I am still looking at a few places where they
 could be improved. Scheduling is single-threaded for now and could be faster
 (kernel compilation is parallel where the backend allows it). There's also a
-lot of optimization potential in the backends. ONNX is relatively incomplete and I'd like to add an exporter as well. Classical ML covers C0/C1/C2a (linear models, PCA, k-means, exact kNN, linear SVM/SVR, decision trees and random forests); GBT and the wider classic stack are planned.
+lot of optimization potential in the backends. ONNX import is relatively incomplete; ONNX export covers E0-E2. Classical ML covers C0/C1/C2a (linear models, PCA, k-means, exact kNN, linear SVM/SVR, decision trees and random forests); GBT and the wider classic stack are planned.
 
 ## Performance
 

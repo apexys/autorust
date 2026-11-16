@@ -29,7 +29,7 @@
 //!
 //! - [`tensor`] — the `Tensor` front-end, `nn` layers, optimizers, autograd.
 //! - [`models`] — reference model definitions (ViT, transformer, FlashAttention).
-//! - [`onnx`] — ONNX importer and runner (T0/T1 inference surface).
+//! - [`onnx`] — ONNX importer/runner (T0/T1) and exporter (E0-E2).
 //! - [`classic`] — classical ML (C0/C1 plus C2a trees/forests: linear/logistic,
 //!   PCA, k-means, kNN, linear SVM/SVR, decision trees and random forests).
 //! - [`dtype`] / [`helpers`] — dtypes and environment/context helpers.

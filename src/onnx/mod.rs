@@ -1,7 +1,9 @@
-//! ONNX importer (`tinygrad.nn.onnx` equivalent).
+//! ONNX importer (T0/T1) and exporter (E0-E2).
 //!
 //! Parses an ONNX model with a std-only protobuf reader and executes it with the
-//! regular [`Tensor`] front-end. The implementation targets the **T0/T1**
+//! regular [`Tensor`] front-end. The [`export`] module traces a lazy
+//! `Tensor`/UOp graph and writes an ONNX model with the std-only protobuf
+//! writer. The implementation targets the **T0/T1**
 //! surface in `ONNX-Compat.md`: static shapes, transformer/CNN inference graphs,
 //! external data, and the common elementwise/movement/reduction/nn ops.
 //!
@@ -21,6 +23,8 @@
 //! [`OnnxModel::set_plan_cache`] disables the plan for debugging.
 
 pub mod pb;
+pub mod export;
+pub mod write;
 
 mod ops;
 

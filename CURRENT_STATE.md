@@ -6763,3 +6763,30 @@ Added `src/classic/tree.rs`:
 Gate: `tests/classic.rs` now has 13 tests, adding decision-tree
 classification/regression, random-forest classification/regression, and
 tree/forest safetensors round-trips. GBT (C2b) remains planned.
+
+### 9.121 ONNX export E0-E2 implemented (2026-11-16)
+
+Added `src/onnx/write.rs` (std-only protobuf writer) and `src/onnx/export.rs`:
+
+- **E0:** public `GraphBuilder` (inputs, raw initializers, nodes, outputs,
+  `save`) plus `ModelProto` encoding (opset import, IR version, attributes,
+  tensors, value info).
+- **E1:** `export_fn` traces a lazy `Tensor`/UOp graph from fixed-shape
+  placeholders; non-input leaves with initial data become initializers;
+  unsupported UOps return `UnsupportedOp`.
+- **E2:** `export_module` materializes `named_state()` parameters/buffers once,
+  maps their UOp ids to initializers, and traces the module forward. Inputs use
+  the module's `Ctx`.
+- Lowering: elementwise arithmetic/logical/comparison, `Where`, `Cast`, unary
+  math, `Reshape`/`Expand`/`Permute`, `Reduce` (`Add`/`Mul`/`Max`), and
+  `Identity` output aliases. This covers the MLP-style Linear/dot + bias +
+  ReLU graphs used by the gate.
+- Explicitly not yet: direct `MatMul`/`Gemm`/`Conv` normalization, `Resize`,
+  transformer/attention patterns, dynamic axes, external data and control flow
+  (E3/E4). Unmapped UOps fail rather than silently producing a wrong graph.
+
+Gates: `tests/onnx_export.rs` (E0 Add graph, E1 closure, E2 module) loads all
+three models through `OnnxModel` and compares outputs. `bench/onnx_export_check.py`
+runs `onnx.checker` + onnxruntime on the same artifacts; all three match
+autorust exactly for the test inputs. `cargo test --release --test onnx_export`
+passes 3 tests.
