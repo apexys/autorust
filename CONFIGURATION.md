@@ -176,6 +176,7 @@ parallel.
 | `CC` | path/name | `clang`, else `cc` | C compiler for the `CC` backend. |
 | `AUTORUST_CC_ARCH` | arch | `native` | `-march`/`-mcpu` for `CC` kernels. |
 | `CUDA_PATH` | directory | `/usr/local/cuda`, `/usr`, `/opt/cuda` include paths | NVRTC include root (`$CUDA_PATH/include`). |
+| `CUDARC_CUDA_VERSION` | `major0minor0` (e.g. `12040`, `13040`) | probed from `nvcc --version` | Build-time CUDA API level for `cudarc`. Set it when `nvcc` reports a toolkit newer than `cudarc` knows (0.19.10 tops out at 13.4); it skips the probe and the panic. |
 | `AUTORUST_COMPILE_THREADS` | integer | `8` | NVRTC workers per kernel batch on CUDA (`1` = serial). NVRTC gains flatten after a handful of workers. |
 | `AUTORUST_NVRTC_LIB` | path/soname | first `libnvrtc.so*` found on the loader path | Force a specific NVRTC library. When set, no other NVRTC is tried. `NVRTC_PATH` is accepted as a tinygrad-compatible alias. |
 | `AUTORUST_CL_LIB` | path | `libOpenCL.so` | Load a specific OpenCL library (test/deployment override). |
@@ -190,6 +191,25 @@ parallel.
 | `AUTORUST_CLBLAST_LIB` | path | `libclblast.so.1`, `.dylib`, `clblast.dll` | Override the CLBlast library. |
 
 ### CUDA toolkit versions
+
+The CUDA *backend* is dynamically loaded, but `cudarc`'s build script still
+selects its API level from `nvcc --version` (`cuda-version-from-build-system`).
+It accepts only versions in its own list; with `cudarc 0.19.10` that stops at
+13.4, so a newer toolkit fails the build with `Unsupported cuda toolkit
+version`. Set `CUDARC_CUDA_VERSION` to the newest supported level
+(`major0minor0`, for example `13040` for 13.4) to skip the probe. The format is
+not `major.minor`: 12.4 is `12040`, not `12.4`. Keep it per machine in
+`~/.cargo/config.toml` (`force = false` lets a shell value win):
+
+```toml
+[env]
+CUDARC_CUDA_VERSION = { value = "13040", force = false }   # CUDA 13.5 host
+# CUDARC_CUDA_VERSION = { value = "12040", force = false } # CUDA 12.4 host
+```
+
+The driver API is backward compatible, so older bindings run on a newer driver:
+`13040` is the right value on this CUDA 13.5 host too. The alternative is
+pinning `cuda-12040` in `Cargo.toml` for every machine.
 
 NVRTC is loaded at run time and is **independent of the toolkit used to build**
 `autorust`. The loader scans `LD_LIBRARY_PATH`/`PATH`, `CUDA_HOME` /
