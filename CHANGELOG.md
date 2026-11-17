@@ -152,6 +152,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   training ops, `Loop`/`Scan`, wider ONNX-ML, `ImageDecoder`). See
   `ONNX-Compat.md`.
 
+### Fixed
+
+- **Frozen plans containing a library GEMM compile again.**
+  `HostGemm::to_rust_literal` omitted `a_bi`, `batch_inner`, `b_bi`,
+  `a_dtype`, `b_dtype` and `bias_dtype`, so `freeze::emit` generated a struct
+  literal that failed to compile for any plan with a `Step::Gemm`. The literal
+  now serialises every field, and `tests/freeze_emit.rs` compiles and runs an
+  emitted matmul plan that lowers to `HostGemm`.
+
 ## [0.3.0] - 2026-11-16
 
 ### Changed

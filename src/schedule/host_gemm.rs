@@ -145,8 +145,11 @@ impl HostGemm {
             "autorust::schedule::host_gemm::HostGemm {{ a_slot: {}, b_slot: {}, \
              c_slot: {}, a_off: {}, b_off: {}, c_off: {}, m: {}, n: {}, k: {}, \
              a_m: {}, a_k: {}, b_k: {}, b_n: {}, c_m: {}, c_n: {}, batch: {}, \
-             a_b: {}, b_b: {}, c_b: {}, dtype: autorust::dtype::DTypeId({}), \
-             c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, scale_slot: {}, \
+             a_b: {}, a_bi: {}, batch_inner: {}, b_b: {}, b_bi: {}, c_b: {}, \
+             dtype: autorust::dtype::DTypeId({}), a_dtype: autorust::dtype::DTypeId({}), \
+             b_dtype: autorust::dtype::DTypeId({}), \
+             c_dtype: autorust::dtype::DTypeId({}), alpha: {:?}f32, bias_slot: {}, bias_off: {}, \
+             bias_dtype: autorust::dtype::DTypeId({}), scale_slot: {}, \
              scale_off: {}, res_slot: {}, res_off: {}, relu: {}, bias_m: {}, scale_m: {}, bias_outside: {}, acc: {}, a_acc: {}, b_acc: {}, c_bo: {}, tf32: {} }}",
             self.a_slot,
             self.b_slot,
@@ -165,13 +168,19 @@ impl HostGemm {
             self.c_n,
             self.batch,
             self.a_b,
+            self.a_bi,
+            self.batch_inner,
             self.b_b,
+            self.b_bi,
             self.c_b,
             self.dtype.0,
+            self.a_dtype.0,
+            self.b_dtype.0,
             self.c_dtype.0,
             self.alpha,
             self.bias_slot,
             self.bias_off,
+            self.bias_dtype.0,
             self.scale_slot,
             self.scale_off,
             self.res_slot,

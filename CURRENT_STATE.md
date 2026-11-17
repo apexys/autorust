@@ -6919,3 +6919,25 @@ layers whose input rank exceeds the weight rank.
 
 Gates: `tests/onnx_export.rs` (8 tests), `bench/onnx_export_check.py` E0-E3b,
 `cargo nextest run --release`, clippy and rustdoc.
+
+### 9.126 Frozen `HostGemm` literals serialise every field (2026-11-17)
+
+Fixed a regression that made every frozen plan containing a library GEMM fail
+to compile. `HostGemm::to_rust_literal` is the AOT emitter's only path for
+`Step::Gemm`, but it predated the split batch axes and per-operand dtypes: it
+serialised 37 of the struct's 43 fields, omitting `a_bi`, `batch_inner`,
+`b_bi`, `a_dtype`, `b_dtype` and `bias_dtype`. The runtime/JIT path was
+unaffected because it uses `to_data`/`from_arg`, which do carry every field.
+
+- `to_rust_literal` now emits all six missing fields, so the generated literal
+  reconstructs the descriptor exactly.
+- New gate `tests/freeze_emit.rs::emitted_host_gemm_plan_compiles`: captures a
+  `64x256 @ 256x128` matmul on `RUST` (asserting the plan contains
+  `Step::Gemm`), emits the crate, compiles it against `autorust` and compares
+  its output with the eager run.
+- The nested test crate now uses `default-features = false, features =
+  ["freeze"]`; it only needs the frozen runner, and avoiding the optional GPU
+  backends keeps the gate independent of a machine's CUDA toolkit version.
+
+Gates: `tests/freeze_emit.rs` (2 tests), plus the `clusterfun` DINOv3 freeze
+build (97 emitted `HostGemm` steps, 43 kernels) as the downstream check.
