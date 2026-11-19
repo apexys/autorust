@@ -379,6 +379,8 @@ impl UOpCtx {
             }
             Load | Unshard | Reduce | After | Range | Contiguous | ContiguousBackward | Copy
             | Stage | Detach | Mstack | Mselect | Allreduce | Special => Some(self.dt_of(&srcs[0])),
+            // gather reads values from src[0]; its output dtype is the source dtype
+            Gather => Some(self.dt_of(&srcs[0])),
             Cmplt | Cmpne | Cmpeq => Some(crate::dtype::BOOL),
             Sin | Log2 | Exp2 | Sqrt | Reciprocal => {
                 if self.is_invalid(&self.base(&srcs[0])) {
@@ -566,6 +568,8 @@ impl UOpCtx {
                 shp.extend(bshape.iter().skip(skip).cloned());
                 Some(shp)
             }
+            // GATHER(src, index) has the index tensor's shape.
+            Gather => Some((*self.shape_of(&srcs[1])?).clone()),
             Stack => {
                 if srcs.is_empty() {
                     Some(vec![])

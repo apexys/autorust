@@ -36,6 +36,7 @@ mod dtype;
 pub mod elementwise;
 pub mod extra;
 pub mod grad;
+pub(crate) mod indexing_fast;
 pub mod movement;
 pub mod nn;
 pub mod op;

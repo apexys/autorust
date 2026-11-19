@@ -258,6 +258,23 @@ How to read it:
   overlap 5.4-5.6%, <1% end-to-end); broadcast-rhs matmul fold (ViT train
   -16%, no candidate at LLM B=1).
 
+### Indexing
+
+- **Direct / interpolating gather (2026-11-19).** `gather_direct` and
+  `gather_interp` skip the one-hot mask at the graph level (the existing
+  gated-load lift already makes the fallback a direct load after codegen).
+  Benchmark (`examples/gather_bench.rs`, atlas 4540x2000, rows/q 64x64, RUST):
+  one-hot gather ~0.31-0.33 ms kernel time/call vs `gather_direct`
+  ~0.31-0.33 ms; two one-hot interp taps ~0.39-0.44 ms vs fused
+  `gather_interp` ~0.38-0.46 ms. Forward is parity because the existing lift
+  already removes the mask; the value is the explicit scatter-add VJP and the
+  conceptual memory drop from `out*domain` (148.8 GB) to `O(out)`; see
+  `CURRENT_STATE.md` §9.126.
+- **Segment-sum / scatter-add.** Static-index scatter is a stable counting sort
+  + `segment_sum` (O(E+C)); segment-sum is a split-cumsum prefix plus two
+  gathers. Dynamic scatter falls back to a deterministic one-hot reduction.
+  No float atomics. Gate: `tests/gather_scatter.rs`.
+
 ### Backend
 
 - **CL fused optimizer.** 96.9 → 26.4 ms, CUDA parity; `tests/nn_optim.rs`.

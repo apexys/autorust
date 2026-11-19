@@ -503,7 +503,66 @@ pub fn cumsum(ctx: &mut UOpCtx, x: UopId, axis: i64) -> UopId {
         let s = sum(ctx, x, None, false, None);
         return ctx.cast(s.clone(), ctx.dt_of(&s));
     }
+    split_cumalu(ctx, x, axis, Ops::Add)
+}
+
+/// `OpMixin._split_cumalu` (op.py:761-771): the two-stage cumulative op.
+///
+/// Values longer than `2*SPLIT` are transposed so the axis is trailing, padded
+/// to a multiple of `SPLIT`, cumulated in 256-wide chunks, then offset by the
+/// exclusive prefix of each chunk's total. This is the upstream shape of the
+/// algorithm; it keeps the graph O(E) rather than building a rank-2 mask.
+fn split_cumalu(ctx: &mut UOpCtx, x: UopId, axis: usize, op: Ops) -> UopId {
+    const SPLIT: i128 = 256;
+    let shape = ctx.shape(&x).unwrap().unwrap_or_default();
     let s = <SInt as Clone>::clone(&shape[axis]).as_i128_or_panic();
-    assert!(s <= 512, "TGERR: _split_cumalu SPLIT path not ported yet");
-    cumalu(ctx, x, axis, Ops::Add)
+    if s <= SPLIT * 2 {
+        return cumalu(ctx, x, axis, op);
+    }
+    let value = identity_const(op, ctx.dt_of(&x));
+    let t = movement::transpose(ctx, x, axis as i64, -1);
+    let tshape = ctx.shape(&t).unwrap().unwrap_or_default();
+    let last = tshape.len() - 1;
+    let rounded = movement::round_up(s, SPLIT);
+    let mut pads: Vec<(Option<i64>, Option<i64>)> = vec![(None, None); tshape.len()];
+    pads[last] = (Some((rounded - s) as i64), Some(0));
+    let padded = super::Tensor::from_uop(ctx, t).pad_constant_ctx(&mut *ctx, &pads, value.clone());
+    let nchunks = rounded / SPLIT;
+    let mut chunk_shape: Vec<SVal> = tshape.to_vec();
+    chunk_shape[last] = SVal::I(nchunks);
+    chunk_shape.push(SVal::I(SPLIT));
+    let chunks = padded.reshape_ctx(ctx, chunk_shape.clone());
+    let add_axis = chunk_shape.len() - 1;
+    let chunks_u = chunks.uop();
+    let chunks_u = cumalu(ctx, chunks_u, add_axis, op);
+    let chunks = super::Tensor::from_uop(ctx, chunks_u);
+    // last element of each chunk, then cumulate the chunk totals.
+    let mut take_last: Vec<super::ix::Ix> = vec![super::ix::Ix::All; chunk_shape.len()];
+    take_last[add_axis] = super::ix::Ix::Index(-1);
+    // `base` is a strided last-column view. Materialize it before the small
+    // cumulative pass: a vectorized PAD/SHRINK on the strided view can alias
+    // lanes (observed as a shifted chunk-offset table), while this copy is only
+    // `s / SPLIT` elements.
+    let base = chunks.getitem_ctx(ctx, &take_last).contiguous_ctx(ctx);
+    let base_nd = chunk_shape.len() - 1;
+    let base_axis = base_nd - 1;
+    let base_u = base.uop();
+    let base_u = cumalu(ctx, base_u, base_axis, op);
+    let base = super::Tensor::from_uop(ctx, base_u);
+    // exclusive prefix: pad one identity at the front, drop the last total.
+    let mut bpads: Vec<(Option<i64>, Option<i64>)> = vec![(None, None); base_nd];
+    bpads[base_axis] = (Some(1), Some(-1));
+    let base = base.pad_constant_ctx(&mut *ctx, &bpads, value);
+    let base = base.unsqueeze_ctx(ctx, -1);
+    let summed = chunks.add_ctx(ctx, &base);
+    let flat = summed.flatten_ctx(ctx, -2, -1);
+    let fnd = flat.shape_ctx(ctx).len();
+    let mut ixs: Vec<super::ix::Ix> = vec![super::ix::Ix::All; fnd];
+    ixs[fnd - 1] = super::ix::Ix::Range {
+        start: Some(-(s as i64)),
+        stop: None,
+        step: 1,
+    };
+    let out = flat.getitem_ctx(ctx, &ixs);
+    movement::transpose(ctx, out.uop(), axis as i64, -1)
 }

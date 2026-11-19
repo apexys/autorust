@@ -297,6 +297,23 @@ fn grad_of_op(ctx: &mut UOpCtx, ret: UopId, g: UopId) -> Option<Vec<Option<UopId
             Some(vec![Some(gr), None, None])
         }
         Ops::Bitcast => Some(vec![None]),
+        // Internal fast-gather marker: the VJP w.r.t. the flat source is a
+        // deterministic scatter-add at the (already normalized) flat indices.
+        // The index is discrete, so it gets no gradient.
+        Ops::Gather => {
+            let src = srcs[0].clone();
+            let idx = srcs[1].clone();
+            let n = ctx
+                .shape_of(&src)
+                .ok()
+                .and_then(|s| s.first().cloned())
+                .and_then(|d| d.as_i64())
+                .expect("TGERR: gather VJP needs a static flat source length");
+            let idx_t = Tensor::from_uop(ctx, idx);
+            let g_t = Tensor::from_uop(ctx, g);
+            let scat = Tensor::scatter_add_ctx(ctx, n, &idx_t, &g_t).uop().clone();
+            Some(vec![Some(scat), None])
+        }
         // `gradient.py`: STACK's grad is `ctx[i]` (slice along the new dim 0).
         Ops::Stack => {
             let shp = ctx.shape_of(&g).unwrap();

@@ -166,6 +166,16 @@ pub enum Ops {
     Allreduce = 78,
     /// `Ops.PYLITERAL` — a Python literal arg for `CUSTOM` predicates.
     Pyliteral = 79,
+    /// `Ops.GATHER` — `out[i] = src[index[i]]` (a port addition).
+    ///
+    /// This is an internal marker used by the tensor gather fast path. It is
+    /// lowered to the existing advanced-index graph before scheduling (which
+    /// the gated-load lift turns into one indirect `LOAD` per output), so the
+    /// scheduler, renderers and interpreter never see it. It exists so the
+    /// autograd rule can emit a scatter-add VJP instead of differentiating the
+    /// one-hot fallback. `src[0]` is a flat source buffer, `src[1]` a flat
+    /// non-negative index tensor; out-of-range indices read zero.
+    Gather = 80,
 }
 
 /// `GroupOp.All` — every `Ops` variant in discriminant order.
@@ -249,6 +259,7 @@ pub const OPS_ALL: &[Ops] = &[
     Ops::Reduce,
     Ops::Allreduce,
     Ops::Pyliteral,
+    Ops::Gather,
 ];
 
 impl Ops {
@@ -338,6 +349,7 @@ impl Ops {
             Ops::Reduce => "Ops.REDUCE",
             Ops::Allreduce => "Ops.ALLREDUCE",
             Ops::Pyliteral => "Ops.PYLITERAL",
+            Ops::Gather => "Ops.GATHER",
         }
     }
 }

@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fast gather / scatter (2026-11-19).** `Tensor::gather_direct`,
+  `Tensor::gather_interp`, `Tensor::segment_sum` and `Tensor::scatter_add`
+  provide O(out) indirect gather, a fused two-tap interpolating row gather,
+  O(E+C) segment sums, and deterministic atomic-free scatter-add (stable CSR
+  for static indices, one-hot reduction fallback for dynamic ones). Gradients
+  use explicit gather/scatter rules; the existing one-hot `getitem`/`gather`
+  paths are unchanged. Gates: `tests/gather_scatter.rs` (forward, finite
+  differences, determinism, CL smoke); benchmark in `examples/gather_bench.rs`.
+
 - **ONNX export E3 (2026-11-16).** `InputSpec`/`OutputSpec` accept
   `with_dynamic_dim(axis, name)` and emit ONNX `dim_param` axes;
   `ExportOptions::external_data` moves float initializers into a

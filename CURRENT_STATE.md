@@ -6919,3 +6919,66 @@ layers whose input rank exceeds the weight rank.
 
 Gates: `tests/onnx_export.rs` (8 tests), `bench/onnx_export_check.py` E0-E3b,
 `cargo nextest run --release`, clippy and rustdoc.
+
+### 9.126 Fast gather / interpolating gather / segment-sum / scatter-add (2026-11-19)
+
+DORSCH needs a per-cell gather from a sample atlas plus deterministic atlas/DEM
+gradient accumulation on a portable OpenCL path without float atomics. Added
+additive APIs on `Tensor` (`src/tensor/indexing_fast.rs`); the existing one-hot
+`getitem`/`gather` paths remain the semantic fallback.
+
+- **LOAD + INDEX works; no scheduler change was needed.** The 1-D gated-load
+  lift already lowers `idx.where(table, 0).sum()` to one indirect `LOAD`, so
+  the new fast path reuses that graph. `gather_direct`/`gather_interp` build an
+  internal `Ops::GATHER` marker (flat source + flat non-negative index) so the
+  autograd rule can emit a scatter-add VJP; `lower_gathers` replaces every
+  marker with the existing advanced-index graph before `callify`/rangeify.
+  Renderers and the interpreter never see the marker. The forward emits no
+  one-hot buffer after the lift; verified by `TG_DUMP_SRC` and by matching the
+  existing direct-load kernels.
+- **`gather_direct(dim, index)`**: 1-D source with any index shape, 2-D source
+  with `dim=0` (`index.shape + [S]`) and `dim=1` (`index.shape`). Negative
+  indices wrap; out-of-range indices are *clamped for the address and masked to
+  zero*, so no out-of-bounds load is issued. A zero write or line outside the
+  source is never read. VJP w.r.t. the source is `scatter_add` at the gathered
+  indices (invalid indices ignored); the index has no gradient.
+- **`gather_interp(rows, q)`** returns `(value, slope)` for an atlas `[N, S]`.
+  It performs one marker gather over an `[.., 2]` index tensor (two adjacent
+  taps) and mixes with `f = q - floor(q)` (0 at/below 0, 1 at/above `S-1`).
+  VJP w.r.t. `q` is `grad_value * slope`; VJP w.r.t. the atlas is the two-tap
+  scatter-add. `rows`/`q` must have equal shape and `S >= 2`.
+- **`segment_sum(row_ptr, values)`** uses `P = [0, cumsum(values)]` (a zero PAD
+  view of the cumsum, materialized before the two gathers) and
+  `out[c] = P[hi] - P[lo]`. Static `row_ptr` is validated (int32, nondecreasing,
+  last == `values.numel()`, empty segments allowed). The split-cumsum path was
+  ported from `_split_cumalu` so `E > 512` is `O(E)` rather than a rank-2 mask;
+  the per-chunk offset table is materialized because a vectorized PAD on the
+  strided last-column view aliased lanes.
+- **`scatter_add(len, idx, values)`** uses a stable counting sort + CSR
+  (`histogram -> exclusive prefix -> permutation -> gather -> segment_sum`) for
+  a static `idx`; a dynamic index falls back to a deterministic one-hot
+  reduction. Both paths are atomic-free and repeat-run identical. VJP w.r.t.
+  values is a gather at `idx` (out-of-range -> 0); `idx` has no gradient.
+  Supported value dtype for this first version is f32 (the graph is
+  dtype-generic where the ops allow it); index dtype is int32 for
+  `scatter_add`/`segment_sum`, int32/int64 for `gather_direct`.
+- **Limitations:** `gather_direct` is not a replacement for the general
+  `Tensor::gather`/`getitem` contract; the 2-D `dim=1` case flattens the
+  leading index dimensions to rows. Dynamic `scatter_add` is correct and
+  deterministic but `O(len * E)`; precompute indices when the CSR path matters.
+  `row_ptr` validation only runs when the pointer tensor is a static leaf
+  (`from_slice`); dynamic pointers are trusted. No float atomics are used on
+  any backend.
+
+Gates: `tests/gather_scatter.rs` (18 tests: forward cases, empty/large indices,
+finite-difference gradients, determinism, CL smoke when a device is present)
+plus the full `DEFAULT_DEVICE=RUST cargo test --release` suite. Benchmark
+(`examples/gather_bench.rs`, atlas 4540x2000, rows/q 64x64, RTX 3060 + Ryzen
+9 3900X, RUST, medians over 45 timed replays): one-hot gather 45.4-48.1 ms wall
+/ ~0.31-0.33 ms kernel time per call; `gather_direct` 44.7-48.7 ms / ~0.31-0.33
+ms; two one-hot interp taps 45.5-47.4 ms / ~0.39-0.44 ms; `gather_interp`
+47.0-52.2 ms / ~0.38-0.46 ms. The ~45-50 ms is generic JIT replay overhead.
+Forward time is parity/noise because the existing lift already makes the
+one-hot gather a direct load; the new path wins on semantics (explicit
+scatter-add VJP, no one-hot graph) and memory: the conceptual one-hot mask is
+`out*domain` (148.8 GB here) while the fast path stores `O(out)` (32 KB).

@@ -1278,10 +1278,11 @@ pub fn realize_many(
     }
     let prof = crate::engine::prof::enabled();
     let t0 = prof.then(std::time::Instant::now);
-    let targets: Vec<UopId> = tensor_uops
-        .iter()
-        .map(|u| materialize_target(ctx, u.clone()))
-        .collect();
+    let mut targets: Vec<UopId> = Vec::with_capacity(tensor_uops.len());
+    for u in tensor_uops {
+        let m = materialize_target(ctx, u.clone());
+        targets.push(crate::tensor::indexing_fast::lower_gathers(ctx, m));
+    }
     if targets.iter().any(|u| is_empty_uop(ctx, u)) {
         // An empty root has no scheduled buffer leaf; realize each target on
         // its own (the empty ones shortcut to zero storage).
@@ -1389,7 +1390,8 @@ pub fn realize_tensor(
     {
         t.set_device(Some(s));
     }
-    let target = materialize_target(ctx, tensor_uop.clone());
+    let materialized = materialize_target(ctx, tensor_uop.clone());
+    let target = crate::tensor::indexing_fast::lower_gathers(ctx, materialized);
     if is_empty_uop(ctx, &target) {
         return realize_empty(ctx, t, &tensor_uop);
     }
