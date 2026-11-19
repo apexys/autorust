@@ -311,6 +311,11 @@ impl StepPlan {
         !self.plans.is_empty()
     }
 
+    /// Total captured LINEARS across resident plans (diagnostics).
+    pub fn n_linears(&self) -> usize {
+        self.plans.iter().map(|p| p.jit.n_linears()).sum()
+    }
+
     /// Drop every capture; the next run re-captures.
     pub fn reset(&mut self) {
         self.plans.clear();
