@@ -272,8 +272,10 @@ How to read it:
   `CURRENT_STATE.md` §9.126.
 - **Segment-sum / scatter-add.** Static-index scatter is a stable counting sort
   + `segment_sum` (O(E+C)); segment-sum is a split-cumsum prefix plus two
-  gathers. Dynamic scatter falls back to a deterministic one-hot reduction.
-  No float atomics. Gate: `tests/gather_scatter.rs`.
+  gathers. Dynamic scatter uses a compact `(idx, e)` bitonic sort + binary
+  search (`O(E log^2 E + len log E)`) when it beats the one-hot fallback, and
+  otherwise keeps the deterministic one-hot reduction. No float atomics. Gate:
+  `tests/gather_scatter.rs`.
 
 ### Backend
 

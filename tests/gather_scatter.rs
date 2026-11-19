@@ -346,6 +346,31 @@ fn scatter_add_dynamic_index_fallback() {
     );
 }
 
+#[test]
+fn scatter_add_dynamic_sorted_path() {
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let len = 16_384usize;
+    let e = 1000usize;
+    let idx_v: Vec<i32> = (0..e)
+        .map(|i| match i % 17 {
+            0 => -((i % 31) as i32 + 1),
+            1 => len as i32 + (i % 19) as i32,
+            _ => ((i * 37) % len) as i32,
+        })
+        .collect();
+    let val_v: Vec<f32> = (0..e).map(|i| ((i * 13) % 97) as f32 * 0.01).collect();
+    let idx = i32s(&ctx, &idx_v).add(0);
+    let vals = f32s(&ctx, &val_v);
+    let want = naive_scatter(len, &idx_v, &val_v);
+    let got = Tensor::scatter_add(len as i64, &idx, &vals).to_list::<f32>(&mut sess);
+    check(&got, &want, 1e-3);
+    for _ in 0..2 {
+        let again = Tensor::scatter_add(len as i64, &idx, &vals).to_list::<f32>(&mut sess);
+        assert_eq!(got, again, "dynamic sorted scatter_add changed across runs");
+    }
+}
+
 // ---- autograd ----
 
 fn numeric_grad<F: Fn(&[f32]) -> f32>(x: &[f32], f: F) -> Vec<f32> {
@@ -504,6 +529,29 @@ fn grad_scatter_add_wrt_values() {
     });
     check_close(&analytic, &numeric);
     check(&analytic, &[30.0, 10.0, 30.0, 0.0, 0.0], 1e-4);
+}
+
+#[test]
+fn cl_scatter_add_dynamic_sorted_path() {
+    if !autorust::runtime::ops_cl::available() {
+        return;
+    }
+    let ctx = Ctx::new();
+    let mut sess = Session::new();
+    let len = 4096usize;
+    let e = 64usize;
+    let idx_v: Vec<i32> = (0..e)
+        .map(|i| match i % 13 {
+            0 => -((i % 7) as i32 + 1),
+            1 => len as i32 + (i % 5) as i32,
+            _ => ((i * 37) % len) as i32,
+        })
+        .collect();
+    let val_v: Vec<f32> = (0..e).map(|i| ((i * 13) % 97) as f32 * 0.01).collect();
+    let idx = Tensor::from_slice(&ctx, &idx_v, None, Some("CL")).add(0);
+    let vals = Tensor::from_slice(&ctx, &val_v, None, Some("CL"));
+    let got = Tensor::scatter_add(len as i64, &idx, &vals).to_list::<f32>(&mut sess);
+    check(&got, &naive_scatter(len, &idx_v, &val_v), 1e-4);
 }
 
 #[test]

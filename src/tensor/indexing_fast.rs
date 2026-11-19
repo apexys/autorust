@@ -7,6 +7,10 @@
 //! fallback semantics while giving autograd an explicit, deterministic
 //! scatter-add VJP and adding an interpolating row gather for DORSCH.
 //!
+//! Dynamic scatter indices also get a CSR path: a compact bitonic sort of
+//! packed `(idx, e)` keys feeds a binary-search prefix and `segment_sum`, which
+//! avoids the `O(len*E)` one-hot reduction when the output domain is large.
+//!
 //! `Ops::Gather` is an internal marker: it is lowered by [`lower_gathers`] to
 //! the existing advanced-index graph before scheduling, so the scheduler,
 //! renderers and interpreter only see already-ported ops. The marker exists
@@ -397,9 +401,10 @@ impl Tensor {
     ///
     /// Deterministic and free of float atomics. Out-of-range indices (negative
     /// or `>= len`) are ignored. A static `idx` is turned into a stable CSR
-    /// (counting sort + `segment_sum`); a dynamic index uses a one-hot
-    /// reduction, which is still deterministic and atomic-free. The VJP w.r.t.
-    /// `values` is a gather of the upstream gradient at `idx`.
+    /// (counting sort + `segment_sum`). A dynamic index uses a compact
+    /// `(idx, e)` bitonic sort + binary-search prefix when that is cheaper than
+    /// the `len x E` one-hot reduction; both are deterministic and atomic-free.
+    /// The VJP w.r.t. `values` is a gather of the upstream gradient at `idx`.
     pub fn scatter_add(len: i64, idx: &Tensor, values: &Tensor) -> Tensor {
         Tensor::scatter_add_ctx(&mut idx.ctx.borrow_mut(), len, idx, values)
     }
@@ -426,6 +431,12 @@ impl Tensor {
         }
         if let Some(raw) = static_ints(ctx, idx) {
             return scatter_add_csr(ctx, len, &raw, vals_flat, dt, dev);
+        }
+        // Dynamic indices: a compact bitonic sort of `(idx, e)` pairs plus a
+        // binary-search prefix avoids the O(len*E) one-hot reduction when the
+        // output domain is large.
+        if prefer_sorted(len as usize, e) {
+            return scatter_add_sorted(ctx, len, idx_flat, vals_flat, e);
         }
         // Dynamic fallback: out[c] = sum_e (idx[e] == c) ? values[e] : 0.
         let idx_t = as_tensor(ctx, idx_flat).reshape_ctx(ctx, [1, e as i64]);
@@ -481,6 +492,128 @@ pub(crate) fn static_ints(ctx: &mut UOpCtx, t: &Tensor) -> Option<Vec<i64>> {
         return None;
     }
     (out.len() as i128 == n).then_some(out)
+}
+
+/// Whether a dynamic `scatter_add` should sort instead of building a
+/// `len x E` one-hot reduction.
+fn prefer_sorted(len: usize, e: usize) -> bool {
+    if len < 2 || !(2..=8192).contains(&e) {
+        return false;
+    }
+    let onehot = len as u128 * e as u128;
+    // ~log2(E)^2/2 compare-exchange stages, four gathers each, plus C binary
+    // search steps. Constants are rough; the factor keeps small domains on the
+    // simpler one-hot path.
+    let bits = (usize::BITS - (e as u64).leading_zeros()) as u128;
+    let sort_cost = e as u128 * bits * bits / 2 + len as u128 * bits;
+    sort_cost.saturating_mul(4) < onehot
+}
+
+/// Sort original indices by `(idx, e)` with a bitonic network expressed as
+/// gathers, so the graph stays O(E log^2 E) instead of building the `E x E`
+/// stable-index mask used by `Tensor::sort`. Returns `(sorted_idx, perm)`.
+fn bitonic_sort_pairs(ctx: &mut UOpCtx, idx: UopId, e: usize) -> (Tensor, Tensor) {
+    let n = e.next_power_of_two();
+    let idx_t = as_tensor(ctx, idx);
+    let dev = device_opt(ctx, &idx_t);
+    let pos = arange_c(ctx, n as i64, dtype::INT32);
+    // Pack `(idx, e)` into one positive int64 key, preserving signed order:
+    // (idx + 2^31) * n + e. The low log2(n) bits are the original position, so
+    // the sort needs no parallel permutation array.
+    let offset = 1i64 << 31;
+    let perm64 = arange_c(ctx, e as i64, dtype::INT32).cast_ctx(ctx, dtype::INT64);
+    let key = idx_t
+        .cast_ctx(ctx, dtype::INT64)
+        .add_ctx(ctx, offset)
+        .mul_ctx(ctx, n as i64)
+        .add_ctx(ctx, &perm64);
+    let pads = [(Some(0i64), Some((n - e) as i64))];
+    let mut key = key
+        .pad_constant_ctx(ctx, &pads, ConstVal::Int(i64::MAX as i128))
+        .reshape_ctx(ctx, [n as i64]);
+    let mut k = 2usize;
+    while k <= n {
+        let mut j = k / 2;
+        while j > 0 {
+            let partner = pos.bitwise_xor_ctx(ctx, j as i64);
+            let lo = pos.minimum_ctx(ctx, &partner);
+            let hi = pos.maximum_ctx(ctx, &partner);
+            let key_lo = key.gather_direct_ctx(ctx, 0, &lo);
+            let key_hi = key.gather_direct_ctx(ctx, 0, &hi);
+            let ascending = pos.bitwise_and_ctx(ctx, k as i64).eq_ctx(ctx, 0i64);
+            let asc_swap = key_lo.gt_ctx(ctx, &key_hi);
+            let desc_swap = key_lo.lt_ctx(ctx, &key_hi);
+            let swap = ascending.where__ctx(ctx, &asc_swap, &desc_swap);
+            let is_lo = pos.eq_ctx(ctx, &lo);
+            let take_hi = is_lo.eq_ctx(ctx, &swap);
+            let next = take_hi.where__ctx(ctx, &key_hi, &key_lo);
+            // Materialize each stage. Gathering directly from a deeply nested
+            // `where` expression picks up wrong lanes under the advanced-index
+            // lift at later stages; a store is a real boundary and keeps the
+            // sort deterministic. This is one tiny `E`-element copy per stage.
+            let dst = creation::empty(
+                ctx,
+                &[SVal::I(n as i128)],
+                dtype::INT64,
+                dev.as_deref().unwrap_or("PYTHON"),
+            );
+            key = as_tensor(ctx, dst).assign_effect_ctx(ctx, &next);
+            j /= 2;
+        }
+        k *= 2;
+    }
+    let take = [Ix::Range {
+        start: Some(0),
+        stop: Some(e as i64),
+        step: 1,
+    }];
+    let packed = key.getitem_ctx(ctx, &take);
+    let perm = packed
+        .bitwise_and_ctx(ctx, (n - 1) as i64)
+        .cast_ctx(ctx, dtype::INT32);
+    let sorted_idx = packed
+        .floordiv_ctx(ctx, n as i64)
+        .sub_ctx(ctx, offset)
+        .cast_ctx(ctx, dtype::INT32);
+    (sorted_idx, perm)
+}
+
+/// Lower-bound of `targets` in the sorted `idx`: `row_ptr[c]` is the number of
+/// entries strictly below `c`. Vectorized binary search over `targets`.
+fn lower_bound(ctx: &mut UOpCtx, sorted: &Tensor, targets: &Tensor, e: usize) -> Tensor {
+    let mut lo = targets.mul_ctx(ctx, 0i64);
+    let mut hi = targets.const_like_ctx(ctx, ConstVal::Int(e as i128), Some(dtype::INT32));
+    let steps = (usize::BITS - (e as u64).leading_zeros()) as usize;
+    for _ in 0..steps {
+        let mid = lo.add_ctx(ctx, &hi).floordiv_ctx(ctx, 2i64);
+        let mid_safe = mid.minimum_ctx(ctx, (e - 1) as i64).maximum_ctx(ctx, 0i64);
+        let val = sorted.gather_direct_ctx(ctx, 0, &mid_safe);
+        let active = lo.lt_ctx(ctx, &hi);
+        let lt_target = val.lt_ctx(ctx, targets);
+        let go_right = active.bitwise_and_ctx(ctx, &lt_target);
+        let mid1 = mid.add_ctx(ctx, 1i64);
+        lo = go_right.where__ctx(ctx, &mid1, &lo);
+        hi = go_right.where__ctx(ctx, &hi, &mid);
+    }
+    lo
+}
+
+/// Dynamic CSR: sort `(idx, e)` pairs, gather the values in that order, derive
+/// the dense `row_ptr` by binary search, and let `segment_sum` produce the
+/// output. Out-of-range indices sort outside the `[0, len)` pointer range and
+/// are ignored.
+fn scatter_add_sorted(
+    ctx: &mut UOpCtx,
+    len: i64,
+    idx_flat: UopId,
+    vals_flat: UopId,
+    e: usize,
+) -> Tensor {
+    let (sorted_idx, perm) = bitonic_sort_pairs(ctx, idx_flat, e);
+    let sorted_vals = as_tensor(ctx, vals_flat).gather_direct_ctx(ctx, 0, &perm);
+    let targets = arange_c(ctx, len + 1, dtype::INT32);
+    let row_ptr = lower_bound(ctx, &sorted_idx, &targets, e);
+    Tensor::segment_sum_ctx(ctx, &row_ptr, &sorted_vals)
 }
 
 /// Stable counting sort + segmented sum for a static index.

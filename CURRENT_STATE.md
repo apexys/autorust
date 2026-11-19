@@ -6956,9 +6956,10 @@ additive APIs on `Tensor` (`src/tensor/indexing_fast.rs`); the existing one-hot
   strided last-column view aliased lanes.
 - **`scatter_add(len, idx, values)`** uses a stable counting sort + CSR
   (`histogram -> exclusive prefix -> permutation -> gather -> segment_sum`) for
-  a static `idx`; a dynamic index falls back to a deterministic one-hot
-  reduction. Both paths are atomic-free and repeat-run identical. VJP w.r.t.
-  values is a gather at `idx` (out-of-range -> 0); `idx` has no gradient.
+  a static `idx`; a dynamic index uses the compact sort+prefix path added in
+  §9.127, or a deterministic one-hot reduction when that is cheaper. All paths
+  are atomic-free and repeat-run identical. VJP w.r.t. values is a gather at
+  `idx` (out-of-range -> 0); `idx` has no gradient.
   Supported value dtype for this first version is f32 (the graph is
   dtype-generic where the ops allow it); index dtype is int32 for
   `scatter_add`/`segment_sum`, int32/int64 for `gather_direct`.
@@ -6982,3 +6983,31 @@ Forward time is parity/noise because the existing lift already makes the
 one-hot gather a direct load; the new path wins on semantics (explicit
 scatter-add VJP, no one-hot graph) and memory: the conceptual one-hot mask is
 `out*domain` (148.8 GB here) while the fast path stores `O(out)` (32 KB).
+
+### 9.127 Dynamic scatter-add CSR (2026-11-19)
+
+Follow-up to §9.126. The dynamic-index `scatter_add` path no longer has to
+build a `len x E` one-hot reduction.
+
+- The index and its original position are packed into one positive int64 key,
+  `(idx + 2^31) * next_pow2(E) + e`, so a standard bitonic network sorts a
+  single array with a total order (no separate permutation array or stable
+  index mask). The low bits recover the original position.
+- Each bitonic stage is materialized through a small `STORE` buffer. Gathering
+  directly from the deeply nested `where` expressions at later stages was
+  observed to read the wrong lanes under the advanced-index lift; the store is
+  a real boundary and keeps the result deterministic across repeated runs.
+- `row_ptr[c]` is then `lower_bound(sorted_idx, c)` for `c = 0..len`, computed
+  with a vectorized binary search (two gathers per step), and
+  `segment_sum(row_ptr, sorted_values)` produces the dense output. Negative
+  and `>= len` indices sort outside the pointer range and are ignored.
+- The dynamic sort path is selected when `E <= 8192` and its estimated cost
+  (`E log^2 E + len log E`) is below the one-hot reduction; small domains keep
+  the simpler one-hot fallback. Static indices keep the counting-sort CSR.
+- Complexity is `O(E log^2 E + len log E)` instead of `O(len*E)`, with no float
+  atomics. The per-stage materialization costs one tiny `E`-element copy per
+  stage; this is preferred over the observed aliasing failure.
+
+Gates: `tests/gather_scatter.rs` now has 20 tests, including a non-power-of-two
+dynamic index, deterministic repeated runs, and a CL dynamic sorted-path check.
+`DEFAULT_DEVICE=RUST cargo test --release --test gather_scatter` passes.

@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Dynamic scatter-add CSR (2026-11-19).** `Tensor::scatter_add` now uses a
+  compact bitonic `(idx, e)` sort, binary-search prefix and segmented reduction
+  for dynamic indices when that beats the one-hot fallback, removing the
+  `O(len*E)` path for large output domains. Deterministic and atomic-free; CL
+  and RUST gates in `tests/gather_scatter.rs`.
+
 - **Fast gather / scatter (2026-11-19).** `Tensor::gather_direct`,
   `Tensor::gather_interp`, `Tensor::segment_sum` and `Tensor::scatter_add`
   provide O(out) indirect gather, a fused two-tap interpolating row gather,
